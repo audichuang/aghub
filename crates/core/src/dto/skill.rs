@@ -2,12 +2,8 @@
 //!
 //! [`SkillView`] is the single source of truth for the field list both the CLI
 //! (`describe`/`add` output) and the API (`SkillResponse`) serialize from a
-//! [`Skill`]. The `shared_with` advisory (this grant also reaches these other
-//! agents, because they read the SAME Referrer directory) is a DTO field both
-//! surfaces emit instead of only the CLI's stderr note. It replaces the old
-//! `native_reader` boolean, which answered "does this agent see the Master
-//! without a link" — a question with no answer once the Master moved to a store
-//! nothing reads.
+//! [`Skill`]. `shared_with` (this grant also reaches the agents that read the
+//! SAME Referrer directory) is a DTO field both surfaces emit.
 //!
 //! Serde defaults to snake_case. No ts-rs here — the ts-rs `SkillResponse`
 //! stays in `crates/api` as a thin wrapper over this view.

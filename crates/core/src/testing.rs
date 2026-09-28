@@ -41,9 +41,7 @@ impl TestConfig {
 		};
 
 		// A bare `{}` seeds every JSON dialect: each parser looks up its own
-		// server key and finds nothing. The OpenCode special case here seeded
-		// `{"mcp_servers": [], …}` — the shape of the deleted `json_list`
-		// module, which OpenCode's parser has never read.
+		// server key and finds nothing. No per-agent special case.
 		let initial_config = if is_toml { "" } else { "{}" };
 
 		fs::write(&config_path, initial_config).map_err(ConfigError::Io)?;

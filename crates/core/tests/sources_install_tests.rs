@@ -1,5 +1,5 @@
 //! Integration tests for the no-network `install_fetched_skill_and_lock`
-//! primitive (Phase 2 of the CLI sources work).
+//! primitive.
 //!
 //! These exercise the per-agent install + lock behavior end to end against a
 //! fetched skill tree on disk. The GLOBAL lock and Master are process-wide

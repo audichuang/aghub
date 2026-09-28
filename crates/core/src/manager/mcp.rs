@@ -151,13 +151,10 @@ impl ConfigManager {
 	/// skill `remove_skill_planned` dry-run/confirm gate so all three resource
 	/// types flow through one [`RemovalOutcome`] DTO.
 	///
-	/// MCP removal is a flat config-file rewrite: it deletes NO on-disk path
-	/// (only a JSON entry out of the shared config file, which persists), so the
-	/// `Layout::Copy` plan carries an EMPTY `paths` and `deleted_path` stays
-	/// null. The shared-reader guard is separate from confirmation, so
-	/// `needs_confirm` stays false — the gate reduces to `executed == !dry_run`. The
-	/// `dry_run`/`confirm` plumbing exists for a UNIFORM wire+CLI shape, not
-	/// because MCP removal gates.
+	/// MCP removal rewrites the shared config file and deletes NO on-disk path,
+	/// so `paths` is EMPTY and `deleted_path` null (see crates/core/AGENTS.md
+	/// "MCP removal contract"). `needs_confirm` stays false, so the gate is
+	/// `executed == !dry_run`; the plumbing exists for a UNIFORM wire+CLI shape.
 	pub fn remove_mcp_planned(
 		&mut self,
 		name: &str,

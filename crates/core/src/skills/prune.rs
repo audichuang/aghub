@@ -12,9 +12,8 @@
 //!   dirs. A project prune never touches the global lock and vice versa.
 //! - A project prune requires a project root.
 //! - The lock write is atomic (temp + rename; see `skill::lock`), and the SCAN
-//!   plus the rewrite are held under the interprocess mutation lock, so a skill
-//!   another aghub process installs in between can no longer be pruned by a disk
-//!   set that predates it.
+//!   plus the rewrite are held under the interprocess mutation lock, so a disk
+//!   set that predates another process's install cannot prune it.
 //!
 //! [`prune_lock`] is pure given a pre-scanned name set; [`prune_lock_from_dirs`]
 //! adds the scan (with an injectable scanner for deterministic tests), and
@@ -52,11 +51,8 @@ pub enum PruneError {
 	/// A project-scope prune was requested without a project root.
 	#[error("project prune requires a project root")]
 	MissingProjectRoot,
-	/// The lock itself could not be read, so nothing about it can be reported.
-	///
-	/// Distinct from [`PruneError::Scan`]: reusing that made the message blame
-	/// the disk scan and claim a permissions problem for a file that is merely
-	/// unparseable — the exact kind of lie this module keeps having to remove.
+	/// The lock itself could not be read. Distinct from [`PruneError::Scan`],
+	/// which would blame the disk scan for a merely unparseable file.
 	#[error(
 		"the skill lock could not be read, so no prune can be planned: \
 		 {0}; resolve it (unresolved merge conflict?) and retry"
@@ -98,11 +94,9 @@ where
 			// Genuinely absent: a missing agent dir simply holds no skills.
 			Ok(false) => continue,
 			Ok(true) => {}
-			// Inaccessible (EACCES on a parent, ENOTDIR, a dropped network
-			// mount, …): we CANNOT prove the dir holds no skills, so abort the
-			// whole scan rather than treat it as empty. `Path::exists()` would
-			// collapse this into `false` and let a confirmed prune wipe the lock
-			// for skills that merely live in a currently-unreadable location.
+			// Inaccessible (EACCES, ENOTDIR, dropped mount): cannot prove it is
+			// empty, so abort. `Path::exists()` would say `false` and let a
+			// prune wipe entries for skills in an unreadable location.
 			Err(_) => return Err(ScanError::PermissionDenied(dir.clone())),
 		}
 		for path in scan(dir)? {
@@ -174,15 +168,11 @@ fn prune_status(
 }
 
 /// Fold the global prune result with a LAZY project prune (the `Both` scope)
-/// into one [`PruneStatus`]. The project prune is a closure that runs ONLY when
-/// the global prune succeeded — a global failure short-circuits before the
-/// project lock is touched at all (no side effect, `pruned` empty), so a failed
-/// global prune can never silently mutate the project lock. The two locks are
-/// independent and pruned in sequence, so a project failure AFTER a global
-/// success is a partial mutation — reported as
-/// `Failed { reason, pruned: <global keys already dropped> }`, never as a
-/// `Pruned` (the project lock errored) nor as a bare `Failed` that falsely
-/// claims nothing changed.
+/// into one [`PruneStatus`]. The project closure runs ONLY after a global
+/// success, so a global failure never touches the project lock. A project
+/// failure after a global success is a partial mutation:
+/// `Failed { reason, pruned: <global keys already dropped> }` — never a bare
+/// `Failed`, which means "lock unchanged".
 fn combine_prune(
 	global: Result<Vec<String>, PruneError>,
 	project: Option<impl FnOnce() -> Result<Vec<String>, PruneError>>,
@@ -215,16 +205,12 @@ fn combine_prune(
 }
 
 /// Reconcile the per-scope lock(s) against disk after a removal and report the
-/// outcome as a [`PruneStatus`]. This is the single core-owned seam every
-/// delete path routes through (the manager's `remove_skill_planned` AND the
-/// API by-path copy branch) so the prune logic lives in exactly one place.
+/// outcome as a [`PruneStatus`]. The single seam every delete path routes
+/// through (manager `remove_skill_planned` AND the API by-path copy branch).
 ///
-/// Scope mapping: `GlobalOnly` → Global lock; `ProjectOnly` → Project lock
-/// (`NotRun` without a root, since there is no project lock to reconcile);
-/// `Both` → global then a LAZY project prune ([`combine_prune`]), so a global
-/// failure never mutates the project lock. Non-fatal: a single-scope failure
-/// leaves that lock unchanged (`Failed { pruned: [] }`); a `Both` failure after
-/// the global succeeded records the partial mutation in `Failed.pruned`.
+/// `GlobalOnly` → Global lock; `ProjectOnly` → Project lock (`NotRun` without
+/// a root); `Both` → [`combine_prune`]. Non-fatal: a single-scope failure
+/// leaves that lock unchanged (`Failed { pruned: [] }`).
 pub fn prune_lock_for_scope(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
@@ -242,8 +228,7 @@ pub fn prune_lock_for_scope(
 		},
 		ResourceScope::Both => {
 			let global = prune_lock_scanning(PruneScope::Global, None);
-			// Lazy: the project prune runs ONLY if `global` succeeded, so a
-			// global failure never mutates the project lock.
+			// Lazy: runs ONLY if `global` succeeded.
 			let project = project_root.map(|r| {
 				move || prune_lock_scanning(PruneScope::Project, Some(r))
 			});
@@ -255,30 +240,18 @@ pub fn prune_lock_for_scope(
 /// What the post-delete lock prune WOULD drop, for a removal that has not run
 /// yet.
 ///
-/// A committed `delete` reconciles the WHOLE scope's lock against disk, so it
-/// also drops entries for OTHER skills that are already gone. The preview did
-/// not disclose that: `pruned_lock_entries` appeared only on the committed
-/// payload, so the caller could not see which other skills' provenance the
-/// commit was about to discard — while `prune-lock`, which performs the SAME
-/// GC, gates it behind its own `--yes`.
+/// A committed `delete` reconciles the WHOLE scope's lock, so it also drops
+/// OTHER skills' already-gone entries; the preview must disclose them.
+/// `removing` (the paths this delete will take) is EXCLUDED from the scan —
+/// they are still on disk before the delete, and the target's own key is the
+/// one the commit is most certain to drop.
 ///
-/// `removing` is the paths this delete will take. They must be EXCLUDED from
-/// the disk scan: the preview runs BEFORE the deletion, so those folders are
-/// still present, and a plain `preview_prune` would omit exactly the key the
-/// commit is most certain to drop — the target's own.
+/// Read-only; takes no mutation guard (safe on the dry-run path).
 ///
-/// Read-only. `preview_prune_from_dirs` deliberately takes no mutation guard
-/// (unlike `prune_lock_from_dirs`), and `locked_keys` only reads, so this is
-/// safe on the dry-run path, which holds no guard.
-///
-/// Returns [`PruneStatus::NotRun`] rather than an error when anything is
-/// unprovable — an unreadable dir, an unreadable lock, a project scope with no
-/// root. A preview that cannot see the whole picture must promise NOTHING; the
-/// alternative is claiming "no other entries will be dropped" on the strength
-/// of a scan that failed. That also keeps preview and commit from diverging on
-/// a corrupt lock: the commit path reads through the fail-CLOSED modify seam
-/// and reports `Failed`, whereas these readers fail OPEN to an empty lock and
-/// would otherwise quietly answer "nothing".
+/// Returns [`PruneStatus::NotRun`] when anything is unprovable (unreadable
+/// dir or lock, project scope without root): a partial picture must promise
+/// NOTHING, and the commit reads the lock fail-CLOSED too.
+/// See docs/history/core-install-linker.md#delete-preview-hid-the-lock-prune
 pub fn preview_prune_for_removal(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
@@ -286,17 +259,10 @@ pub fn preview_prune_for_removal(
 ) -> crate::skills::removal::PruneStatus {
 	use crate::skills::removal::PruneStatus;
 
-	// Excluded by PATH, not by folder name: a single-agent delete removes only
-	// some referrers and KEEPS the shared Master, so the skill is still on disk
-	// through that Master and its key must NOT be listed.
-	//
-	// Compared through the ANCESTORS, not as raw strings. The upgrade path the
-	// first cut named — "macOS /private/var, a symlinked HOME" — is not
-	// hypothetical: on a macOS runner the plan carries the Master as
-	// `/private/var/...` and the agent dirs as `/var/...`, the two never
-	// matched, and an `--all-agents` preview omitted the key it was certain to
-	// drop. Raw equality stays as a fallback so a path that cannot be resolved
-	// still matches exactly as before.
+	// Excluded by PATH, not folder name: a single-agent delete KEEPS the
+	// shared Master, so that key must not be listed. Compared through the
+	// ANCESTORS (macOS `/private/var` vs `/var`), raw equality as fallback.
+	// See docs/history/core-install-linker.md#delete-preview-hid-the-lock-prune
 	let excluded: Vec<(PathBuf, PathBuf)> = removing
 		.iter()
 		.map(|p| (p.clone(), normalize_ancestors(p)))
@@ -314,13 +280,10 @@ pub fn preview_prune_for_removal(
 			.collect())
 	};
 
-	// Mirrors `prune_lock_for_scope`'s mapping exactly — including `None` as
-	// the root for the Global half of `Both`. A different mapping here would
-	// scan different dirs from the commit it is previewing.
+	// Mirrors `prune_lock_for_scope`'s mapping exactly (incl. `None` for the
+	// Global half of `Both`), or it previews different dirs than it commits.
 	let preview_one = |prune_scope: PruneScope, root: Option<&Path>| {
-		// Fail-CLOSED on the LOCK as well as on the scan: an unreadable lock
-		// must degrade the whole preview to `NotRun`, not to an empty list that
-		// promises nothing else will be dropped.
+		// Fail-CLOSED on the lock too: unreadable → `NotRun`, not "nothing".
 		let keys = locked_keys_checked(prune_scope, root)?;
 		let dirs = scope_skill_dirs(prune_scope, root);
 		let disk = collect_disk_dir_names(&dirs, &scan).ok()?;
@@ -365,11 +328,9 @@ pub fn preview_prune_for_removal(
 /// Normalize a skill directory's ANCESTORS without resolving the directory
 /// itself.
 ///
-/// A full `canonicalize` would follow an agent's referrer symlink through to
-/// the Master it points at — so excluding the referrer would also exclude the
-/// Master, the skill would read as absent, and its key would be pruned while
-/// the Master is still on disk. Only the ancestors need normalizing, and that
-/// is exactly what differs: macOS `/var` → `/private/var`, or a symlinked HOME.
+/// A full `canonicalize` would follow a Referrer to its Master, so excluding
+/// the Referrer would exclude the Master too and prune a live key. Only the
+/// ancestors differ (macOS `/var` → `/private/var`, a symlinked HOME).
 fn normalize_ancestors(path: &Path) -> PathBuf {
 	match (path.parent(), path.file_name()) {
 		(Some(parent), Some(name)) => std::fs::canonicalize(parent)
@@ -394,12 +355,8 @@ where
 		return Err(PruneError::MissingProjectRoot);
 	}
 	let disk = collect_disk_dir_names(dirs, scan)?;
-	// Fail CLOSED on the lock, like the commit this previews. `locked_keys`'s
-	// fail-OPEN readers turned an unreadable lock into an empty key set, and an
-	// empty result here means "the scan ran and found no orphans" — a clean
-	// bill of health from a scan that saw nothing, while `--yes` on the same
-	// file refuses outright. A preview whose whole job is predicting the commit
-	// must not disagree with it about whether the file is readable.
+	// Fail CLOSED on the lock, like the commit this previews (see
+	// `locked_keys_checked`).
 	let keys = locked_keys_checked(scope, project_root).ok_or_else(|| {
 		PruneError::UnreadableLock(match scope {
 			PruneScope::Global => "global skill lock".to_string(),
@@ -424,15 +381,10 @@ pub fn preview_prune(
 	preview_prune_from_dirs(scope, &dirs, project_root, top_level_skill_dirs)
 }
 
-/// Current lock entry keys for a scope (no mutation).
-/// Lock keys for a PREVIEW, failing CLOSED.
-///
-/// `locked_keys` uses the fail-OPEN readers, so an unreadable lock yields an
-/// empty key set — and an empty `would_prune_lock_entries` reads, by this
-/// module's own convention, as "the scan ran and found no orphans": a clean
-/// bill of health from a scan that saw nothing. The commit path prunes through
-/// the fail-CLOSED modify seam and reports `Failed` for the same file, so the
-/// two diverged exactly where the preview is supposed to predict the commit.
+/// Lock keys for a PREVIEW, failing CLOSED: an empty result means "no
+/// orphans", so an unreadable lock must not read as one — the commit's
+/// fail-CLOSED modify seam reports `Failed` for the same file.
+/// See docs/history/core-install-linker.md#prune-preview-trusted-an-unreadable-lock
 fn locked_keys_checked(
 	scope: PruneScope,
 	project_root: Option<&Path>,
@@ -452,11 +404,9 @@ fn locked_keys_checked(
 /// Every directory a skill can physically live in for `scope`: the agents' read
 /// dirs, PLUS the `.aghub` Master store.
 ///
-/// The store is not optional. No agent reads it — that is its whole purpose —
-/// so an agent-dirs-only union sees nothing but Referrers, and combined with the
-/// symlink blindness below every installed skill read as an orphan. Since
-/// `delete --yes` prunes its scope's lock as a side effect, the first delete
-/// after upgrading would have wiped the entire lock's provenance.
+/// The store is not optional: agent dirs hold only Referrers, so without it
+/// every installed skill reads as an orphan and a prune wipes the lock.
+/// See docs/history/core-install-linker.md#prune-scan-missed-the-master-store
 fn scope_skill_dirs(
 	scope: PruneScope,
 	project_root: Option<&Path>,
@@ -490,10 +440,8 @@ fn top_level_skill_dirs(dir: &Path) -> Result<Vec<PathBuf>, ScanError> {
 		let file_type = entry
 			.file_type()
 			.map_err(|_| ScanError::PermissionDenied(entry.path()))?;
-		// `is_dir()` is FALSE for a symlink, and every grant is now a symlink,
-		// so a name-only test would call each one an orphan. Accept a link too
-		// and let the `SKILL.md` probe decide: that probe FOLLOWS the link, so a
-		// dangling Referrer still fails it and cannot false-present.
+		// Accept a link too (every grant is one; `is_dir()` is false for it).
+		// The `SKILL.md` probe FOLLOWS it, so a dangling Referrer still fails.
 		let usable = file_type.is_dir() || file_type.is_symlink();
 		if usable && entry.path().join("SKILL.md").is_file() {
 			dirs.push(entry.path());
@@ -511,17 +459,12 @@ pub(crate) mod test_lock {
 	use std::sync::{Mutex, MutexGuard, OnceLock};
 	use tempfile::TempDir;
 
-	/// THE env mutex for the `aghub-core` lib test binary — one per binary, no
-	/// exceptions (see `crates/core/AGENTS.md` Testing). libtest runs a
-	/// binary's tests on parallel threads and on Unix one thread's `setenv`
-	/// racing another's `getenv` is UB, so a SECOND mutex serializes nothing
-	/// against this one and reopens exactly that race. `transfer::tests` swaps
-	/// `HOME`/`XDG_*` under this same mutex for that reason; anything new that
-	/// reads or writes those vars must extend this lock, never add its own.
+	/// THE env mutex for the `aghub-core` lib test binary — one per binary;
+	/// anything reading or writing `HOME`/`XDG_*` extends this lock, never adds
+	/// its own (why: `crates/core/AGENTS.md` Testing).
 	///
-	/// Take it ONCE: `GlobalLockGuard` already holds it, and `std::sync::Mutex`
-	/// is not reentrant, so locking it again while a guard is alive
-	/// self-deadlocks.
+	/// Take it ONCE: `GlobalLockGuard` already holds it and it is not
+	/// reentrant, so a second lock self-deadlocks.
 	pub(crate) fn env_lock() -> &'static Mutex<()> {
 		static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 		LOCK.get_or_init(|| Mutex::new(()))

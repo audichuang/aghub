@@ -10,12 +10,11 @@ use std::path::Path;
 /// spelling is not one of the forms we can canonicalize.
 ///
 /// Wraps [`crate::skills::install_fetched::remote_owner_from_url`] with the
-/// `owner/repo` shorthand, which that function deliberately does not accept (it
-/// guards Master adoption, where treating a hostless string as GitHub would widen
-/// ownership). Here the shorthand MUST resolve, because it is exactly what an
-/// npx-written project entry records — leaving it unresolvable would make every
-/// such entry unprovable and therefore unguarded. `owner/repo` means GitHub in
-/// this codebase; `precheck_source` accepts no other hostless form.
+/// `owner/repo` shorthand, which that function deliberately rejects (it guards
+/// Master adoption, where a hostless string would widen ownership). Here it MUST
+/// resolve: it is what an npx-written project entry records, and an unresolvable
+/// entry is unguarded. `owner/repo` means GitHub (`precheck_source` accepts no
+/// other hostless form).
 fn comparable_remote(source: &str) -> Option<String> {
 	use crate::skills::install_fetched::remote_owner_from_url;
 	let source = source.trim();
@@ -77,34 +76,25 @@ pub fn mutation_guard(
 /// under the mutation lock immediately before mutating — a compare-and-set on the
 /// coordinates, not on content.
 ///
-/// The mutation lock cannot close this window on its own: a fetch is a NETWORK
-/// operation and must not run while holding the lock, so the read that decides
-/// what to fetch is necessarily unlocked. That makes it the WIDEST window in the
-/// subsystem (seconds, not microseconds) — everything else the lock covers is a
-/// local filesystem step.
+/// The mutation lock cannot close this window alone: a fetch must not run under
+/// the lock, so the read deciding what to fetch is unlocked — the WIDEST window
+/// in the subsystem (seconds). See crates/core/AGENTS.md "Mutation attribution".
 ///
-/// **Only an entry aghub actually read can produce one** — via
+/// **Only an entry aghub actually read can produce one** —
 /// [`of_global_entry`](Self::of_global_entry) /
-/// [`of_project_entry`](Self::of_project_entry) when the caller already holds the
-/// entry, or [`capture`](Self::capture) when it does not. Never by hand: every
-/// field then holds the entry's own pre-fetch value verbatim, which is what makes
-/// the comparison meaningful and removes two traps:
+/// [`of_project_entry`](Self::of_project_entry) when the entry is in hand, else
+/// [`capture`](Self::capture). Never by hand, which rules out two traps:
 ///
-/// - A re-derived source is not comparable. A GLOBAL entry always carries
-///   `sourceUrl`, but a PROJECT entry's is aghub-only and absent on npx-written
-///   locks, where the effective source is the `owner/repo` shorthand — so
-///   reconstructing an HTTPS URL and comparing it would falsely reject every such
-///   entry.
-/// - A flow that OVERRIDES a coordinate for the operation (a `--ref`, or a
-///   rename resolving a moved `skillPath`) must still compare the value that was
-///   there BEFORE. Capturing separates the two by construction: the snapshot is
-///   the expectation, and whatever the flow writes is the intent.
+/// - A re-derived source is not comparable: a PROJECT entry's `sourceUrl` is
+///   absent on npx-written locks (effective source = `owner/repo`), so a
+///   reconstructed HTTPS URL would falsely reject every such entry.
+/// - A flow that OVERRIDES a coordinate (a `--ref`, a rename's moved
+///   `skillPath`) must still compare the value that was there BEFORE: the
+///   snapshot is the expectation, what the flow writes is the intent.
 ///
-/// A caller that reads the entry to decide WHAT to fetch must build the identity
-/// from THAT read — `of_*_entry` — not from a second [`Self::capture`]. Two reads can
-/// straddle another process's repoint: the first yields the coordinates that get
-/// fetched, the second an identity that matches the live entry, so the
-/// compare-after-fetch passes while the bytes came from the OTHER coordinates.
+/// Build it from the SAME read that chose what to fetch (`of_*_entry`), not a
+/// second [`Self::capture`]: two reads can straddle a repoint, so the check
+/// passes while the bytes came from the other coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryIdentity {
 	/// Effective source: the global entry's `source_url`, or the project entry's
@@ -186,20 +176,14 @@ impl EntryIdentity {
 	/// entry — i.e. whether the caller is allowed to overwrite it with content it
 	/// fetched from those coordinates.
 	///
-	/// [`ensure_unchanged`](Self::ensure_unchanged) is a different question: it
-	/// proves nobody else moved the entry while we fetched. It cannot catch a
-	/// caller that fetched from somewhere else entirely, because the entry it
-	/// compares against never changed. The API's git-sync takes both the session
-	/// (a repo) and the skill name from the request, so without this a client can
-	/// pair repo B's session with a skill locked to repo A: B's bytes land on disk
-	/// while the lock keeps A's source/path/ref and merely gets B's hash stamped.
-	/// No race needed.
+	/// Not [`ensure_unchanged`](Self::ensure_unchanged), which proves nobody
+	/// moved the entry during the fetch and cannot catch a caller that fetched
+	/// from somewhere else: the API's git-sync takes both the session (a repo)
+	/// and the skill name from the request, so repo B's bytes could land under
+	/// a lock entry for repo A with B's hash stamped. No race needed.
 	///
-	/// Refuses ONLY on a provable mismatch. A side that cannot be resolved to a
-	/// comparable remote (a self-hosted spelling, a form neither branch below
-	/// understands) proves nothing, and refusing there would break legitimate
-	/// syncs — the same false-negative trap that comparing a RECONSTRUCTED source
-	/// URL fell into for npx-written project entries.
+	/// Refuses ONLY on a provable mismatch: an unresolvable side (a self-hosted
+	/// spelling) proves nothing, and refusing would break legitimate syncs.
 	pub fn describes(&self, source: &str, skill_path: &str) -> bool {
 		// Catalogs name the folder; install locks may name its SKILL.md.
 		fn folder(path: &str) -> &str {
@@ -224,12 +208,10 @@ impl EntryIdentity {
 	/// Refuse unless the entry is still exactly the one this snapshot describes.
 	/// Call under the mutation lock, immediately before mutating.
 	///
-	/// All three coordinates bind. `ref_name` included: A fetching `main` while
-	/// another process repoints the entry to `stable` would otherwise overwrite
-	/// that content with `main` and stamp only the hash/OID, leaving disk and lock
-	/// disagreeing. `skillPath` included: for a rename, the snapshot holds the OLD
-	/// path, so a repoint to a different folder in the same repo is caught while
-	/// the flow's own resolved new path is unaffected.
+	/// All three coordinates bind: `ref_name` (a repoint `main` → `stable`
+	/// mid-fetch would leave disk and lock disagreeing) and `skillPath` (for a
+	/// rename the snapshot holds the OLD path, so a repoint to another folder is
+	/// caught while the flow's own new path is unaffected).
 	pub fn ensure_unchanged(
 		&self,
 		name: &str,

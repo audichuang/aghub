@@ -5,18 +5,13 @@
 //! where an agent's Referrer for a skill goes, or that it cannot hold skills at
 //! this scope at all.
 //!
-//! **There is no longer a "reads the master directly" case.** The Master lives
-//! in the `.aghub` store, which no agent reads, so every supported agent needs a
-//! link. The old `NativeReader` variant became unreachable the moment the store
-//! moved; it was deleted rather than left in place, because a variant that is
-//! still constructed but never produced draws no dead-code warning and silently
-//! kills every `matches!` arm that tests for it.
+//! **No agent reads the Master directly** (it lives in `.aghub`), so every
+//! supported agent needs a link. See
+//! docs/history/core-install-linker.md#native-reader-classification-removed
 //!
-//! What replaced it is **slot sharing**: several agents resolve to the SAME
-//! Referrer directory (up to eight at project scope, all of them
-//! `.agents/skills`). Granting to one grants to all of them, so that fact is
-//! computed once here and carried on the plan rather than rediscovered by each
-//! consumer.
+//! **Slot sharing**: several agents can resolve to the SAME Referrer directory
+//! (`.agents/skills`); granting to one grants to all, so it is computed once
+//! here and carried on the plan, never rediscovered by a consumer.
 
 use crate::AgentType;
 use aghub_agents::{AgentDescriptor, ResourceScope};
@@ -26,21 +21,15 @@ use std::str::FromStr;
 /// Where an agent's Referrer for a skill goes at a scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkNeed {
-	/// The directory this agent reads skills from. **Not necessarily private:**
-	/// ten agent/scope combinations resolve to the shared `.agents/skills`, and
-	/// eight of those have no alternative. Consumers that key on this path alone
-	/// conflate every sharer into one identity — read `shared_with` on the plan.
+	/// The directory this agent reads skills from. **Not necessarily private**
+	/// (it may be the shared `.agents/skills`): keying on this path alone
+	/// conflates every sharer — read `shared_with` on the plan.
 	NeedsLink { referrer_dir: PathBuf },
 	/// Agent's skills-dir cannot be resolved for this scope.
 	Unsupported,
 }
 
 /// One agent's classification result for a given scope.
-///
-/// `reads_master` / `writes_master` used to live here. Against a store no agent
-/// reads they are constant `false`, so keeping them would have shipped three
-/// hard-coded booleans to the UI dressed as facts. `shared_with` replaces them
-/// with the fact that now matters: who else this grant would reach.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentLinkPlan {
 	pub agent_id: &'static str,
@@ -55,13 +44,10 @@ pub struct AgentLinkPlan {
 /// Serializable wire view of an [`AgentLinkPlan`] for the skills-coverage
 /// surface.
 ///
-/// `AgentLinkPlan`/`LinkNeed` are domain types (one carries a filesystem path),
-/// so this view is the SINGLE place the coverage wire shape is defined. The API
-/// derives a `ts-rs` DTO that mirrors it, and the CLI serializes it directly, so
-/// neither hand-rolls a second mapping. `needs_link`/`supported` project the
-/// `LinkNeed` 2-state; the agent is keyed as `id` and `scope` is the lowercase
-/// scope label. `shared_with` is what stops the UI presenting a shared slot as
-/// if it were a per-agent choice.
+/// The SINGLE definition of the coverage wire shape: the API's `ts-rs` DTO
+/// mirrors it and the CLI serializes it directly. `scope` is the lowercase
+/// label; `shared_with` stops the UI presenting a shared slot as a per-agent
+/// choice.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentSkillCoverageView {
 	pub id: String,
@@ -93,12 +79,9 @@ pub(crate) fn canonicalize_lenient(p: &Path) -> PathBuf {
 	if let Ok(c) = std::fs::canonicalize(p) {
 		return c;
 	}
-	// `p` (or its leaf) may not exist yet — e.g. `<root>/.agents/skills` before
-	// any install. Plain canonicalize() then fails and leaves the raw path,
-	// which won't match a canonicalized counterpart (macOS `/var`->`/private`,
-	// Windows 8.3 short names / `\\?\` UNC). Canonicalize the longest EXISTING
-	// ancestor and re-append the non-existent remainder so both sides normalize
-	// identically.
+	// The leaf may not exist yet: canonicalize the longest EXISTING ancestor
+	// and re-append the rest, so both sides normalize identically (macOS
+	// `/var`->`/private`, Windows 8.3 names / `\\?\` UNC).
 	let mut ancestor = p;
 	let mut tail: Vec<std::ffi::OsString> = Vec::new();
 	loop {
@@ -121,11 +104,6 @@ pub(crate) fn canonicalize_lenient(p: &Path) -> PathBuf {
 }
 
 /// One agent's Referrer directory for a scope, WITHOUT the availability probe.
-///
-/// The `master_skills_dir` parameter is gone. It existed to answer "does this
-/// agent already read the master", and the answer is now structurally always no
-/// — keeping the parameter would have let a caller pass the OLD master path and
-/// silently resurrect the deleted behaviour.
 pub fn agent_link_need(
 	descriptor: &AgentDescriptor,
 	scope: ResourceScope,
@@ -147,11 +125,9 @@ pub fn agent_link_need(
 
 /// Every OTHER agent whose Referrer directory is the same one at this scope.
 ///
-/// Comparison is on the resolved directory, so a symlinked `.agents` still folds
-/// its sharers together. Computed once here because every consumer needs it and
-/// none of them should re-derive it: the install-result attribution, the doctor
-/// rows, `transfer`'s protect set and the desktop checkbox group all key on the
-/// Referrer path, and each of them conflated the sharers before this existed.
+/// Compared on the resolved directory, so a symlinked `.agents` still folds its
+/// sharers together. Every consumer (install attribution, doctor rows,
+/// `transfer`'s protect set, the desktop group) reads this, never re-derives it.
 pub fn shared_with(
 	agent_id: &str,
 	dir: &Path,

@@ -1,16 +1,13 @@
 //! Apply a [`RepairPlan`]. The execution half of `shape.rs`.
 //!
 //! **The plan is the ONLY input.** Nothing here re-runs `classify_shape`: a
-//! second classification between planning and writing is a second opinion, and
-//! the two can disagree across the window (npx running concurrently is the
-//! whole reason this module exists). If the plan says `AdoptAsMaster`, this
-//! adopts — the caller re-plans if it wants a fresher view.
+//! second classification is a second opinion that can disagree across the
+//! window (concurrent npx). The caller re-plans if it wants a fresher view.
 //!
-//! **Ordering is crash-safety, not tidiness.** Every step is ordered so that a
-//! process dying at ANY point leaves one of exactly two readable states: the old
-//! real directory still serving the skill (nothing lost), or the Master present
-//! with the Referrer still a real directory — which is npx's own shape, and the
-//! repair policy already absorbs it. So there is no rollback and no receipt.
+//! **Ordering is crash-safety.** A process dying at ANY point leaves one of two
+//! readable states: the old real directory still serving the skill, or the
+//! Master present with the Referrer still a real directory (npx's own shape,
+//! which repair absorbs). So there is no rollback and no receipt.
 //!
 //! The one destructive step is the shared-slot swap, and it goes LAST:
 //!
@@ -20,11 +17,9 @@
 //! 2. rename the old directory into `.aghub/.quarantine/<name>/<stamp>/`;
 //! 3. rename the temp link over the real name.
 //!
-//! Doing 2 before 1 leaves a window where the skill is readable from NOWHERE,
-//! and anything ending the process there (SIGKILL, ENOSPC, a Windows host where
-//! both `symlink_dir` and the `mklink /J` fallback fail) leaves the *legal*
-//! `Absent` shape — making a dead repair indistinguishable from a deliberate
-//! withhold.
+//! Doing 2 before 1 leaves a window where the skill is readable from NOWHERE;
+//! dying there (SIGKILL, ENOSPC, no symlink/junction support) leaves the legal
+//! `Absent` shape, indistinguishable from a deliberate withhold.
 //!
 //! Quarantine is nested `<name>/<stamp>/`, never flat `<name>-<stamp>`:
 //! sanitized names contain hyphens, so the flat form cannot be split back.
@@ -51,22 +46,16 @@ pub enum RepairOutcome {
 	/// npx-clobbered and hash-equal: the fork was quarantined and the Referrer
 	/// restored.
 	Reconciled,
-	/// Nothing was wrong with the Master or the write slots; what this run did
-	/// was detach stale Referrers from dirs the agent only READS. A distinct
-	/// outcome because `Conformant` says "nothing written", and reporting a
-	/// write as "already correct" is the same lie the removal side added
-	/// `Partial` to stop telling.
+	/// Only stale Referrers were detached from dirs the agent only READS.
+	/// Distinct from `Conformant`, which promises nothing was written.
 	Tidied,
 	/// Nothing written. `reason` says why, `fix` is the literal next command or
 	/// path — a refused row must read as an instruction, not a diagnosis.
 	Refused { reason: String, fix: String },
 	/// The repair was attempted and the OS said no (EACCES, ENOSPC, a Windows
-	/// sharing violation). Distinct from `Refused` on purpose: a refusal is a
-	/// DECISION and the next run repeats it, whereas this is a transient state
-	/// the next run absorbs — steps 4 and 5 fail after the master exists, so
-	/// re-running reports the same skill as `Relinked` or `Reconciled`, not as
-	/// this. Folding the two together would break dry-run parity, which
-	/// promises a preview and its commit reach the same verdict.
+	/// sharing violation). Distinct from `Refused`: a refusal is a DECISION the
+	/// next run repeats; this is transient and the next run absorbs it.
+	/// Folding them would break dry-run parity (preview and commit agree).
 	Failed { reason: String, fix: String },
 }
 
@@ -74,29 +63,23 @@ pub enum RepairOutcome {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RepairReport {
 	pub name: String,
-	/// The shape repair FOUND, alongside what it did about it. An agent
-	/// choosing its next action should not need a second command to learn why
-	/// the outcome was what it was.
+	/// The shape repair FOUND, so the outcome explains itself.
 	pub shape: Option<crate::skills::shape::SkillShape>,
 	pub outcome: RepairOutcome,
 	pub master: PathBuf,
 	/// Referrers created or repointed.
 	pub referrers: Vec<PathBuf>,
 	/// Stale Referrers detached from read-only compat dirs. Separate from
-	/// `referrers`: those are grants this run MADE, these are duplicates it
-	/// took away, and folding them together would read as granting the skill
-	/// twice.
+	/// `referrers` (grants this run MADE), or it reads as granting twice.
 	pub unlinked: Vec<PathBuf>,
 	/// Where a fork was moved, when one was.
 	pub quarantined: Option<PathBuf>,
-	/// Agents that STILL share one directory after this repair — they have no
-	/// private skills dir, so granting or revoking for one of them does it for
-	/// all. The preview has to say so: a user who cannot see that codex remains
-	/// fused does not know what the migration bought them.
+	/// Agents that STILL share one directory after this repair (no private
+	/// skills dir, so a grant for one is a grant for all). The preview must
+	/// say so.
 	pub fused: Vec<String>,
-	/// True when the writes were withheld. A dry run walks the SAME branches —
-	/// including the hash comparison that decides `Reconciled` vs `Refused` —
-	/// so a preview that reports `reconciled` is a commit that will reconcile.
+	/// True when the writes were withheld. A dry run walks the SAME branches
+	/// (hash comparison included), so its verdict is the commit's verdict.
 	pub dry_run: bool,
 }
 
@@ -140,25 +123,14 @@ fn io_err(context: &str, e: std::io::Error) -> ConfigError {
 
 /// Plan and apply a repair for ONE skill, under the interprocess mutation lock.
 ///
-/// **This is the seam both surfaces call.** `execute_repair` below is the pure
-/// applier and takes no lock; calling it directly from a surface skips the
-/// guard, and hand-mirroring the lock across the CLI and the API route is the
-/// "NEVER hand-mirror a mutating flow across surfaces" the root `AGENTS.md`
-/// forbids.
+/// **The seam both surfaces call.** `execute_repair` is the lock-free applier;
+/// a surface calling it directly skips the guard.
 ///
-/// The guard is taken BEFORE `plan_repair`, not just before the writes: the plan
-/// IS the state read that decides the mutation, and a plan chosen outside the
-/// lock is a view another process may already have invalidated. That matters
-/// here more than almost anywhere — this module exists because npx rewrites
-/// these very directories, and the hash-compare → rename window is exactly what
-/// a concurrent `aghub skills add` of the same name would tear.
+/// The guard is taken BEFORE `plan_repair`: the plan IS the deciding read
+/// (`crates/core/AGENTS.md` "Mutation attribution"). A dry run takes none.
 ///
-/// A dry run takes NO guard, same as every other verb: it decides and writes
-/// nothing, so there is nothing to serialize.
-///
-/// `grant_to` is computed in here rather than passed in, so the "answered
-/// against the layout as it stands, before anything moves" rule cannot be got
-/// wrong by a caller — and so it is answered under the same lock as the plan.
+/// `grant_to` is computed here, not passed in, so it is answered against the
+/// layout as it stands and under the same lock as the plan.
 ///
 /// `Ok(None)` when the scope names no single store (`Both`), matching
 /// [`plan_repair`].
@@ -196,41 +168,21 @@ pub fn repair_skill(
 
 /// Repair EVERY skill the lock names at this scope (or just `name`).
 ///
-/// **The one home for the batch.** The CLI and the API route each grew their own
-/// copy of this loop — same worklist, same fail-closed lock read, same
-/// "stay quiet about the conformant ones" rule — and they had already drifted:
-/// the route took no outer bulk guard, so a fifty-skill desktop migration was
-/// fifty independently racing mutations, which is exactly what the CLI's own
-/// comment says must not happen. That is the "NEVER hand-mirror a mutating flow
-/// across surfaces" rule in the root `AGENTS.md`; surfaces are adapters now.
+/// **The one home for the batch** — CLI and API are thin adapters over it.
 ///
-/// **A failing skill does not abort the batch.** Both loops used `?`, so an
-/// EACCES on skill 25 of 50 threw away the report for the 24 that had already
-/// migrated — the disk was fine (every step is crash-safe and re-running is
-/// idempotent) but the user was told nothing at all. Each skill's error becomes
-/// a [`RepairOutcome::Failed`] row instead, so the answer is always a complete
-/// receipt of what happened to all of them.
+/// **A failing skill does not abort the batch**: its error becomes a
+/// [`RepairOutcome::Failed`] row, so the answer is always a complete receipt.
+/// See docs/history/core-repair-rename.md#repair-batch-loop-lived-in-each-surface
 pub fn repair_all(
 	scope: crate::models::ResourceScope,
 	project_root: Option<&Path>,
 	name: Option<&str>,
 	dry_run: bool,
 ) -> Result<Vec<RepairReport>> {
-	// ONE guard around the whole bulk run, not one per skill, and taken BEFORE
-	// the lock read below — `crates/core/AGENTS.md`'s "guard before the
-	// deciding read". The lock decides which directory may be ADOPTED as a
-	// Master, so a snapshot taken outside the guard can authorize a swap the
-	// current lock no longer permits: this run reads `demo` as locked, another
-	// aghub deletes that entry and releases, npx drops a fresh real
-	// `.agents/skills/demo` in place, and this run resumes with a stale
-	// `in_lock = true` and adopts content nobody authorized. Dry runs take no
-	// guard (they write nothing), so a PREVIEW still reads outside it —
-	// deliberate, and the reason a preview is authority for nothing.
-	//
-	// It is also ONE guard for the whole batch: `repair_skill` takes its own
-	// (reentrant per thread, so the inner acquire is free), but without this
-	// outer one a fifty-skill migration is fifty independently racing
-	// mutations another aghub could interleave halfway through.
+	// ONE guard for the whole batch, taken BEFORE the lock read below: the lock
+	// decides which directory may be ADOPTED as a Master, so a stale `in_lock`
+	// could adopt content nobody authorized. `repair_skill`'s inner acquire is
+	// reentrant. Dry runs take none, so a preview is authority for nothing.
 	let _bulk_guard = if dry_run {
 		None
 	} else {
@@ -244,10 +196,7 @@ pub fn repair_all(
 		)
 	};
 
-	// Fail CLOSED. The lock IS the worklist and it decides which directories may
-	// be adopted as a Master, so an unreadable lock must not come back as
-	// "nothing to repair" — that answer looks like success and the user would
-	// believe they had migrated.
+	// Fail CLOSED: an unreadable lock must not read as "nothing to repair".
 	let mut in_lock: std::collections::BTreeSet<String> =
 		std::collections::BTreeSet::new();
 	if matches!(scope, crate::models::ResourceScope::GlobalOnly) {
@@ -267,9 +216,7 @@ pub fn repair_all(
 		);
 	}
 
-	// A named skill is repaired whether or not the lock knows it — the lock only
-	// decides ADOPTION, and refusing to look at an unlocked skill would leave the
-	// user with no way to diagnose it.
+	// A named skill is repaired even if unlocked: the lock only decides ADOPTION.
 	let worklist: Vec<String> = match name {
 		Some(one) => vec![one.to_string()],
 		None => in_lock.iter().cloned().collect(),
@@ -287,9 +234,7 @@ pub fn repair_all(
 			// `Ok(None)` = the scope names no single store; nothing to say.
 			Ok(None) => continue,
 			Ok(Some(report)) => {
-				// In a bulk run, silence about the already-correct skills is the
-				// point; a named one still reports so the user learns it was
-				// fine.
+				// Bulk runs stay quiet about conformant skills; a named one reports.
 				if report.outcome == RepairOutcome::Conformant && name.is_none()
 				{
 					continue;
@@ -304,10 +249,8 @@ pub fn repair_all(
 
 /// The row a skill gets when its own repair errored.
 ///
-/// Carries no master, no referrers and no quarantine path: none of them
-/// happened, or happened only partly, and naming a path here would tell the user
-/// a write landed. `fix` names re-running because repair is idempotent — the
-/// next run picks the skill up in whatever state it now holds.
+/// Names no path: that would claim a write landed. `fix` says re-run because
+/// repair is idempotent.
 fn failed_report(name: &str, dry_run: bool, e: &ConfigError) -> RepairReport {
 	RepairReport {
 		name: name.to_string(),
@@ -337,9 +280,8 @@ pub fn execute_repair(
 ) -> Result<RepairReport> {
 	let mut report = RepairReport {
 		name: plan.name.clone(),
-		// The shape of the directory this repair is ABOUT: the shared slot
-		// where there is one, since that is the slot every non-conformant
-		// shape shows up in.
+		// The shared slot where there is one: every non-conformant shape shows
+		// up there.
 		shape: plan
 			.actions
 			.iter()
@@ -426,21 +368,16 @@ pub fn execute_repair(
 	let adopt = plan.adopts().map(|p| p.to_path_buf());
 	if let Some(src) = &adopt {
 		report.outcome = RepairOutcome::Migrated;
-		// The `!exists` guard is what scopes the cleanup below. It claims
-		// exactly one thing and no more: the master did not exist at plan time
-		// and does not exist now, so anything sitting at that path after a
-		// failed copy is THIS call's own partial write. It is NOT a claim that
-		// the path is ours in general — removing a master that pre-existed
-		// would delete the user's only intact copy, which is why the cleanup
-		// lives inside this branch and nowhere else.
+		// `!exists` scopes the cleanup below: only then is whatever sits at the
+		// path after a failed copy THIS call's partial write. Never clean up a
+		// pre-existing master — it may be the user's only intact copy.
 		if !dry_run && !plan.master.exists() {
 			crate::skills::linker::ensure_master_store_parent(&plan.master)
 				.map_err(|e| io_err("create master store", e))?;
 			if let Err(e) = Linker::copy_preserving_links(src, &plan.master) {
-				// Without this the failed run leaves an EMPTY master behind,
-				// and the next run compares the intact slot against it, calls
-				// it a diverged fork and refuses forever — the user has to
-				// `rm -rf` the store entry by hand before anything works.
+				// An empty master left behind would make every later run see
+				// the intact slot as a diverged fork and refuse forever
+				// (`a_failed_copy_leaves_no_empty_master_to_wedge_the_next_run`).
 				let _ = std::fs::remove_dir_all(&plan.master);
 				return Err(io_err("copy master out of the shared slot", e));
 			}
@@ -515,36 +452,16 @@ pub fn execute_repair(
 			report.unlinked.push(action.path.clone());
 			continue;
 		}
-		// Re-checked at write time, not trusted from plan time — but only
-		// THREE of the compat-Referrer sweep's four guards (the ones actually
-		// inside `compat_unlink_permitted`: link-only, resolves to this
-		// master or the adopt source, nobody-else's-write-slot) live in this
-		// recheck: the disk it was decided against can move in between, npx
-		// rewriting the same directories or a user retargeting a link by
-		// hand onto private content or a protected write directory, and this
-		// call answers those three fresh. Only a
-		// row this recheck STILL permits gets unlinked and reported;
-		// recording the path BEFORE the check (as this used to) is how an
-		// entry that was left untouched still reported itself removed.
+		// Re-checked at write time: three of the four compat-unlink guards
+		// (link-only, resolves to this master or the adopt source, nobody
+		// else's write slot) are answered fresh by `compat_unlink_permitted`,
+		// and only a row it STILL permits is unlinked and reported.
 		//
-		// The FOURTH guard — "the write slot covers it afterwards" — is NOT
-		// re-asked here. It lives in `plan_repair`'s "THE WRITE SLOT COVERS
-		// IT AFTERWARDS" comment, decided once against the PLAN (not the
-		// disk) before this loop ever runs, and `RepairPlan` carries no
-		// `scope`/`project_root` for this call to re-derive a write slot's
-		// path and re-classify it fresh. The gap that leaves: a `Leave` +
-		// `Conformant` write slot the plan is trusting as coverage could, in
-		// the narrow window between that plan-time read and this loop
-		// running (real writes in steps 3-5 take measurable time; nothing
-		// aghub's own mutation lock excludes runs here, since the lock only
-		// serializes aghub against aghub), be broken by something outside
-		// aghub — and this recheck would still detach the compat referrer
-		// that was the agent's only surviving link. Left unclosed this round:
-		// closing it means threading `scope`/`project_root` onto `RepairPlan`
-		// (or into this fn) so each `Unlink` row's covering write slot(s) can
-		// be re-classified here, which is more plumbing than the risk (an
-		// external actor racing inside one locked `execute_repair` call)
-		// currently buys back.
+		// The FOURTH guard ("the write slot covers it afterwards") is decided
+		// once in `plan_repair` and NOT re-asked: `RepairPlan` carries no
+		// scope/root to re-classify the write slot. Known open gap — a non-aghub
+		// actor breaking that slot mid-run leaves this unlinking the agent's
+		// last link. See docs/history/core-repair-rename.md#compat-unlink-recheck-and-the-fourth-guard
 		if !compat_unlink_permitted(
 			&action.path,
 			&plan.master,
@@ -555,19 +472,10 @@ pub fn execute_repair(
 		{
 			continue;
 		}
-		// `unlink_reporting`, not `unlink`: the latter folds `NotFound` into
-		// success so step 4 can be idempotent, and a RECEIPT must not inherit
-		// that. An entry another process removed between the recheck above and
-		// this call came back `Ok(())` and was then reported as unlinked by
-		// THIS run — a removal attributed to the wrong actor. Nothing is
-		// recorded unless this call is what removed it.
-		//
-		// Residual, deliberately left: the check and the removal are two
-		// syscalls, so a replacement placed at the path inside that window is
-		// what gets removed. Narrowing it further needs `unlinkat` against a
-		// directory fd (or an inode compare that is itself racy), and the
-		// window is bounded by these two adjacent statements. The receipt half
-		// — the part that told the user something untrue — is closed here.
+		// `unlink_reporting`, not `unlink` (which folds `NotFound` into
+		// success): record only what THIS call removed. Residual, deliberate:
+		// check and removal are two syscalls; closing that needs `unlinkat`
+		// on a dir fd.
 		let removed = Linker::unlink_reporting(&action.path)
 			.map_err(|e| io_err("unlink stale compat referrer", e))?;
 		if !removed {
@@ -584,10 +492,9 @@ pub fn execute_repair(
 
 /// `.aghub/.quarantine/<name>/<stamp>/`.
 ///
-/// Sits inside the store because `top_level_skill_dirs` is one level deep and
-/// requires a root `SKILL.md`, so a dot-prefixed nested tree is invisible to the
-/// store scan. That invisibility is a property of THAT function, not of the
-/// layout — any new enumerator of `.aghub` has to keep the same depth.
+/// Invisible to the store scan only because `top_level_skill_dirs` is one
+/// level deep and needs a root `SKILL.md` — any new `.aghub` enumerator must
+/// skip it too (`is_store_bookkeeping`).
 fn quarantine_dir(master: &Path, name: &str) -> PathBuf {
 	master
 		.parent()
@@ -631,14 +538,10 @@ fn swap_slot(slot: &Path, master: &Path, dest: &Path) -> Result<()> {
 			.map_err(|e| io_err("create quarantine dir", e))?;
 	}
 	if let Err(e) = std::fs::rename(slot, dest) {
-		// Leave nothing half-done: the temp link is transient, so drop it and
-		// report. The slot still holds the fork, which is a shape repair can
-		// absorb on the next run.
+		// Drop the temp link; the slot still holds the fork, which the next
+		// run absorbs. No copy-then-remove fallback for EXDEV/sharing
+		// violations: it doubles the window and can half-copy.
 		let _ = Linker::unlink(&temp);
-		// EXDEV (quarantine on another filesystem) and Windows sharing
-		// violations both land here. Copy-then-remove is NOT a safe fallback:
-		// it doubles the window and can half-copy, so the honest answer is to
-		// report and leave the fork where it is.
 		return Err(io_err("move the fork into quarantine", e));
 	}
 

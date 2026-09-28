@@ -1,7 +1,7 @@
 //! Sub-agent planned-removal integration tests for aghub-core.
 //!
 //! Cover `remove_sub_agent_planned`'s dry-run/confirm gate and the legacy
-//! `remove_sub_agent` reroute (Phase 3 #5). A project-scoped Claude manager
+//! `remove_sub_agent` reroute. A project-scoped Claude manager
 //! with a temp root is fully isolated — it reads/writes `<root>/.claude/agents`
 //! and never touches the real home dir.
 

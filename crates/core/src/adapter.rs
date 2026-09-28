@@ -28,7 +28,6 @@ pub fn set_mcp_path_override(agent_id: &str, path: Option<PathBuf>) {
 	});
 }
 
-// Function removed because it is now a method on the AgentAdapter trait
 impl AgentAdapter for &'static AgentDescriptor {
 	fn name(&self) -> &'static str {
 		self.id

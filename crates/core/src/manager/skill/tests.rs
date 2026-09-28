@@ -231,10 +231,9 @@ fn add_skill_from_path_links_master_not_copy() {
 	);
 }
 
-// GAP-2 no-copy regression: add_skill (manual-create) writes a .agents
-// Master and a link in the agent dir, never a private copy, and records
-// canonical_path (link provenance) -- proving the Task 25 add_skill ->
-// add_skill_universal delegation (Locked Decision 1).
+// No-copy regression: add_skill (manual-create) writes a Master and a link
+// in the agent dir, never a private copy, and records canonical_path (link
+// provenance) -- proving the add_skill -> add_skill_universal delegation.
 #[cfg(unix)]
 #[test]
 fn add_skill_manual_create_links_master_not_copy() {
@@ -1666,10 +1665,9 @@ fn add_skill_from_path_universal_does_not_overwrite_existing_canonical() {
 		"Canonical should not be overwritten: {content}"
 	);
 
-	// Cursor must NOT discover the skill. It was installed for another
-	// agent, and Cursor now has its own Referrer directory rather than
-	// reading the store. This assertion used to say the opposite — it
-	// pinned the leak as a feature.
+	// Cursor must NOT discover the skill: it was installed for another
+	// agent, and Cursor has its own Referrer directory rather than reading
+	// the store.
 	let mut mgr2 = ConfigManager::new(
 		create_adapter(AgentType::Cursor),
 		false,

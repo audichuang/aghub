@@ -1640,7 +1640,7 @@ fn test_no_empty_string_mcp_key_produced() {
 }
 
 // ==================== Group 8: planned MCP removal (confirm gate) ====
-// Phase 3 #5 Task 1: remove_mcp_planned + reroute remove_mcp through it.
+// remove_mcp_planned, and remove_mcp rerouted through it.
 
 /// Dry-run (dry_run=true) plans the removal but deletes nothing: executed is
 /// false, the plan names NO on-disk path (an MCP removal only rewrites a JSON

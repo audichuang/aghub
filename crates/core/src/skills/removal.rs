@@ -1,7 +1,7 @@
 //! Layout-aware removal helpers + containment guard. Allow-listed skills roots:
-//! `~/.config/agents/skills`, `~/.agents/skills`, `<project>/.agents/skills`, and
-//! the agent's own skills dir. Used by F2 clean removal to ensure a `remove_dir_all`
-//! never escapes a known skills root (defends against a symlink pointing out of tree).
+//! the shared store roots ([`skill_store_roots`]) plus each agent's own skills
+//! dir, so a `remove_dir_all` never escapes a known skills root (defends against
+//! a symlink pointing out of tree).
 
 use std::path::{Path, PathBuf};
 
@@ -9,21 +9,15 @@ use crate::skills::linker::Linker;
 
 /// The shared skill-store roots for a scope: the `.aghub` Master store plus the
 /// shared Referrer roots (`.agents/skills`, and the XDG `agents/skills`, which
-/// has NO leading dot) that several agents read at once — as opposed to any
-/// single agent's private skills dir.
+/// has NO leading dot) that several agents read at once.
 ///
-/// Kept separate from [`allowed_skill_roots`] (which adds the per-agent dirs)
-/// because "may this path be deleted at all" and "is this path SHARED" are
-/// different questions: a private per-agent copy is deletable, a Master is not.
-///
-/// Both consumers need real `.aghub` entries and neither tolerates their absence:
-/// [`allowed_skill_roots`] would refuse every Master deletion as out-of-tree, and
-/// [`is_universal_master`] would let a single-agent removal `remove_dir_all` the
-/// Master itself. See `.scratch/aghub-skill-store/spec.md` "Day-one hazards".
-/// A linked PROJECT store is omitted: its target must not become an allowed
-/// mutation root simply because a project can point `.aghub` outside itself.
-/// The global store stays even when the user symlinked it (dotfiles); roots are
-/// canonicalized by their consumers, so the link's target is what is allowed.
+/// Separate from [`allowed_skill_roots`]: "may this be deleted at all" and "is
+/// this SHARED" differ (a private copy is deletable, a Master is not). Both
+/// consumers need the `.aghub` entries — without them every Master delete is
+/// refused as out-of-tree, or a single-agent removal takes the Master.
+/// A linked PROJECT store is omitted (a project must not widen the mutation
+/// roots by pointing `.aghub` outside itself); the global store stays even when
+/// symlinked (dotfiles), since consumers canonicalize roots.
 pub fn skill_store_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
 	let mut roots: Vec<PathBuf> = Vec::new();
 	// Universal global root: $XDG_CONFIG_HOME/agents/skills (dirs resolves XDG).
@@ -231,13 +225,9 @@ pub enum Layout {
 #[derive(Debug, Clone)]
 pub struct RemovalPlan {
 	/// At least one agent dir could not be enumerated completely, so `paths`
-	/// may be SHORT and `skipped` names the dir that hid the rest.
-	///
-	/// A field rather than a re-derivation, because the consumer that needs it
-	/// most is the one furthest from the scan: an EXHAUSTIVE executor
-	/// (`accept_rename`) which must not delete a partial result set — it goes
-	/// straight to `execute_removal`, and `execute_removal` acts on `paths`
-	/// alone and cannot see why `skipped` is non-empty.
+	/// may be SHORT and `skipped` names the dir that hid the rest. A field
+	/// because the exhaustive executor (`accept_rename` → `execute_removal`)
+	/// acts on `paths` alone and must not delete a partial result set.
 	pub incomplete: bool,
 	pub layout: Layout,
 	/// Absolute paths that would be removed (symlinks unlinked, dirs `remove_dir_all`'d).
@@ -250,50 +240,35 @@ pub struct RemovalPlan {
 	pub needs_confirm: bool,
 	/// This removal took NOTHING, and the caller must not report otherwise.
 	///
-	/// TWO producers, and they are not interchangeable. The original: the
-	/// targeted removal resolved to the SHARED universal Master and was
-	/// therefore refused — a single-agent removal cannot express "stop only
-	/// this agent seeing it" when the agent reads the Master directly, so the
-	/// caller must fail loudly instead of reporting a removal that did not
-	/// happen. The second: an EXHAUSTIVE sweep that finished with nothing to
-	/// take and something in `skipped`, i.e. it could not prove nothing still
-	/// holds the skill. `remove_skill_planned` answers that one with a
-	/// PREVIEW even on a confirmed call rather than with `commit`, because
-	/// `commit` would set `executed: true` and run the scope-wide lock GC on a
-	/// run that removed nothing.
+	/// Two producers, not interchangeable: a targeted removal that takes nothing
+	/// away (a shared Referrer an unselected reader still needs, or
+	/// `remove_skill_planned`'s `blocks` verdict) and is refused; or an
+	/// EXHAUSTIVE sweep that took nothing with entries in `skipped` (it cannot
+	/// prove nothing still holds the skill). `remove_skill_planned` answers the
+	/// latter with a PREVIEW even when confirmed — `commit` would report
+	/// `executed` and run the lock GC on a run that removed nothing.
 	pub shared_master_kept: bool,
 	/// Where the skill is STILL served from after this removal — the reason a
 	/// refusal refuses, named.
 	///
-	/// A separate field rather than a fold into `skipped`, which already carries
-	/// two other meanings ("deliberately not taken" and "could not be read") and
-	/// is read back by `all_survivors_reported` to decide whether the planner
-	/// understood the request. Overloading it a third time would change that
-	/// verdict under its own consumer.
-	///
-	/// Populated ONLY when the removal is refused, and by the ONE place that
-	/// owns the verdict (`read_effect_after`, via `remove_skill_planned`), so
-	/// `delete`, the API delete route and `reconcile skill` name the same paths.
-	/// A second derivation in the reconcile preflight is what let its message
-	/// list "who else reads the Master" while staying silent about the agent's
-	/// OWN second read dir — the only thing the user could have acted on.
+	/// Not folded into `skipped`, whose two meanings ("deliberately not taken",
+	/// "could not be read") `all_survivors_reported` reads back. Populated ONLY
+	/// on refusal, by the one verdict owner (`read_effect_after`, via
+	/// `remove_skill_planned`), so every surface names the same paths.
+	/// See docs/history/core-removal.md#reconcile-refusal-hid-the-agents-own-read-dir
 	pub still_read_from: Vec<std::path::PathBuf>,
 }
 
-/// A path's identity for comparison, with the FINAL component left unresolved.
+/// A path's identity for comparison, with the FINAL component left unresolved:
+/// a Referrer and its Master canonicalize to the same path, so resolving the
+/// leaf would read "delete this Referrer" as "delete the Master". The parent is
+/// resolved so two spellings of one directory (macOS `/var`, Windows short
+/// names) compare equal.
 ///
-/// Resolving the leaf too would be wrong here: a Referrer and the Master it
-/// points at canonicalize to the same path, so "this Referrer is being deleted"
-/// would read as "the Master is being deleted". The parent still gets resolved
-/// so two spellings of the same directory (macOS `/var`, Windows short names)
-/// compare equal.
-///
-/// `pub(crate)` because `skills::shape`'s compat-Referrer sweep shares this
-/// exact trap: a read-only compat dir reached through a symlinked ANCESTOR
-/// (`.agent/skills` -> `.agents/skills`) is a different `PathBuf` from the
-/// write slot it aliases, and plain `==` cannot see they are the same
-/// directory. Re-deriving the same parent-resolved comparison a second time
-/// is how the two copies drift; there is exactly one identity rule.
+/// `pub(crate)` because `skills::shape`'s compat-Referrer sweep has the same
+/// trap (a compat dir reached through a symlinked ANCESTOR, `.agent/skills` ->
+/// `.agents/skills`, is a different `PathBuf` from the slot it aliases). There
+/// is exactly one identity rule — do not re-derive it.
 pub(crate) fn entry_identity(path: &Path) -> PathBuf {
 	match (path.parent(), path.file_name()) {
 		(Some(parent), Some(leaf)) => {
@@ -319,41 +294,16 @@ fn discovered_entry_dir(skill: &crate::models::Skill) -> Option<PathBuf> {
 	path.parent().map(Path::to_path_buf)
 }
 
-/// Every folder in `dir` a removal of the skill `name` has to consider: the
-/// `<dir>/<sanitized-name>` slot AND whatever DISCOVERY actually reads as that
-/// skill there.
+/// Candidates for an IDENTITY question — "does anything in `dir` resolve to that
+/// directory?" — which needs no frontmatter. Wide on purpose: a Referrer whose
+/// own `SKILL.md` will not parse never becomes a `Skill`, so a name-matched list
+/// misses it and its target gets `remove_dir_all`'d under a dangling link. Only
+/// callers that act on a canonical-target match may use it; a DELETE-by-name
+/// sweep uses the narrow [`candidate_entries`].
 ///
-/// Both planners used to sweep the slot alone, which is only where aghub itself
-/// installs. `npx skills` and older aghub releases wrote `<dir>/<folder>` with a
-/// different frontmatter `name`, and discovery recurses, so a grouped layout
-/// puts the skill at `<dir>/<team>/<folder>` — neither is at the slot. The
-/// planner then found nothing to take while the agent went on reading it, which
-/// `--all-agents` reported as a clean `removed` (nested copy untouched, the
-/// other agent still discovering the skill) and the symlink path turned into a
-/// hard `unsupported_operation` refusal of a delete the caller was entitled to.
-///
-/// The union, not a swap: the slot is kept because an empty same-named folder
-/// holds no skill for discovery to find, and leaving one behind is what makes a
-/// reinstall collide.
-///
-/// Existence is NOT filtered here — callers disagree on what counts (the
-/// symlink planner must see a DANGLING link, which `exists()` hides), so each
-/// keeps its own probe.
-/// The second half of the pair says the list may be SHORT — `dir` held
-/// something this walk could not read. Silence there is how a nested Referrer
-/// disappears: one unreadable sibling used to abort the whole scan, the union
-/// collapsed to the slot, and a directory another agent still links into looked
-/// unreferenced. Every destructive caller must fail closed on it; none may
-/// treat it as "nothing found".
-/// Candidates for an IDENTITY question — "does anything in here resolve to that
-/// directory?" — which needs no frontmatter at all.
-///
-/// Separate from [`candidate_entries`] because that one feeds a sweep that
-/// DELETES by name and must stay narrow, while this one feeds checks that only
-/// ever act on a canonical-target match and must stay wide: a Referrer whose
-/// own `SKILL.md` will not parse never becomes a `Skill`, so a name-matched
-/// list cannot see it, and the directory it points at was `remove_dir_all`'d
-/// with the link left dangling.
+/// The `bool` says the list may be SHORT (`dir` held something unreadable).
+/// Every destructive caller must fail closed on it, never read it as "nothing
+/// found". See docs/history/core-removal.md#slot-only-removal-sweeps
 pub(crate) fn referrer_candidates(
 	dir: &Path,
 	safe: &str,
@@ -366,6 +316,15 @@ pub(crate) fn referrer_candidates(
 	(out, incomplete)
 }
 
+/// Every folder in `dir` a removal of skill `name` must consider: the
+/// `<dir>/<sanitized-name>` slot UNION whatever discovery reads as that skill
+/// (an npx-era `<dir>/<folder>` under a different frontmatter name, or a
+/// grouped `<dir>/<team>/<folder>`). The slot stays in the union so an empty
+/// same-named folder is cleaned up instead of colliding with a reinstall.
+///
+/// Existence is NOT filtered: the symlink planner must see a DANGLING link,
+/// which `exists()` hides. The `bool` is the same fail-closed incompleteness
+/// flag as [`referrer_candidates`].
 pub(crate) fn candidate_entries(
 	dir: &Path,
 	name: &str,
@@ -407,39 +366,22 @@ pub struct ReadEffect {
 }
 
 /// Did this removal take anything away from the agent reading `read_dirs`, and
-/// what still hands it the skill afterwards?
+/// what still hands it the skill afterwards? The ONE place that answers it — a
+/// plan's path list cannot. Full rationale: crates/core/AGENTS.md "Did that
+/// removal take anything away?".
 ///
-/// The ONE place that answers it — the question every removal surface needs and
-/// none of them can read off a plan. A plan lists paths, and a path list looks
-/// the same whether the agent goes on reading the skill from somewhere else or
-/// not.
+/// It asks DISCOVERY (frontmatter name, recursive), never a
+/// `dir.join(sanitize_name(name))` probe. `changed` FULLY canonicalizes each
+/// entry (leaf included, unlike [`entry_identity`]): an npx-era Referrer beside
+/// its Master resolves to the Master's location, so unlinking it changes
+/// nothing (refuse); a private copy shadowing a Master has its own location, so
+/// deleting it shrinks the set (allow).
 ///
-/// It asks DISCOVERY, not a path guess. Every earlier spelling compared
-/// `dir.join(sanitize_name(name))` against the plan, which misses in both
-/// directions: a skill whose FOLDER name differs from its frontmatter `name`
-/// (`npx skills` and older aghub releases both wrote that) was invisible to it,
-/// and an empty directory that merely carries the name looked like a live
-/// skill. Discovery reads the frontmatter and recurses into grouped layouts, so
-/// it sees what the agent will see.
-///
-/// `changed` is why "are there survivors?" is not the whole verdict, and the
-/// distinction is drawn by FULLY canonicalizing each entry (leaf included),
-/// unlike [`entry_identity`]:
-///
-/// - an npx-era Referrer beside the Master it points at resolves to the SAME
-///   location as the Master, so unlinking it leaves the set identical —
-///   nothing was taken away, and a single-agent removal must still refuse;
-/// - a private per-agent copy shadowing a Master resolves to a location of its
-///   own, so deleting it really does shrink the set. Refusing that (which is
-///   what asking survivors alone did) left no verb at all able to drop a
-///   private copy whose content had drifted from the Master.
-///
-/// Fail-OPEN on an unlistable read dir (plain `load_skills_from_dir`, not the
-/// `_checked` variant): "cannot tell" reads as no survivors, hence no refusal.
-/// That is the safe direction HERE and only here — this guard REFUSES removals,
-/// so fail-closed would let one unreadable directory make a skill undeletable.
-/// `transfer::skill_holders` asks the opposite question (may the Master be
-/// collected?) and is fail-CLOSED for the same reason. Do not unify them.
+/// Fail-OPEN on an unlistable read dir ("cannot tell" = no survivors, flagged in
+/// `incomplete`): this guard REFUSES removals, so fail-closed would let one
+/// unreadable directory make a skill undeletable. `transfer::skill_holders`
+/// asks the opposite question and is fail-CLOSED for the same reason. Do not
+/// unify them.
 pub fn read_effect_after(
 	read_dirs: &[PathBuf],
 	name: &str,
@@ -580,22 +522,12 @@ fn plan_symlink_removal(
 	let mut shared_referrer_kept = false;
 	let mut targeted_entries: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-	// The union `candidate_entries` returns, not the `<dir>/<safe>` slot alone:
-	// `npx skills` and older aghub releases wrote `<dir>/<folder>` under a
-	// different frontmatter name, and a grouped layout nests it deeper still, so
-	// a sweep keyed on the slot walked straight past a live referrer.
 	for dir in all_agent_dirs {
-		// Identity-matched below (`canonicalize() == canonical_real`), never
-		// name-matched, so the wide list cannot touch an unrelated skill — and
-		// it is the only list that can see a Referrer whose target will not
-		// parse.
-		// TWO lists, and the split is load-bearing. The wide one exists so a
-		// Referrer whose target will not parse is still SEEN; the narrow one
-		// is the only thing this sweep may UNLINK. Every branch below that
-		// pushes into `paths` must be cleared by one of them: canonical
-		// identity (which a wide entry can prove on its own) or membership in
-		// the narrow list (for a dangling link, which resolves to nothing and
-		// so can never be cleared by identity).
+		// TWO lists, and the split is load-bearing: the wide `entries` is
+		// matched by canonical identity (so it cannot touch an unrelated skill,
+		// and still sees a Referrer whose target will not parse); the narrow
+		// `named` is the only list that may clear a DANGLING link, which has no
+		// identity. Every push into `paths` must be cleared by one of the two.
 		let (named, _) = candidate_entries(dir, &skill.name, safe);
 		let (entries, incomplete) = referrer_candidates(dir, safe);
 		incomplete_scan |= incomplete;
@@ -611,25 +543,20 @@ fn plan_symlink_removal(
 		let targeted =
 			all_agents || own_agent_dir.is_some_and(|d| d == dir.as_path());
 		for entry in entries {
-			// NotFound means this agent simply does not hold it. Any other error
-			// means the entry is THERE and we could not look — dropping it out of
-			// the sweep made `delete --all-agents` neither count it as a holder nor
-			// unlink its referrer, while still reporting `success: true` with the
-			// path silently missing from the JSON. Fail CLOSED: an unknown holder
-			// keeps the shared master, exactly as a known one would.
+			// NotFound: this agent does not hold it. Any other error: the entry
+			// is THERE and unreadable — fail CLOSED, an unknown holder keeps the
+			// shared master as a known one would.
+			// See docs/history/core-removal.md#unstatable-entry-dropped-from-the-sweep
 			match std::fs::symlink_metadata(&entry) {
 				Ok(_) => {}
 				Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
 					continue;
 				}
 				Err(_) => {
-					// Fail CLOSED on the canonical either way — an entry we
-					// cannot stat may be a referrer. But only REPORT the ones
-					// this removal names: an unrelated entry in `skipped` reads
-					// as "we deliberately kept your skill here", and the
-					// manager's own accounting reads that list. The dir itself
-					// is already reported through `incomplete` above, which the
-					// same stat failure sets.
+					// Keep the canonical either way, but only REPORT entries
+					// this removal names: `skipped` reads as "kept your skill
+					// here" and feeds the manager's accounting. The dir is
+					// already reported through `incomplete`.
 					other_refs = true;
 					if named.contains(&entry) {
 						skipped.push(entry);
@@ -657,14 +584,11 @@ fn plan_symlink_removal(
 					// skill; never touch it (match by canonical identity, not name).
 				}
 				Err(error) => {
-					// Dangling/broken link: it resolves to NOTHING, so identity
-					// cannot clear it the way the arm above clears a live one.
-					// The wide list makes that decisive — "is a link, and we
-					// are targeted" would unlink every unrelated broken link in
-					// this agent's skills dir, and mark the removal effective
-					// for having done it. Only a link this removal NAMES may
-					// go. NotFound cannot reference a Master that exists; other
-					// errors leave its identity unknown and must keep the Master.
+					// Dangling/broken link: no identity to clear it, so only a
+					// link this removal NAMES may go ("a link, and targeted"
+					// would unlink every unrelated broken link here). NotFound
+					// cannot reference an existing Master; other errors leave
+					// identity unknown and keep the Master.
 					if named.contains(&entry)
 						&& Linker::is_link(&entry)
 						&& targeted
@@ -786,12 +710,9 @@ fn plan_copy_removal(
 						skipped.push(root);
 					}
 					Some(KeepReason::ExternalReferrer(referrer)) => {
-						// Name the referrer, not just the kept directory:
-						// `skipped` lists only the caller's own path, so a keep
-						// decided by one of 25 OTHER agents' dirs was
-						// previously undiagnosable. The reason CARRIES the
-						// path for exactly this — an extraction that dropped
-						// it would silently undo the diagnosis.
+						// Name the referrer, not just the kept dir: `skipped`
+						// lists only the caller's own path, so a keep decided
+						// by another agent's dir is otherwise undiagnosable.
 						log::warn!(
 							"keeping {}: {} still references it",
 							root.display(),
@@ -821,45 +742,28 @@ fn plan_copy_removal(
 	}
 }
 
-/// True when `dir` lives inside a universal Master store — i.e. it is SHARED
-/// with every other agent reading that store, rather than one agent's private
-/// copy.
+/// True when `dir` lives inside a universal Master store — SHARED with every
+/// agent reading that store, not one agent's private copy.
 ///
-/// Containment, not path shape. Discovery RECURSES (`collect_skills` descends
-/// into any directory that is not itself a skill), so a Master can sit at
-/// `.agents/skills/<team>/<name>`, which a `parent == "skills"` shape test
-/// misses — and misses in the dangerous direction, letting a single-agent
-/// removal take a shared Master. The shape test was wrong the other way too: a
-/// private copy at `.claude/skills/agents/skills/<name>` matched it and became
-/// undeletable.
+/// Containment, not path shape: discovery recurses, so a Master can sit at
+/// `.agents/skills/<team>/<name>` (a `parent == "skills"` test misses it and
+/// lets a single-agent removal take it), and a private copy at
+/// `.claude/skills/agents/skills/<name>` must not match.
 ///
-/// "Is this SHARED?" is not on its own a reason to keep a directory — see
-/// [`skill_dir_readers_outside`] for the question a location delete asks.
+/// Shared alone is not a reason to keep — see [`skill_dir_readers_outside`].
 fn is_universal_master(dir: &Path, project_root: Option<&Path>) -> bool {
 	assert_strictly_contained(dir, &skill_store_roots(project_root)).is_some()
 }
 
 /// Which in-scope agents read the skill folder `dir` WITHOUT being named in
-/// `requested`?
+/// `requested`? The question a LOCATION delete asks: "is this a shared Master?"
+/// alone made every Master undeletable through the desktop's per-location
+/// dialog, which sends every agent installed at that path. It is the readers
+/// LEFT OUT of a request that make it dangerous, not the layout.
 ///
-/// The question a LOCATION delete has to ask. "Is this a shared Master?"
-/// ([`is_universal_master`]) is not it: a Master is shared by construction, so
-/// asking that alone made every Master permanently undeletable through the
-/// desktop's per-location dialog — which groups installs by exact
-/// `source_path` and sends EVERY agent installed at that path, i.e. the whole
-/// set of readers. That request is the user saying "drop this location", and
-/// it takes nothing from anybody who did not ask. A request naming only SOME
-/// of them is the dangerous one, and it is the leftovers — not the layout —
-/// that make it dangerous.
-///
-/// A PATH question on purpose, answered from each agent's own read dirs rather
-/// than from a `load_all_agents` scan: an agent whose config fails to parse
-/// loads zero skills, and reading "no skills" as "not a reader" would fail
-/// OPEN — straight into deleting a folder another agent still reads. Nothing
-/// here parses a config, so a broken one cannot hide a reader. Containment,
-/// not equality, because discovery recurses: a Master at
-/// `.agents/skills/<team>/<name>` is still read by every agent whose read dir
-/// is `.agents/skills`.
+/// Answered from each agent's read dirs, never a `load_all_agents` scan: an
+/// agent whose config fails to parse loads zero skills and would read as "not a
+/// reader" (fail OPEN). Containment, not equality, because discovery recurses.
 pub fn skill_dir_readers_outside(
 	dir: &Path,
 	scope: crate::models::ResourceScope,
@@ -934,25 +838,18 @@ pub fn dir_has_external_referrer(
 		let dir = dir.as_path();
 		let (entries, incomplete) = referrer_candidates(dir, &safe);
 		if incomplete {
-			// A dir this walk could not finish may hold a Referrer it never
-			// listed, and this function only ever KEEPS — so an unfinished
-			// listing is an unknown referrer, exactly like an unstat-able
-			// entry below. Naming the DIR (not a guessed entry) is the honest
-			// answer: that is the thing that could not be read.
+			// An unfinished listing may hide a Referrer, and this fn only KEEPS:
+			// treat it as an unknown referrer and name the DIR that could not be
+			// read, not a guessed entry.
 			return Some(dir.to_path_buf());
 		}
 		for entry in entries {
-			// `Linker::is_link` and `canonicalize(..).unwrap_or(false)` both answer
-			// "no" to EACCES, so an unreadable peer directory hid a live inbound
-			// symlink and this function green-lit `remove_dir_all` on the directory
-			// that link points at. Verified: identical runs differing only in the
-			// peer dir's mode either skip the directory (0755) or delete it and
-			// leave the peer's link dangling (0400), both exit 0.
-			//
-			// Failing closed on EVERY stat error was too blunt, though: this loop
-			// runs over all 25 agents' skills dirs, so one odd directory blocked
-			// copy-layout deletion of every skill. Narrow it to the cases where a
-			// referrer could actually BE there.
+			// Fail closed only where a referrer could actually BE: `is_link` and
+			// `canonicalize().unwrap_or(false)` both answer "no" to EACCES (hiding
+			// a live inbound link), yet this loop runs over every agent in the
+			// roster, so failing closed on every stat error lets one odd dir block
+			// every copy-layout delete.
+			// See docs/history/core-removal.md#unreadable-peer-dir-hid-an-inbound-link
 			match std::fs::symlink_metadata(&entry) {
 				Ok(_) => {}
 				// Nothing there, and — for NotADirectory — nothing CAN be: the
@@ -967,12 +864,10 @@ pub fn dir_has_external_referrer(
 					continue;
 				}
 				Err(_) => {
-					// Cannot stat the entry — but a NAME needs no stat. Mode 0400
-					// is exactly this shape: `read_dir` succeeds, every child stat
-					// fails. If the listing is complete and the leaf is not in it,
-					// there is provably no referrer here. Asked of the entry's OWN
-					// parent and leaf, because a discovered entry can sit nested
-					// below `dir` — `<dir>/<safe>` is just the depth-0 case.
+					// Cannot stat the entry, but a NAME needs no stat (mode 0400:
+					// `read_dir` works, child stats fail). A complete listing
+					// without the leaf proves no referrer. Asked of the entry's own
+					// parent, since discovered entries may nest below `dir`.
 					let listed = entry
 						.file_name()
 						.and_then(|leaf| leaf.to_str())
@@ -981,10 +876,8 @@ pub fn dir_has_external_referrer(
 						});
 					match listed {
 						Some(false) => continue,
-						// Present but opaque, or not even listable: unknown, and an
-						// unknown referrer keeps the directory. This function only
-						// ever KEEPS, so failing closed costs a refused deletion,
-						// never data.
+						// Present but opaque, or unlistable: unknown keeps the dir
+						// (costs a refused deletion, never data).
 						Some(true) | None => return Some(entry),
 					}
 				}
@@ -1040,18 +933,14 @@ pub enum KeepReason {
 }
 
 /// The one rule for "may a single-agent removal `remove_dir_all` this folder?".
+/// BOTH criteria are load-bearing:
+/// - [`is_universal_master`] — an agent reading a shared store dir directly
+///   leaves no symlink, so the referrer sweep alone cannot see it.
+/// - [`dir_has_external_referrer`] — a plain copy OUTSIDE the store roots can
+///   still have an inbound symlink.
 ///
-/// Two criteria, and BOTH are load-bearing:
-/// - [`is_universal_master`] — the referrer sweep alone is not enough, because
-///   a NativeReader leaves NO symlink behind, so every other agent reading the
-///   same Master is invisible to it and the Master got `remove_dir_all`'d out
-///   from under them while the operation reported success.
-/// - [`dir_has_external_referrer`] — a plain copy OUTSIDE the universal roots
-///   can still have an inbound symlink, which the first criterion cannot see.
-///
-/// Shared on purpose: [`plan_copy_removal`] and `ConfigManager::remove_skill`
-/// both answer this question, and hand-mirroring an OR across the two is how
-/// the seam ended up enforcing only half of it.
+/// Shared by [`plan_copy_removal`] and `ConfigManager::remove_skill`; never
+/// hand-mirror the OR (it once ended up enforcing only half).
 pub fn single_agent_keep_reason(
 	dir: &Path,
 	all_agent_dirs: &[PathBuf],
@@ -1081,16 +970,10 @@ fn push_contained(
 
 /// Outcome of the post-delete lock prune attached to a [`RemovalOutcome`].
 ///
-/// `NotRun` on a dry-run or non-executed removal; `Pruned(keys)` lists the lock
-/// entries dropped (may be empty when nothing was orphaned); `Failed` means the
-/// prune scan/write errored (non-fatal — the deletion already happened).
-///
-/// `Failed.pruned` is the truthful partial-mutation record: for a single-scope
-/// prune it is always empty (the lock was left unchanged), but a `Both` prune
-/// reconciles two *independent* locks (global + project) in sequence, so the
-/// global lock can already be pruned when the project prune fails. The dropped
-/// global keys are reported in `pruned` rather than silently lost behind the
-/// error — never claim "lock unchanged" when it wasn't.
+/// `Failed` is non-fatal (the deletion already happened). A `Both` prune
+/// reconciles two independent locks in sequence, so `Failed.pruned` reports
+/// global keys already dropped before the project prune failed — never claim
+/// "lock unchanged" when it wasn't.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum PruneStatus {
 	/// No prune attempted (dry-run / nothing executed).
@@ -1102,13 +985,9 @@ pub enum PruneStatus {
 	/// the failure (empty for a single-scope prune; possibly non-empty for the
 	/// `Both` scope when the first lock pruned before the second errored).
 	Failed { reason: String, pruned: Vec<String> },
-	/// A PREVIEW: these are the keys a committed delete would drop. Nothing has
-	/// been written.
-	///
-	/// Distinct from `Pruned` on purpose — the whole point is that a preview
-	/// cannot claim entries WERE dropped, and the CLI, API and desktop share
-	/// one wire shape, so reusing `pruned_lock_entries` would make `outcome`
-	/// the only thing separating "about to" from "did".
+	/// A PREVIEW: the keys a committed delete would drop; nothing written.
+	/// Distinct from `Pruned` so the shared CLI/API/desktop wire shape never
+	/// leaves `outcome` alone to separate "about to" from "did".
 	WouldPrune(Vec<String>),
 }
 
@@ -1121,50 +1000,28 @@ pub struct RemovalOutcome {
 	pub plan: RemovalPlan,
 	pub executed: bool,
 	pub prune: PruneStatus,
-	/// Paths the executing removal TRIED and failed to delete (permissions, a
-	/// concurrent change, …). Empty on a clean run, and on the resources whose
-	/// removal touches no path at all (MCP / sub-agent).
-	///
-	/// `executed` is set to `true` for the whole execute branch regardless, and
-	/// the failed paths are folded into `plan.skipped`, so a run where EVERY
-	/// delete failed still reported `executed: true` and — once a three-way
-	/// outcome existed — `outcome: "removed"` for files that are all still
-	/// there. Keeping the failures here lets the wire view say `partial`
-	/// instead of claiming a removal that did not happen.
+	/// Paths the executing removal TRIED and failed to delete. `executed` is
+	/// true for the whole execute branch and failures are also folded into
+	/// `plan.skipped`, so this is the only signal that lets the wire view say
+	/// `partial` instead of `removed`.
+	/// See docs/history/core-removal.md#partial-removals-reported-as-removed
 	pub failed_paths: Vec<std::path::PathBuf>,
-	/// The resource was ALREADY GONE — nothing to remove, whatever the caller
-	/// asked for.
-	///
-	/// Without this, `executed: false` conflated two different answers, and the
-	/// wire view could only guess between them from the caller's intent: an
-	/// unconfirmed delete of an absent resource reported `outcome: "preview"`,
-	/// whose contract says re-running with `--yes` WILL change something. It
-	/// will not — there is nothing there. Set by [`RemovalOutcome::noop`], the
-	/// one constructor for that case.
+	/// The resource was ALREADY GONE. Without it `executed: false` also meant
+	/// "preview", whose contract says `--yes` WILL change something. Set only
+	/// by [`RemovalOutcome::noop`]. See docs/history/core-removal.md#absent-was-indistinguishable-from-preview
 	pub absent: bool,
 }
 
 impl RemovalOutcome {
 	/// The PREVIEW of `plan` — what a commit would do, including the lock keys
-	/// it would drop.
+	/// it would drop. The one producer for every surface (root AGENTS.md: never
+	/// hand-mirror a transactional flow), and it runs `verify_shape` itself for
+	/// the same reason. See docs/history/core-removal.md#preview-and-commit-duplicated-per-surface
 	///
-	/// One producer, shared by every surface. Two hand-written copies of this
-	/// (the manager's and the API by-path route's) is exactly the
-	/// "NEVER hand-mirror a transactional flow across surfaces" the root
-	/// `AGENTS.md` forbids, and it had already drifted: the route hard-coded
-	/// `PruneStatus::NotRun`, so its preview silently under-reported the lock
-	/// cleanup its own commit would perform.
-	/// `blocks` is the caller's OWN "this removal takes nothing away" verdict
-	/// (`read_effect_after`), passed in rather than re-derived here: the
-	/// `shared_master_kept && paths.is_empty()` proxy below cannot see the
-	/// npx-era Referrer sitting BESIDE the Master it points at, where there is
-	/// a real path to unlink and the commit still refuses. A caller with no
-	/// such verdict passes `false` and keeps the proxy.
-	/// `name` is here so the shape check runs INSIDE the producer. Leaving it
-	/// to the two call sites is the "hand-mirror a transactional flow across
-	/// surfaces" the root `AGENTS.md` forbids: preview and commit would each
-	/// carry their own copy, and the CLI already shipped a preview that printed
-	/// a plan the commit then refused.
+	/// `blocks` is the caller's own `read_effect_after` verdict, passed in: the
+	/// `shared_master_kept && paths.is_empty()` proxy below cannot see an
+	/// npx-era Referrer beside its Master (a real path to unlink, still
+	/// refused). A caller with no verdict passes `false`.
 	pub fn preview(
 		plan: RemovalPlan,
 		blocks: bool,
@@ -1173,12 +1030,10 @@ impl RemovalOutcome {
 		name: &str,
 	) -> crate::errors::Result<Self> {
 		crate::skills::shape::verify_shape(scope, project_root, name)?;
-		// Load-bearing: a kept Master never reaches `commit`. A single-agent
-		// keep REFUSES; an exhaustive keep comes back here as a preview even
-		// when it was confirmed (`remove_skill_planned`). Either way promising
-		// `would_prune_lock_entries` would describe a prune that never runs —
-		// and the second shape is one `blocks` alone cannot see, which is why
-		// the plan flag stays in this condition.
+		// A kept Master never reaches `commit` (a single-agent keep refuses; an
+		// exhaustive keep returns here as a preview even when confirmed), so a
+		// promised prune would never run. `blocks` alone misses the second
+		// shape, hence the plan flag.
 		let prune =
 			if blocks || (plan.shared_master_kept && plan.paths.is_empty()) {
 				PruneStatus::NotRun
@@ -1200,15 +1055,8 @@ impl RemovalOutcome {
 	}
 
 	/// COMMIT `plan`: run the removal, fold what ACTUALLY happened back into the
-	/// plan, and reconcile the per-scope lock.
-	///
-	/// The counterpart of [`Self::preview`], and the same rule applies — this is
-	/// the only place that turns a [`RemovalReport`] into an outcome. The
-	/// duplicate that used to live in the API by-path route hard-coded
-	/// `failed_paths` empty, which made `RemovalKind::Partial` unreachable there:
-	/// a delete where every `remove_dir_all` returned `EACCES` reported
-	/// `outcome: "removed"` with the skill still on disk, and the desktop closes
-	/// its dialog on `removed`.
+	/// plan, and reconcile the per-scope lock. The only place a
+	/// [`RemovalReport`] becomes an outcome (same rule as [`Self::preview`]).
 	pub fn commit(
 		mut plan: RemovalPlan,
 		roots: &[PathBuf],
@@ -1253,11 +1101,8 @@ impl RemovalOutcome {
 	}
 
 	/// Idempotent-delete no-op: nothing on disk to remove (missing config or
-	/// missing resource). One shared constructor so the CLI and API serialize
-	/// the SAME `success:true, executed:false, dry_run:true` wire shape for the
-	/// "already gone" path across skill/MCP/sub-agent deletes — they must not
-	/// drift (API was lenient, CLI errored). `deleted_path` stays null because
-	/// `executed` is false.
+	/// resource). One constructor so the CLI and API serialize the SAME
+	/// "already gone" shape across skill/MCP/sub-agent deletes.
 	pub fn noop() -> Self {
 		RemovalOutcome {
 			plan: RemovalPlan {

@@ -1,18 +1,14 @@
 //! No-network install of an ALREADY-FETCHED skill.
 //!
-//! This is the shared primitive behind both the API git-install route and the
-//! CLI `source sync` command: given a skill that has already been fetched into a
-//! local tree, install it into the resolved per-agent skills directories — in the
-//! universal `.agents/skills` layout — and write the install lock. It performs NO
-//! network and NO credential resolution; fetch + auth live in the caller.
+//! Shared by the API git-install route and CLI `source sync`: install a skill
+//! already fetched into a local tree (Master in `.aghub` + per-agent
+//! Referrers) and write the install lock. NO network, NO credential
+//! resolution — fetch + auth live in the caller.
 //!
-//! It returns PER-AGENT results so the API can rebuild its current per-agent
-//! success / invalid-agent response and the CLI can report which agents got the
-//! skill. An agent whose target skills dir cannot be resolved (`Unsupported`)
-//! is a PREDICTABLE failure: the shared multi-target preflight rejects the
-//! whole batch as a hard error and nothing is written for ANY agent. Soft
-//! failures (`installed: false`, `error: Some(..)`) are reserved for runtime
-//! link failures on targets that passed preflight.
+//! Returns PER-AGENT results. An `Unsupported` agent is a PREDICTABLE failure:
+//! the shared multi-target preflight rejects the whole batch before any write.
+//! Soft failures (`installed: false`, `error: Some(..)`) are runtime link
+//! failures on targets that passed preflight.
 
 use std::path::{Path, PathBuf};
 
@@ -140,16 +136,12 @@ fn skill_lock_source(
 /// Canonical host + repo-path identity for the common remote URL forms. The
 /// transport and optional `.git` suffix do not define ownership; the host does.
 ///
-/// This is the low-level normalizer shared by three callers, not their complete
-/// identity policy. The install-time owner check passes recorded clone URLs and
-/// falls back to literal equality when either side cannot be normalized.
-/// [`crate::skills::lock::EntryIdentity`] wraps it in `comparable_remote`, which
-/// additionally recognizes GitHub `owner/repo` shorthand but deliberately
-/// returns `None` for a TFS collection path and for a bare origin-shaped string.
-/// `skill_update::sources` first uses the recorded provider or restores a
-/// fetchable URL, so its `source_origin` can resolve those origin-shaped strings.
-/// Keeping the transport parser here prevents those caller-specific fallbacks
-/// from silently widening install ownership or `EntryIdentity` comparisons.
+/// Low-level normalizer only, not an identity policy. Its three callers add
+/// their own fallbacks (install owner check: literal equality;
+/// [`crate::skills::lock::EntryIdentity`]'s `comparable_remote`: `owner/repo`
+/// shorthand, `None` for TFS/origin-shaped strings; `skill_update::sources`:
+/// provider-restored URLs). Keep those fallbacks out of here, or they widen
+/// install ownership and `EntryIdentity` comparisons.
 pub fn remote_owner_from_url(source_url: &str) -> Option<String> {
 	let source_url = source_url.trim();
 	if source_url.is_empty() || source_url.starts_with("file:") {
@@ -225,11 +217,9 @@ fn same_source_owner(
 	}
 }
 
-/// Whether a same-owner lock's update coordinates disagree with what this
-/// install was asked for. Healing them keeps a later `source sync --update`
-/// following the ref the caller actually requested, instead of whatever the
-/// lock happened to be written with first — an idempotent re-install writes no
-/// file, so without this the stale coordinates would survive silently.
+/// Whether a same-owner lock's update coordinates disagree with this request.
+/// Healing them keeps `source sync --update` on the requested ref; an
+/// idempotent re-install writes no file, so stale coordinates would survive.
 ///
 /// Only a PRESENT requested value can differ: an omitted coordinate is carried
 /// over from the recorded entry at the write site, never erased.
@@ -455,11 +445,9 @@ pub fn install_fetched_skill_and_lock(
 		}
 	}
 
-	// LAST preflight before the first write. The lock is written at the END of
-	// this flow, but a modify funnel that refuses on an unreadable lock would
-	// do so AFTER the Master and Referrers exist — and `?` there returns
-	// without consuming the materialization receipt, leaving an untracked
-	// partial install. Refuse now, while there is still nothing to roll back.
+	// LAST preflight before the first write: an unreadable lock refused at
+	// the END would leave an untracked partial install. Refuse while there is
+	// nothing to roll back.
 	skill::lock::ensure_locks_writable(
 		req.scope != ResourceScope::ProjectOnly,
 		match req.scope {
@@ -483,17 +471,11 @@ pub fn install_fetched_skill_and_lock(
 		created_referrer_dirs,
 	} = materialized;
 
-	// Gate ordinary lock rewrites on a fresh Master or fresh Referrer. One
-	// additional case is safe: an untracked, byte-identical Master with at least
-	// one successfully covered target (including an already-correct Referrer)
-	// may be adopted without manufacturing a filesystem change.
-	// The lock-write signal must come from the CREATION receipt, not from
-	// "can this agent read it". Those diverged the moment `installed` started
-	// folding in `already_linked` — which it had to, or the second through
-	// eighth agent of a shared slot reported `installed: false` with no error on
-	// a first install. Keying the lock write on readability instead made an
-	// idempotent re-run rewrite the lock, because every already-correct link
-	// reports readable.
+	// Gate lock rewrites on a fresh Master or fresh Referrer — the CREATION
+	// receipt, never readability (`installed` folds in `already_linked`, so an
+	// idempotent re-run would rewrite the lock). One extra safe case: adopt an
+	// untracked byte-identical Master with at least one covered target.
+	// See docs/history/core-install-linker.md#install-attribution-vs-rollback-receipts
 	let linked_any = !created_referrer_dirs.is_empty();
 	let covered_any = agent_results.iter().any(|r| r.error.is_none());
 	// A same-owner re-install that changed nothing on disk still has to correct
@@ -529,12 +511,9 @@ pub fn install_fetched_skill_and_lock(
 				 before the source lock write; the lock was not written",
 			)));
 		}
-		// Rewriting an existing entry must not DROP a coordinate this request
-		// omits (a relink rewrites the entry with no commit of its own, and
-		// erasing `ref_commit` changes update preflight). But a recorded commit
+		// Never DROP a coordinate this request omits. But a recorded commit
 		// certifies ONE (ref, skillPath) pair: carry it over only while both
-		// still match, else leave it None so preflight cannot treat coordinates
-		// nothing has verified as already proven.
+		// still match, or preflight treats unverified coordinates as proven.
 		let mut effective_source = req.source.clone();
 		let mut effective_commit = req.ref_commit.clone();
 		if let Some(owner) = existing_owner.as_ref() {
@@ -549,13 +528,9 @@ pub fn install_fetched_skill_and_lock(
 				effective_commit = owner.ref_commit.clone();
 			}
 		}
-		// Roll back from THIS call's receipt when the lock write fails. The
-		// preflight above rejects a lock we cannot parse, but it cannot rule
-		// out a late I/O failure (unwritable parent, full disk) or a foreign
-		// writer corrupting the file in between — the mutation lock serializes
-		// aghub against aghub only. Returning `?` here instead would leave the
-		// Master and Referrers this call just created with no lock entry
-		// pointing at them: an untracked install the caller was told failed.
+		// Roll back from THIS call's receipt when the lock write fails (late
+		// I/O, or a foreign non-aghub writer): a bare `?` would leave an
+		// untracked install the caller was told failed.
 		receipt = match write_install_lock(
 			&name,
 			req.scope,
@@ -602,23 +577,19 @@ pub struct MaterializedMaster {
 	/// `true` only when this call atomically claimed and wrote the Master.
 	pub created_master: bool,
 	/// The agent skills-dirs where this call created a FRESH referrer, taken
-	/// from the linker's own `linked` set -- never reconstructed from
-	/// `installed` or from read-path order, which would wrongly attribute a
-	/// NativeReader row (installed, no link, first read path IS the Master).
+	/// from the linker's own `linked` set — never reconstructed from
+	/// `installed` (which includes already-linked slots).
 	pub created_referrer_dirs: Vec<PathBuf>,
 }
 
 /// The ONE universal-install materializer shared by every install path: the
 /// fetched/desktop install ([`install_fetched_skill_and_lock`]) AND the CLI
 /// `aghub add skill` path (`ConfigManager::add_skill_universal` /
-/// `add_skill_from_path_universal`). Materializes the `.agents/skills/<name>`
-/// Master from `source_root` (copy-free linker; copied only when absent) and
-/// links each `NeedsLink` agent.
+/// `add_skill_from_path_universal`). Materializes the `.aghub` Master from
+/// `source_root` (copied only when absent) and links each `NeedsLink` agent.
 ///
-/// NativeReader agents are reported installed with NO link; NeedsLink agents are
-/// linked via the copy-free linker. Unsupported agents reject the whole request
-/// before the shared Master write. A per-agent LinkError is folded into that
-/// agent's row (Decision 10), never aborting later runtime attempts.
+/// Unsupported agents reject the whole request before the shared Master
+/// write. A per-agent LinkError is folded into that agent's row (Decision 10).
 pub fn materialize_universal_master(
 	source_root: &Path,
 	safe_name: &str,
@@ -684,10 +655,8 @@ pub fn materialize_universal_master(
 			_ => Ok(()),
 		},
 		|plans| {
-			// Dedup: up to eight agents resolve to the SAME shared
-			// `.agents/skills`, and asking the linker to create one link eight
-			// times makes seven of them report `AlreadyLinked` against work this
-			// very call just did.
+			// Dedup: sharers of one slot would otherwise report
+			// `AlreadyLinked` against work this very call just did.
 			let mut seen = std::collections::HashSet::new();
 			let symlink_dirs = plans
 				.iter()
@@ -731,14 +700,9 @@ pub fn materialize_universal_master(
 			// `already_linked`: rolling back a link this call did not create
 			// would remove a grant that was already there.
 			created_referrer_dirs = linked_dirs.iter().cloned().collect();
-			// Attribution is a different question from rollback. An agent whose
-			// slot was ALREADY correctly linked is installed — it can read the
-			// skill. Folding these in became load-bearing the moment
-			// `NativeReader` was deleted: eight agents now share one
-			// `.agents/skills` slot, so one is `Linked` and seven are
-			// `AlreadyLinked`, and reporting those seven as
-			// `installed: false, error: None` is a first-install failure with no
-			// error attached.
+			// Attribution differs from rollback: an ALREADY correctly linked
+			// slot is installed (it can read the skill), or a shared slot's
+			// other sharers report a silent failure on a first install.
 			let mut present_dirs = linked_dirs.clone();
 			present_dirs.extend(
 				install

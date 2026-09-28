@@ -5,14 +5,10 @@ use std::path::{Path, PathBuf};
 
 /// Load skills from a directory using skill parser.
 ///
-/// `Err` when a directory EXISTS but cannot be read. "Absent" and "unreadable"
-/// are different answers and this used to return the same empty list for both:
-/// `chmod 000` on an agent's skills dir made `get skills` print `[]` on exit 0
-/// with no warning, and — because `load_all_agents` only marks `load_failed`
-/// when the load returns `Err` — made that agent invisible to
-/// `transfer::skill_holders`, whose whole job is to notice a reader before the
-/// shared master is deleted. Same silent data loss, with less signal than the
-/// malformed-config case it sits next to.
+/// `Err` when a directory EXISTS but cannot be read: "absent" and
+/// "unreadable" are different answers, and `load_failed` (which
+/// `transfer::skill_holders` relies on) is set only from an `Err`.
+/// See docs/history/core-repair-rename.md#discovery-read-unreadable-as-empty
 pub fn load_skills_from_dir(skills_dir: &Path) -> std::io::Result<Vec<Skill>> {
 	let (skills, failure, _) = walk_dir(skills_dir, false);
 	match failure {
@@ -24,23 +20,14 @@ pub fn load_skills_from_dir(skills_dir: &Path) -> std::io::Result<Vec<Skill>> {
 /// Discover live Masters, skipping aghub's own bookkeeping in the store.
 ///
 /// The skip is [`crate::skills::linker::is_store_bookkeeping`], not a named
-/// path: `.quarantine/` is only ONE of the dot-prefixed entries the store
-/// holds. A failed `apply-update` leaves `.aghub-stage-<pid>-<n>/skill/` and
-/// `.aghub-backup-<pid>-<n>/target/` beside the Master — deliberately, so the
-/// user can recover by hand — and a slot swap that died mid-way leaves
-/// `.<name>.aghub-migrating`. Each of those holds a full `SKILL.md`, and
-/// `collect_skills` recurses into any directory with no ROOT `SKILL.md`, so
-/// without this predicate the store enumerates the SAME frontmatter name
-/// twice: `resync` then refuses the update as a multi-Master conflict, and
-/// the removal fallback picks its delete target by `read_dir` order.
+/// path: `.quarantine/`, `.aghub-stage-*`, `.aghub-backup-*` and
+/// `.<name>.aghub-migrating` all hold a full `SKILL.md`, and without the skip
+/// one name enumerates twice (resync refuses a multi-Master conflict, removal
+/// picks by `read_dir` order).
 ///
-/// `Err`-or-nothing, and deliberately so for a DESTRUCTIVE caller: an entry
-/// whose `SKILL.md` will not open has an unknown frontmatter `name`, so it may
-/// be the very skill being removed under a folder name that is not
-/// `sanitize_name(name)`. A partial list cannot rule that out, which makes
-/// "not in the list" unusable as "not there" and makes a uniqueness check
-/// unsound. There is no `_partial` twin here on purpose — one existed briefly
-/// and bought an unrelated delete's convenience with three false answers.
+/// `Err`-or-nothing on purpose for a DESTRUCTIVE caller: an unopenable
+/// `SKILL.md` may be the very skill under another folder name, so a partial
+/// list cannot answer "not there". Do not add a `_partial` twin here.
 pub(crate) fn load_master_skills(store: &Path) -> std::io::Result<Vec<Skill>> {
 	let (skills, failure, _) = walk_dir(store, true);
 	match failure {
@@ -52,14 +39,12 @@ pub(crate) fn load_master_skills(store: &Path) -> std::io::Result<Vec<Skill>> {
 /// Masters in ONE scope's store that no agent reads — every agent unticked,
 /// so the skill is stored (and still updated) but granted to nobody.
 ///
-/// Invisible to every per-agent listing by construction, which is why it needs
-/// its own question: without it a user can neither see, re-grant nor delete
-/// such a skill from the UI. "Reads" is by frontmatter name, the same rule the
-/// update check uses to fall back to the Master. `Err` as for the store walk.
+/// Invisible to every per-agent listing, so it needs its own question.
+/// "Reads" is by frontmatter name, as in the update check's Master fallback.
 ///
-/// Advisory only: `load_all_agents` fails OPEN, so a Master read solely by an
-/// agent whose config cannot be loaded lists here too. Deleting from this list
-/// is still safe — the removal plan re-derives readers and fails closed.
+/// Advisory only: `load_all_agents` fails OPEN, so a Master read only by an
+/// unloadable agent lists here too. Deleting is still safe — the removal plan
+/// re-derives readers and fails closed.
 pub fn withheld_masters(
 	scope: crate::models::ResourceScope,
 	project_root: Option<&Path>,
@@ -98,11 +83,9 @@ pub fn withheld_masters(
 /// this walk could not parse does NOT set it: that entry was still enumerated,
 /// so a caller probing paths can see it.
 ///
-/// For the guards that must not turn "cannot tell" into "nothing is there":
-/// they need the entries they can see AND the warning that the list is short.
-/// `Err`-or-nothing forces them to pick one, and both choices are wrong for a
-/// destructive decision — dropping the partial list hides a live Referrer,
-/// while refusing outright makes one odd sibling block every deletion.
+/// For guards that need the visible entries AND the warning: dropping the
+/// partial list hides a live Referrer, refusing outright lets one odd sibling
+/// block every deletion.
 pub fn load_skills_from_dir_partial(skills_dir: &Path) -> (Vec<Skill>, bool) {
 	let (skills, _, unlisted) = walk_dir(skills_dir, false);
 	(skills, unlisted)
@@ -111,11 +94,9 @@ pub fn load_skills_from_dir_partial(skills_dir: &Path) -> (Vec<Skill>, bool) {
 /// Every entry path under `dir`, WITHOUT parsing any of them, plus whether the
 /// listing may be short.
 ///
-/// For the questions answered by IDENTITY rather than name: "does a link in
-/// here resolve to that directory?" needs no frontmatter, and demanding one
-/// hides the referrer whose own `SKILL.md` will not parse — the exact entry a
-/// deletion is about to orphan. Recurses into real directories only (a link is
-/// reported, never followed), so a symlink cycle cannot loop it.
+/// For questions answered by IDENTITY, not name ("does a link here resolve to
+/// that directory?"), so an unparsable Referrer is still seen. Recurses into
+/// real directories only; links are reported, never followed.
 pub fn entry_paths(dir: &Path) -> (Vec<PathBuf>, bool) {
 	let mut out = Vec::new();
 	let mut unlisted = false;
@@ -210,9 +191,7 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> std::io::Result<Vec<Skill>> {
 
 /// Name the path in an I/O error.
 ///
-/// `std::io::Error` out of `fs` carries no path, so an unreadable skills
-/// directory surfaced as a bare `Permission denied (os error 13)` — on a
-/// command that may not even have been about skills.
+/// `std::io::Error` out of `fs` carries no path.
 fn at_path(path: &Path, error: std::io::Error) -> std::io::Error {
 	std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
@@ -220,13 +199,9 @@ fn at_path(path: &Path, error: std::io::Error) -> std::io::Error {
 /// Walk `dir`, pushing every skill it can read and recording the FIRST failure
 /// instead of stopping at it.
 ///
-/// Walking on is not a relaxation, it is what makes a destructive caller
-/// correct. Aborting discarded every skill already found in the same tree, so
-/// one unreadable sibling made a whole agent dir look empty — and an empty read
-/// dir is how `candidate_entries` loses a nested Referrer and how a planner
-/// concludes nobody else holds the skill. The error is still returned to
-/// callers that want it; what changes is that "some of it" is no longer thrown
-/// away with it.
+/// Walking on is what makes a destructive caller correct: aborting made one
+/// unreadable sibling hide the whole dir, so a planner concluded nobody else
+/// held the skill. The error is still returned.
 fn collect_skills(
 	dir: &Path,
 	skills: &mut Vec<Skill>,
@@ -248,12 +223,8 @@ fn collect_skills(
 		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
 			return;
 		}
-		// A path that is not a directory holds no ENTRIES, and that is a
-		// complete answer, not a failure to read one. Recording it as an error
-		// made `skill_holders` count a provably-empty path as a holder it
-		// could not verify, and the exhaustive guard then refused a collection
-		// that was safe. "Cannot tell" must mean a directory whose CONTENTS
-		// are hidden.
+		// A non-directory holds no ENTRIES — a complete answer. "Cannot tell"
+		// means a directory whose CONTENTS are hidden.
 		Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
 			return;
 		}
@@ -265,12 +236,8 @@ fn collect_skills(
 	};
 
 	for entry in entries {
-		// A per-entry error is "could not read", not "not there" — the same
-		// distinction the `read_dir` arm above makes, and `flatten()` +
-		// `is_dir()` both answered "no" to it. With mode 0400 on the skills
-		// dir `read_dir` SUCCEEDS and every stat under it then fails, so a
-		// directory full of skills read as empty and a genuine holder went
-		// invisible to `transfer::skill_holders`.
+		// A per-entry error is "could not read", not "not there" (mode 0400:
+		// `read_dir` succeeds, every stat under it fails).
 		let entry = match entry {
 			Ok(entry) => entry,
 			Err(error) => {
@@ -282,10 +249,8 @@ fn collect_skills(
 			}
 		};
 		let path = entry.path();
-		// Only at the store's TOP level, which is where every skill in it sits
-		// and where all of aghub's own entries sit. `to_string_lossy` rather
-		// than `to_str`: a non-UTF8 name must still be testable for the leading
-		// dot, and a `None` there would let the entry through.
+		// Store TOP level only. `to_string_lossy`, not `to_str`: a non-UTF8
+		// name must still be tested for the leading dot.
 		if store_layout
 			&& path.file_name().is_some_and(|name| {
 				crate::skills::linker::is_store_bookkeeping(
@@ -315,9 +280,7 @@ fn collect_skills(
 		match skill::parser::parse_skill_dir(&path) {
 			Ok(skill_pkg) => {
 				let mut skill = crate::convert_skill(skill_pkg);
-				// Detect a link (unix symlink OR windows junction) and record the
-				// canonical path. A junction reports is_symlink()==false, so the
-				// bare file-type check missed it; Linker::is_link sees both.
+				// `Linker::is_link` also sees junctions (is_symlink() does not).
 				if Linker::is_link(&path) {
 					if let Ok(resolved) = fs::canonicalize(&path) {
 						let canonical = resolved.join("SKILL.md");
@@ -327,28 +290,12 @@ fn collect_skills(
 				}
 				skills.push(skill);
 			}
-			// A directory with no SKILL.md is a GROUP directory — recurse.
-			// An I/O error is not: `parse_skill_dir` raises `SkillError::Io`
-			// when SKILL.md is there and cannot be read, and the old blanket
-			// `Err(_)` recursed into it, found only files, and returned `Ok`.
-			// The agent then held the skill while reporting it held nothing:
-			// `load_failed` stayed false, `transfer::skill_holders` counted a
-			// real reader as a non-reader, and the shared master was deleted —
-			// exit 0, "N succeeded, 0 failed", no warning. In a copy layout the
-			// same truncation widened a single-agent removal into a sweep that
-			// deleted an UNTARGETED agent's skill directory.
-			//
-			// A malformed SKILL.md keeps recursing, as it always has: that is
-			// `doctor`'s `invalid-skill`, and changing it here would be a
-			// separate, wider behaviour change.
-			// ...but `SkillError::Io` is not a synonym for "unreadable".
-			// `read_to_string` also raises `InvalidData` for a SKILL.md that is
-			// not UTF-8 (one latin-1 byte, a cp1252 smart quote) and
-			// `IsADirectory` for a SKILL.md that is a directory. Those bytes
-			// WERE read; the content is malformed. Propagating them made a
-			// single bad file exit-1 every command for that agent — including
-			// the `delete` that would have removed the offender, so it could
-			// not be cleaned up through aghub at all.
+			// No SKILL.md: a GROUP directory — recurse. An unreadable SKILL.md
+			// is a failure, NOT a group (recursing hid a real reader and the
+			// shared master was deleted). A malformed one keeps recursing
+			// (`doctor`'s `invalid-skill`), and `InvalidData` / `IsADirectory`
+			// count as malformed: the bytes were read.
+			// See docs/history/core-repair-rename.md#discovery-read-unreadable-as-empty
 			Err(skill::SkillError::Io(error))
 				if !matches!(
 					error.kind(),
@@ -356,10 +303,8 @@ fn collect_skills(
 						| std::io::ErrorKind::IsADirectory
 				) =>
 			{
-				// NOT `unlisted`: the entry WAS enumerated, so the caller's
-				// per-entry probes can still see it. Only its frontmatter name
-				// is unknown, and treating that as a hidden entry made one
-				// broken skill keep every OTHER agent's directory alive.
+				// NOT `unlisted`: the entry WAS enumerated; only its name is
+				// unknown. Flagging it kept every OTHER agent's dir alive.
 				note(failure, at_path(&path, error));
 			}
 			Err(_) => collect_skills(&path, skills, failure, unlisted, false),

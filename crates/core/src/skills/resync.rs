@@ -96,10 +96,7 @@ impl std::fmt::Display for ResyncError {
 /// every surface.
 ///
 /// Surfaces own their WORDING (the API must stay path-free; the CLI names the
-/// skill), but not the classification: the CLI's `source sync` used to render a
-/// `StaleFetch` as free text with no code at all, while the API answered 409 +
-/// `SOURCE_CHANGED_DURING_FETCH` for the very same condition — and the API's own
-/// comment claimed that was "the same answer the CLI's sync gives".
+/// skill), never the classification. See docs/history/core-removal.md#resync-failure-codes-diverged-per-surface
 pub fn resync_error_code(error: &ResyncError) -> &'static str {
 	match error {
 		ResyncError::Locked(_) => crate::skills::lock::MUTATION_LOCK_BUSY_CODE,

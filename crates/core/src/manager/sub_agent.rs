@@ -143,13 +143,9 @@ impl ConfigManager {
 			return Err(error);
 		}
 
-		// Remove stale file when the name changed (a new file was written
-		// under the new name by save_sub_agent_entry). `save_scoped_sub_agents`
-		// does NOT delete stale files, so a left-behind old `.md` reappears as a
-		// phantom agent on reload. A non-NotFound delete failure is therefore
-		// actionable — surface it (do not report success) so the caller knows the
-		// orphan lingers; an already-gone file is idempotent success. Mirrors the
-		// removal contract in `remove_sub_agent_planned`.
+		// Remove the old-name file: `save_scoped_sub_agents` does NOT delete
+		// stale files, so it would reappear as a phantom agent. A non-NotFound
+		// failure surfaces; already-gone is success.
 		if name_changed {
 			if let Some(old_path) = old_source_path {
 				let new_path = self
@@ -191,12 +187,9 @@ impl ConfigManager {
 	/// skill `remove_skill_planned` dry-run/confirm gate so all three resource
 	/// types flow through one [`RemovalOutcome`] DTO.
 	///
-	/// Sub-agent removal is a flat operation: the plan is a `Layout::Copy` plan
-	/// whose paths are the backing source `.md` file (empty for a config-only
-	/// agent that was never persisted). It is never destructive of shared data,
-	/// so `needs_confirm` is always false — the gate reduces to
-	/// `executed == !dry_run`. The `dry_run`/`confirm` plumbing exists for a
-	/// UNIFORM wire+CLI shape, not because sub-agent removal gates.
+	/// The `Layout::Copy` plan's paths are the backing `.md` file (empty for a
+	/// never-persisted agent). `needs_confirm` is always false, so the gate is
+	/// `executed == !dry_run`; the plumbing exists for a UNIFORM wire+CLI shape.
 	pub fn remove_sub_agent_planned(
 		&mut self,
 		name: &str,
@@ -306,16 +299,11 @@ impl ConfigManager {
 			});
 		}
 
-		// Move the backing file to a tombstone FIRST, before mutating/saving
-		// in-memory state. Unlike skills, `save_scoped_sub_agents` does NOT
-		// delete stale files (crates/agents/src/sub_agents.rs), so a file left on
-		// disk after an in-memory removal reappears as a phantom agent on the
-		// next reload — and conversely, deleting it outright before the save
-		// would lose the user's data if the save then fails. So this is
-		// transactional: rename → mutate + save → on success drop the tombstone,
-		// on save failure RESTORE it and re-insert the agent, so a reported
-		// failure means nothing changed. A non-NotFound rename error surfaces and
-		// leaves state untouched; an already-gone file is idempotent success.
+		// Transactional: rename to a tombstone → mutate + save → drop the
+		// tombstone on success, RESTORE it on save failure, so a reported failure
+		// changed nothing. (A leftover file reappears as a phantom agent; an
+		// outright delete before the save would lose data if the save fails.)
+		// A non-NotFound rename error surfaces; already-gone is success.
 		let mut tombstones: Vec<(PathBuf, PathBuf)> = Vec::new();
 		for path in &plan.paths {
 			let tomb = path.with_extension("md.aghub-tomb");

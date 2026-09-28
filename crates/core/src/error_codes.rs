@@ -1,26 +1,15 @@
 //! Stable wire codes for [`ConfigError`], shared by every surface.
 //!
-//! The HTTP API projected `ConfigError` onto a `(Status, code)` pair inside its
-//! own `From<ConfigError> for ApiError`, and that was the only place the code
-//! vocabulary existed. The CLI had none: under `--json` a failure printed
-//! NOTHING on stdout and one line of English prose on stderr, and policy
-//! refusals, missing resources, invalid agent ids and genuine write failures
-//! were all exit 1. A caller could only tell them apart by pattern-matching the
-//! prose — which is not stable, and already differs in wording for the same
-//! condition (`Skill 'x' not found` from `describe` vs `Resource not found:
-//! skill 'x'` from `disable`).
-//!
-//! So the code + retryability half lives here, and both surfaces read it.
-//! HTTP status stays in the API, where it belongs — it is the only part that is
-//! genuinely transport-specific.
+//! The code + retryability half lives here and both CLI and API read it; HTTP
+//! status stays in the API (the only transport-specific part). Callers branch
+//! on these codes, never on error prose. Why: knowledge page
+//! `CLI 與 API 的共用錯誤契約`.
 
 use crate::errors::ConfigError;
 
 /// The stable machine code for this error.
 ///
-/// Same strings the API has always sent, so a client that already branches on
-/// `ApiError::code` needs no change and the CLI's `--json` errors speak the
-/// same vocabulary.
+/// Same strings the API has always sent — never rename one.
 pub fn wire_code(error: &ConfigError) -> &'static str {
 	match error {
 		ConfigError::ResourceNotFound { .. } => "RESOURCE_NOT_FOUND",
@@ -47,10 +36,6 @@ pub fn wire_code(error: &ConfigError) -> &'static str {
 /// something first — including
 /// [`SOURCE_CHANGED_DURING_FETCH`](crate::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE),
 /// which is retryable only AFTER a re-read, so it is not `true` here.
-///
-/// This exists because "retry" is the single most consequential thing an
-/// automating caller decides from an error, and it was previously undecidable:
-/// every CLI failure was exit 1 with prose.
 pub fn retryable(error: &ConfigError) -> bool {
 	matches!(
 		error,

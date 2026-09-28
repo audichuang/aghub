@@ -368,19 +368,13 @@ where
 	Ok(MultiTargetMutationReport { results })
 }
 
-/// Run a mutation across two groups of targets under a STAGED policy:
-/// preflight covers every target (primary + secondary) up front exactly like
-/// [`run_multi_target_mutation`], so no predictable failure ever reaches a
-/// write. Once preflight is clean, every primary row is attempted (no
-/// fail-fast among primaries). If any primary row failed, the secondary rows
-/// are never attempted at all — each gets a synthesized failure row instead,
-/// so a caller can never remove a resource whose only copy to another target
-/// failed. When every primary row succeeds, secondary rows run with the same
-/// attempt-all behavior as before.
+/// STAGED policy: preflight covers every target (primary + secondary) up
+/// front like [`run_multi_target_mutation`]; then every primary row is
+/// attempted. If any primary failed, no secondary row runs (each gets a
+/// synthesized failure row); otherwise secondaries run attempt-all.
 ///
-/// This is `reconcile_{skill,mcp,sub_agent}`'s policy: `primary` is the
-/// "added" copies, `secondary` is the "removed" deletes — a copy that fails
-/// at RUNTIME (after preflight already passed) must not let its paired
+/// `reconcile_{skill,mcp,sub_agent}`: primary = the "added" copies, secondary
+/// = the "removed" deletes — a runtime copy failure must not let its paired
 /// delete run, or the resource ends up gone from every agent.
 pub fn run_staged_multi_target_mutation<T, O, E>(
 	primary: &[T],

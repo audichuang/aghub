@@ -15,16 +15,9 @@ use serde::Serialize;
 
 /// What a removal request actually resolved to. The one field that answers "did
 /// the thing I asked for happen?" without cross-referencing three booleans.
-///
-/// `executed` + `dry_run` could not express `Absent`: an "already gone" outcome
-/// and a refused preview both had `executed: false`, and `dry_run` was derived
-/// from `!executed`, so they serialized IDENTICALLY — the same md5, byte for
-/// byte, for `delete skills nope -y` and `delete skills nope`. The human
-/// renderer told those two apart perfectly ("nothing to remove" vs "would
-/// remove … re-run with --yes"); only the machine shape could not. Worse, the
-/// comment on that renderer explains that telling a caller to "re-run with
-/// --yes" when the thing is already gone is a loop that never terminates — and
-/// `dry_run: true` on a `--yes` run is exactly that hint in machine form.
+/// Every variant exists so no outcome tells a caller "re-run with --yes" when
+/// that cannot change anything (a retry loop that never terminates).
+/// See docs/history/core-removal.md#absent-was-indistinguishable-from-preview
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovalKind {
@@ -39,11 +32,7 @@ pub enum RemovalKind {
 	/// Deletion ran and at least one path could NOT be deleted. `paths` holds
 	/// what went, `skipped` holds what stayed. Do not read this as success:
 	/// when `paths` is empty, nothing was removed at all.
-	///
-	/// Without this variant, such a run reported `removed` — `executed` is
-	/// hard-coded `true` for the whole execute branch and the failures are
-	/// folded into `skipped`, so the only honest signal was a caller manually
-	/// comparing two lists.
+	/// See docs/history/core-removal.md#partial-removals-reported-as-removed
 	Partial,
 	/// Nothing was or will be removed because the agent goes on reading the
 	/// skill from the SHARED universal Master either way — whether the plan
@@ -51,13 +40,9 @@ pub enum RemovalKind {
 	/// a path that changes nothing (an npx-era Referrer beside the Master it
 	/// points at).
 	///
-	/// A single-agent removal cannot express "stop only this agent seeing it",
-	/// so an EXECUTING call refuses outright (`manager/skill.rs`'s
-	/// `unsupported_operation`). Reporting `preview` for the dry-run of that
-	/// state was the same non-terminating hint `Absent` was added to kill:
-	/// "re-run with --yes" pointed straight at a guaranteed error. And the API
-	/// reported it as a plain `success: true`, which is why the desktop's
-	/// delete dialog closed on a skill that is still installed.
+	/// An EXECUTING call refuses outright (`manager/skill.rs`'s
+	/// `unsupported_operation`), so its dry-run must not report `preview`.
+	/// See docs/history/core-removal.md#kept-outcome-for-a-shared-master
 	Kept,
 }
 
@@ -83,12 +68,9 @@ impl RemovalView {
 	///
 	/// `requested_dry_run` is the CALLER's intent — no `--yes`, or an explicit
 	/// `--dry-run` (the API always passes `false`; it has no preview mode).
-	/// There is deliberately no `From<&RemovalOutcome>`: `dry_run` used to be
-	/// `!outcome.executed`, which reported `dry_run: true` to a caller who HAD
-	/// passed `--yes` and whose target simply no longer existed. That caller's
-	/// only reasonable reading is "my confirmation was ignored", so it retries —
-	/// forever, because the world is already in the requested state and nothing
-	/// else ever contradicts it.
+	/// Deliberately no `From<&RemovalOutcome>`: deriving `dry_run` from
+	/// `!executed` told a confirmed caller its `--yes` was ignored.
+	/// See docs/history/core-removal.md#absent-was-indistinguishable-from-preview
 	pub fn from_outcome(
 		outcome: &RemovalOutcome,
 		requested_dry_run: bool,
@@ -101,38 +83,23 @@ impl RemovalView {
 		{
 			// Nothing was or will be removed BECAUSE it is shared. Outranks
 			// every other answer: an executing call refuses (the manager
-			// guard), so `preview` would tell a caller to retry into a
-			// guaranteed error, and an `executed` call that took nothing is not
-			// a removal.
+			// guard), and an `executed` call that took nothing is not a removal.
 			//
-			// `plan.shared_master_kept` has existed since the plan was written
-			// and is read by `manager/skill.rs` and `transfer.rs` — it was just
-			// never read HERE, so the fact never reached the wire at all.
-			//
-			// `|| !outcome.executed` covers the shape where the plan HAS paths
-			// of its own and unlinking them changes NOTHING about what the
-			// agent reads (an npx-era Referrer beside the Master it points at
-			// — both resolve to the same place). The manager folds that fact
-			// into `shared_master_kept`, then REFUSES the confirmed call — so a
-			// preview reporting `preview` promised "re-run with --yes will
-			// change something" and `--yes` answered `unsupported_operation`.
-			// That is exactly the never-terminating hint this variant exists to
-			// kill. An EXECUTED run keeps falling through to `Removed`/
-			// `Partial`: it got past the refusal, so its paths really went.
+			// `|| !outcome.executed` covers a plan WITH paths that change
+			// nothing the agent reads (an npx-era Referrer beside its Master):
+			// the manager folds that into `shared_master_kept` and refuses the
+			// confirmed call. An EXECUTED run falls through to `Removed`/
+			// `Partial` — it got past the refusal, so its paths really went.
 			RemovalKind::Kept
 		} else if outcome.executed && !outcome.failed_paths.is_empty() {
-			// Ran, but not everything went. Checked BEFORE `Removed`: the
-			// execute branch sets `executed: true` unconditionally, so a run
-			// where every single delete failed is indistinguishable from a
-			// clean one on that flag alone.
+			// Checked BEFORE `Removed`: `executed` is true even when every
+			// delete failed.
 			RemovalKind::Partial
 		} else if outcome.executed {
 			RemovalKind::Removed
 		} else if outcome.absent {
-			// Already gone. This OUTRANKS the caller's intent: an unconfirmed
-			// delete of a resource that does not exist is not a preview of
-			// anything — re-running it with `--yes` changes nothing, and
-			// reporting `preview` invites exactly that pointless retry.
+			// Already gone OUTRANKS the caller's intent: `preview` would invite
+			// a pointless `--yes` retry.
 			RemovalKind::Absent
 		} else if requested_dry_run {
 			RemovalKind::Preview
@@ -142,14 +109,9 @@ impl RemovalView {
 			RemovalKind::Absent
 		};
 		Self {
-			// NOT hard-coded true. `Partial` means the removal RAN and at least
-			// one path could not be deleted — with every path failing, `paths` is
-			// empty and the resource is entirely still there. This type's own doc
-			// for the variant says "Do not read this as success", and then said
-			// `success: true` two screens later; a `delete --yes` that deleted
-			// nothing because of EACCES exited 0. Every other variant IS a
-			// success: a preview succeeded at previewing, `absent` at finding
-			// nothing to do, and `kept` at deliberately keeping a shared master.
+			// NOT hard-coded true: `Partial` may have deleted nothing. Every
+			// other variant IS a success (previewed, nothing to do, or a shared
+			// master deliberately kept).
 			success: kind != RemovalKind::Partial,
 			dry_run: requested_dry_run,
 			executed: outcome.executed,

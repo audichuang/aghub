@@ -6,11 +6,8 @@ use aghub_agents::{agents, AgentDescriptor, AgentType};
 pub static ALL_AGENTS: &[&AgentDescriptor] = agents::ALL_DESCRIPTORS;
 
 /// Total by construction — `AgentType::descriptor` is a `match` generated
-/// from the same roster row as the variant, so there is no missing-entry case
-/// left to fall back from. This used to be a find-by-id ending in
-/// `.unwrap_or(&agents::claude::DESCRIPTOR)`: an agent absent from the roster
-/// was served Claude's descriptor silently, writing its MCP servers into
-/// `~/.claude.json` and linking its skills into Claude's directory.
+/// from the same roster row as the variant. There is NO fallback: never add
+/// one (an old `unwrap_or(claude)` wrote other agents' config into Claude's).
 pub fn get(agent_type: AgentType) -> &'static AgentDescriptor {
 	agent_type.descriptor()
 }

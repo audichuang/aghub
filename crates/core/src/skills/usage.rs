@@ -1,10 +1,8 @@
 //! Skill usage counts, read from Claude Code's `skillUsage` map.
 //!
-//! Claude Code records `{ <name>: { usageCount, lastUsedAt } }` in
-//! `~/.claude.json`, incrementing on every real dispatch of a skill. We read
-//! that map and left-join it against the installed skills so a skill that has
-//! never been dispatched (and is therefore absent from the map) surfaces as
-//! zero — those are the prune candidates.
+//! `~/.claude.json` records `{ <name>: { usageCount, lastUsedAt } }` per
+//! dispatch; left-joined against installed skills so a never-dispatched skill
+//! (absent from the map) reads as zero — the prune candidates.
 //!
 //! Claude-only: no other agent keeps a comparable counter, so there is no
 //! cross-agent generalization here (see
@@ -103,11 +101,8 @@ pub fn join_skill_usage(
 /// empty list if the config cannot be loaded. `skillUsage` is user-global, not
 /// per-project, so this intentionally covers only global-scope skills.
 ///
-/// Note: plugin-managed skills (whose usage Claude keys as `plugin:name`) are
-/// joined by bare name and would read as 0 — but they live in the plugin cache,
-/// not `~/.claude/skills`, so this does not manifest in practice. The API list
-/// route's `ClaudePluginManager` filter is API-only and deliberately not wired
-/// through core for this edge case (see the spec's Risks).
+/// Plugin skills (keyed `plugin:name`) would read as 0, but live in the plugin
+/// cache, not `~/.claude/skills`; deliberately not handled here (spec Risks).
 pub fn list_claude_skill_usage() -> Vec<SkillUsage> {
 	let mut manager = ConfigManager::with_scope(
 		create_adapter(AgentType::Claude),

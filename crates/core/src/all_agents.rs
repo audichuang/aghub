@@ -16,12 +16,9 @@ pub struct AgentResources {
 	/// This agent's config could NOT be read, so the empty lists above mean
 	/// "unknown", not "nothing".
 	///
-	/// This loader fails OPEN by design — a broken agent config must not break
-	/// every other agent's listing — and for a listing that is right. For a
-	/// DECISION it is not: `transfer::skill_holders` asks "has every reader of
-	/// this master been named?", and an agent counted as a non-reader because it
-	/// could not be read got the master deleted out from under it. Callers that
-	/// decide something must read this flag.
+	/// The loader fails OPEN (right for a listing). Callers that DECIDE
+	/// something must read this flag — e.g. `transfer::skill_holders` would
+	/// otherwise count an unreadable agent as a non-reader and delete its master.
 	pub load_failed: bool,
 }
 

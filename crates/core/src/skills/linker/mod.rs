@@ -14,10 +14,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// Directory name of the Master store — the ONE place a skill's bytes live.
 ///
-/// Deliberately a directory NO agent reads: storing a skill must not grant it.
-/// `.agents/skills` cannot serve this role because ten agent/scope combinations
-/// scan it natively, so materializing a Master there hands the skill to every one
-/// of them. See `.scratch/aghub-skill-store/spec.md`.
+/// Deliberately a directory NO agent reads: storing a skill must not grant it
+/// (`.agents/skills` is scanned natively by many agent/scope pairs).
 pub const MASTER_STORE_DIR_NAME: &str = ".aghub";
 
 /// Resolve the `.aghub` Master store dir for a scope.
@@ -79,31 +77,21 @@ pub fn ensure_master_store_parent(canonical: &Path) -> io::Result<()> {
 	Ok(())
 }
 
-/// Resolve the shared `.agents/skills` Referrer root for a scope.
-///
-/// Once the Master moves to [`master_store_dir`], this directory is an ordinary
-/// Referrer slot like any agent's private skills dir — except that it is shared:
-/// ten agent/scope combinations read it, and eight of them have no private dir to
-/// use instead, so granting to one grants to all of them.
 /// Is this entry in the Master store aghub's own bookkeeping rather than a
-/// skill?
+/// skill? Skills sit at exactly ONE level; aghub's own entries are
+/// dot-prefixed (`.quarantine/<name>/<stamp>/`, a transient
+/// `.<name>.aghub-migrating` link).
 ///
-/// The store holds skills at exactly ONE level; everything aghub keeps for
-/// itself is dot-prefixed — `.quarantine/<name>/<stamp>/` (forks kept aside by
-/// repair) and the transient `.<name>.aghub-migrating` link a slot swap leaves
-/// if it dies mid-way.
-///
-/// **Every enumerator of the store must apply this**, and "it is structurally
-/// invisible" is a property of one function, not of the layout:
-/// `top_level_skill_dirs` happens to be safe because it is one level deep AND
-/// requires a root `SKILL.md`, so the quarantine's `<name>/<stamp>/SKILL.md`
-/// falls outside it — but `doctor` enumerated the store directly and listed
-/// `.quarantine` as an `invalid-skill`, which permanently reddened
-/// `--fail-on-issues` for anybody who had ever migrated.
+/// **Every enumerator of the store must apply this** — being invisible to
+/// `top_level_skill_dirs` is a property of that function, not of the layout.
+/// See docs/history/core-install-linker.md#doctor-listed-the-quarantine-as-a-skill
 pub fn is_store_bookkeeping(file_name: &str) -> bool {
 	file_name.starts_with('.')
 }
 
+/// Resolve the shared `.agents/skills` Referrer root for a scope: an ordinary
+/// Referrer slot, except that it is shared — granting there grants to every
+/// agent/scope that reads it.
 pub fn shared_referrer_dir(project_root: Option<&Path>) -> Option<PathBuf> {
 	universal_canonical_dir(project_root)
 }
@@ -202,7 +190,6 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 /// Compute a relative path so a symlink created inside `from_dir` resolves to
 /// `to_path`. Both should be absolute. Falls back to the absolute `to_path`
 /// when the two share no common prefix (different roots).
-#[cfg_attr(not(test), allow(dead_code))]
 fn relative_path(from_dir: &Path, to_path: &Path) -> PathBuf {
 	let from: Vec<Component> = from_dir.components().collect();
 	let to: Vec<Component> = to_path.components().collect();
@@ -232,16 +219,13 @@ fn relative_path(from_dir: &Path, to_path: &Path) -> PathBuf {
 
 /// Names excluded when materializing a Master, mirroring upstream npx
 /// `copyDirectory` (installer.ts) so the Master hashes identically to npx.
-#[cfg_attr(not(test), allow(dead_code))]
 const EXCLUDE_FILES: &[&str] = &["metadata.json"];
-#[cfg_attr(not(test), allow(dead_code))]
 const EXCLUDE_DIRS: &[&str] = &[".git", "__pycache__", "__pypackages__"];
 
 /// Recursively copy a skill source tree into the canonical Master directory,
 /// applying the npx exclude lists and dereferencing symlinks.
 ///
-/// NOTE: this copy materializes the single Master only; it is NOT a per-agent
-/// copy fallback. The converged install model bans copy as a per-agent outcome.
+/// Materializes the single Master only — copy is never a per-agent outcome.
 fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 	std::fs::create_dir_all(to)?;
 	for entry in std::fs::read_dir(from)? {
@@ -250,11 +234,8 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 		let name = file_name.to_string_lossy();
 		let file_type = entry.file_type()?;
 		let from_path = entry.path();
-		// Source hashes use lstat semantics and skip links. Materializing a Master
-		// must use the same basis: dereferencing here would both import bytes from
-		// outside the fetched skill and make the on-disk hash disagree with its
-		// lock immediately after install. `Linker::is_link` also covers Windows
-		// junctions/reparse points.
+		// Skip links, matching the lstat-based source hash: dereferencing would
+		// import outside bytes and make the Master disagree with its lock.
 		if Linker::is_link(&from_path) {
 			continue;
 		}
@@ -278,7 +259,7 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 /// `failed` (Decision 10), never as an `Err` from the convenience layer.
 #[derive(Debug, Default)]
 pub struct UniversalInstallReport {
-	/// `.agents/skills/<name>` master SKILL-DIR.
+	/// The Master SKILL-DIR.
 	pub canonical: PathBuf,
 	/// Agent skills-dirs where a fresh link to the master was created.
 	pub linked: Vec<PathBuf>,
@@ -289,11 +270,9 @@ pub struct UniversalInstallReport {
 	pub conflicts: Vec<PathBuf>,
 	/// Per-agent hard link failures (Decision 10): NOT propagated as `Err`.
 	pub failed: Vec<(PathBuf, LinkError)>,
-	/// `true` only when THIS call created the master SKILL-DIR, established by
-	/// an atomic `create_dir` claim rather than an exists-check. A caller that
-	/// rolls its own install back needs creation provenance it can trust: with a
-	/// pre-check, a second process could create the master in the gap and have
-	/// its copy deleted by the first process's rollback.
+	/// `true` only when THIS call created the master SKILL-DIR, via an atomic
+	/// `create_dir` claim — an exists-check would let a rollback delete a
+	/// master another process created in the gap.
 	pub created_master: bool,
 }
 
@@ -313,21 +292,16 @@ pub fn install_universal(
 			target: canonical.to_path_buf(),
 		});
 	}
-	// Claim the master SKILL-DIR atomically: `create_dir` is the whole
-	// invariant. `AlreadyExists` means someone else owns this master (a previous
-	// run, or a concurrent process), so we neither copy over it nor claim to
-	// have created it -- an exists-check first would report creation for a
-	// master another process wrote in the gap.
+	// Atomic claim: `AlreadyExists` means another run owns this master, so we
+	// neither copy over it nor claim it (see `created_master`).
 	let mut created_master = false;
 	ensure_master_store_parent(canonical)?;
 	match std::fs::create_dir(canonical) {
 		Ok(()) => {
 			created_master = true;
 			if let Err(error) = copy_dir_recursive(source_root, canonical) {
-				// We claimed this directory, so we own its cleanup. Leaving a
-				// partial Master behind would poison every retry: the next claim
-				// sees `AlreadyExists`, skips the copy, and the half-written
-				// Master keeps occupying the name.
+				// We own the cleanup: a partial Master would poison every retry
+				// (the next claim sees `AlreadyExists` and skips the copy).
 				let _ = std::fs::remove_dir_all(canonical);
 				return Err(error.into());
 			}
@@ -395,11 +369,8 @@ impl Linker {
 	/// Windows symlink/junction (FILE_ATTRIBUTE_REPARSE_POINT 0x0400). Never
 	/// follows the link. Ported from SM `is_symlink_or_junction`.
 	///
-	/// Lossy wrapper over [`Self::is_link_checked`]: every I/O error, `NotFound`
-	/// included, folds to `false`. That is exactly right for this fn's many
-	/// read-only callers (they only ever want a yes/no), and exactly wrong for
-	/// a caller that must fail CLOSED on a permission fault — that caller wants
-	/// [`Self::is_link_checked`] instead, not a hand-rolled copy of this match.
+	/// Lossy: every I/O error folds to `false`. A caller that must fail CLOSED
+	/// on a permission fault uses [`Self::is_link_checked`], never a copy of it.
 	pub fn is_link(path: &Path) -> bool {
 		Self::is_link_checked(path).unwrap_or(false)
 	}
@@ -407,14 +378,9 @@ impl Linker {
 	/// The fallible form of [`Self::is_link`]: same reparse-point detection,
 	/// but a `NotFound` is `Ok(false)` (nothing to call a link one way or the
 	/// other) while every OTHER I/O error — most often a permission fault on
-	/// an ancestor directory — is returned rather than swallowed.
-	///
-	/// The ONE place both directions are needed. `compat_unlink_permitted`
-	/// (`skills::shape`) used to re-spell this exact match inline so it could
-	/// fail closed instead of folding to `false` like [`Self::is_link`] — a
-	/// second copy the root `AGENTS.md` "never hand-mirror" rule forbids.
-	/// Extracted here so a change to the Windows reparse-point test only ever
-	/// has one call site to get right.
+	/// an ancestor directory — is returned rather than swallowed. The ONE
+	/// spelling of this match (`compat_unlink_permitted` uses it), so the
+	/// Windows reparse-point test has one call site.
 	pub fn is_link_checked(path: &Path) -> io::Result<bool> {
 		match path.symlink_metadata() {
 			Ok(meta) => {
@@ -435,13 +401,9 @@ impl Linker {
 			}
 			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
 			Err(e) if e.kind() == io::ErrorKind::NotADirectory => Ok(false),
-			// A component of the path is not a directory, so nothing can live
-			// under it — as definite an absence as `NotFound`, and the same
-			// call `skills::shape`'s marker probe makes (`NotADirectory =>
-			// Absent`). Folding it into `Err` instead made a single regular
-			// file sitting where a compat read DIR belongs refuse `repair` for
-			// every skill at that scope, with a `fix:` line offering a
-			// permission to change and a path to move aside that do not exist.
+			// A non-directory component is a definite absence; must agree with
+			// `skills::shape`'s marker probe. Pinned by
+			// `is_link_checked_reads_a_non_directory_component_as_absent`.
 			Err(e) => Err(e),
 		}
 	}
@@ -455,14 +417,9 @@ impl Linker {
 		Self::unlink_reporting(path).map(|_| ())
 	}
 
-	/// [`Self::unlink`], but says whether THIS call is what removed the entry.
-	///
-	/// `unlink` folds `NotFound` into success because step 4 unlinks a stale
-	/// link before re-creating it and must be idempotent. A RECEIPT cannot use
-	/// that answer: a compat entry another process removed between the guard
-	/// and here came back as `Ok(())`, and `report.unlinked` then attributed
-	/// somebody else's removal to this run. Callers that only want the
-	/// idempotence keep using `unlink`; callers that report use this.
+	/// [`Self::unlink`], but says whether THIS call removed the entry. Callers
+	/// that build a receipt use this: `unlink`'s `NotFound`-is-success would
+	/// attribute another process's removal to this run.
 	pub fn unlink_reporting(path: &Path) -> io::Result<bool> {
 		let result = {
 			#[cfg(windows)]
@@ -486,15 +443,11 @@ impl Linker {
 		}
 	}
 
-	/// Create `agent_skills_dir/<skill_name>` -> `master_dir` (the
-	/// `.agents/skills/<name>` canonical SKILL-DIR, which MUST already exist and
-	/// MUST be absolute). Creates `agent_skills_dir` if absent. lstat-inspects
-	/// the occupant WITHOUT following it (via [`Linker::is_link`], so a junction
-	/// is recognized): returns `AlreadyLinked` / `Conflict` without writing on
-	/// collision. On a clean target: Unix => symlink; Windows => symlink_dir,
-	/// else `cmd /C mklink /J <ABSOLUTE master>`; both fail =>
-	/// `LinkError::LinkUnsupported`. `master_dir` not absolute =>
-	/// `NonAbsoluteTarget`.
+	/// Create `agent_skills_dir/<skill_name>` -> `master_dir` (the Master
+	/// SKILL-DIR; MUST exist and be absolute, else `NonAbsoluteTarget`).
+	/// lstat-inspects the occupant WITHOUT following it: `AlreadyLinked` /
+	/// `Conflict` without writing. Clean slot: Unix symlink; Windows
+	/// symlink_dir, else junction; both fail => `LinkUnsupported`.
 	pub fn link(
 		master_dir: &Path,
 		agent_skills_dir: &Path,
@@ -539,19 +492,12 @@ impl Linker {
 		Ok(LinkOutcome::Linked)
 	}
 
-	/// Create a RAW cross-platform link at `link` pointing at `target`, with NO
-	/// conflict detection — the caller guarantees an empty slot. This is the
-	/// low-level primitive the rename snapshot/restore uses; contrast
-	/// [`Linker::link`], which lstat-inspects the slot and reports
-	/// `AlreadyLinked`/`Conflict`.
+	/// Create a RAW link at `link` -> `target` with NO conflict detection (the
+	/// caller guarantees an empty slot); used by rename snapshot/restore.
 	///
-	/// Unix: one `symlink` syscall handles both file and dir targets. Windows:
-	/// the kind must be chosen, so resolve `target` relative to `link`'s parent
-	/// and pick `symlink_dir`/`symlink_file` by the resolved metadata (defaulting
-	/// to a file link when it cannot be stat'd). For a directory target: native
-	/// `symlink_dir` first (needs Dev Mode/admin), else a [`create_junction`]
-	/// fallback using the ABSOLUTE resolved target — so a junction round-trips
-	/// through snapshot/restore even without admin.
+	/// Windows picks `symlink_dir`/`symlink_file` from the target resolved
+	/// against `link`'s parent (file when unstat-able); a dir falls back to a
+	/// [`create_junction`] on the ABSOLUTE target so it round-trips without admin.
 	pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
 		#[cfg(unix)]
 		{
@@ -571,9 +517,7 @@ impl Linker {
 				if std::os::windows::fs::symlink_dir(target, link).is_ok() {
 					return Ok(());
 				}
-				// Fallback: directory junction (no admin). A junction cannot store
-				// a relative target, so use the absolute resolved path. Reuses the
-				// module's `create_junction` and folds its `LinkError` into `io`.
+				// Junction fallback: cannot store a relative target.
 				create_junction(&resolved, link).map_err(|e| match e {
 					LinkError::Io(io) => io,
 					LinkError::LinkUnsupported { source, .. } => source,
@@ -598,10 +542,8 @@ impl Linker {
 	/// [`Linker::is_link`]) as a link via [`Linker::symlink`] rather than
 	/// deep-copying its target.
 	///
-	/// This is the link-PRESERVING copy the rename snapshot/restore needs. It is
-	/// deliberately distinct from the module-private `copy_dir_recursive`, which
-	/// SKIPS links and applies the npx exclude lists to materialize the Master —
-	/// do not conflate the two.
+	/// The rename snapshot/restore copy. Not `copy_dir_recursive`, which SKIPS
+	/// links and applies the npx excludes to materialize a Master.
 	pub fn copy_preserving_links(src: &Path, dst: &Path) -> io::Result<()> {
 		std::fs::create_dir_all(dst)?;
 		for entry in std::fs::read_dir(src)? {

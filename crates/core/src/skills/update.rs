@@ -32,18 +32,13 @@ pub enum SkillUpdateStatus {
 	},
 }
 
-/// Shared rename-detection contract used by every update/apply/sync path
-/// (CLI `apply-update`, the API apply/sync routes, and the update-check
-/// pipeline). Centralising the predicate, the user-facing message, and the
-/// error code keeps all surfaces in lock-step: a skill renamed upstream is
-/// refused identically whether detected at check time, apply time, or sync
-/// time, and consumers branch on a single stable code.
+/// Shared rename-detection contract for every update/apply/sync path, so a
+/// skill renamed upstream is refused identically on every surface with one
+/// stable code.
 ///
-/// Returns `Some(parsed_name)` when the upstream-parsed name differs from the
-/// expected (locked) name — i.e. the skill was renamed in the source — or
-/// `None` when the names match. Intentionally a cheap, exact comparison: the
-/// `SKILL.md` frontmatter parser is the authority on canonical form, so this
-/// does not trim or case-fold.
+/// `Some(parsed_name)` when the upstream name differs from the locked one.
+/// Exact comparison on purpose: the frontmatter parser owns canonical form, so
+/// no trim or case-fold here.
 pub fn detect_rename(parsed_name: &str, expected: &str) -> Option<String> {
 	if parsed_name == expected {
 		None
@@ -90,12 +85,9 @@ pub fn compare_known_hashes(
 /// and reports `Uncheckable{reason}` directly — or `None` for HTTPS / GitHub
 /// `owner/repo` shorthand that should proceed to a normal fetch.
 ///
-/// `source_type` is the authoritative signal for local installs (set to
-/// `"local"` at install time, and what the CLI `check` already keys on);
-/// `source` is inspected for its URL scheme to distinguish SSH from other
-/// unsupported (non-HTTPS) schemes. This makes the spec-mandated
-/// `Uncheckable{ssh|local|unsupportedScheme}` reasons reachable instead of
-/// every non-HTTPS source collapsing to a misleading `network` error.
+/// `source_type == "local"` is authoritative for local installs; `source`'s
+/// scheme separates SSH from other non-HTTPS schemes, so each gets its own
+/// `Uncheckable` reason instead of a misleading `network` error.
 pub fn precheck_source(
 	source_type: &str,
 	source: &str,

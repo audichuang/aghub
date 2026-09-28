@@ -1,17 +1,12 @@
 //! The transactional skill-rename: install the new name, remove the old name,
 //! and transition both lock entries as ONE transaction that rolls back to the
-//! pre-mutation state on any failure. Extracted from the CLI `source
-//! accept-rename` and the API `accept-rename` route, which mirrored this logic
-//! by hand (candidate A). ADR-0001 fixes the rollback scope (rename + relink
-//! only); `docs/specs/2026-07-15-skill-rename-transaction-deepening.md` records
-//! the extraction.
+//! pre-mutation state on any failure. ADR-0001 fixes the rollback scope;
+//! `docs/specs/2026-07-15-skill-rename-transaction-deepening.md` records the
+//! extraction from the CLI and API surfaces.
 //!
-//! The git FETCH is deliberately NOT here: `skill-update` depends on this crate,
-//! so this module cannot fetch. The adapter fetches (with its own auth strategy)
-//! and hands us an already-fetched `repo_root` + `oid` via [`FetchedRename`];
-//! everything the transaction mutates (`install_fetched`, `removal`, `linker`,
-//! the lock) is core-level. That also makes the transaction testable with a
-//! tempdir `repo_root` — no git, no network.
+//! The git FETCH is deliberately NOT here (`skill-update` depends on this
+//! crate): the adapter fetches and hands over `repo_root` + `oid` via
+//! [`FetchedRename`], which also keeps the transaction testable without git.
 
 use crate::models::ResourceScope;
 use crate::skills::install_fetched::FetchedSkillInstallReport;
@@ -58,11 +53,9 @@ pub struct RenameLockSource {
 	pub source_url: String,
 	pub ref_name: Option<String>,
 	pub skill_path: String,
-	/// The OLD-name entry's identity as it stood when [`rename_source_from_lock`]
-	/// read it, BEFORE the fetch. An adapter is expected to override `ref_name`
-	/// (a `--ref`) and to rewrite `skill_path` to the resolved new location — this
-	/// field is the one it must leave alone, because it is what
-	/// [`accept_rename`] compares the live entry against under the lock.
+	/// The OLD-name entry's identity as read BEFORE the fetch. Adapters may
+	/// override `ref_name` / `skill_path` but must leave this alone:
+	/// [`accept_rename`] compares the live entry against it under the lock.
 	pub captured: crate::skills::lock::EntryIdentity,
 }
 
@@ -132,10 +125,8 @@ impl RenameError {
 			RenameError::SameSanitizedName | RenameError::TargetExists(_) => {
 				Some(RENAME_TARGET_EXISTS_CODE)
 			}
-			// Both are retryable and neither mutated anything — a surface that
-			// cannot tell them from a permanent failure makes the caller give up
-			// on a transient condition. Rename is the most destructive flow here,
-			// so "retry" vs "do not retry" matters most.
+			// Both are retryable and mutated nothing; surfaces need the code to
+			// tell them from a permanent failure.
 			RenameError::Locked(_) => {
 				Some(crate::skills::lock::MUTATION_LOCK_BUSY_CODE)
 			}
@@ -146,13 +137,11 @@ impl RenameError {
 		}
 	}
 
-	/// The canonical, safe, user-facing message. Every variant produced by the
-	/// transaction itself is name-based, not path-based. The two exceptions wrap
-	/// an upstream error whose Display can embed a fetched temp path:
-	/// `ParseFailed` (from `skill::parser::parse`) and, for a whole-install
-	/// failure, `InstallFailed`. Neither is reachable through the API today --
-	/// the adapter pre-parses the fetched `SKILL.md` before `accept_rename`
-	/// re-parses it -- so redact them at the source if that ever changes.
+	/// The canonical, user-facing message: name-based, never path-based.
+	/// Exceptions: `ParseFailed` and a whole-install `InstallFailed` wrap an
+	/// upstream Display that can embed a fetched temp path. Unreachable through
+	/// the API today (the adapter pre-parses); redact at the source if that
+	/// changes.
 	pub fn message(&self) -> String {
 		match self {
 			RenameError::NotLocked(m) => m.clone(),
@@ -211,10 +200,8 @@ pub fn rename_source_from_lock(
 					"Locked skill has no skillPath".to_string(),
 				)
 			})?;
-			// From THIS read, not a second one: the coordinates below and the
-			// identity must describe the same observation, or another process's
-			// repoint between two reads would be fetched under one set and
-			// compare-verified against the other.
+			// Identity from THIS read, the same observation as the coordinates
+			// (`crates/core/AGENTS.md` "Mutation attribution").
 			let captured =
 				crate::skills::lock::EntryIdentity::of_global_entry(entry);
 			Ok(RenameLockSource {
@@ -287,11 +274,8 @@ pub fn accept_rename(
 	let resource_scope = req.scope.resource_scope();
 	let project_root = req.scope.project_root();
 
-	// Hold the interprocess mutation lock for the WHOLE transaction: the
-	// target-absence check, the install, the old-name removal AND the rollback.
-	// This is what makes the rollback's attribution sound — without it a
-	// `new_name` another process created between the check and a failure here is
-	// indistinguishable from our own work.
+	// Hold the mutation lock for the WHOLE transaction (absence check, install,
+	// removal, rollback) so the rollback's attribution is sound.
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"accept rename",
 		resource_scope,
@@ -375,12 +359,9 @@ pub fn accept_rename(
 		RenameScope::Global => None,
 	};
 
-	// Reassert the old-name lock precondition INSIDE the transaction. The CLI/API
-	// adapters obtain the source via `rename_source_from_lock` (which requires the
-	// lock), but this is a public core entry point and `RenameLockSource` is
-	// constructible — refuse to rename a skill that is installed but not lock-
-	// managed rather than trusting fabricated coordinates. Checked before any
-	// mutation (the snapshot above is non-mutating and is dropped on return).
+	// Reassert the old-name lock precondition here: this is a public entry
+	// point and `RenameLockSource` is constructible, so never trust fabricated
+	// coordinates. Checked before any mutation.
 	let (old_is_locked, scope_label) = match &req.scope {
 		RenameScope::Global => (old_global_entry.is_some(), "global"),
 		RenameScope::Project { .. } => (old_local_entry.is_some(), "project"),
@@ -393,57 +374,26 @@ pub fn accept_rename(
 		)));
 	}
 
-	// Compare-after-fetch. The adapter read these coordinates, then FETCHED —
-	// seconds during which another aghub process may have repointed this very
-	// entry at a different source. The mutation lock cannot cover a network fetch,
-	// so proving the entry is still the one we fetched is the other half of the
-	// guarantee. Without it this transaction removes the old name AND its lock
-	// entry (steps 8-9) on behalf of coordinates that no longer exist — deleting
-	// the other process's skill and replacing it with content from a source the
-	// lock no longer names. Checked here: after the guard, before any mutation.
-	// All three coordinates bind, including the OLD skillPath: the snapshot holds
-	// what the entry said pre-fetch, while the adapter's own resolved new path
-	// lives in `source.skill_path` and is unaffected — so a rename that legitimately
-	// follows a MOVED skill still works, and one racing another process's repoint
-	// of the old name does not.
+	// Compare-after-fetch: the lock cannot cover the fetch, so prove under it
+	// that the entry is still the one fetched (`crates/core/AGENTS.md`
+	// "Mutation attribution"). The captured identity holds the OLD skillPath,
+	// so a rename following a MOVED skill (new path in `source.skill_path`)
+	// still passes.
 	fetched
 		.source
 		.captured
 		.ensure_unchanged(req.old_name, resource_scope, project_root)
 		.map_err(RenameError::StaleFetch)?;
 
-	// Undo ONLY the new-name artifacts. This is the correct rollback for every
-	// failure BEFORE Step 8 touches the old name: at that point the old dirs
-	// and the old lock entry are still complete, so restoring them would mean
-	// deleting live, intact directories and re-copying them from the backup --
-	// pure risk with nothing to gain. `restore_snapshot` clears `live` before
-	// re-copying and swallows both errors, so one unrelated I/O failure there
-	// (ENOSPC, a parent that turned read-only) would destroy a skill the
-	// transaction had not touched.
+	// Undo ONLY the new-name artifacts — correct for every failure before
+	// Step 8: the old name is still intact, and `restore_snapshot` (which
+	// clears `live` and swallows errors) would only risk destroying it.
 	//
-	// Removal is scoped to what THIS call created, read off the install report:
-	// only the agent dirs whose row reports `installed`, and the Master only when
-	// `wrote_master`. A Master or Referrer we merely found and verified belongs
-	// to whoever wrote it. `created: None` means the install returned Err without
-	// a report, so nothing can be attributed and every new-name slot is cleared.
-	//
-	// The lock this transaction holds makes the RECEIPTS trustworthy: a
-	// `modify_*_lock` insert under it is a genuine compare-and-set, so
-	// `created_lock` can no longer be reported to two aghub processes at once,
-	// and the `Some(report)` arms below are exact.
-	//
-	// The `None` arm is still a BLANKET cleanup, and it is not provably correct.
-	// It is sound against another aghub process — the lock plus the pre-install
-	// absence check leave nothing at `new_name` that could be someone else's —
-	// but `npx skills` takes no lock of ours (see `skill::lock::guard`). So an
-	// `npx skills` install of this exact `new_name`, landing between our absence
-	// check and a report-less install failure, has its work deleted here. The
-	// spec's intended payoff was an ATTRIBUTED fallback; delivering it needs
-	// `install_fetched_skill_and_lock` to carry a partial receipt out of its Err
-	// path (today an Err after `materialize_universal_master` but before the lock
-	// write reports nothing, and that Master genuinely is ours to remove), which
-	// is a signature change across every caller. Deferred deliberately, recorded
-	// in docs/specs/2026-07-29-skill-mutation-interprocess-lock.md.
+	// Scoped to THIS call's receipt: `created_referrer_dirs`, and the Master
+	// only when `wrote_master`. `created: None` (Err without a report) is a
+	// BLANKET cleanup: sound against aghub (lock + absence check), NOT against
+	// a racing `npx skills` install of `new_name`. Deferred; see
+	// docs/specs/2026-07-29-skill-mutation-interprocess-lock.md.
 	let rollback_new_only = |created: Option<&FetchedSkillInstallReport>| {
 		let (dirs, remove_master) = match created {
 			Some(report) => {
@@ -482,10 +432,8 @@ pub fn accept_rename(
 		}
 	};
 
-	// Roll the WHOLE transaction back to its pre-mutation state, old name
-	// included. Used ONLY from Step 8 onward, once the old name itself has been
-	// mutated. Defined BEFORE install so every post-old-mutation failure path
-	// (P0-1) runs the SAME rollback.
+	// Roll the WHOLE transaction back, old name included. Used ONLY from Step 8
+	// on; defined before install so every such failure path (P0-1) shares it.
 	let rollback_all = |created: Option<&FetchedSkillInstallReport>| {
 		rollback_new_only(created);
 		restore_snapshot(&snapshot);
@@ -532,23 +480,16 @@ pub fn accept_rename(
 				return Err(RenameError::InstallFailed(e.to_string()));
 			}
 		};
-	// A genuine runtime failure (`error: Some(..)`) on ANY target agent must
-	// abort the transaction, even when other agents installed successfully --
-	// otherwise Step 8 below removes the old name for every agent and the
-	// failed one loses the skill entirely. `installed: false, error: None` is a
-	// legitimate idempotent soft skip (already-correct link, see
-	// `materialize_universal_master`), not a failure, so it must NOT trip this
-	// branch on its own.
+	// A runtime failure (`error: Some(..)`) on ANY agent aborts, or Step 8
+	// removes the old name from an agent that never got the new one.
+	// `installed: false, error: None` is an idempotent soft skip, not a failure.
 	if let Some((agent, detail)) = install_report
 		.agent_results
 		.iter()
 		.find_map(|r| r.error.as_ref().map(|e| (r.agent, e.clone())))
 	{
-		// The per-agent detail comes from `LinkError`'s Display, which embeds
-		// absolute link/target paths -- log it, but keep the returned message
-		// path-free (naming only the agent) so the API contract (no raw
-		// filesystem paths in errors) holds when a surface forwards it
-		// verbatim. Mirrors the removal-failure branch below.
+		// `LinkError`'s Display embeds paths: log it, return a path-free
+		// message (API errors carry no raw filesystem paths).
 		log::warn!(
 			"rename: install failed for agent '{}' installing '{}': {detail}",
 			agent.as_str(),
@@ -561,15 +502,9 @@ pub fn accept_rename(
 		)));
 	}
 	if install_report.agent_results.is_empty() {
-		// Degenerate case: no target rows at all, so nothing can have received
-		// the skill. A NON-empty report whose rows are all `installed: false,
-		// error: None` is deliberately NOT this case: that is the idempotent
-		// soft skip, meaning every target's link for the new name was already
-		// correct, so the new name IS installed and the rename may proceed.
-		// (Unreachable in practice -- the pre-install target-existence check
-		// above rejects a new_name that already exists in this scope, so only a
-		// concurrent installer racing that check can produce an all-soft-skip
-		// report, and failing here would delete that installer's work.)
+		// No target rows: nothing received the skill. An all-soft-skip report
+		// is NOT this case — every link was already correct, so the new name
+		// IS installed (and failing would delete a concurrent installer's work).
 		rollback_new_only(Some(&install_report));
 		return Err(RenameError::InstallFailed(
 			"no agent received the skill".to_string(),
@@ -606,11 +541,9 @@ pub fn accept_rename(
 		true,
 	);
 	if removal_plan.incomplete {
-		// An EXHAUSTIVE consumer may not act on a partial result set.
-		// `execute_removal` reads `paths` alone — it cannot see that `skipped`
-		// names a dir whose contents were hidden — so the rename would delete
-		// the old-name entries it COULD see and report success while an agent
-		// that never received the new name kept an entry under the old one.
+		// An EXHAUSTIVE consumer may not act on a partial listing:
+		// `execute_removal` reads `paths` alone and would report success while
+		// a hidden old-name entry survives.
 		rollback_all(Some(&install_report));
 		return Err(RenameError::RemovalFailed(format!(
 			"Cannot finish renaming '{}': a skills directory could not be \
@@ -634,9 +567,7 @@ pub fn accept_rename(
 		}
 	};
 	if !removal_report.failed.is_empty() {
-		// Per-path detail goes to the log; the returned message stays path-free
-		// so the API contract (no raw filesystem paths in errors) holds when a
-		// surface forwards it verbatim (Codex A review, Minor 6).
+		// Per-path detail to the log; the returned message stays path-free.
 		let failed_msgs: Vec<String> = removal_report
 			.failed
 			.iter()
@@ -780,13 +711,9 @@ fn snapshot_old_skill(
 	let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
 	let mut captured = std::collections::HashSet::new();
 
-	// The SAME set `plan_removal` will delete, not `<dir>/<safe>` alone.
-	// Discovery reaches a differently-named or grouped entry
-	// (`<dir>/team/legacy`) that the slot spelling never names, so step 8 could
-	// delete a path step 6 never backed up — and a later failure then rolled
-	// back into a permanently missing old skill. An unfinished listing aborts
-	// BEFORE any mutation: a snapshot that cannot enumerate what it is
-	// protecting is not a snapshot.
+	// The SAME set `plan_removal` will delete (grouped / renamed entries
+	// included), not `<dir>/<safe>` alone; an unfinished listing aborts before
+	// any mutation. See docs/history/core-repair-rename.md#rename-snapshot-missed-grouped-entries
 	let mut targets: Vec<PathBuf> = Vec::new();
 	for dir in agent_dirs {
 		let (candidates, incomplete) =
@@ -813,10 +740,8 @@ fn snapshot_old_skill(
 		if !captured.insert(live.clone()) {
 			continue;
 		}
-		// A genuinely-absent path (NotFound) has nothing to back up. ANY OTHER
-		// stat error (permission, I/O) on a possibly-existing target must ABORT
-		// before mutation — treating it as "absent" could skip the backup and
-		// then lose the old skill when a later step rolls back (Codex A review).
+		// Only NotFound means absent; any other stat error aborts before
+		// mutation, or a skipped backup loses the old skill on rollback.
 		let meta = match std::fs::symlink_metadata(&live) {
 			Ok(m) => m,
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -827,10 +752,8 @@ fn snapshot_old_skill(
 			}
 		};
 		let backup = tmp.path().join(format!("snap-{idx}"));
-		// A reparse point (Unix symlink OR Windows symlink/junction) is captured
-		// by recording its target and re-creating it as a link — NEVER
-		// deep-copied. `Linker::is_link` covers junctions, which bare
-		// `is_symlink()` may miss.
+		// A reparse point is captured as a link, NEVER deep-copied.
+		// `Linker::is_link` also covers junctions.
 		let result = if Linker::is_link(&live) {
 			std::fs::read_link(&live)
 				.and_then(|target| Linker::symlink(&target, &backup))
@@ -877,17 +800,10 @@ fn restore_snapshot(snapshot: &SkillSnapshot) {
 	}
 }
 
-/// Best-effort rollback of the new-name artifacts this call created,
-/// re-asserting containment before each `remove_dir_all` (TOCTOU guard).
-///
-/// `agent_dirs` is the caller's attribution of which dirs to clear, and
-/// `remove_master` whether the canonical Master was newly written by the same
-/// call — a Master that merely existed and verified belongs to whoever wrote it.
-/// Undo a `materialize_universal_master` from its OWN receipt: unlink the
-/// referrers this call created, then remove the Master only if this call wrote
-/// it. Shared with `install_fetched`, which must clean up after itself when a
-/// post-materialization step fails — the rename flow is not the only caller
-/// that can fail with a fresh Master already on disk.
+/// Undo a `materialize_universal_master` from its OWN receipt: clear
+/// `agent_dirs` (the caller's attribution), then remove the Master only when
+/// `remove_master` (this call wrote it). Re-asserts containment before each
+/// `remove_dir_all`. Shared with `install_fetched`.
 pub fn rollback_materialized_install(
 	new_name: &str,
 	scope: ResourceScope,

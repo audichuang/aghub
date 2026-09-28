@@ -9,12 +9,10 @@ pub const DATA_DIR_ENV: &str = "AGHUB_DATA_DIR";
 /// `dirs::data_dir()/aghub`.
 ///
 /// The CLI (`commands::app_data_dir`), the HTTP API
-/// (`aghub_api::default_app_data_dir`) and the desktop all delegate here, so
-/// an inference provider added in the desktop UI is the same SQLite row the
-/// CLI lists, and the shared keyring namespace has a matching db row on both
-/// sides. Tauri's own `app_data_dir()` is identifier-scoped
-/// (`<data>/com.akrc.aghub`) and must NOT be used for this — the desktop
-/// migrates away from it on startup.
+/// (`aghub_api::default_app_data_dir`) and the desktop all delegate here —
+/// never re-spell the formula. Tauri's identifier-scoped `app_data_dir()`
+/// (`<data>/com.akrc.aghub`) must NOT be used; why: knowledge page
+/// `推論供應商與 app data root`.
 pub fn app_data_dir() -> PathBuf {
 	if let Some(dir) = std::env::var_os(DATA_DIR_ENV) {
 		return PathBuf::from(dir);

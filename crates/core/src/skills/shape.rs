@@ -8,8 +8,8 @@
 //! one `(referrer, master)` pair — what shape is it in — and nothing else. It
 //! never writes, and it never decides what to DO about a shape.
 //!
-//! Three traps are load-bearing here; each cost a review round to find, and each
-//! has a test below that goes red if the guard is removed.
+//! Three traps are load-bearing here; each has a test below that goes red if
+//! the guard is removed.
 //!
 //! 1. **`symlink_metadata` alone cannot decide conformance.** It is `lstat`: it
 //!    reports a file type and nothing about the target. A healthy Referrer, a
@@ -44,17 +44,10 @@ pub struct CandidateReferrer {
 
 /// Every agent's candidate Referrer path for `name` at a scope.
 ///
-/// **One derivation, and it is path-derived rather than shape-derived.** An
-/// earlier design took the union of "links that already resolve to the Master"
-/// and "agents that natively read `.agents/skills`"; both halves were wrong. The
-/// first admits only paths that are ALREADY conformant, so a dangling link, a
-/// foreign target and npx's real directory were filtered out before anything
-/// could report them. The second returns a variant carrying no path at all, so
-/// cursor / codex / opencode lost their private dirs — the exact agents the
-/// per-agent-Referrer decision exists to serve.
-///
-/// Taking each agent's own WRITE dir answers both at once: a private one where
-/// the agent has one, the shared `.agents/skills` slot where it does not.
+/// Path-derived, never shape-derived: each agent's own WRITE dir (private where
+/// it has one, the shared `.agents/skills` slot where it does not), so a broken
+/// Referrer is reported instead of filtered out.
+/// See docs/history/core-skills-shape.md#candidate-referrers-were-once-shape-derived
 pub fn candidate_referrers(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
@@ -77,14 +70,9 @@ pub fn candidate_referrers(
 /// One agent's skills WRITE dir for a scope, or `None` when it cannot hold a
 /// skill there at all.
 ///
-/// Deliberately NOT routed through `agent_link_need`. That returns a 3-state
-/// whose `NativeReader` arm carries no path, and it reaches that arm whenever
-/// the agent's dir resolves to the store — which happens for real: with
-/// `.agents/skills` symlinked into `.aghub` (stow, or a user hand-fixing their
-/// layout) every shared-slot agent classifies as a native reader and drops out
-/// of the candidate set entirely, so a repair silently does nothing about the
-/// eight agents that most need it. Pinned by
-/// `an_aliased_master_refuses_the_whole_plan`.
+/// Asks the adapter directly, never a link-need classification: an aliased
+/// store must not drop shared-slot agents out of the candidate set.
+/// See docs/history/core-skills-shape.md#aliased-store-dropped-shared-slot-agents
 fn skill_write_dir(
 	descriptor: &aghub_agents::AgentDescriptor,
 	scope: ResourceScope,
@@ -153,55 +141,23 @@ pub fn master_path(
 
 /// Which agents can READ `name` at this scope right now.
 ///
-/// This is migration's `grant_to`: D6 says an agent that reads the skill today
-/// is owed an explicit Referrer once the Master moves, and "today" means
-/// against the layout as it currently stands — so this must be called BEFORE
-/// anything is moved. Read paths, not write dirs: an agent can read the shared
-/// slot while writing to its own directory, and it is exactly those agents that
-/// would silently lose the skill if migration only linked the writers.
+/// This is migration's `grant_to` (D6: an agent that reads the skill today is
+/// owed an explicit Referrer once the Master moves), so call it BEFORE anything
+/// is moved. Read paths, not write dirs: an agent reading the shared slot while
+/// writing its own dir would otherwise lose the skill.
 ///
-/// A path counts when the skill is actually present there, so an agent that
-/// merely COULD read the slot does not get a grant for a skill nobody put in it.
+/// A path counts only when it holds a root `SKILL.md`
+/// ([`SkillMarker::Present`]); a same-named category dir or an unreadable dir
+/// ([`SkillMarker::Unknown`]) is no evidence of a read and must not seed an
+/// implicit `Create`. A definitively DANGLING link also counts: it is a
+/// stranded Referrer repair must mend, and the marker probe alone reads it as
+/// `Absent`.
 ///
-/// "Present" means [`has_skill_marker`] returning [`SkillMarker::Present`] — a
-/// root `SKILL.md`, not just SOME entry at the path. A same-named category
-/// directory a name collision happens to share (`SkillShape::ForeignDir`'s
-/// whole reason for existing) used to count on bare existence, which put
-/// every agent sharing that compat dir into `grant_to` and turned an absent
-/// shared row into `Create` — a managed skill silently granted to a reader
-/// that was never actually reading it.
-///
-/// [`SkillMarker::Unknown`] does not count either, and that is a SEPARATE,
-/// later fix: an unreadable same-named directory (`chmod 000`) is not
-/// evidence of a read, so it must not seed `grant_to` and, downstream, an
-/// implicit `Create` in the shared slot — see [`SkillMarker`]'s doc for why
-/// this caller's safe direction is the opposite of `classify_shape`'s.
-///
-/// A DANGLING link still counts, even though its `SKILL.md` probe cannot —
-/// `has_skill_marker` asks about `<entry>/SKILL.md`, which fails `NotFound`
-/// the instant the link's own target is gone, folding a stranded Referrer
-/// into the same `Absent` bucket as an agent that was never granted the
-/// skill at all. That is the regression this OR-clause exists to undo: a
-/// migration or a hand-deleted shared slot can leave exactly this shape
-/// behind (`.agent/skills/<name>` still pointing at a target that no longer
-/// resolves), and the agent WAS reading through it right up until the
-/// target vanished — repair is the only way back for it
-/// (`crates/agents/src/agents/antigravity.rs`'s descriptor comment documents
-/// this exact family of stranded skills). `Linker::is_link` asks about the
-/// entry itself, not what it resolves to, so it stays `true` for a broken
-/// link while staying
-/// `false` for every real-directory shape this function must keep
-/// excluding — a same-named regular file, a category dir with no root
-/// `SKILL.md`, and (the one that matters) an unreadable directory: its own
-/// `symlink_metadata` still succeeds (permission bits on an entry don't
-/// gate `lstat`-ing it from its parent), but its file type is a directory,
-/// never a symlink, so this OR-clause cannot make it count. `Linker::is_link`
-/// is deliberately the LOSSY form (folds any I/O error to `false`) rather
-/// than `is_link_checked`: an unreadable PARENT then reads as `false`, i.e.
-/// "not a reader" — the same safe direction this function already takes for
-/// `Unknown` — where `is_link_checked`'s fail-CLOSED direction is what
-/// `compat_unlink_permitted` needs for the opposite reason (a refusal, not a
-/// silent non-grant). Do not swap it for `is_link_checked` here.
+/// Do not swap [`is_dangling_link`]'s `Linker::is_link` for `is_link_checked`:
+/// the lossy form reads an unreadable parent as "not a reader" (this function's
+/// safe direction); fail-closed is right only for `compat_unlink_permitted`,
+/// where the outcome is a refusal rather than a silent non-grant.
+/// See docs/history/core-skills-shape.md#readers-of-counted-bare-existence and docs/history/core-skills-shape.md#dangling-referrer-rescue
 pub fn readers_of(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
@@ -224,24 +180,12 @@ pub fn readers_of(
 		.collect()
 }
 
-/// A link whose target is DEFINITIVELY gone.
+/// A link whose target is DEFINITIVELY gone (`NotFound`).
 ///
-/// The narrow half of the dangling-referrer rescue. `readers_of` counts such an
-/// entry because a link at the skill's name is evidence this agent was granted
-/// the skill once, and `repair`'s whole job is to mend that — the marker probe
-/// alone reads it as `Absent` (`fs::metadata` follows the link and gets
-/// `NotFound`), which silently removed the escape hatch
-/// `agents/antigravity.rs` documents.
-///
-/// `is_link` ALONE was too wide, and the difference is a real multi-agent
-/// grant, not a nicety: a link to an existing directory that holds no
-/// `SKILL.md` counted as a prior grant, so `repair --yes` created
-/// `.agents/skills/<name>` and handed the managed skill to all EIGHT agents
-/// that read the shared slot. Verified by running, not reasoned.
-///
-/// Only `NotFound` qualifies. An unresolvable-for-any-other-reason target
-/// (EACCES, ELOOP, a dead mount) is UNKNOWN, and unknown must not seed a grant
-/// — the same direction `readers_of` takes for `SkillMarker::Unknown`.
+/// `is_link` alone is too wide: a link to a dir with no `SKILL.md` would count
+/// as a prior grant and hand the skill to every shared-slot agent. Any other
+/// unresolvable target (EACCES, ELOOP, a dead mount) is unknown and must not
+/// seed a grant. See docs/history/core-skills-shape.md#dangling-referrer-rescue
 fn is_dangling_link(entry: &Path) -> bool {
 	Linker::is_link(entry)
 		&& std::fs::metadata(entry)
@@ -280,14 +224,9 @@ pub enum ViolationKind {
 
 /// The **observed** shape of one `(referrer, master)` pair.
 ///
-/// Deliberately observation only, with no policy in it. An earlier version had a
-/// `Legacy` variant, but the spec defines legacy as "the LOCK names it, a real
-/// directory serves it, and no Master exists" — and this function cannot see the
-/// lock. It classified a user's hand-placed `.cursor/skills/<n>`, and even a
-/// regular file, as legacy and offered it up for adoption as the Master, which
-/// D5 forbids outright. Whether an [`Self::UnmigratedCopy`] may be adopted is
-/// [`plan_repair`]'s call, because that is where the lock and the slot identity
-/// are known.
+/// Observation only, no policy: this cannot see the lock, so whether an
+/// [`Self::UnmigratedCopy`] may be adopted is [`plan_repair`]'s call (D5).
+/// See docs/history/core-skills-shape.md#legacy-shape-variant-offered-user-dirs-for-adoption
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillShape {
@@ -308,9 +247,7 @@ pub enum SkillShape {
 	/// `DESCRIPTION.md` while aghub happens to manage a skill called
 	/// `research`. Distinguished from `ForkedCopy` because the remedies are
 	/// opposites: a fork is compared and quarantined, whereas this must be left
-	/// strictly alone. Quarantining it would move somebody's entire skill
-	/// collection aside — and before this existed, `repair` did exactly that in
-	/// its `fix:` line, telling the user to "keep the one you want".
+	/// strictly alone. See docs/history/core-skills-shape.md#repair-quarantined-category-directories
 	ForeignDir,
 	/// Referrer and Master are the SAME object reached by different paths,
 	/// because a parent of the Referrer is a symlink. Refuse: the "duplicate"
@@ -431,25 +368,12 @@ pub fn classify_shape(referrer: &Path, master: &Path) -> SkillShape {
 	if !referrer.is_dir() {
 		return SkillShape::Violation(ViolationKind::ReferrerIsNotADir);
 	}
-	// A directory with no root `SKILL.md` is not a skill, so it cannot be a
-	// COPY of this one — it only shares the name. This is [`has_skill_marker`]
-	// (see its doc for the three-state ABSENT/PRESENT/UNKNOWN rule — and for
-	// why `prune::top_level_skill_dirs` asks the same question with a THIRD,
-	// differently-folded spelling rather than this one), and `metadata`
-	// follows links, so a link to a real skill still passes.
-	//
-	// Asked BEFORE the fork/unmigrated split because both of those lead
-	// somewhere destructive: a fork gets hashed and quarantined, and an
-	// unmigrated copy in the shared slot gets ADOPTED as the Master. Neither is
-	// a thing to do to a directory that belongs to another tool.
-	//
-	// `Unknown` is treated as `Present` here — the OPPOSITE of `readers_of`'s
-	// direction, and deliberately so (see [`SkillMarker`]'s doc). Staying loud
-	// on an unreadable directory routes it into `ForkedCopy` ->
-	// `CompareThenQuarantine` -> `compare`'s `Undecidable` arm -> a `Refused`
-	// outcome a human sees, instead of downgrading it to `ForeignDir` ->
-	// `LeaveForeign`, which silently passes an unreadable directory by as if
-	// it belonged to somebody else.
+	// A directory with no root `SKILL.md` is not a skill, only a name
+	// collision. Asked BEFORE the fork/unmigrated split, because both of those
+	// lead somewhere destructive (quarantine, adoption as the Master).
+	// `Unknown` counts as `Present` here — the OPPOSITE of `readers_of` — so an
+	// unreadable dir routes to a visible refusal instead of `LeaveForeign`
+	// (see [`SkillMarker`]).
 	if has_skill_marker(referrer) == SkillMarker::Absent {
 		return SkillShape::ForeignDir;
 	}
@@ -470,26 +394,11 @@ fn referrer_or_master_exists(path: &Path) -> bool {
 /// bool, because the two callers below need OPPOSITE conservative answers
 /// when the probe genuinely cannot tell.
 ///
-/// `classify_shape` treats [`Self::Unknown`] as [`Self::Present`]: staying
-/// loud on an unreadable directory routes it into `ForkedCopy` ->
-/// `CompareThenQuarantine` -> a refusal a human sees, rather than
-/// downgrading it to `ForeignDir`, which is left silently alone.
-/// `readers_of` treats [`Self::Unknown`] as NOT [`Self::Present`] — the
-/// mirror image, and for the same reason bools cannot serve both: a probe
-/// that could not be answered is not evidence "this agent already reads the
-/// skill", and counting it as one seeds `grant_to` with a reader that was
-/// never established, which downstream turns an absent shared row into an
-/// implicit `Create` — a managed skill silently granted to an agent nobody
-/// asked to have it.
-///
-/// A single bool folded both directions into ONE answer, which was the
-/// defect: `chmod 000` on a same-named collision directory made the probe
-/// unreadable, the bool said "yes, a marker" (fail-open, correct for
-/// `classify_shape`), and `readers_of` read that same "yes" as "this agent
-/// reads the skill" and silently linked it into the shared `.agents/skills`
-/// slot — reachable by `an_unreadable_same_named_dir_never_seeds_an_implicit_create`
-/// below, and originally found by running `repair` against exactly this
-/// state on the CLI.
+/// `classify_shape` treats [`Self::Unknown`] as [`Self::Present`] (an
+/// unreadable dir routes to a refusal a human sees, not a silent
+/// `ForeignDir`). `readers_of` treats it as NOT present (an unanswered probe is
+/// no evidence of a read, and counting it seeds an implicit `Create`). Never
+/// collapse this to a bool. See docs/history/core-skills-shape.md#one-bool-marker-served-two-callers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SkillMarker {
 	/// A root `SKILL.md` file is really there (`metadata` follows links, so a
@@ -512,16 +421,9 @@ enum SkillMarker {
 /// `ForeignDir` split and [`readers_of`]'s `Present` check) — each picks its
 /// own safe direction for [`SkillMarker::Unknown`]; see that type's doc.
 ///
-/// NOT the only spelling in the crate: `prune::top_level_skill_dirs` asks the
-/// same "is this a skill dir" question with `entry.path().join("SKILL.md")
-/// .is_file()` — a bare bool that folds an I/O error (most often EACCES) into
-/// `false` the same way it folds a genuine absence, i.e. the OPPOSITE
-/// direction from this function's `Unknown` (which `classify_shape` treats as
-/// `Present`, staying loud rather than silently calling an unreadable
-/// directory "not a skill"). That third spelling drops an unreadable skill
-/// dir's entry from the list `prune` prunes lock keys against — left alone
-/// this round; do not assume unifying it onto `has_skill_marker` is a safe,
-/// mechanical change.
+/// NOT the only spelling in the crate: `prune::top_level_skill_dirs` uses a
+/// bare `is_file()` that folds EACCES into `false`. Unifying it onto this is
+/// not a mechanical change — it alters which lock keys `prune` keeps.
 fn has_skill_marker(entry: &Path) -> SkillMarker {
 	match std::fs::metadata(entry.join("SKILL.md")) {
 		Ok(meta) if meta.is_file() => SkillMarker::Present,
@@ -1942,7 +1844,7 @@ pub enum RefuseReason {
 	/// [`crate::skills::repair::RepairOutcome::Failed`]: the disk did not
 	/// just glitch mid-write, the sweep never got far enough to plan a write
 	/// at all, and the next run repeats the same answer until a human fixes
-	/// the permission — exactly what a refusal promises and `Failed` does not.
+	/// the permission.
 	UnreadableCompatDir { path: PathBuf },
 	/// The real directory a moving action would rename away is TRACKED by the
 	/// surrounding git repository, so it is in-place authored SOURCE, not a
@@ -1954,10 +1856,8 @@ pub enum RefuseReason {
 	GitTrackedSource { paths: Vec<PathBuf> },
 	/// A repository is right there (a `.git` above `path`) but `git` could not
 	/// answer whether it tracks the directory — no `git` binary, an unusable
-	/// gitfile, any non-`0`/`1` exit. Refused rather than migrated: knowing we
-	/// are inside a repo and guessing "untracked" is exactly how B6 happened,
-	/// and this repo's rule is that an undecided probe refuses (see
-	/// [`Self::UnreadableCompatDir`]) instead of reporting `Failed`.
+	/// gitfile, any non-`0`/`1` exit. An undecided probe refuses rather than
+	/// guessing "untracked".
 	GitTrackingUndecided { path: PathBuf },
 }
 
@@ -2024,17 +1924,12 @@ impl RepairPlan {
 /// Does the surrounding git repository TRACK this path — three states.
 ///
 /// Only the two actions that RENAME a real directory away (`AdoptAsMaster`,
-/// `CompareThenQuarantine`) ask. A tracked directory is authored source, and
-/// moving it deletes the skill from version control (B6); an untracked one is
-/// precisely what `repair` exists to migrate, so "inside a repo" is NOT the
-/// question and must never become it.
+/// `CompareThenQuarantine`) ask. "Inside a repo" is NOT the question: an
+/// untracked directory is exactly what `repair` exists to migrate.
 ///
-/// Shells out to the `git` binary on purpose: `aghub-core` has no git
-/// dependency and must not grow one for a yes/no question (`crates/git`'s
-/// `system_git` and `cc-plugins`' registry installer set the precedent). Only
-/// the EXIT CODE is read — `ls-files` prints every match on stdout, which
-/// would land in the middle of a `repair --json` run, and its messages are
-/// localized, so parsing them is not an option.
+/// Shells out to `git` on purpose (`aghub-core` must not grow a git dependency
+/// for a yes/no question) and reads only the EXIT CODE: stdout would land in a
+/// `repair --json` run and messages are localized.
 enum GitTracked {
 	Yes,
 	No,
@@ -2045,11 +1940,9 @@ fn git_tracked(path: &Path) -> GitTracked {
 	let Some(parent) = path.parent() else {
 		return GitTracked::No;
 	};
-	// No repository above it: nothing can be tracked and no process needs to
-	// run. `exists()` follows the link, so a linked WORKTREE's `.git` FILE
-	// counts too — B6 was reported against a worktree. This walk is also what
-	// keeps a missing `git` binary from refusing every repair everywhere:
-	// outside a repo the answer is decided without asking git at all.
+	// No repository above it: decided without running git, so a missing `git`
+	// binary cannot refuse every repair. `exists()` follows the link, so a
+	// linked worktree's `.git` FILE counts too.
 	if !parent.ancestors().any(|dir| dir.join(".git").exists()) {
 		return GitTracked::No;
 	}
@@ -2089,53 +1982,32 @@ fn git_tracked(path: &Path) -> GitTracked {
 /// against can move in between (npx rewrites these very directories, and a
 /// long preview gives a user plenty of time to retarget a link by hand).
 ///
-/// Fails CLOSED: any I/O error other than `NotFound` while probing `entry` is
-/// returned rather than folded into `false` the way `Linker::is_link` does —
-/// that folding is exactly what let a `PermissionDenied` probe read as
-/// "nothing here", so a row that was never actually removed still reported
-/// itself removed.
+/// Fails CLOSED: any I/O error other than `NotFound` is returned, never folded
+/// into `false`. See docs/history/core-skills-shape.md#compat-probe-folded-permission-errors
 ///
-/// Compares by [`entry_identity`], never by `==` on the constructed
-/// `PathBuf`s: a compat dir reached through a symlinked ANCESTOR
-/// (`.agent/skills` -> `.agents/skills`, which stow or a hand-fixed layout
-/// both produce) is a different STRING from the write slot it aliases, and
-/// `==` cannot see they are the same directory. Deliberately does NOT
-/// canonicalize `entry`'s own leaf — that is [`same_object`]'s job below, and
-/// doing it here would fold every Referrer into its Master and make an
-/// ordinary, correctly-linked Referrer look like a write slot.
+/// Compares by [`entry_identity`], never `==` on `PathBuf`s: a compat dir
+/// reached through a symlinked ancestor is a different string from the slot it
+/// aliases. See docs/history/core-skills-shape.md#compat-sweep-unlinked-the-physical-shared-slot. It does NOT
+/// canonicalize `entry`'s own leaf ([`same_object`] does that below), or every
+/// correctly-linked Referrer would look like a write slot.
 ///
-/// `planned` is the write-dir-derived candidate set — `Unlink` rows (this
-/// sweep's own conclusions, whether from an earlier iteration at plan time or
-/// the full action list at execute time) are filtered OUT before comparing:
-/// they are not a write slot in their own right, and comparing against them
-/// would make every compat entry match itself and never detach anything.
+/// `Unlink` rows in `planned` are filtered out before comparing: they are this
+/// sweep's own conclusions, and matching them would make every compat entry
+/// match itself and never detach.
 pub(crate) fn compat_unlink_permitted(
 	entry: &Path,
 	master: &Path,
 	adopt_source: Option<&Path>,
 	planned: &[PlannedReferrer],
 ) -> std::io::Result<bool> {
-	// NOBODY'S WRITE SLOT. This asks one narrow question — "is this path the
-	// PLAN'S OWN OUTPUT?" — and it is the only thing standing between the
-	// sweep and the Referrer steps 4-5 of the same run just wrote. Take
-	// `.agents/skills/<name>` at project scope: amp writes it, every other
-	// reader has a private slot, and because the entry resolves to the Master
-	// `readers_of` puts them ALL in `grant_to`, so every one of them is
-	// covered. [`compat_unlink_authorized`] therefore PASSES on that entry —
-	// nobody would be stranded — and only this guard stops step 6 from
-	// deleting what step 4 created.
-	//
-	// It used to carry a second job it could not actually do: protecting the
-	// agents still READING a shared dir. That only worked while every shared
-	// dir happened to have a writer, which is an accident of the roster, not
-	// a design — and an accident that has already run out at project scope,
-	// where `.agents/skills` is now amp's ALONE against a dozen readers.
-	// [`compat_unlink_authorized`] owns that question now, quantified over
-	// every reader of the entry. The two protect disjoint populations and are
-	// ANDed, never substituted: a writer never records itself as a reader of
-	// its own slot (the sweep skips the identity-equal read dir), so the
-	// reader quorum cannot see the case above, and this guard cannot see an
-	// uncovered co-reader of a dir nobody writes.
+	// NOBODY'S WRITE SLOT: "is this path the plan's own output?" It is the only
+	// thing stopping step 6 from deleting what steps 4-5 of the same run wrote
+	// (e.g. amp's project `.agents/skills/<name>`, where every other reader is
+	// covered, so [`compat_unlink_authorized`] passes). The two guards protect
+	// disjoint populations and are ANDed, never substituted: a writer never
+	// records itself as a reader of its own slot, so the reader quorum cannot
+	// see this case, and this guard cannot see an uncovered co-reader of a dir
+	// nobody writes. See docs/history/core-skills-shape.md#compat-sweep-asked-only-the-first-reader
 	let entry_id = entry_identity(entry);
 	if planned
 		.iter()
@@ -2145,42 +2017,28 @@ pub(crate) fn compat_unlink_permitted(
 		return Ok(false);
 	}
 
-	// LINK ONLY. A real directory here may hold the only copy of bytes aghub
-	// never installed (`CompareThenQuarantine` is the verb for those, never
-	// this). `NotFound` means nothing to detach at all — both read `Ok(false)`
-	// below, but only `NotFound` may; every other error fails CLOSED via
-	// `Linker::is_link_checked`, the fallible probe `Linker::is_link` itself
-	// wraps and folds to a bare `false` — this is the ONE caller that must NOT
-	// take that lossy wrapper (root `AGENTS.md`: never hand-mirror a flow and
-	// keep it in sync by hand; a second inline copy of the Windows
-	// reparse-point test is exactly that).
+	// LINK ONLY. A real directory may hold the only copy of bytes aghub never
+	// installed (`CompareThenQuarantine`'s job, never this). Only `NotFound`
+	// may read `Ok(false)`; every other error fails CLOSED via
+	// `Linker::is_link_checked` — the ONE caller that must not take the lossy
+	// `Linker::is_link`, and must not inline its own reparse-point test either.
 	if !Linker::is_link_checked(entry)? {
 		return Ok(false);
 	}
 
-	// RESOLVES TO THIS MASTER, or to the directory this run is about to ADOPT
-	// as one. The second half is not a loosening, it is what makes the sweep
-	// single-pass: during a MIGRATION the store does not exist yet, so
-	// `same_object` against `master` alone is false for everything and the
-	// detach would wait for a second `repair` run — leaving the agent reading
-	// the skill from two places, and its toggle refusing, after a run that
-	// reported `migrated`. The adopted directory becomes a link to the Master
-	// in step 5, so an entry resolving to it resolves to the Master by the
-	// time step 6 detaches anything. `same_object` folds two unresolvable
-	// paths to `false`, never to equal, so a link pointing anywhere ELSE is
-	// somebody else's — D5 says report, never move.
+	// RESOLVES TO THIS MASTER, or to the directory this run ADOPTS as one —
+	// that half keeps a migration single-pass (the store does not exist yet;
+	// the adopted dir becomes a link to the Master in step 5, before step 6).
+	// `same_object` never equates two unresolvable paths, so a link pointing
+	// anywhere else is somebody else's (D5: report, never move).
 	let serves_this_master = same_object(entry, master)
 		|| adopt_source.is_some_and(|src| same_object(entry, src));
 	Ok(serves_this_master)
 }
 
 /// One agent's skills directories for a scope, snapshotted once before the
-/// compat sweep runs.
-///
-/// The sweep used to read these per descriptor inside its own loop, which is
-/// what made guard 4 answerable only about the descriptor whose iteration
-/// reached an entry first. Collecting them up front is what lets
-/// [`compat_unlink_authorized`] quantify over every READER of an entry.
+/// compat sweep runs so [`compat_unlink_authorized`] can quantify over every
+/// READER of an entry.
 pub(crate) struct AgentDirs {
 	pub(crate) id: &'static str,
 	/// `None` when this scope gives the agent no write slot at all. Such an
@@ -2193,34 +2051,21 @@ pub(crate) struct AgentDirs {
 /// GUARD 4: will every agent that reads `entry` still be served by its OWN
 /// write slot once the plan has run?
 ///
-/// Pure on purpose — no registry, no filesystem, no scope. The roster and the
-/// coverage set arrive as data, because the defect this closes cannot be
-/// staged through the real roster: there is no directory today that is read by
-/// two agents and written by none (`set_skills_path_override` cannot
-/// manufacture one either — it is a single thread-local pair that replaces an
-/// agent's read paths AND its write path with the same one dir). The interface
-/// is the only test surface this rule has.
+/// Pure on purpose (roster and coverage arrive as data): the real roster has
+/// no dir read by two agents and written by none, so this interface is the
+/// only test surface the rule has.
 ///
-/// The quantifier is the whole point. The sweep used to ask "is the descriptor
-/// I am currently looping over covered?" and detach on the first `true` — an
-/// EXISTENTIAL test authorizing a GLOBAL action on a possibly-shared entry.
-/// Every other reader was `continue`d before it was ever recorded, so an agent
-/// whose only way in was that entry lost the skill without a vote.
+/// Universal, never existential: one reader's coverage is not consent for the
+/// rest. Readers are matched by [`entry_identity`], so a co-reader spelling the
+/// dir through a symlinked ancestor still counts.
+/// See docs/history/core-skills-shape.md#compat-sweep-asked-only-the-first-reader
 ///
-/// Readers are matched by [`entry_identity`], the same ruler guard 1 uses: a
-/// co-reader that spells the dir differently through a symlinked ancestor is
-/// still a co-reader, and missing it would reintroduce the same hole one level
-/// down.
+/// An entry nobody was observed reading is NOT detachable (never the vacuous
+/// `all()` over an empty set).
 ///
-/// An entry nobody was observed reading is NOT detachable — `all()` over an
-/// empty set is vacuously true, and that is the one answer this must never
-/// give.
-///
-/// Deliberate ceiling: this asks "the agent's OWN slot serves it", which is
-/// strictly stronger than "the agent still reads it from somewhere". The
-/// looser form needs a fixpoint — a surviving third read dir may itself be an
-/// entry this same sweep detaches — for a layout nobody has. Refusing an
-/// exotic detach leaves a stale link, which is the safe direction.
+/// Deliberate ceiling: "the agent's OWN slot serves it" is stronger than "it
+/// still reads it from somewhere"; the looser form needs a fixpoint for a
+/// layout nobody has, and refusing leaves only a stale link (the safe side).
 pub(crate) fn compat_unlink_authorized(
 	entry: &Path,
 	leaf: &str,
@@ -2236,10 +2081,8 @@ pub(crate) fn compat_unlink_authorized(
 			.any(|dir| entry_identity(&dir.join(leaf)) == id)
 	}) {
 		observed = true;
-		// `write.is_none()` is checked HERE rather than trusted to the caller's
-		// coverage set: an agent this scope gives no write slot has nothing to
-		// fall back on, and that is a property of the agent, not of how the
-		// set happened to be built.
+		// Checked here, not trusted to `covered`: no write slot means nothing to
+		// fall back on, a property of the agent, not of how the set was built.
 		if agent.write.is_none() || !covered.contains(agent.id) {
 			return false;
 		}
@@ -2297,15 +2140,9 @@ pub fn plan_repair(
 
 	let master_exists = referrer_or_master_exists(&master);
 
-	// TWO passes, and the split is load-bearing. Shapes first, because whether
-	// a Referrer is owed depends on whether a Master will EXIST — and during a
-	// migration it does not exist yet, it is about to be adopted out of the
-	// shared slot. Deciding actions in the same pass that observes the shapes
-	// gated `Create` on `master_exists` alone, so a migration created no
-	// per-agent Referrer at all: the Master moved into the store and every
-	// agent that used to read the slot silently kept reading it through the one
-	// shared link. That is D6 ("relink every agent that can read the skill
-	// today") failing closed, and it is the entire point of moving the store.
+	// TWO passes, load-bearing: whether a Referrer is owed depends on whether a
+	// Master will EXIST, and during a migration it is only about to be adopted
+	// out of the shared slot. See docs/history/core-skills-shape.md#migration-created-no-per-agent-referrers
 	let shaped: Vec<(PathBuf, bool, SkillShape, Vec<&'static str>)> = order
 		.into_iter()
 		.map(|path| {
@@ -2316,10 +2153,8 @@ pub fn plan_repair(
 		})
 		.collect();
 
-	// Exactly one adoption, and only from the shared slot. Registry order must
-	// never decide this: it once let an agent's PRIVATE copy win over the shared
-	// slot and become the Master, while the real Master-to-be was planned for
-	// Relink — the one action that destroys a directory.
+	// Exactly one adoption, and only from the shared slot — never by registry
+	// order. See docs/history/core-skills-shape.md#private-copy-won-adoption-by-registry-order
 	let adopting = shaped.iter().any(|(_, shared, shape, _)| {
 		*shared && in_lock && *shape == SkillShape::UnmigratedCopy
 	});
@@ -2362,27 +2197,13 @@ pub fn plan_repair(
 		}
 	}
 
-	// B6: a real directory git TRACKS is authored IN PLACE, not installed.
-	//
-	// Both moving actions rename that directory away — `AdoptAsMaster` into the
-	// store, `CompareThenQuarantine` into `.aghub/.quarantine/` — and the store
-	// is ignored, so the skill's source leaves version control: 39 deletions in
-	// `git status`, exit 0, doctor green. Shape cannot tell the two apart
-	// (authored source and a pre-2.18 install are both `UnmigratedCopy`) and
-	// neither can the lock (aghub's own repo has 22 of its hand-edited skills
-	// in `skills-lock.json`), so tracking is the only available signal. Root
-	// `AGENTS.md`'s D7 "migration deliberately leaves alone" was only ever true
-	// of the lazy path; bulk `repair` is documented to migrate every
-	// lock-named skill, and this is the guard that promise was missing.
-	//
-	// Deliberately NOT "is it inside a repo": migrating an untracked real
-	// directory is the entire point of `repair`, so widening this refuses the
-	// command's main job. Scope-blind on purpose too — a global
-	// `~/.agents/skills/<n>` lives in plenty of dotfiles repos.
-	//
-	// Every tracked path is listed on ONE refusal because `execute_repair`
-	// reports only the first: per-path reasons would make the user re-run after
-	// each `git rm --cached`.
+	// A real directory git TRACKS is authored in place, not installed; both
+	// moving actions would rename it into the ignored store and take it out of
+	// version control. Neither shape nor lock can tell source from a pre-2.18
+	// install, so tracking is the only signal. Deliberately NOT "is it inside a
+	// repo" (that refuses repair's main job), and scope-blind (dotfiles repos).
+	// All tracked paths go on ONE refusal, since `execute_repair` reports only
+	// the first. See docs/history/core-skills-shape.md#repair-migrated-git-tracked-source-b6
 	let mut tracked: Vec<PathBuf> = Vec::new();
 	let mut undecided: Vec<PathBuf> = Vec::new();
 	for entry in &planned {
@@ -2415,51 +2236,27 @@ pub fn plan_repair(
 		}
 	}
 
-	// Stale Referrers in dirs this agent only READS.
+	// Stale Referrers in dirs this agent only READS. `candidate_referrers` is
+	// write-dir derived, so a link an older release left in a compat dir is
+	// invisible elsewhere — and the agent keeps reading from it, so "remove for
+	// this agent alone" refuses forever (observed on antigravity).
 	//
-	// `candidate_referrers` is WRITE-dir derived by design, so a link an older
-	// release left in a compat dir is invisible to every other part of this
-	// plan — and it is not harmless: the agent goes on reading the skill from
-	// it, so "remove for this agent alone" can never take anything away and
-	// refuses forever. Observed on antigravity, whose global write slot moved to
-	// `.gemini/config/skills` while `.gemini/antigravity/skills` kept the link.
-	//
-	// FOUR guards decide whether a compat entry may be detached, and three of
-	// them — link-only, resolves to this Master (or the adopt source), and
-	// "is nobody's write slot" — live in [`compat_unlink_permitted`], the ONE
-	// fallible test `execute_repair` step 6 re-runs immediately before it
-	// unlinks anything. Compared by [`entry_identity`], never by `==` on the
-	// constructed `PathBuf`s: a compat dir reached through a symlinked
-	// ANCESTOR (`.agent/skills` -> `.agents/skills`, which stow or a
-	// hand-fixed layout both produce) is a different STRING from the write
-	// slot it aliases, and `==` cannot see they are the same directory —
-	// which is how an earlier version of this sweep planned an `Unlink` for
-	// the PHYSICAL shared slot itself, reached through the alias.
-	//
-	// THE WRITE SLOT COVERS IT AFTERWARDS is the fourth guard. It is decided
-	// here rather than in `compat_unlink_permitted` — the coverage table below
-	// reads the PLAN, not the disk, so a slot this run is about to Create or
-	// Relink covers the agent just as well as one that already resolves, and
-	// demanding disk state would make the cleanup need a SECOND repair run.
-	// Being plan-shaped is also why `execute_repair` cannot re-ask it: a
-	// `RepairPlan` carries no scope or project root.
-	//
-	// It does NOT gate whether a descriptor's read dirs get swept — every
-	// agent's are, so the fallible probe can still notice an unreadable compat
-	// dir. What it gates is the DESTRUCTIVE half, from inside
-	// [`compat_unlink_authorized`], and it is asked about every agent READING
-	// the entry rather than only the one whose iteration reached it first: the
-	// unlink is one physical act on a possibly-shared entry, so one agent's
-	// coverage is not consent for the rest. Without it the "cleanup" silently
-	// REVOKES the skill for an agent whose only Referrer was the compat one —
-	// the pre-2.18 shape `repair` exists to rescue.
+	// FOUR guards decide a detach. Three — link-only, resolves to this Master
+	// (or the adopt source), nobody's write slot — live in
+	// [`compat_unlink_permitted`], which `execute_repair` step 6 re-runs right
+	// before unlinking. The fourth, THE WRITE SLOT COVERS IT AFTERWARDS, is
+	// decided here because it reads the PLAN, not the disk (a slot about to be
+	// Created/Relinked covers the agent, so no second run is needed); a
+	// `RepairPlan` carries no scope, so execution cannot re-ask it. It gates
+	// only the destructive half, inside [`compat_unlink_authorized`], and is
+	// asked of EVERY reader of the entry — otherwise the cleanup revokes the
+	// skill for an agent whose only Referrer was the compat one.
 	let adopt_source = planned
 		.iter()
 		.find(|row| row.action == ReferrerAction::AdoptAsMaster)
 		.map(|row| row.path.clone());
-	// Snapshot every agent's dirs BEFORE sweeping. Guard 4 has to be asked
-	// about each entry's whole reader set, and a per-descriptor loop can only
-	// ever answer for the descriptor it is currently on.
+	// Snapshot every agent's dirs BEFORE sweeping, so guard 4 sees each
+	// entry's whole reader set.
 	let roster: Vec<AgentDirs> = crate::registry::ALL_AGENTS
 		.iter()
 		.map(|descriptor| AgentDirs {
@@ -2468,9 +2265,8 @@ pub fn plan_repair(
 			read: skill_read_dirs(descriptor, scope, project_root),
 		})
 		.collect();
-	// The coverage test itself is unchanged — only WHO it gets asked about is.
-	// An agent with no write slot at this scope is absent from the set, so it
-	// is never covered and always vetoes.
+	// An agent with no write slot at this scope is never covered, so it always
+	// vetoes.
 	let covered: std::collections::HashSet<&'static str> = roster
 		.iter()
 		.filter(|agent| {
@@ -2483,11 +2279,8 @@ pub fn plan_repair(
 					&& match row.action {
 						ReferrerAction::Create | ReferrerAction::Relink => true,
 						// Step 5 swaps the adopted directory for a link to the
-						// Master, so an agent whose write slot IS the adopt
-						// source ends up covered exactly like one being
-						// linked. Missing this still cost a second run at
-						// PROJECT scope, where antigravity's write dir and the
-						// shared slot are the same directory.
+						// Master, so its slot's agents are covered.
+						// See docs/history/core-skills-shape.md#adopt-source-coverage-cost-a-second-run
 						ReferrerAction::AdoptAsMaster => true,
 						ReferrerAction::Leave => {
 							row.shape == SkillShape::Conformant
@@ -2504,14 +2297,9 @@ pub fn plan_repair(
 		let Some(write_dir) = agent.write.as_ref() else {
 			continue;
 		};
-		// NOT an early `continue` on coverage. The fallible probe below has to
-		// run even for an UNCOVERED agent: it is the only thing that notices an
-		// unreadable compat dir, and skipping the whole loop reported `ok` with
-		// a stale referrer sitting right there — so the round that added
-		// `UnreadableCompatDir` only actually refused when some OTHER agent's
-		// write slot happened to be covered. Verified by running. Coverage now
-		// gates the destructive half from inside
-		// [`compat_unlink_authorized`], which is reached only on `Ok(true)`.
+		// NOT an early `continue` on coverage: the fallible probe must run even
+		// for an uncovered agent, as it is the only thing that notices an
+		// unreadable compat dir. See docs/history/core-skills-shape.md#compat-sweep-skipped-the-unreadable-probe
 		for read_dir in &agent.read {
 			// Identity, not spelling — see the guards note above.
 			if entry_identity(read_dir) == entry_identity(write_dir) {
@@ -2532,12 +2320,8 @@ pub fn plan_repair(
 						&entry, &safe, &roster, &covered,
 					) => {}
 				Ok(true) | Ok(false) => continue,
-				// Fail CLOSED: an unreadable compat dir is a DECISION for a
-				// human (fix the permission), not a transient write failure —
-				// see `RefuseReason::UnreadableCompatDir`. This blocks the
-				// WHOLE plan (`RepairPlan::refusals`), same as every other
-				// refusal, rather than silently reporting the skill
-				// conformant while a stale link sits right there.
+				// Fail CLOSED: an unreadable compat dir is a decision for a
+				// human, and it blocks the WHOLE plan like every refusal.
 				Err(_) => {
 					unlink.push(PlannedReferrer {
 						agents: vec![agent.id],
@@ -2553,10 +2337,8 @@ pub fn plan_repair(
 					continue;
 				}
 			}
-			// Collapse by IDENTITY like the guards above: one compat dir
-			// several agents read — including two whose read paths spell it
-			// differently through a symlinked ancestor — is one row naming
-			// all of them, never one row each.
+			// Collapse by IDENTITY: one compat dir several agents read (however
+			// spelled) is one row naming all of them.
 			if let Some(row) = unlink
 				.iter_mut()
 				.find(|r| entry_identity(&r.path) == entry_identity(&entry))
@@ -2578,11 +2360,9 @@ pub fn plan_repair(
 	planned.extend(unlink);
 
 	// Execution order: adopt the Master, then private Referrers, then the shared
-	// slot, then the compat-dir detaches. Reversing this is the difference
-	// between a crash that leaves the old directory serving the skill and one
-	// that leaves it readable from nowhere — and the detaches go LAST for the
-	// same reason: until the write slot is really on disk, the compat link is
-	// the only thing still handing the agent the skill.
+	// slot, then the compat-dir detaches — so a crash at any point leaves the
+	// skill still served (until the write slot is on disk, the compat link is
+	// the agent's only way in).
 	planned.sort_by_key(|p| match p.action {
 		ReferrerAction::AdoptAsMaster => 0,
 		ReferrerAction::Unlink => 3,
@@ -2655,15 +2435,10 @@ fn action_for(
 
 /// Refuse a removal that would destroy bytes existing nowhere else.
 ///
-/// **Shares [`plan_repair`]'s observation, NOT its policy.** It reuses the
-/// collapsed candidate set (one entry per directory, with the `shared` flag)
-/// because deriving that twice is how two answers drift apart. It deliberately
-/// ignores the action column, because repair and removal refuse different
-/// things: repair refuses what it cannot FIX (a link pointing at nothing is
-/// `Refuse { MasterMissing }` — unfixable without a Master), while removal
-/// refuses only what it cannot UNDO. Unlinking a dangling link destroys
-/// nothing, so mapping repair's refusals onto delete refused every
-/// pre-migration user's delete outright.
+/// **Shares [`plan_repair`]'s observation, NOT its policy**: it reuses the
+/// collapsed candidate set but ignores the action column. Repair refuses what
+/// it cannot FIX; removal refuses only what it cannot UNDO (unlinking a
+/// dangling link destroys nothing).
 ///
 /// Exactly two shapes block:
 ///
@@ -2676,18 +2451,15 @@ fn action_for(
 ///
 /// Everything else is allowed, and two exclusions are load-bearing:
 ///
-/// - A forked copy in an agent's PRIVATE directory stays legal. Removing a
-///   private copy that shadows a Master is documented, tested behaviour (root
-///   `AGENTS.md`: it "DOES take something away, and stays legal — the Master it
-///   falls back to is disclosed in `skipped`"). A guard must not quietly
-///   relitigate a spec decision.
+/// - A forked copy in an agent's PRIVATE directory stays legal: removing a
+///   private copy that shadows a Master is specified behaviour (the Master is
+///   disclosed in `skipped`; see `crates/core/AGENTS.md` "Did that removal take
+///   anything away?").
 /// - Link shapes (`Dangling`, `ForeignTarget`, `Chain`) and the master-side
 ///   violations are repair problems, not delete hazards.
 ///
-/// `in_lock: false` is passed deliberately and cannot change the verdict — it
-/// only picks between `AdoptAsMaster` and `LeaveForeign`, neither of which this
-/// function reads. A lock read here would fail open at a layer whose job is to
-/// fail closed.
+/// `in_lock: false` cannot change the verdict (it only picks `AdoptAsMaster`
+/// vs `LeaveForeign`, which this ignores); a lock read here would fail open.
 ///
 /// `Ok(())` for [`ResourceScope::Both`] and for a scope with no store root:
 /// `plan_repair` names no single store there, and refusing every removal a
@@ -2700,11 +2472,8 @@ pub fn verify_shape(
 	let Some(plan) = plan_repair(scope, project_root, name, false, &[]) else {
 		return Ok(());
 	};
-	// Exhaustive on the blocking shapes ON PURPOSE. An earlier version matched
-	// the action and fell through a `_` arm for the detail text, which printed
-	// "a foreign link target … something that is neither a link nor a
-	// directory" — two different shapes in one sentence. With the blocking set
-	// enumerated here, a wrong detail is unreachable.
+	// Exhaustive on the blocking shapes ON PURPOSE, so a wrong detail is
+	// unreachable. See docs/history/core-skills-shape.md#verify-shape-printed-two-shapes-in-one-detail
 	let blocker = plan.actions.iter().find_map(|a| match &a.shape {
 		SkillShape::Violation(ViolationKind::ForkedCopy) if a.shared => Some((
 			a,
@@ -2721,18 +2490,14 @@ pub fn verify_shape(
 	let Some((blocker, detail)) = blocker else {
 		return Ok(());
 	};
-	// Built directly rather than through `ConfigError::unsupported_operation`,
-	// whose "Cannot {op} {noun} for {agent} agent" template has no room for an
-	// explanation and would name the target agent — misleading here, because the
-	// blocking directory is the SHARED slot, read by agents the command never
-	// mentioned. The error CODE is what the wire contract pins
-	// (`UNSUPPORTED_OPERATION` / HTTP 422), not the prose.
+	// Not `ConfigError::unsupported_operation`: its template would name the
+	// target agent, but the blocker is the SHARED slot. The wire contract pins
+	// the CODE (`UNSUPPORTED_OPERATION` / HTTP 422), not the prose.
 	let writers = if blocker.agents.is_empty() {
 		String::new()
 	} else {
-		// Their WRITE dir, which is what `PlannedReferrer::agents` holds.
-		// Deliberately not "read by": more agents than these read a shared
-		// slot, and naming only the writers as readers would under-report.
+		// `PlannedReferrer::agents` are WRITERS; more agents read a shared
+		// slot, so never phrase this as "read by".
 		format!(" (the skills directory of {})", blocker.agents.join(", "))
 	};
 	Err(crate::errors::ConfigError::UnsupportedOperation(format!(

@@ -100,24 +100,14 @@ pub struct OperationResultView {
 	pub project_root: Option<String>,
 	pub action: String,
 	pub success: bool,
-	/// Duplicate of `success` under the name the OTHER batch family uses.
-	///
-	/// `core::batch`'s `AgentOpResultView` calls this field `ok`, and both
-	/// families serialize into an envelope with the SAME top-level keys
-	/// (`success_count` / `failed_count` / `results`). Each struct's own doc
-	/// comment claims to be "the SINGLE place the wire shape is defined" —
-	/// true per family, and the collision went unnoticed. A parser written
-	/// against `row.ok` therefore read `undefined` for every transfer/reconcile
-	/// row and scored SUCCESSES as failures. Emitting both names costs one bool
-	/// and makes either spelling correct.
+	/// Duplicate of `success` under the name `core::batch`'s
+	/// `AgentOpResultView` uses — both families share one envelope shape, so
+	/// either spelling must read correctly.
+	/// See docs/history/core-transfer.md#batch-row-ok-field
 	pub ok: bool,
-	/// The target already held this resource; nothing was written. Still a
-	/// success row (`success`/`ok` true, no `error`).
-	///
-	/// Emitted UNCONDITIONALLY — no `skip_serializing_if`. A client talking to
-	/// a mixed-version server cannot otherwise tell `false` from "this server
-	/// does not report it", and that ambiguity is the whole reason the field
-	/// exists.
+	/// The target already held this resource; nothing was written (still a
+	/// success row). Emitted unconditionally so a mixed-version client can tell
+	/// `false` from "this server does not report it".
 	pub already_present: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
@@ -335,16 +325,11 @@ fn load_source_skill(source: &ResourceLocator) -> Result<Skill> {
 		.ok_or_else(|| ConfigError::resource_not_found("skill", &source.name))
 }
 
-/// Does the reconcile/transfer SOURCE resource exist? Read-only, mutates
-/// nothing.
+/// Does the reconcile/transfer SOURCE resource exist? Read-only.
 ///
-/// A `reconcile --dry-run` (and the implicit dry-run a `--remove` without
-/// `--yes` takes) has to answer this itself. Its preview used to be a plain
-/// echo of argv, so `--name totally-absent --remove opencode` printed a plan
-/// and exited 0, and only the `--yes` run reported `Resource not found` —
-/// exactly the sequence an agent uses to check before committing. These are
-/// the same three loaders the real reconcile uses, so the existence rule
-/// cannot drift between the preview and the mutation.
+/// The preview seam: uses the same loaders as the real reconcile so the
+/// existence rule cannot drift.
+/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
 pub fn ensure_skill_exists(source: &ResourceLocator) -> Result<()> {
 	load_source_skill(source).map(|_| ())
 }
@@ -359,19 +344,13 @@ pub fn ensure_sub_agent_exists(source: &ResourceLocator) -> Result<()> {
 	load_source_sub_agent(source).map(|_| ())
 }
 
-/// Does the target's installed skill hold the same content as `source_root`?
-///
 /// Can we PROVE the target now holds the source content?
 ///
-/// Compared by the npx-compatible folder hash, the same digest the lock files
-/// use, so "same" means the same thing here as everywhere else in the project.
-/// That hash has blind spots by design — it skips symlinks and `.git` /
-/// `node_modules`, and refuses above its file/size bounds — and this gates a
-/// DESTRUCTIVE step, so a blind spot answers `Unprovable`, never `Landed`.
-///
-/// Three answers, not two: telling a caller "the content differs" when the real
-/// story is "aghub could not look" sends them to reconcile a difference that
-/// does not exist.
+/// Compared by the npx-compatible folder hash (the lock files' digest). It has
+/// blind spots by design — symlinks, `.git` / `node_modules`, its file/size
+/// bounds — and this gates a DESTRUCTIVE step, so a blind spot answers
+/// `Unprovable`, never `Landed`. Three answers, not two: "differs" when aghub
+/// could not look sends the caller after a difference that may not exist.
 enum ContentProof {
 	Landed,
 	Differs,
@@ -379,19 +358,12 @@ enum ContentProof {
 	Unprovable(String),
 }
 
-/// Does this tree hold anything the folder hash cannot see?
-///
-/// Symlinks are skipped outright by `skill::hash`, so two trees differing ONLY
-/// in a symlink hash EQUAL — and the removal that equality authorises then
-/// destroys the difference. Verified: a source with a symlink and a Master
-/// without one hashed the same, the reconcile reported "2 succeeded", and the
-/// symlink was gone.
+/// Does this tree hold anything the folder hash cannot see? Two trees differing
+/// only there hash EQUAL.
+/// See docs/history/core-transfer.md#folder-hash-blind-spots-authorised-a-removal
 fn has_unhashed_entries(dir: &Path, depth: usize) -> bool {
-	// The hash's OWN bound, not a second guess at it. A private `32` here
-	// rejected trees 33-64 deep that the hash accepts, and blamed it on
-	// symlinks — a legitimate move refused with a reason that was not true.
-	// Past this depth we simply stop looking: the hash refuses the tree on its
-	// own, and its refusal produces the accurate "could not be hashed" answer.
+	// The hash's OWN depth bound, not a private guess; past it the hash refuses
+	// the tree itself with the accurate "could not be hashed" answer.
 	if depth >= skill::hash::MAX_DEPTH {
 		return false;
 	}
@@ -488,15 +460,9 @@ fn resolve_through_links(path: PathBuf) -> PathBuf {
 
 /// A backing file's identity — NOT its path.
 ///
-/// `canonicalize` collapses symlinks but NOT hard links: two directory entries,
-/// one inode. Before writing, the shared backing must be recognized even when
-/// the path strings differ; replacing a file changes which link owns the copy,
-/// while an in-place rewrite changes both. Dotfile setups make hard links
-/// deliberately (`cp -l`), and de-duplicators (rdfind, jdupes) make them
-/// by accident out of any two identical config files. Previously, with
-/// `~/.claude.json` hard-linked to `~/.cursor/mcp.json`, a reconcile that named
-/// claude as a COPY TARGET emptied claude's config and reported
-/// "2 succeeded, 0 failed".
+/// `canonicalize` collapses symlinks but NOT hard links (dotfile `cp -l`,
+/// rdfind/jdupes), so identity is `(dev, ino)`.
+/// See docs/history/core-transfer.md#shared-backing-destroyed-a-resource
 struct Backing {
 	/// `(device, inode)` — identity proper. `None` when the path does not
 	/// exist yet, and then there is nothing to alias.
@@ -539,37 +505,10 @@ fn node_id(_path: &Path) -> Option<(u64, u64)> {
 	None
 }
 
-/// Refuse a removal that would take the resource from something that must
-/// SURVIVE this reconcile.
-///
-/// Two things must survive: every agent we are copying INTO, and the SOURCE we
-/// are copying FROM — unless the caller explicitly asked to remove the source
-/// too, which is the ordinary "move it" shape.
-///
-/// The membership is a property of the FILE, not of the agent id, so this
-/// compares resolved backing paths and never `AgentType` equality. Two ids land
-/// on one file both by design (Claude's project MCP config is `.mcp.json`, and
-/// Copilot uses that same file when it exists) and by accident (a symlinked
-/// home or an agent-home env override collapses two declared-distinct
-/// directories into one).
-///
-/// Left unchecked it does not merely fail, it DESTROYS: the copy finds an
-/// equivalent entry and reports `already_present` — truthfully, it IS the same
-/// file — the staged gate only asks whether the copy ERRORED, and the removal
-/// then rewrites that one file without the entry. Every row reports success and
-/// the resource is gone from everyone. Keying the protection on the agent id
-/// missed the whole source half of it: `reconcile --from-agent claude --remove
-/// grok` with `~/.grok` symlinked to `~/.claude` deleted the source's only copy
-/// and exited 0, because `grok != claude` as an id.
 /// What a backing lookup could determine about one target.
 ///
-/// `Option<PathBuf>` conflated the two answers that matter to a PROTECTIVE
-/// check: "this agent definitely does not hold it" and "its config would not
-/// parse, so I cannot tell". `sub_agent_backing_path` loads a whole
-/// `ConfigManager`, which parses MCPs too — an unrelated broken `config.toml`
-/// on a sharing agent made the roster guard read it as a non-holder and delete
-/// the file both of them read. A guard that exists to prevent data loss must
-/// fail CLOSED on the second answer.
+/// "Holds no such resource" and "config would not parse, cannot tell" are
+/// different answers; a guard against data loss fails CLOSED on the second.
 enum Backed {
 	/// The resolved backing path this target reads.
 	At(PathBuf),
@@ -579,6 +518,16 @@ enum Backed {
 	Unknown,
 }
 
+/// Refuse a removal that would take the resource from something that must
+/// SURVIVE this reconcile: every copy target, and the source unless the caller
+/// asked to remove it too (the "move it" shape).
+///
+/// Membership is a property of the FILE, never the agent id: two ids land on
+/// one file by design (Claude and Copilot share project `.mcp.json`) and by
+/// accident (symlinked home, agent-home env override). Unchecked, the copy
+/// reports `already_present`, the removal rewrites the shared file, and every
+/// row reports success with the resource gone.
+/// See docs/history/core-transfer.md#shared-backing-destroyed-a-resource
 fn ensure_removals_spare<F>(
 	protect: &[Protected],
 	removing: &[InstallTarget],
@@ -706,14 +655,8 @@ where
 }
 
 /// The shared-backing refusal a `--yes` run would raise, WITHOUT writing
-/// anything — so a preview can raise it too.
-///
-/// The documented pattern for a destructive verb is preview-then-confirm. A
-/// preview that green-lights a plan the commit refuses is worse than no
-/// preview: the caller learns about the refusal only by attempting the write,
-/// and this is the one check that exists to stop data loss.
-///
-/// One definition, called by both the preview and the commit. Two would drift.
+/// anything — one definition for preview and commit, so a preview cannot
+/// green-light what the commit refuses.
 fn ensure_reconcile_spares<F>(
 	source: &ResourceLocator,
 	added: &[AgentType],
@@ -811,22 +754,14 @@ struct Protected {
 /// unless the caller asked to remove the source too — and with `roster`, every
 /// OTHER agent in the registry that is not itself being removed.
 ///
-/// The named-partners-only list was blind in exactly the case that destroys
-/// silently: an agent that shares the backing file but appears NOWHERE in the
-/// command is in neither list, so the backing comparison never runs for it.
-/// Claude and Copilot both resolve a project MCP to `<root>/.mcp.json`, and
-/// `reconcile mcp --remove claude` rewrote that one file and reported success
-/// while copilot lost the server too.
+/// The roster is the REGISTRY, not the installed agents: an agent that appears
+/// nowhere in the command can still share the backing file, and one we cannot
+/// see is not one that does not read it.
+/// See docs/history/core-transfer.md#shared-backing-destroyed-a-resource
 ///
-/// The roster is the REGISTRY, not the installed agents — same source as
-/// `skill_holders`, and for the same reason: an agent we cannot see is not an
-/// agent that does not read the file.
-///
-/// Skills deliberately pass `roster: false`. `<root>/.agents/skills` is a
-/// SHARED read path for most of the project-scope roster (amp writes it; the
-/// rest keep it as a compat read dir since their write slots moved to private
-/// directories), so a roster protect list would refuse every removal that
-/// touches it. What a skill removal really takes away is decided by
+/// Skills pass `roster: false`: `<root>/.agents/skills` is a shared read path
+/// for most of the project roster, so a roster list would refuse every removal
+/// touching it. What a skill removal takes away is decided by
 /// `remove_skill_planned` / `removal::read_effect_after`, not here.
 fn protected_targets(
 	copies: &[OperationPlan],
@@ -876,35 +811,15 @@ fn protected_targets(
 }
 
 /// The removal rows of ONE reconcile, each with the backing it resolved to at
-/// PREFLIGHT, plus the credential half: which of them actually took something
-/// out.
+/// PREFLIGHT, plus which rows actually took something out.
 ///
-/// This is the other half of [`ensure_removals_spare`]. That guard refuses a
-/// removal whose file something else still reads, and the remedy it prints is
-/// "add the sharer to `--remove` as well" — so the shape it sends the caller
-/// back with must actually work. It did not: two rows rewriting one file means
-/// the first takes the entry out and the second finds nothing to remove, so a
-/// reconcile that did exactly what was asked reported `failed_count: 1` and
-/// exited 1. A row whose resource a SIBLING ROW of this same command already
-/// took is a success — for all three delete arms, `reconcile_skill`'s included,
-/// where several project-scope agents share one write dir by design.
-///
-/// Sharing a backing is NOT on its own that credential. Copilot's project MCP
-/// path falls back to claude's `<root>/.mcp.json` while neither that file nor
-/// `.github/mcp.json` exists, so `--remove claude --remove copilot` against an
-/// absent file made the two rows "siblings" of a deletion that never happened,
-/// and both `ResourceNotFound`s were blessed: `success_count: 2` for removing
-/// something nobody ever had. Only a row that REALLY emptied the backing
-/// vouches for the later rows reading it.
-///
-/// Scoped to this command's own removal set, so it cannot bless a misspelled
-/// agent that simply never held the resource: that agent shares its backing
-/// with nobody and its row still errors.
-///
-/// Backings are resolved at PREFLIGHT, before any row runs, because a
-/// sub-agent's backing IS the resource file — once the first row deletes it
-/// there is nothing left to compare, and a delete-time answer would be `None`
-/// for both.
+/// The other half of [`ensure_removals_spare`]: its remedy ("add the sharer to
+/// `--remove`") must work, so a row whose resource a SIBLING row of this
+/// command already took is a success. Sharing a backing is not the credential —
+/// only a row that REALLY emptied it vouches for later rows. Scoped to this
+/// command's removal set, so a never-holder's row still errors. Resolved at
+/// preflight because a sub-agent's backing IS the file the first row deletes.
+/// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
 struct RemovalCredits {
 	/// One entry per removal target that resolves to a backing at all, in
 	/// input order.
@@ -959,23 +874,16 @@ impl RemovalCredits {
 	}
 }
 
-/// Read a removal that found nothing as the success it is when a SIBLING ROW of
-/// the same reconcile already took the entry out of the file both share — and
-/// record a real deletion, so the later rows have something to claim.
+/// Read a removal that found nothing as success when a SIBLING row of the same
+/// reconcile already emptied the shared backing — and record a real deletion.
 ///
-/// `took` is the caller's OWN answer to "did this row really empty its
-/// backing?", because only the caller can tell: `remove_mcp`/`remove_sub_agent`
-/// delete or error, so their `Ok` is `true`, while `remove_skill_planned`
-/// returns an unexecuted outcome for a removal it deliberately spared
-/// (`shared_master_kept`) — success that took nothing, and no credential. The
-/// return is always `Ok(false)`: a Delete row is never `already_present`, that
-/// vocabulary belongs to the Copy direction.
-///
-/// One definition for ALL THREE reconcile delete arms (MCP, sub-agent, skill).
-/// They answered this differently before — the skill arm blessed EVERY
-/// `ResourceNotFound` unconditionally, reporting `success_count: 2` for two
-/// agents that had never held the skill — and that is exactly the
-/// hand-mirroring that drifts.
+/// `took` is the caller's own answer to "did this row really empty its
+/// backing?": `remove_mcp`/`remove_sub_agent` delete or error, while
+/// `remove_skill_planned` can return a spared outcome (`shared_master_kept`)
+/// that took nothing. Always `Ok(false)`: a Delete row is never
+/// `already_present`. One definition for all three delete arms (MCP, sub-agent,
+/// skill) so they cannot drift.
+/// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
 fn sibling_already_took_it(
 	removed: Result<bool>,
 	agent: AgentType,
@@ -998,26 +906,14 @@ fn sibling_already_took_it(
 }
 
 /// The directory an agent writes ITS OWN skills into, for
-/// [`ensure_removals_spare`].
+/// [`ensure_removals_spare`] — deliberately not the Master: several agents
+/// linking one Master is the normal state, and `remove_skill_planned` keeps it.
 ///
-/// Deliberately the agent's own dir and NOT the shared `.agents/skills` Master.
-/// Several agents linking to one Master is the normal supported state, and
-/// removing one agent's link is exactly what `remove_skill_planned` does — it
-/// keeps the Master (`shared_master_kept`).
-///
-/// Two agent IDs whose own skills DIRECTORY is one directory IS a state the
-/// world can be in — two of them, in fact. By design: eight project-scope
-/// agents write into `<root>/.agents/skills`, and granting to one grants to
-/// all. By accident: a symlinked home or an agent-home env override collapses
-/// two declared-distinct dirs (`~/.gemini -> ~/.claude` made "remove from
-/// gemini" delete claude's private skill and exit 0).
-///
-/// What this guard refuses is only the pair the caller NAMED — an add and a
-/// remove that land in one directory cannot both be honoured, whichever of the
-/// two reasons put them there. Unnamed sharers are deliberately unprotected
-/// (`protected_targets` is called with `roster: false` for skills): on the
-/// shared slot that sharing IS the grant model, and what a removal really takes
-/// away is decided by `remove_skill_planned` / `removal::read_effect_after`.
+/// Two agents can share this dir by design (the shared `.agents/skills` slot)
+/// or by accident (symlinked home). Only the pair the caller NAMED is refused —
+/// an add and a remove landing in one dir cannot both be honoured. Unnamed
+/// sharers are unprotected (`roster: false`): on the shared slot, sharing IS
+/// the grant model.
 fn skill_backing_dir(target: &InstallTarget) -> Backed {
 	// A pure path derivation — it reads no agent config, so a failure here is
 	// "this scope has no skills dir for that agent", not "cannot tell".
@@ -1030,20 +926,11 @@ fn skill_backing_dir(target: &InstallTarget) -> Backed {
 /// The folder one agent's skill of this name is actually READ FROM, for
 /// [`RemovalCredits`].
 ///
-/// A DIFFERENT question from [`skill_backing_dir`] above, and the two must not
-/// be swapped: that one answers "which directory does this row rewrite", which
-/// is what `ensure_removals_spare` needs. The credential needs "what does this
-/// row TAKE" — and what a skill removal takes can be the shared Master, which
-/// lives in NO agent's write dir. Keyed on write dirs, an exhaustive removal
-/// (every reader named, so the Master goes) had its first row delete the Master
-/// and every later row report `RESOURCE_NOT_FOUND` for a skill that command had
-/// just taken from it.
-///
-/// `skill_root` prefers `canonical_path`, so a Referrer and the Master it points
-/// at are ONE backing — which is exactly what that first row emptied.
-///
-/// `None` when this target has no such skill: it never held it, so no sibling's
-/// deletion can vouch for its row.
+/// Not interchangeable with [`skill_backing_dir`] ("which dir does this row
+/// rewrite"): the credential needs "what does this row TAKE", which can be the
+/// Master in no agent's write dir. `skill_root` prefers `canonical_path`, so a
+/// Referrer and its Master are ONE backing.
+/// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
 fn skill_entry_backing(target: &InstallTarget, name: &str) -> Backed {
 	let mut manager = build_manager(target);
 	// Same reason as `sub_agent_backing_path`: `load()` parses this agent's
@@ -1074,23 +961,15 @@ fn mcp_backing_path(target: &InstallTarget) -> Backed {
 /// The file one agent's sub-agent of this name lives in, for
 /// [`ensure_removals_spare`].
 ///
-/// Sub-agents have no `config_path()` — each one IS its own `.md` file — so the
-/// backing key is the resolved path of the same-named file this target actually
-/// sees. That is also why enumerating the descriptors' declared directories and
-/// finding them all distinct proves nothing: two dirs that differ on paper are
-/// one dir behind a symlinked ancestor (deliberately allowed — see
-/// `agents/src/sub_agents.rs`, where only symlinked LEAVES are refused) or an
-/// agent-home env override. Ask the filesystem, not the table.
-///
-/// `None` when the target has no such sub-agent — the ordinary copy case, and
-/// not a collision: two targets resolving to one directory either both see the
-/// file or neither does.
+/// Each sub-agent IS its own `.md` file, so the key is the resolved path this
+/// target sees. Ask the filesystem, not the descriptor table: dirs distinct on
+/// paper can be one dir behind a symlinked ancestor (allowed — see
+/// `agents/src/sub_agents.rs`) or an env override. `Absent` is the ordinary
+/// copy case, not a collision.
 fn sub_agent_backing_path(target: &InstallTarget, name: &str) -> Backed {
 	let mut manager = build_manager(target);
-	// `load()` parses this agent's MCPs too, so an unrelated malformed config
-	// lands here. That is NOT "no such sub-agent" — reading it as one let a
-	// roster-protected agent drop out of the guard and lose the file it shared
-	// with the removal target.
+	// `load()` parses MCPs too; an unrelated malformed config is "cannot tell",
+	// not "no such sub-agent".
 	if ensure_loaded(&mut manager).is_err() {
 		return Backed::Unknown;
 	}
@@ -1106,15 +985,9 @@ fn sub_agent_backing_path(target: &InstallTarget, name: &str) -> Backed {
 /// Copy one MCP into a target. `Ok(true)` = the target already had an
 /// EQUIVALENT server and nothing was written.
 ///
-/// Equivalence, not mere name collision: unlike a skill (one shared Master), a
-/// same-named MCP entry can hold a completely different command or URL, and
-/// reporting success for that would claim a copy that never happened while the
-/// target keeps serving something else. A differing entry is still a hard
-/// conflict — `update_mcp` is the seam for changing one.
-///
-/// Shared by `transfer_mcp` and `reconcile_mcp`'s Copy arm so the two cannot
-/// disagree about what "already there" means; they disagreeing is the defect
-/// this fixes.
+/// Equivalence, not name collision: a same-named entry can serve a different
+/// command or URL. A differing entry is a hard conflict (`update_mcp` changes
+/// one). Shared by `transfer_mcp` and `reconcile_mcp` so they cannot disagree.
 ///
 // ponytail: equivalence compares the in-memory model. A dialect whose writer
 // drops a field aghub does model will re-read unequal, so a repeat transfer
@@ -1292,15 +1165,9 @@ fn resolve_skill_file(path: &str) -> PathBuf {
 
 /// Resolve a skill's on-disk root directory WITHOUT requiring it to exist.
 ///
-/// Prefers `canonical_path` (the real master location for a symlinked skill),
-/// falls back to `source_path`. Both go through the same tilde-expansion
-/// (`resolve_skill_file`). When the resolved path is a `SKILL.md` file the
-/// PARENT directory is returned (the skill folder); a directory is returned
-/// as-is. Returns `None` only when the skill records no path at all.
-///
-/// This is the single shared resolver reused by `resolve_skill_root` (which
-/// adds an existence check) and the layout-aware removal planner, so the
-/// "canonical FILE path → take PARENT" rule (spec) lives in exactly one place.
+/// Prefers `canonical_path` over `source_path` (tilde-expanded); a `SKILL.md`
+/// path yields its PARENT. `None` only when no path is recorded. The one
+/// resolver behind `resolve_skill_root` and the removal planner.
 pub(crate) fn skill_root_unchecked(skill: &Skill) -> Option<PathBuf> {
 	let path = skill
 		.canonical_path
@@ -1377,10 +1244,8 @@ fn unique_targets(targets: Vec<InstallTarget>) -> Vec<InstallTarget> {
 	unique
 }
 
-/// Reject a transfer that names no destinations. An empty `--to` is almost
-/// always a mistake; without this guard `transfer_*` returns `Ok([])` and the
-/// caller exits 0 having copied nothing (finding #4). Both surfaces route
-/// through `transfer_*`, so the guard lives here once.
+/// Reject a transfer that names no destinations; otherwise it exits 0 having
+/// copied nothing. Both surfaces route through `transfer_*`.
 fn ensure_destinations(destinations: &[InstallTarget]) -> Result<()> {
 	if destinations.is_empty() {
 		return Err(ConfigError::InvalidConfig(
@@ -1391,17 +1256,11 @@ fn ensure_destinations(destinations: &[InstallTarget]) -> Result<()> {
 	Ok(())
 }
 
-/// Reject a reconcile that names the same agent in both `--add` and `--remove`.
-/// The add loop runs before the remove loop, so `--add X --remove X` would
-/// silently net to a delete and exit 0. Both surfaces (CLI + API) route through
-/// `reconcile_*`, so the guard lives here once.
 /// Preconditions every `reconcile_*` shares.
 ///
-/// The destructive half is the point: a reconcile that REMOVES needs explicit
-/// confirmation, and that policy lives HERE so the CLI's `--yes` and the API's
-/// `confirm` are two adapters over one rule instead of two hand-kept copies.
-/// The CLI still previews before it ever calls in, so from that surface this is
-/// a backstop; for an API client it is the only gate there is.
+/// A reconcile that REMOVES needs explicit confirmation; the policy lives here
+/// so CLI `--yes` and API `confirm` are adapters over one rule. For an API
+/// client it is the only gate.
 fn ensure_reconcilable(
 	added: &[AgentType],
 	removed: &[AgentType],
@@ -1418,15 +1277,12 @@ fn ensure_reconcilable(
 	Ok(())
 }
 
-/// Reject an agent that appears in BOTH the add and remove sets.
+/// Reject an agent in BOTH the add and remove sets (adds run first, so it would
+/// silently net to a delete).
 ///
-/// Public so a PREVIEW can apply it without touching anything: a dry-run used
-/// to approve `--add opencode --remove opencode` and only the `--yes` run hit
-/// this, which is the wrong order for a check whose entire job is telling the
-/// caller what the commit will do. (`confirm = false` is NOT a dry-run switch —
-/// it is the "refuses removals without confirmation" gate, and an add-only
-/// reconcile with it still WRITES. That is why the preview needs read-only
-/// preflights like this one rather than a planner call.)
+/// Public so a preview can apply it read-only: `confirm = false` is not a
+/// dry-run switch.
+/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
 pub fn ensure_disjoint(
 	added: &[AgentType],
 	removed: &[AgentType],
@@ -1474,12 +1330,9 @@ fn reconcile_plans(
 			action: OperationAction::Copy,
 		})
 		.collect();
-	// Deduplicate BEFORE any row exists, so no `RemovalCredits` receipt can be
-	// issued that a later duplicate of the same target then spends on itself:
-	// `--remove claude --remove claude` used to delete once, credit the
-	// backing, and let row two's `ResourceNotFound` be forgiven by row one —
-	// reporting two successes for one deletion. This is the single place rows
-	// are built, so preview and commit dedupe identically.
+	// Deduplicate BEFORE any row exists, so a duplicate target cannot spend the
+	// `RemovalCredits` receipt its twin earned. The single place rows are
+	// built. See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
 	let deletes = unique_targets(
 		removed
 			.into_iter()
@@ -1503,13 +1356,9 @@ fn batch_preflight_error(
 	operation: &str,
 	error: crate::batch::MultiTargetMutationError<OperationPlan, ConfigError>,
 ) -> ConfigError {
-	// Keep the VARIANT when every row refused for the same domain reason.
-	// Aggregating a batch is a transport concern and must not relabel the
-	// answer: `delete skills x -a cursor` and `reconcile skills x --remove
-	// cursor` are one refusal ("cursor reads it from the shared master"), and
-	// flattening the second to `InvalidConfig` sent the API 400 for one and 422
-	// for the other, so a client branching on `UNSUPPORTED_OPERATION` saw the
-	// same domain error land in its "bad parameters" arm.
+	// Keep the VARIANT when every row refused for the same domain reason: batch
+	// aggregation must not relabel the answer (and its HTTP status).
+	// See docs/history/core-transfer.md#batch-refusal-variant-was-flattened
 	let all_unsupported = !error.failures.is_empty()
 		&& error
 			.failures
@@ -1697,29 +1546,19 @@ pub fn reconcile_mcp(
 	if deletes_source && !copies.is_empty() {
 		ensure_mcp_source_fields_representable(&source, &mcp)?;
 	}
-	// Before ANY write: an add and a remove that resolve to the same file
-	// cannot both be honoured, and attempting it deletes from both. The protect
-	// list is the ROSTER, not just the agents this command named — see
-	// `protected_targets`.
+	// Before ANY write: an add and a remove resolving to one file cannot both
+	// be honoured. The protect list is the roster — see `protected_targets`.
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
 	let protect =
 		protected_targets(&copies, &source, source_removed, &removing, true);
 	ensure_removals_spare(&protect, &removing, source.agent, mcp_backing_path)?;
-	// The remedy that refusal prints — "add the sharer to --remove too" — has
-	// to lead somewhere: the row that finds the entry already gone because a
-	// sibling row rewrote the shared file first is a success. It is a success
-	// only once that sibling row has actually taken it, so the backings are
-	// resolved here and the credentials are earned below.
+	// The rows the refusal's remedy creates must succeed: a row finding the
+	// entry gone because a sibling row took it is a success, credited below.
 	let mut credits = RemovalCredits::new(&removing, mcp_backing_path);
-	// The copy targets, remembered for the RE-CHECK inside the delete arm. Some
-	// resolvers are existence-dependent — Copilot's project path is `.mcp.json`
-	// when that file exists, `.github/mcp.json` when only that one does, and
-	// `.mcp.json` again when NEITHER exists — so the preflight above is a
-	// SNAPSHOT: a copy that creates `.github/mcp.json` flips the delete target
-	// onto it afterwards, and the preflight saw two different files.
-	// Re-resolving at delete time is the only point where the paths are
-	// settled.
+	// Preflight is a SNAPSHOT: Copilot's project path depends on which of
+	// `.mcp.json` / `.github/mcp.json` exists, so a copy can move the delete
+	// target. The delete arm re-resolves once every path is settled.
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -1852,11 +1691,7 @@ pub fn reconcile_sub_agent(
 	if source_removed && !copies.is_empty() {
 		ensure_sub_agent_source_fields_representable(&source, &sub_agent)?;
 	}
-	// Same shape as the MCP guard above, and the same destruction when it is
-	// missing: the copy finds its OWN file, reports `already_present`
-	// truthfully, the staged gate only asks whether the copy ERRORED, and the
-	// delete then removes the one file both targets were reading. Two success
-	// rows, resource gone from both.
+	// Same shared-backing guard as the MCP arm.
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
 	let protect =
@@ -1864,18 +1699,13 @@ pub fn reconcile_sub_agent(
 	ensure_removals_spare(&protect, &removing, source.agent, |target| {
 		sub_agent_backing_path(target, &source.name)
 	})?;
-	// Same reason as the MCP arm: the refusal above tells the caller to add the
-	// sharer to --remove, and that command has to be able to succeed. Here the
-	// preflight is the ONLY place the backings can be resolved — the backing IS
-	// the file, so after the first row deletes it neither target resolves to
-	// anything.
+	// Same credential as the MCP arm; the backing IS the file, so preflight is
+	// the only place it can be resolved.
 	let mut credits = RemovalCredits::new(&removing, |target| {
 		sub_agent_backing_path(target, &source.name)
 	});
-	// …and that preflight is only a SNAPSHOT, which for sub-agents is barely a
-	// guard at all: the backing IS the resource file, so two agents sharing one
-	// directory both resolve to `None` until a copy writes it. The real check is
-	// the delete-time one below.
+	// …and only a snapshot: two agents sharing a dir both resolve to `Absent`
+	// until a copy writes the file. The delete-time re-check is the real one.
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -2002,20 +1832,12 @@ pub fn transfer_skill(
 			let outcome = (|| -> Result<bool> {
 				let mut manager = build_manager(&plan.target);
 				ensure_loaded(&mut manager)?;
-				// No pre-check: `add_skill_from_path` already owns the
-				// already-present decision, and it is the only code that knows
-				// which kind of "already there" this is. A `get_skill().is_some()`
-				// guard here refused the two cases that are genuine no-ops —
-				// the target reads the shared `.agents` Master (cursor, cline,
-				// codex, opencode, warp all do), or it already holds a valid
-				// link to it — while `reconcile --add` accepted exactly those.
-				// Same operation, opposite verdict.
-				//
-				// A REAL foreign occupant (a same-named directory that is not a
-				// link to the Master) is still refused, by
+				// No pre-check: `add_skill_from_path` owns the already-present
+				// decision (`reconcile --add` uses the same call); a real
+				// foreign occupant is refused by
 				// `add_skill_from_path_universal`. Content is deliberately not
-				// compared: that is the documented `add_skill_from_path`
-				// contract, shared with `aghub add skill --from`.
+				// compared.
+				// See docs/history/core-transfer.md#transfer-skill-pre-check-refused-genuine-no-ops
 				let added = manager.add_skill_from_path(&source_root)?;
 				Ok(added.already_installed)
 			})();
@@ -2036,34 +1858,16 @@ pub fn transfer_skill(
 /// Every in-scope agent whose skill READ DIRS currently hold `name`, plus the
 /// ids of the agents whose read dirs exist but could not be listed.
 ///
-/// One extra scan, taken only to answer "will anyone still be reading the
-/// Master after this reconcile?" — the per-agent removal planner cannot see
-/// that, because a NativeReader leaves no artifact for it to count.
+/// Answers "will anyone still read the Master after this reconcile?" — a
+/// per-agent removal plan cannot see readers outside itself. Walks the skill
+/// dirs directly, NOT `load_all_agents`: a full load fails on any MCP parse
+/// error and would erase a real holder.
 ///
-/// It walks the skill dirs DIRECTLY instead of going through
-/// `load_all_agents`, and that is the point rather than an optimisation. A full
-/// config load also parses MCPs and sub-agents and gives up on the FIRST error,
-/// so one unparseable `.mcp.json` erased an agent's skills from this answer
-/// while nothing about its skills was broken — the Master was then garbage
-/// collected out from under a real holder. Patching that by treating any load
-/// failure as "might hold it" only traded the data loss for the opposite
-/// failure: an agent that cannot hold skills at all vetoed every removal in the
-/// scope, with no override. Asking the filesystem the skill question directly
-/// has neither failure mode.
-///
-/// FAIL-CLOSED on what is left: a read dir that EXISTS but cannot be listed
-/// counts as a holder, because "holds nothing" and "cannot tell" are the same
-/// empty list. An ABSENT read dir really does hold nothing and does not count —
-/// widen that and every uninstalled agent becomes a holder, `exhaustive` is
-/// never true again, and Master GC silently stops happening forever.
-///
-/// Naming an unreadable agent in `removed` makes the reconcile exhaustive
-/// again. That is deliberate: an explicit "take it from that one too" is the
-/// only thing that can authorize a collection we cannot verify.
-///
-/// Otherwise the direction leaves an orphan Master behind — `doctor` reports it
-/// as `orphanMaster` and it is reclaimable. Recoverable noise beats
-/// unrecoverable data loss; do not "fix" this back to fail-open.
+/// FAIL-CLOSED: an existing-but-unlistable read dir is a holder ("holds
+/// nothing" and "cannot tell" are the same empty list); an ABSENT one is not,
+/// or Master GC never happens again. Worst case is a reclaimable `orphanMaster`
+/// — do not "fix" this back to fail-open.
+/// See docs/history/core-transfer.md#holder-scan-reads-skill-dirs-directly
 fn skill_holders(
 	name: &str,
 	source: &ResourceLocator,
@@ -2083,11 +1887,8 @@ fn skill_holders(
 		// developer's real home instead of the fixture.
 		let dirs = create_adapter(agent)
 			.get_skills_paths(source.project_root.as_deref(), scope);
-		// FAIL-CLOSED, and the direction is the whole point: `Err` means a
-		// read dir EXISTS and could not be listed, and "holds nothing" and
-		// "cannot tell" are the same empty list. An ABSENT dir is not an error
-		// — it really does hold nothing, and widening that would make every
-		// uninstalled agent a holder.
+		// FAIL-CLOSED: `Err` means a read dir EXISTS and could not be listed.
+		// An absent dir is not an error.
 		match crate::skills::discovery::load_skills_from_dirs(&dirs) {
 			Ok(skills) => {
 				if skills.iter().any(|s| s.name == name) {
@@ -2095,12 +1896,9 @@ fn skill_holders(
 				}
 			}
 			Err(error) => {
-				// SAY so even when the answer is safe anyway. Counting an
-				// unreadable agent as a holder keeps the Master, but it also
-				// makes the whole thing silent: the removal simply stops being
-				// exhaustive and proceeds. The error names the path it failed
-				// on (`discovery::at_path`), which is the only thing the user
-				// can act on.
+				// Say so even though the answer is already safe, or the removal
+				// silently stops being exhaustive; the error names the path the
+				// user can fix.
 				log::warn!(
 					"cannot read agent '{}' skills, counting it as a holder \
 					 of '{name}': {error}",
@@ -2125,11 +1923,8 @@ struct ReconcileSkillPlan {
 	source_root: PathBuf,
 	requested_removals: Vec<AgentType>,
 	/// Does this reconcile drop the skill from EVERY agent that holds it? Then
-	/// the shared Master has no remaining reader and must go with it. Removing
-	/// it per-agent instead refuses on every target (an agent reading the
-	/// Master directly has nothing agent-specific to take) and leaves the
-	/// Master orphaned — and the desktop's manage-agents dialog allows exactly
-	/// that shape: deselect every agent, no adds.
+	/// the Master has no remaining reader and goes with it (the desktop's
+	/// manage-agents dialog produces this: deselect every agent, no adds).
 	exhaustive: bool,
 	/// Holders this reconcile does NOT remove: the reason the Master stays, and
 	/// the only thing a refused caller can actually act on.
@@ -2143,17 +1938,9 @@ struct ReconcileSkillPlan {
 
 /// The paths rows running BEFORE `target` will already have removed.
 ///
-/// Credited by POSITION: `deletion_paths` is built 1:1 with `deletes`, in the
-/// order the rows execute, so "earlier" is a prefix — not "everything up to
-/// wherever the target turns up".
-///
-/// A target ABSENT from the list credits NOTHING. The `take_while` this
-/// replaces credited the ENTIRE list in that case, counting removals from rows
-/// that had not run yet; that flips `shared_master_kept` to false, the preflight
-/// green-lights the row, and the commit then refuses it — the half-applied
-/// reconcile the preflight exists to prevent. Nothing passes an out-of-plan
-/// target today (both callers feed `plan.deletes` straight back), so this is
-/// the fail-CLOSED reading of a state that should not arise.
+/// By POSITION: `deletion_paths` is 1:1 with `deletes` in execution order, so
+/// "earlier" is a prefix. A target absent from the list credits NOTHING (fail
+/// closed). See docs/history/core-transfer.md#earlier-rows-credited-by-position
 fn earlier_row_removals(
 	deletion_paths: &[(AgentType, Vec<PathBuf>)],
 	target: AgentType,
@@ -2188,19 +1975,10 @@ fn plan_reconcile_skill(
 	let exhaustive =
 		collectable && holders.iter().all(|held| removed.contains(held));
 
-	// Naming the unreadable agent is NOT enough authority to collect the
-	// Master. Counting it as a holder keeps `exhaustive` false while it is
-	// unnamed — but the moment the caller names it, `exhaustive` flips true and
-	// the batch will happily delete the Master from a READABLE row while the
-	// unreadable agent's own row is still ahead of it: its preflight fails OPEN
-	// on a config it cannot load, and rows use attempt-all semantics, so
-	// ordering saves nothing. The result is the Master gone and an opaque copy
-	// or Referrer left behind — the exact data loss the holder scan exists to
-	// prevent, reached by the one input that was supposed to authorize it.
-	//
-	// "Take it from that one too" can only be honoured by a batch that CAN take
-	// it from that one. Refuse before any row runs; fixing the directory is the
-	// way through, and it is recoverable.
+	// Refuse before any row runs while a holder is unreadable, even if the
+	// caller names it: a named unreadable row fails open in preflight, rows are
+	// attempt-all, and a readable row would delete the Master first.
+	// See docs/history/core-transfer.md#naming-an-unreadable-holder
 	if exhaustive && !unreadable.is_empty() {
 		return Err(ConfigError::InvalidConfig(format!(
 			"cannot decide whether removing '{}' leaves the shared \
@@ -2221,17 +1999,10 @@ fn plan_reconcile_skill(
 		source.project_root.clone(),
 	);
 	// Shared slots must go first: a private Referrer cannot be revoked while
-	// the same agent still reads the shared slot this batch is removing.
-	//
-	// "How many agents read this dir" is asked of the one helper that owns it
-	// (`skill_dir_readers_outside`, with an empty exclusion list so the count
-	// spans the whole roster), never re-derived here. The inline version this
-	// replaces was a SEVENTH independent spelling of slot sharing and it
-	// disagreed with the others on two axes — it counted the row's own agent
-	// where `classify::shared_with` excludes self, and it matched read dirs by
-	// equality where the owner uses containment, so a Master under
-	// `.agents/skills/<team>/<name>` counted zero readers instead of every
-	// agent scanning `.agents/skills`.
+	// the same agent still reads the shared slot this batch is removing. Reader
+	// count comes from `skill_dir_readers_outside` (empty exclusion = whole
+	// roster); never re-derive slot sharing here.
+	// See docs/history/core-transfer.md#seventh-spelling-of-slot-sharing
 	deletes.sort_by_cached_key(|row| {
 		let scope = target_resource_scope(&row.target);
 		let readers = create_adapter(row.target.agent)
@@ -2304,34 +2075,20 @@ impl ReconcileSkillPlan {
 		}
 	}
 
-	/// Refuse an END STATE that cannot exist, BEFORE the first write.
-	///
-	/// Removing an agent that reads the shared Master directly takes nothing
-	/// away while the Master stays — and whether it stays is a fact about the
-	/// WHOLE reconcile, not about this one row. So the copies used to land on
-	/// disk first and the delete row failed afterwards, leaving a half-applied
-	/// reconcile.
-	///
-	/// This is not a second implementation of that verdict: it asks the same
-	/// planner the same question with the same `exhaustive`, just earlier. It
-	/// runs for EVERY delete row, including a reconcile with no copies at all —
-	/// the unreachable end state is what is refused, not the pairing with a
-	/// copy.
+	/// Refuse an unreachable END STATE before the first write, so copies never
+	/// land ahead of a delete row that then fails. Same planner, same
+	/// `exhaustive`, just earlier; runs for every delete row, with or without
+	/// copies.
 	fn preflight_delete(&self, target: &InstallTarget) -> Result<()> {
 		let mut manager = build_manager(target);
-		// Fail OPEN on a config this row cannot even read: that is this row's
-		// own problem, the mutate arm fails it identically, and escalating it
-		// here would abort the whole batch — an unparseable `.mcp.json` would
-		// cancel a perfectly good copy to a DIFFERENT agent.
+		// Fail OPEN on a config this row cannot read: the mutate arm fails it
+		// anyway, and escalating would abort unrelated copies in the batch.
 		if ensure_loaded(&mut manager).is_err() {
 			return Ok(());
 		}
-		// A dry-run plans under the guard this reconcile already holds and
-		// writes nothing.
-		// `still_read_from` rides along on the same dry run for the same reason
-		// `shared_master_kept` does — it is the ONE owner's answer. Re-deriving
-		// it here from the target's own read dirs is exactly the second
-		// derivation the paragraph below warns about.
+		// A dry-run under the guard this reconcile already holds.
+		// `still_read_from` comes from the same owner as `shared_master_kept` —
+		// never re-derive it.
 		let (mut shared_master_kept, still_read_from, mut deleting) =
 			match manager.remove_skill_planned_for_agents(
 				&self.skill.name,
@@ -2380,12 +2137,9 @@ impl ReconcileSkillPlan {
 			}
 		}
 
-		// Two ways this row takes nothing away, and only the first is visible
-		// on the disk the preflight can see.
-		//
-		// The first starts with the manager's dry-run verdict, adjusted above
-		// only for earlier removals in this batch. The all-agents verdict is
-		// never narrowed to one agent's read dirs.
+		// Two ways this row takes nothing away: the manager's dry-run verdict
+		// (adjusted only for earlier rows' removals, never narrowed to one
+		// agent's read dirs), and a paired copy re-creating what it reads.
 		if shared_master_kept || self.a_copy_restores_it(target) {
 			return Err(self.refuse_shared_master(
 				target.agent.as_str(),
@@ -2395,38 +2149,16 @@ impl ReconcileSkillPlan {
 		Ok(())
 	}
 
-	/// Will one of THIS reconcile's own copies leave the skill sitting in a
-	/// directory `target` READS?
+	/// Will one of THIS reconcile's own copies leave the skill in a directory
+	/// `target` READS?
 	///
-	/// Preflight runs before the first write, so the probe above looks at a
-	/// disk where the entries this reconcile is about to create do not exist
-	/// yet. Reasoned about rather than observed because
-	/// `run_staged_multi_target_mutation` runs EVERY preflight before ANY copy;
-	/// without it, "add windsurf, remove cursor" on a cursor-private skill
-	/// passed preflight, wrote the Master, deleted cursor's own folder and
-	/// reported BOTH rows successful while cursor still saw the skill.
-	///
-	/// Both halves come from ONE home. WHERE a copy lands is
-	/// [`Self::copy_entry_dirs`] (`agent_link_need` — root AGENTS.md "Link
-	/// decision"); WHERE the delete target reads is its own
-	/// `get_skills_paths`. Asking the classifier about the DELETE target alone
-	/// — "is it a NativeReader of the Master?" — was only half the question,
-	/// and the missing half is a data-loss shape, not a false refusal: Amp and
-	/// Kimi BOTH read and write `~/.config/agents/skills` at global scope
-	/// (`macros.rs` maps that path as read AND write for them), so
-	/// `--add amp --remove kimi -g` planned a copy whose Referrer slot IS the
-	/// entry Kimi's delete then unlinks. Copies run first, so both rows
-	/// reported success and Amp — the agent the user was ADDING — ended up
-	/// unable to see the skill. Comparing DIRS (not the delete's planned paths)
-	/// is what catches it at preflight: the shared entry need not exist on disk
-	/// yet for the collision to be certain.
-	///
-	/// Do NOT re-derive either half from `skill_store_roots` membership:
-	/// that list includes the XDG `~/.config/agents/skills`, which Amp and Kimi
-	/// read at global scope but no copy to a DIFFERENT agent ever writes
-	/// (global installs materialise `~/.agents/skills`). Doing so refused
-	/// `reconcile --add claude --remove amp -g` outright — batch preflight, so
-	/// nothing was written at all.
+	/// Preflight runs before any copy, so the disk cannot show it; reasoned
+	/// from ONE home per half: where copies land is [`Self::copy_entry_dirs`]
+	/// (`agent_link_need` — root AGENTS.md "Link decision"), where the target
+	/// reads is its `get_skills_paths`. Compare DIRS, not planned paths — the
+	/// shared entry need not exist yet. Do NOT derive either half from
+	/// `skill_store_roots` (it includes a dir no cross-agent copy writes).
+	/// See docs/history/core-transfer.md#paired-copy-undoes-the-removal
 	fn a_copy_restores_it(&self, target: &InstallTarget) -> bool {
 		let entry_dirs = self.copy_entry_dirs();
 		if entry_dirs.is_empty() {
@@ -2449,13 +2181,9 @@ impl ReconcileSkillPlan {
 	}
 
 	/// Every directory this reconcile's copies leave a READABLE entry in,
-	/// canonicalized so two spellings of one directory compare equal.
-	///
-	/// Installs are symlink-only, so a copy touches two places: it materialises
-	/// the shared Master (`master_store_dir` — the same resolution
-	/// `universal_install_prep` uses), and, for a `NeedsLink` agent, it links
-	/// that agent's own skills dir to it. A `NativeReader` gets no link; the
-	/// Master already IS one of its read dirs.
+	/// canonicalized so two spellings of one directory compare equal: the
+	/// Master (`master_store_dir`, as `universal_install_prep` resolves it) and
+	/// each copy target's Referrer dir.
 	fn copy_entry_dirs(&self) -> Vec<PathBuf> {
 		let mut dirs: Vec<PathBuf> = Vec::new();
 		let mut push = |dir: &Path| {
@@ -2492,11 +2220,7 @@ impl ReconcileSkillPlan {
 	}
 
 	/// "This agent reads the skill from the shared master, so removing it alone
-	/// takes nothing away."
-	///
-	/// Naming WHY the master stays is not decoration: without it the message
-	/// names the delete target while the real reason is a different agent, and
-	/// the user has nothing to act on.
+	/// takes nothing away" — naming WHO keeps the master, so the user can act.
 	fn refuse_shared_master(
 		&self,
 		agent: &str,
@@ -2517,18 +2241,15 @@ impl ReconcileSkillPlan {
 				self.keepers.join("', '")
 			));
 		} else if !self.copies.is_empty() {
-			// No keepers were computed because an add short-circuits the holder
-			// scan — the add IS the reason. Saying so is the difference between
-			// a dead end and "drop the --add, or remove that agent too".
+			// An add short-circuits the holder scan — the add IS the reason.
 			message.push_str(
 				"; this reconcile also adds the skill to another agent, so the \
 				 shared master stays",
 			);
 		}
-		// Keepers and survivors answer DIFFERENT questions: who else reads the
-		// Master, versus where THIS agent still reads it from. The second is the
-		// only one the caller can act on when the blocker is a leftover Referrer
-		// in the agent's own compat dir, and it used to be missing entirely.
+		// Keepers = who else reads the Master; survivors = where THIS agent
+		// still reads it from (e.g. a leftover compat-dir Referrer) — the
+		// actionable one.
 		if !still_read_from.is_empty() {
 			message.push_str(&format!(
 				"; it is still served to this agent from '{}'",
@@ -2552,15 +2273,10 @@ impl ReconcileSkillPlan {
 
 /// Everything a `reconcile_skill` would refuse, without touching anything.
 ///
-/// Exists so a PREVIEW cannot green-light a plan the commit rejects — the CLI's
-/// dry-run is the step an agent takes to decide whether to commit. It runs the
-/// SAME per-row preflight over the SAME plan and reports it through the same
-/// `batch_preflight_error`, so the preview and the commit are indistinguishable
-/// down to the error code and message.
-///
-/// Advisory by construction: it takes no mutation lock, and the committing call
-/// re-runs all of it under one. That is the right split — a preview that locked
-/// would serialize read-only inspection against real work.
+/// Same per-row preflight over the same plan and the same
+/// `batch_preflight_error`, so preview and commit match down to the code and
+/// message. Advisory: no mutation lock (the commit re-runs it under one), so
+/// inspection never serializes against real work.
 pub fn reconcile_skill_preview(
 	source: &ResourceLocator,
 	added: &[AgentType],
@@ -2593,15 +2309,10 @@ pub fn reconcile_skill(
 	confirm: bool,
 ) -> Result<OperationBatchResult> {
 	ensure_reconcilable(&added, &removed, confirm)?;
-	// ONE guard for the whole reconcile, taken before the first READ that
-	// decides a write. The holder scan and the preflight dry-runs are exactly
-	// the "state read that decides the mutation" the lock exists for: computed
-	// outside it, another aghub process could link a fresh Referrer into the
-	// Master between the scan and the writes, and this flow would collect a
-	// Master that had just gained a reader. Reentrant, so every
-	// `guard_and_reload` underneath is free. It serializes aghub against aghub
-	// only — `manager/skill.rs`'s executing refusal stays as the backstop for
-	// anything else that touches these dirs.
+	// ONE guard for the whole reconcile, taken before the holder scan and
+	// preflight dry-runs — the state reads that decide the mutation. Reentrant,
+	// so inner `guard_and_reload`s are free. See crates/core/AGENTS.md
+	// "Mutation attribution".
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"reconcile skill",
 		match source.scope {
@@ -2621,11 +2332,9 @@ pub fn reconcile_skill(
 	// Does this reconcile take the skill AWAY from its source? Only then must a
 	// copy prove the content actually landed — see the Copy arm below.
 	let deletes_source = removed.contains(&source.agent);
-	// Nothing we are copying INTO — and not the source either, unless the
-	// caller asked to remove it — may share a skills DIRECTORY with something
-	// we are removing from. A DIFFERENT question from `plan.preflight`, which
-	// refuses an unreachable END STATE: this one refuses a target whose backing
-	// dir another row in the same batch is about to delete. Both still asked.
+	// No copy target (nor the source, unless removed) may share a skills
+	// DIRECTORY with a removal target. Distinct from `plan.preflight`'s
+	// end-state check; both run.
 	let removing: Vec<InstallTarget> =
 		plan.deletes.iter().map(|row| row.target.clone()).collect();
 	let protect = protected_targets(
@@ -2641,13 +2350,10 @@ pub fn reconcile_skill(
 		source.agent,
 		skill_backing_dir,
 	)?;
-	// Same credential as the MCP and sub-agent arms. Two removal rows really can
-	// be one entry — eight project-scope agents share `<root>/.agents/skills`,
-	// and an exhaustive removal takes the Master every named reader links to —
-	// so the second row finding nothing left is a success. Only once an EARLIER
-	// row actually took that entry: this arm used to forgive every
-	// `ResourceNotFound`, so removing from two agents that had never held the
-	// skill exited 0 reporting two deletions with the disk untouched.
+	// Same credential as the MCP and sub-agent arms: shared slots and an
+	// exhaustive Master removal make two rows one entry, but only an EARLIER
+	// row that really took it forgives.
+	// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
 	let mut credits = RemovalCredits::new(&removing, |target| {
 		skill_entry_backing(target, &plan.skill.name)
 	});
@@ -2666,13 +2372,9 @@ pub fn reconcile_skill(
 							crate::models::ResourceScope::ProjectOnly
 						}
 					};
-					// ONE guard across check → write → rollback, which is what
-					// `mutation_guard`'s own doc says it is for. The manager's
-					// internal guard is released the moment
-					// `add_skill_from_path` returns, so the proof below and the
-					// rollback after it used to run unlocked — able to unlink a
-					// referrer another aghub process had just recreated. It is
-					// reentrant, so the inner one costs nothing.
+					// ONE guard across check → write → rollback; the manager's
+					// own guard ends when `add_skill_from_path` returns.
+					// See crates/core/AGENTS.md "Mutation attribution".
 					let _copy_guard = crate::skills::lock::mutation_guard(
 						"reconcile skill copy",
 						target_scope,
@@ -2686,31 +2388,14 @@ pub fn reconcile_skill(
 					let added =
 						manager.add_skill_from_path(&plan.source_root)?;
 
-					// When this reconcile also REMOVES, the copy has to prove
-					// the source content actually landed — not merely that the
-					// call succeeded. `wrote_master` is the ONLY outcome that
-					// proves it; both other outcomes can leave the source
-					// unwritten:
-					//
-					// - `materialize_universal_master` preserves a pre-existing
-					//   Master rather than overwriting it (deliberate: see
-					//   `add_skill_from_path`). A target with no skill at all is
-					//   then LINKED to an already-present Master holding DIFFERENT
-					//   content — success, `already_installed` false, not one byte
-					//   of the source written.
-					// - A NativeReader that already reads such a Master reports
-					//   `already_installed` — truthfully, it does hold a skill by
-					//   that name — and that name is all the two have in common.
-					//
-					// Paired with the delete, the source content is then gone
-					// while a same-named skill remains, so nothing looks wrong.
-					// Hence: whatever the call reported, if we did not write the
-					// Master ourselves, PROVE the content is there before removing
-					// it from the source.
-					//
-					// Only the removing case is tightened. A plain
-					// `transfer`/`--add` writes nothing away, so preserving the
-					// Master there stays the documented behaviour.
+					// When this reconcile also REMOVES, the copy must prove the
+					// source content landed. `wrote_master` is the only outcome
+					// that proves it: a pre-existing Master is preserved, not
+					// overwritten, so a target can be linked to (or already
+					// hold) a same-named Master with DIFFERENT content. Paired
+					// with the delete, the source content would be gone while
+					// nothing looks wrong. A plain `transfer`/`--add` keeps
+					// preserve-the-Master behaviour.
 					if deletes_source && !added.wrote_master {
 						let landed =
 							crate::skills::skill_source_root(&plan.source_root);
@@ -2729,9 +2414,7 @@ pub fn reconcile_skill(
 								 the source content over. Reconcile the master \
 								 first, or drop the --remove.",
 							)),
-							// NOT folded into "differs": sending someone to
-							// reconcile a difference that may not exist is its
-							// own wrong answer.
+							// Not folded into "differs" — see [`ContentProof`].
 							ContentProof::Unprovable(reason) => Some(format!(
 								"aghub cannot PROVE the target now holds the \
 								 source content — {reason}. It will not remove \
@@ -2741,23 +2424,13 @@ pub fn reconcile_skill(
 							)),
 						};
 						if let Some(why) = why {
-							// Undo THIS call's own work before refusing.
-							// `add_skill_from_path` has already linked the
-							// target to the master, so returning Err here
-							// left the row saying `success: false` while the
-							// target had gained a skill it never had, holding
-							// content nobody asked to copy.
-							// `created_referrer_dirs` is the materializer's
-							// own receipt and exists for exactly this — its
-							// doc: "a caller that cannot roll back is the bug
-							// this exists to prevent". The master is NOT
-							// touched: we only get here when we did not write
-							// it, so it belongs to whoever did.
-							//
-							// Under `_copy_guard` below, which spans
-							// check → write → rollback: unlocked, this could
-							// unlink a referrer another aghub process had just
-							// recreated.
+							// Undo THIS call's own work before refusing, from
+							// the materializer's receipt
+							// (`created_referrer_dirs`), or the failed row
+							// leaves the target holding content nobody asked to
+							// copy. The master is not touched: we did not write
+							// it. Runs under `_copy_guard`; see
+							// crates/core/AGENTS.md "Mutation attribution".
 							crate::skills::rename::rollback_materialized_install(
 								&plan.skill.name,
 								target_scope,
@@ -2788,30 +2461,17 @@ pub fn reconcile_skill(
 					let mut manager = build_manager(&row.target);
 					ensure_loaded(&mut manager)?;
 					// `remove_skill_planned` REFUSES an executing removal that
-					// would take nothing while keeping a shared Master, so that
-					// shape arrives here as an `Err` and never as an `Ok` to
-					// re-inspect. Do not add a second copy of the check here: it
-					// is unreachable, and a reader who spots the duplicate may
-					// delete the wrong one of the two.
+					// takes nothing while keeping a shared Master, so that
+					// shape arrives as `Err`; do not add a second copy of the
+					// check here.
 					//
-					// `executed` alone is NOT the credential:
-					// `RemovalOutcome::commit` sets it for the whole execute
-					// branch even when every `remove_dir_all` returned
-					// `EACCES` (its own doc says so), so a row that left the
-					// Master on disk reported a deletion AND vouched for the
-					// sibling rows reading that same Master — exit 0 with the
-					// skill still there. `failed_paths` is the truthful half,
-					// and a row that could not empty its backing is a FAILED
-					// row: reconcile has no `outcome` field to carry `delete`'s
-					// `partial`, so `Err` is the only honest carrier. Never
-					// `ResourceNotFound` — that is the one variant
-					// `sibling_already_took_it` forgives.
-					//
-					// What remains a credential-free `Ok(false)`: the
-					// `spared_everything` preview (kept because a peer links
-					// into this agent's own dir) leaves `executed` false. The
-					// executing "takes nothing away" shape never arrives here
-					// at all — `remove_skill_planned` refuses it.
+					// `executed` alone is NOT the credential (it is set even
+					// when every `remove_dir_all` failed); `failed_paths` is. A
+					// row that could not empty its backing is an `Err`, never
+					// `ResourceNotFound` (the variant `sibling_already_took_it`
+					// forgives). The spared preview leaves `executed` false: a
+					// credential-free `Ok(false)`.
+					// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
 					sibling_already_took_it(
 						manager
 							.remove_skill_planned_for_agents(
