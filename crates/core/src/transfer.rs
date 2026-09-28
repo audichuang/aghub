@@ -657,6 +657,7 @@ where
 /// The shared-backing refusal a `--yes` run would raise, WITHOUT writing
 /// anything — one definition for preview and commit, so a preview cannot
 /// green-light what the commit refuses.
+/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
 fn ensure_reconcile_spares<F>(
 	source: &ResourceLocator,
 	added: &[AgentType],
@@ -914,6 +915,7 @@ fn sibling_already_took_it(
 /// an add and a remove landing in one dir cannot both be honoured. Unnamed
 /// sharers are unprotected (`roster: false`): on the shared slot, sharing IS
 /// the grant model.
+/// See docs/history/core-transfer.md#shared-backing-destroyed-a-resource
 fn skill_backing_dir(target: &InstallTarget) -> Backed {
 	// A pure path derivation — it reads no agent config, so a failure here is
 	// "this scope has no skills dir for that agent", not "cannot tell".
@@ -965,7 +967,8 @@ fn mcp_backing_path(target: &InstallTarget) -> Backed {
 /// target sees. Ask the filesystem, not the descriptor table: dirs distinct on
 /// paper can be one dir behind a symlinked ancestor (allowed — see
 /// `agents/src/sub_agents.rs`) or an env override. `Absent` is the ordinary
-/// copy case, not a collision.
+/// copy case, not a collision: two targets resolving to one directory either
+/// both see the file or neither does.
 fn sub_agent_backing_path(target: &InstallTarget, name: &str) -> Backed {
 	let mut manager = build_manager(target);
 	// `load()` parses MCPs too; an unrelated malformed config is "cannot tell",
@@ -1836,7 +1839,8 @@ pub fn transfer_skill(
 				// decision (`reconcile --add` uses the same call); a real
 				// foreign occupant is refused by
 				// `add_skill_from_path_universal`. Content is deliberately not
-				// compared.
+				// compared: that is the documented `add_skill_from_path`
+				// contract, shared with `aghub add skill --from`.
 				// See docs/history/core-transfer.md#transfer-skill-pre-check-refused-genuine-no-ops
 				let added = manager.add_skill_from_path(&source_root)?;
 				Ok(added.already_installed)
@@ -1923,8 +1927,9 @@ struct ReconcileSkillPlan {
 	source_root: PathBuf,
 	requested_removals: Vec<AgentType>,
 	/// Does this reconcile drop the skill from EVERY agent that holds it? Then
-	/// the Master has no remaining reader and goes with it (the desktop's
-	/// manage-agents dialog produces this: deselect every agent, no adds).
+	/// the Master has no remaining reader and goes with it — removed per-agent,
+	/// the Master would be left orphaned (the desktop's manage-agents dialog
+	/// produces this: deselect every agent, no adds).
 	exhaustive: bool,
 	/// Holders this reconcile does NOT remove: the reason the Master stays, and
 	/// the only thing a refused caller can actually act on.
@@ -2277,6 +2282,7 @@ impl ReconcileSkillPlan {
 /// `batch_preflight_error`, so preview and commit match down to the code and
 /// message. Advisory: no mutation lock (the commit re-runs it under one), so
 /// inspection never serializes against real work.
+/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
 pub fn reconcile_skill_preview(
 	source: &ResourceLocator,
 	added: &[AgentType],
@@ -2311,8 +2317,9 @@ pub fn reconcile_skill(
 	ensure_reconcilable(&added, &removed, confirm)?;
 	// ONE guard for the whole reconcile, taken before the holder scan and
 	// preflight dry-runs — the state reads that decide the mutation. Reentrant,
-	// so inner `guard_and_reload`s are free. See crates/core/AGENTS.md
-	// "Mutation attribution".
+	// so inner `guard_and_reload`s are free. It serializes aghub against aghub
+	// only — `remove_skill_planned`'s executing refusal stays as the backstop.
+	// See crates/core/AGENTS.md "Mutation attribution".
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"reconcile skill",
 		match source.scope {
@@ -2469,8 +2476,10 @@ pub fn reconcile_skill(
 					// when every `remove_dir_all` failed); `failed_paths` is. A
 					// row that could not empty its backing is an `Err`, never
 					// `ResourceNotFound` (the variant `sibling_already_took_it`
-					// forgives). The spared preview leaves `executed` false: a
-					// credential-free `Ok(false)`.
+					// forgives): reconcile has no `outcome` field to carry
+					// `partial`, so `Err` is the only honest carrier. The
+					// spared preview (a peer links into this agent's own dir)
+					// leaves `executed` false: a credential-free `Ok(false)`.
 					// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
 					sibling_already_took_it(
 						manager
@@ -3192,14 +3201,13 @@ mod tests {
 		assert!(manager.get_mcp("filesystem").is_none());
 	}
 
-	// Fix A regression test: a Copy that fails at RUNTIME (after preflight
-	// already passed) must not let its paired Delete run. Claude supports
-	// project-scope stdio MCPs (so `mcp_supported_for_target` preflight is
-	// clean), but Claude's OWN mcp config already holds an unrelated MCP
-	// named "filesystem" — `add_mcp`'s duplicate-name guard rejects the copy
-	// only once it actually runs. Before the fix, `reconcile_mcp` built one
-	// flat Copy-then-Delete plan and attempted every row regardless, so the
-	// Cursor delete still ran: the MCP would vanish from Cursor without ever
+	// Regression: a Copy that fails at RUNTIME (after preflight already
+	// passed) must not let its paired Delete run. Claude supports project-scope
+	// stdio MCPs (so `mcp_supported_for_target` preflight is clean), but
+	// Claude's OWN mcp config already holds an unrelated MCP named
+	// "filesystem" — `add_mcp`'s duplicate-name guard rejects the copy only
+	// once it actually runs. A flat Copy-then-Delete plan that attempts
+	// every row regardless would still run the Cursor delete: the MCP would vanish from Cursor without ever
 	// landing on Claude — gone from every agent. This test fails on that
 	// regression because `cursor_manager.get_mcp("filesystem")` would be
 	// `None` afterward.
@@ -4553,11 +4561,11 @@ mod tests {
 		assert!(referrer.exists(), "the add must create Windsurf's referrer");
 	}
 
-	// Fix A regression test (skill case): a Copy that fails at RUNTIME (after
-	// preflight already passed) must not let its paired Delete run — same
-	// policy as `reconcile_mcp_keeps_source_when_a_copy_fails_at_runtime`, but
-	// for the highest-blast-radius resource, since a skill delete can
-	// `remove_dir_all` an on-disk directory.
+	// Regression (skill case): a Copy that fails at RUNTIME (after preflight
+	// already passed) must not let its paired Delete run — same policy as
+	// `reconcile_mcp_keeps_source_when_a_copy_fails_at_runtime`, but for the
+	// highest-blast-radius resource, since a skill delete can `remove_dir_all`
+	// an on-disk directory.
 	//
 	// The source skill here is a COPY-LAYOUT skill: a plain, hand-created
 	// directory inside Claude's own skills dir with no `.agents/skills`
@@ -4566,8 +4574,8 @@ mod tests {
 	// at the slot the copy would need to link into, so the universal
 	// materializer's link step reports a conflict at write time — preflight
 	// (`skill_target_dir`) only resolves the write dir, it never checks for an
-	// existing occupant. Before the fix, `reconcile_skill` attempted the
-	// Delete regardless: the source directory would be `remove_dir_all`'d
+	// existing occupant. A reconcile that attempts the Delete regardless
+	// loses the skill: the source directory would be `remove_dir_all`'d
 	// even though the Windsurf copy never landed, destroying the skill
 	// outright with no surviving copy anywhere. This test fails on that
 	// regression because `skill_dir.join("SKILL.md").exists()` would be

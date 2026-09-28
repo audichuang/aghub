@@ -120,6 +120,7 @@ impl ConfigManager {
 	/// The merge deliberately fails open (a broken project config must not hide
 	/// global results) — right for a listing, wrong for a decision, which must
 	/// read this flag (`AgentResources::load_failed`).
+	/// See docs/history/core-manager.md#both-scope-load_failed-was-always-false
 	pub fn load_both_annotated_checked(
 		&mut self,
 	) -> Result<(LoadedResources, bool)> {

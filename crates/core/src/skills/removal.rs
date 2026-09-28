@@ -15,6 +15,7 @@ use crate::skills::linker::Linker;
 /// this SHARED" differ (a private copy is deletable, a Master is not). Both
 /// consumers need the `.aghub` entries — without them every Master delete is
 /// refused as out-of-tree, or a single-agent removal takes the Master.
+/// See `.scratch/aghub-skill-store/spec.md` "Day-one hazards".
 /// A linked PROJECT store is omitted (a project must not widen the mutation
 /// roots by pointing `.aghub` outside itself); the global store stays even when
 /// symlinked (dotfiles), since consumers canonicalize roots.
@@ -713,6 +714,8 @@ fn plan_copy_removal(
 						// Name the referrer, not just the kept dir: `skipped`
 						// lists only the caller's own path, so a keep decided
 						// by another agent's dir is otherwise undiagnosable.
+						// The reason CARRIES the path for this: an extraction
+						// that dropped it would silently undo the diagnosis.
 						log::warn!(
 							"keeping {}: {} still references it",
 							root.display(),
@@ -748,7 +751,7 @@ fn plan_copy_removal(
 /// Containment, not path shape: discovery recurses, so a Master can sit at
 /// `.agents/skills/<team>/<name>` (a `parent == "skills"` test misses it and
 /// lets a single-agent removal take it), and a private copy at
-/// `.claude/skills/agents/skills/<name>` must not match.
+/// `.claude/skills/agents/skills/<name>` must not match (else undeletable).
 ///
 /// Shared alone is not a reason to keep — see [`skill_dir_readers_outside`].
 fn is_universal_master(dir: &Path, project_root: Option<&Path>) -> bool {
@@ -940,7 +943,8 @@ pub enum KeepReason {
 ///   still have an inbound symlink.
 ///
 /// Shared by [`plan_copy_removal`] and `ConfigManager::remove_skill`; never
-/// hand-mirror the OR (it once ended up enforcing only half).
+/// hand-mirror the OR (a copy enforcing only half lost a shared Master).
+/// See docs/history/core-manager.md#remove-skill-ate-a-shared-master
 pub fn single_agent_keep_reason(
 	dir: &Path,
 	all_agent_dirs: &[PathBuf],
@@ -1102,7 +1106,8 @@ impl RemovalOutcome {
 
 	/// Idempotent-delete no-op: nothing on disk to remove (missing config or
 	/// resource). One constructor so the CLI and API serialize the SAME
-	/// "already gone" shape across skill/MCP/sub-agent deletes.
+	/// "already gone" shape across skill/MCP/sub-agent deletes. `deleted_path`
+	/// stays null because `executed` is false.
 	pub fn noop() -> Self {
 		RemovalOutcome {
 			plan: RemovalPlan {
@@ -1629,7 +1634,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn plan_removal_copy_keeps_master_when_another_agent_symlinks_to_it() {
-		// P0: a universal `.agents/skills/<name>` master read DIRECTLY (as a real
+		// A universal `.agents/skills/<name>` master read DIRECTLY (as a real
 		// dir) by one agent has canonical_path=None -> classified Copy layout.
 		// A single-agent removal must NOT `remove_dir_all` that master while
 		// another agent's symlink still resolves to it (that would orphan the

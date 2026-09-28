@@ -724,8 +724,8 @@ mod tests {
 		);
 	}
 
-	/// The migration this whole change exists for: a real directory in the
-	/// shared slot becomes the Master, and the slot becomes a link to it.
+	/// The core migration: a real directory in the shared slot becomes the
+	/// Master, and the slot becomes a link to it.
 	#[test]
 	fn migrating_adopts_the_shared_dir_and_leaves_a_link_behind() {
 		let (_tmp, root) = fixture();
@@ -996,8 +996,8 @@ mod tests {
 			compat.symlink_metadata().is_err(),
 			"the stale compat Referrer must be gone after ONE run"
 		);
-		// The shared slot is eight agents' only way in — it becomes a link,
-		// never a casualty of the sweep.
+		// The shared slot is the only way in for every agent that writes
+		// nowhere else — it becomes a link, never a casualty of the sweep.
 		assert!(
 			Linker::is_link(&slot),
 			"the shared slot must survive as an ordinary Referrer"
@@ -1013,12 +1013,11 @@ mod tests {
 		);
 	}
 
-	/// Codex 5.6 blocker 2 (DO-NOT-SHIP review): the write-time step recorded
-	/// `Tidied` and pushed the path into `report.unlinked` BEFORE checking
-	/// whether the entry could still be unlinked at all — so a disk that
-	/// changed between planning and writing (npx's `cleanAndCreateDirectory`,
-	/// or a user replacing the stale link by hand) was reported as removed
-	/// while the directory sat there completely untouched.
+	/// A compat entry that changed between planning and writing (npx's
+	/// `cleanAndCreateDirectory`, or a user replacing the stale link by hand)
+	/// is never recorded as `Tidied` / `report.unlinked`: the write-time step
+	/// rechecks before reporting.
+	/// See docs/history/core-repair-rename.md#compat-unlink-recheck-and-the-fourth-guard
 	#[test]
 	fn a_compat_entry_that_changed_since_planning_is_never_reported_as_unlinked(
 	) {
@@ -1067,10 +1066,11 @@ mod tests {
 	/// The three things the sweep must NEVER take. Each is its own way to lose
 	/// a skill, and each guard was written against a real failure:
 	///  * a real DIRECTORY may hold the only copy of bytes aghub never installed
-	///  * a link pointing somewhere else is not ours to move (D5)
-	///  * `.agents/skills` is codex's second READ dir and eight other agents'
-	///    only WRITE dir — sweeping it revokes the skill for all eight. That one
-	///    really was planned before guard 4 existed.
+	///  * a link pointing somewhere else is not ours to move (D5 of
+	///    `.scratch/aghub-skill-store/spec.md`)
+	///  * `.agents/skills` is codex's second READ dir and the only WRITE slot
+	///    for every other agent whose descriptor writes there — sweeping it
+	///    revokes the skill for all of them.
 	#[test]
 	fn the_compat_sweep_never_takes_what_it_must_not() {
 		// (a) a real directory in the compat dir
@@ -1129,7 +1129,7 @@ mod tests {
 		assert!(
 			!p.actions.iter().any(|a| a.path == shared
 				&& a.action == crate::skills::shape::ReferrerAction::Unlink),
-			"the shared slot is eight agents' only slot, never a detach: {:?}",
+			"the shared slot is its readers' only slot, never a detach: {:?}",
 			p.actions
 		);
 
@@ -1160,11 +1160,9 @@ mod tests {
 
 	/// An unreadable compat dir REFUSES even when no write slot is covered.
 	///
-	/// The round that added `UnreadableCompatDir` put `if !covered { continue }`
-	/// BEFORE the fallible probe, so the refusal only fired when some other
-	/// agent's slot happened to be covered — with nothing covered the run
-	/// reported `ok` and left the stale referrer in place. An external reviewer
-	/// reproduced that by running it.
+	/// Pins the probe running before the coverage check: with nothing covered
+	/// the run must not report `ok` with the stale referrer in place.
+	/// See docs/history/core-skills-shape.md#compat-sweep-skipped-the-unreadable-probe
 	#[cfg(unix)]
 	#[test]
 	fn an_unreadable_compat_dir_refuses_even_with_no_covered_slot() {

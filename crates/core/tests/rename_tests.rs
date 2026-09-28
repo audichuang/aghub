@@ -391,12 +391,11 @@ impl Drop for EnvVarGuard {
 	}
 }
 
-/// Fix C: with TWO target agents, if ONE agent's install hits a genuine
-/// runtime failure while the OTHER (Claude) installs successfully, the WHOLE
+/// With TWO target agents, if ONE agent's install hits a genuine runtime
+/// failure while the OTHER (Claude) installs successfully, the WHOLE
 /// transaction must roll back -- Claude's half succeeding must never let the
-/// transaction reach Step 8 and remove the failing agent's old skill too.
-/// Before the fix, the rollback only fired when NOT A SINGLE agent installed,
-/// so this partial-failure case fell through to Step 8.
+/// transaction reach Step 8 and remove the failing agent's old skill too
+/// (pins the rollback firing on a PARTIAL failure, not only a total one).
 ///
 /// The failing agent is Amp (`capabilities.skills.universal: true`): it is
 /// DISCOVERED via its read-only universal-XDG append path
@@ -405,8 +404,8 @@ impl Drop for EnvVarGuard {
 /// is blocked read-only. Old-skill removal touches only the (writable) XDG
 /// path, decoupling it from the (blocked) write path -- unlike blocking a
 /// single shared per-agent dir, this does NOT also trip the pre-existing
-/// removal-failure guard, so it isolates Fix C specifically: without the fix,
-/// this scenario returns `Ok(..)` and silently drops Amp's skill.
+/// removal-failure guard, so it isolates the partial-failure rollback:
+/// without it, this scenario returns `Ok(..)` and silently drops Amp's skill.
 #[test]
 fn accept_rename_rolls_back_when_one_of_two_agents_fails_to_install() {
 	use std::os::unix::fs::PermissionsExt;

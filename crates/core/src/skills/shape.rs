@@ -8,6 +8,8 @@
 //! one `(referrer, master)` pair — what shape is it in — and nothing else. It
 //! never writes, and it never decides what to DO about a shape.
 //!
+//! D5–D8 are rows of the decision table in `.scratch/aghub-skill-store/spec.md`.
+//!
 //! Three traps are load-bearing here; each has a test below that goes red if
 //! the guard is removed.
 //!
@@ -632,11 +634,11 @@ mod tests {
 	/// A link is only a prior grant when its target is DEFINITIVELY gone.
 	///
 	/// Asked THROUGH `readers_of`, not of the helper: the helper being right
-	/// buys nothing if the call site widens again, and that is exactly what
-	/// happened — `is_link` alone made every link at the name count, so a link
-	/// to an existing directory holding no `SKILL.md` seeded `grant_to` and
-	/// `repair --yes` handed the managed skill to all EIGHT agents that read
-	/// the shared slot. An external reviewer reproduced that by running it.
+	/// buys nothing if the call site widens again. Pins that a link to an
+	/// existing directory holding no `SKILL.md` never seeds `grant_to` (else
+	/// `repair --yes` hands the managed skill to every reader of the shared
+	/// slot).
+	/// See docs/history/core-skills-shape.md#dangling-referrer-rescue
 	#[test]
 	fn readers_of_counts_only_a_definitively_dangling_link() {
 		let tmp = tempfile::tempdir().unwrap();
@@ -665,8 +667,7 @@ mod tests {
 		);
 		fs::remove_file(&entry).unwrap();
 
-		// (b) a link to a real directory serving NO skill — NOT a grant. This
-		//     is the assertion the reviewer's experiment turned red.
+		// (b) a link to a real directory serving NO skill — NOT a grant.
 		let not_a_skill = root.join("not-a-skill");
 		fs::create_dir_all(&not_a_skill).unwrap();
 		unix_fs::symlink(&not_a_skill, &entry).unwrap();
@@ -1004,9 +1005,8 @@ mod tests {
 		assert_eq!(action_at(&p, &slot), &ReferrerAction::LeaveForeign);
 	}
 
-	/// The blocker this rewrite exists for: a hand-placed private copy must not
-	/// beat the shared slot to become the Master. Selection is by SLOT, never by
-	/// registry order.
+	/// A hand-placed private copy must not beat the shared slot to become the
+	/// Master. Selection is by SLOT, never by registry order.
 	#[test]
 	fn a_private_copy_never_wins_adoption_over_the_shared_slot() {
 		let (_tmp, root) = project_fixture();
@@ -1259,16 +1259,11 @@ mod tests {
 		);
 	}
 
-	/// Codex 5.6 blocker 1 (DO-NOT-SHIP review): the compat-dir sweep used to
-	/// compare raw `PathBuf` spellings. `.agent/skills` (antigravity's
-	/// read-only compat dir) aliased AT THE DIRECTORY LEVEL onto
-	/// `.agents/skills` (its own write slot, and up to eight other agents'
-	/// only slot) is the layout `stow`, or a user hand-fixing their setup,
-	/// actually produces — not a hypothetical. `.agent/skills/demo` then
-	/// lstats as a symlink resolving to the Master exactly like the write
-	/// slot's own entry, but the literal `PathBuf` differs, so the old guard
-	/// missed it and scheduled the PHYSICAL shared slot for `Unlink` —
-	/// deleting the referrer every other agent reads through.
+	/// `.agent/skills` (antigravity's read-only compat dir) aliased AT THE
+	/// DIRECTORY LEVEL onto `.agents/skills` — the layout `stow` produces —
+	/// must never schedule the physical shared slot for `Unlink`: compare by
+	/// entry identity, not `PathBuf` spelling.
+	/// See docs/history/core-skills-shape.md#compat-sweep-unlinked-the-physical-shared-slot
 	#[test]
 	fn an_aliased_compat_dir_never_schedules_the_shared_slot_for_unlink() {
 		let (_tmp, root) = project_fixture();
@@ -1426,14 +1421,10 @@ mod tests {
 		);
 	}
 
-	/// Codex 5.6 blocker 3: a REGRESSION introduced by the `ForeignDir`
-	/// change. Before it, a same-named category directory classified as
-	/// `ForkedCopy` and the whole plan refused loudly. After it, `readers_of`
-	/// still counted the category dir as "reads this skill" on bare
-	/// existence — no root `SKILL.md` required — so an agent that has never
-	/// actually read the skill landed in `grant_to`, and the absent shared
-	/// row turned into `Create`: a managed skill silently granted through a
-	/// name collision.
+	/// A same-named category directory with no root `SKILL.md` is not a read:
+	/// counting it put an agent that never read the skill in `grant_to` and
+	/// turned the absent shared row into `Create`.
+	/// See docs/history/core-skills-shape.md#readers-of-counted-bare-existence
 	#[test]
 	fn readers_of_ignores_a_same_named_category_dir_with_no_root_skill_md() {
 		let (_tmp, root) = project_fixture();
@@ -1480,16 +1471,11 @@ mod tests {
 		);
 	}
 
-	/// Round-2 blocker: the same fixture as the test above, but the category
-	/// dir is made UNREADABLE first — reproduced against the CLI with
-	/// `chmod 000` on exactly this directory before `repair research -p`
-	/// silently planned `link: .agents/skills/research`. A shared
-	/// `has_skill_marker` bool answered "yes, a marker" for BOTH callers
-	/// (correct fail-open for `classify_shape`, wrong for this one), so
-	/// `readers_of` counted an unreadable foreign directory as a read of the
-	/// managed skill. Pins the `SkillMarker::Unknown` direction THROUGH
+	/// The same fixture as the test above, but the category dir is made
+	/// UNREADABLE first. Pins the `SkillMarker::Unknown` direction THROUGH
 	/// `readers_of` specifically — `an_unreadable_directory_is_not_mistaken_for_a_foreign_one`
 	/// above only pins `classify_shape`'s (opposite) direction.
+	/// See docs/history/core-skills-shape.md#one-bool-marker-served-two-callers
 	#[test]
 	fn readers_of_treats_an_unreadable_same_named_dir_as_not_a_reader() {
 		use std::os::unix::fs::PermissionsExt;
@@ -1686,21 +1672,12 @@ mod tests {
 		);
 	}
 
-	/// The mirror of the test above, pinning that the round-2 blocker stays
-	/// closed: an unreadable real DIRECTORY sitting in a compat read dir must
-	/// still not count as a reader. The two pre-existing tests above already
-	/// pin the end-to-end outcome for the category-dir fixture
-	/// (`readers_of_treats_an_unreadable_same_named_dir_as_not_a_reader`,
-	/// `an_unreadable_same_named_dir_never_seeds_an_implicit_create`); this
-	/// one is the load-bearing check specifically for the OR-clause just
-	/// added — swapping `Linker::is_link(&entry)` for the naive
-	/// `entry.symlink_metadata().is_ok()` (the pre-round-2 bare-existence
-	/// rule this whole change must not resurrect) makes THIS test fail
-	/// exactly as it makes those two fail: `symlink_metadata` on a directory
-	/// entry succeeds regardless of the directory's OWN permission bits
-	/// (those gate reading what is inside it, not `lstat`-ing the entry from
-	/// its parent), so the naive rule reads an unreadable directory as
-	/// "present" every bit as much as a dangling link is.
+	/// An unreadable real DIRECTORY in a compat read dir must not count as a
+	/// reader. Pins the `Linker::is_link(&entry)` clause: the naive
+	/// `entry.symlink_metadata().is_ok()` fails this test, because `lstat` on
+	/// a directory entry succeeds regardless of the directory's OWN
+	/// permission bits.
+	/// See docs/history/core-skills-shape.md#dangling-referrer-rescue
 	#[test]
 	fn readers_of_still_excludes_an_unreadable_compat_directory() {
 		use std::os::unix::fs::PermissionsExt;
@@ -1731,12 +1708,11 @@ mod tests {
 		);
 	}
 
-	/// Codex 5.6 should-fix 4 / the design decision behind finding 4: an
-	/// unreadable compat parent must REFUSE the plan, never silently pass the
-	/// sweep by. `symlink_metadata` on an entry under an unreadable directory
-	/// fails with something other than `NotFound`, and the old sweep folded
-	/// that into "nothing here" exactly like `Linker::is_link` does — so the
-	/// skill read as fully conformant while a stale link sat right there.
+	/// An unreadable compat parent must REFUSE the plan, never silently pass
+	/// the sweep by: `symlink_metadata` under an unreadable directory fails
+	/// with something other than `NotFound`, which must not read as "nothing
+	/// here".
+	/// See docs/history/core-skills-shape.md#compat-probe-folded-permission-errors
 	#[test]
 	fn an_unreadable_compat_dir_refuses_the_plan_instead_of_a_silent_no_op() {
 		use std::os::unix::fs::PermissionsExt;
@@ -1853,6 +1829,7 @@ pub enum RefuseReason {
 	/// ignored store. Every tracked path in the plan is listed, so one
 	/// `git rm -r --cached` round clears them all instead of the user
 	/// discovering the next one on every re-run.
+	/// See docs/history/core-skills-shape.md#repair-migrated-git-tracked-source-b6
 	GitTrackedSource { paths: Vec<PathBuf> },
 	/// A repository is right there (a `.git` above `path`) but `git` could not
 	/// answer whether it tracks the directory — no `git` binary, an unusable
@@ -1865,9 +1842,10 @@ pub enum RefuseReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedReferrer {
 	/// Every agent that resolves to this path. The shared `.agents/skills` slot
-	/// is ONE directory read by up to eight agents, so it appears once with all
-	/// of their ids — not eight times. Callers disclose "granting to one grants
-	/// to all of these" straight from this field.
+	/// is ONE directory read by every agent whose descriptor lists it, so it
+	/// appears once with all of their ids — not once per agent. Callers
+	/// disclose "granting to one grants to all of these" straight from this
+	/// field.
 	pub agents: Vec<&'static str>,
 	pub path: PathBuf,
 	pub shape: SkillShape,
@@ -1987,9 +1965,10 @@ fn git_tracked(path: &Path) -> GitTracked {
 ///
 /// Compares by [`entry_identity`], never `==` on `PathBuf`s: a compat dir
 /// reached through a symlinked ancestor is a different string from the slot it
-/// aliases. See docs/history/core-skills-shape.md#compat-sweep-unlinked-the-physical-shared-slot. It does NOT
-/// canonicalize `entry`'s own leaf ([`same_object`] does that below), or every
-/// correctly-linked Referrer would look like a write slot.
+/// aliases. It does NOT canonicalize `entry`'s own leaf ([`same_object`] does
+/// that below), or every correctly-linked Referrer would look like a write
+/// slot.
+/// See docs/history/core-skills-shape.md#compat-sweep-unlinked-the-physical-shared-slot
 ///
 /// `Unlink` rows in `planned` are filtered out before comparing: they are this
 /// sweep's own conclusions, and matching them would make every compat entry
@@ -2121,10 +2100,11 @@ pub fn plan_repair(
 	let shared_slot = shared_referrer_dir(store_root(scope, project_root))
 		.map(|d| d.join(&safe));
 
-	// Collapse the candidates by PATH: the shared slot is one directory that up
-	// to eight agents resolve to. Compare the constructed paths, never resolved
-	// ones — an Absent candidate does not canonicalize, so resolving would fold
-	// every ungranted agent into one bucket.
+	// Collapse the candidates by PATH: the shared slot is one directory that
+	// every agent whose descriptor lists it resolves to. Compare the
+	// constructed paths, never resolved ones — an Absent candidate does not
+	// canonicalize, so resolving would fold every ungranted agent into one
+	// bucket.
 	let mut order: Vec<PathBuf> = Vec::new();
 	let mut by_path: std::collections::HashMap<PathBuf, Vec<&'static str>> =
 		std::collections::HashMap::new();
@@ -2239,7 +2219,8 @@ pub fn plan_repair(
 	// Stale Referrers in dirs this agent only READS. `candidate_referrers` is
 	// write-dir derived, so a link an older release left in a compat dir is
 	// invisible elsewhere — and the agent keeps reading from it, so "remove for
-	// this agent alone" refuses forever (observed on antigravity).
+	// this agent alone" refuses forever.
+	// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
 	//
 	// FOUR guards decide a detach. Three — link-only, resolves to this Master
 	// (or the adopt source), nobody's write slot — live in
@@ -2439,6 +2420,7 @@ fn action_for(
 /// collapsed candidate set but ignores the action column. Repair refuses what
 /// it cannot FIX; removal refuses only what it cannot UNDO (unlinking a
 /// dangling link destroys nothing).
+/// See docs/history/core-skills-shape.md#verify-shape-reused-repair-refusals
 ///
 /// Exactly two shapes block:
 ///
@@ -2454,7 +2436,7 @@ fn action_for(
 /// - A forked copy in an agent's PRIVATE directory stays legal: removing a
 ///   private copy that shadows a Master is specified behaviour (the Master is
 ///   disclosed in `skipped`; see `crates/core/AGENTS.md` "Did that removal take
-///   anything away?").
+///   anything away?"). A guard must not quietly relitigate a spec decision.
 /// - Link shapes (`Dangling`, `ForeignTarget`, `Chain`) and the master-side
 ///   violations are repair problems, not delete hazards.
 ///

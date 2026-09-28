@@ -271,13 +271,11 @@ mod tests {
 		);
 	}
 
-	/// At PROJECT scope amp and kimi resolve to `<root>/.agents/skills`, so they
-	/// join the shared slot with codex, cline, warp, antigravity, copilot and
-	/// gemini — eight agents, one directory. At GLOBAL they share a DIFFERENT
-	/// directory with each other (`~/.config/agents/skills`), which is a second
-	/// shared slot with the same property.
+	/// At PROJECT scope kimi writes its private `.kimi/skills` and shares with
+	/// nobody. At GLOBAL amp and kimi share `~/.config/agents/skills` — a
+	/// second shared slot, distinct from `.agents/skills`.
 	#[test]
-	fn amp_and_kimi_share_the_project_slot_and_a_second_one_at_global() {
+	fn kimi_is_private_at_project_and_shares_with_amp_at_global() {
 		let tmp = tempfile::tempdir().unwrap();
 		let root = std::fs::canonicalize(tmp.path()).unwrap();
 		let kimi = plan_for("kimi", ResourceScope::ProjectOnly, Some(&root));

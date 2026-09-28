@@ -2,6 +2,9 @@
 //! (MIT) — linker.rs: is_symlink_or_junction / remove_symlink_or_junction /
 //! create_windows_symlink / normalize_path. SM's iflow copy-mode is intentionally
 //! NOT ported: aghub bans copy as a skill-install outcome.
+//!
+//! "Decision N" below refers to the decision list in
+//! `docs/specs/2026-06-19-symlink-only-skill-install.md`.
 
 pub mod classify;
 pub use classify::{
@@ -16,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// Deliberately a directory NO agent reads: storing a skill must not grant it
 /// (`.agents/skills` is scanned natively by many agent/scope pairs).
+/// See `.scratch/aghub-skill-store/spec.md`.
 pub const MASTER_STORE_DIR_NAME: &str = ".aghub";
 
 /// Resolve the `.aghub` Master store dir for a scope.
@@ -223,7 +227,7 @@ const EXCLUDE_FILES: &[&str] = &["metadata.json"];
 const EXCLUDE_DIRS: &[&str] = &[".git", "__pycache__", "__pypackages__"];
 
 /// Recursively copy a skill source tree into the canonical Master directory,
-/// applying the npx exclude lists and dereferencing symlinks.
+/// applying the npx exclude lists and skipping symlinks.
 ///
 /// Materializes the single Master only — copy is never a per-agent outcome.
 fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
@@ -404,6 +408,7 @@ impl Linker {
 			// A non-directory component is a definite absence; must agree with
 			// `skills::shape`'s marker probe. Pinned by
 			// `is_link_checked_reads_a_non_directory_component_as_absent`.
+			// See docs/history/core-install-linker.md#non-directory-compat-component-refused-repair
 			Err(e) => Err(e),
 		}
 	}

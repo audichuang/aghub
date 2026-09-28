@@ -194,7 +194,7 @@ fn add_skill_writes_master_and_symlinks_agent() {
 }
 
 // no-copy regression: add_skill_from_path writes a .agents Master and a
-// link in the agent dir, never a private copy (Locked Decision 1).
+// link in the agent dir, never a private copy.
 #[cfg(unix)]
 #[test]
 fn add_skill_from_path_links_master_not_copy() {
@@ -272,10 +272,8 @@ fn add_skill_manual_create_links_master_not_copy() {
 	);
 }
 
-// OpenCode used to be a project NativeReader: it writes `.opencode/skills`
-// but READ `.agents/skills`, so an install gave it the Master and no link of
-// its own — along with nine other agents reading that same directory. Now it
-// gets its own Referrer into the store and the shared slot stays untouched.
+// OpenCode gets its own Referrer into the store at project scope; the shared
+// `.agents/skills` slot stays untouched.
 #[cfg(unix)]
 #[test]
 fn add_skill_opencode_gets_its_own_referrer_into_the_store() {
@@ -465,7 +463,7 @@ fn test_format_skill_quotes_numeric_values() {
 }
 
 // -----------------------------------------------------------------------
-// P0-K fix: remove_skill for universal mode was a no-op
+// remove_skill in universal mode must actually remove
 // -----------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -643,9 +641,9 @@ fn remove_skill_refuses_master_another_agent_links_to() {
 	assert!(claude_link.exists());
 
 	// The directly-read Master is gone, but the protection it needed is not:
-	// a real directory in the SHARED `.agents/skills` slot is read by up to
-	// ten agents, and one agent's removal must not `remove_dir_all` it out
-	// from under the rest. Put the skill exactly there.
+	// a real directory in the SHARED `.agents/skills` slot is read by every
+	// agent whose descriptor lists it, and one agent's removal must not
+	// `remove_dir_all` it out from under the rest. Put the skill exactly there.
 	let shared = root.join(".agents/skills/shared-master");
 	std::fs::create_dir_all(&shared).unwrap();
 	std::fs::write(
@@ -1687,7 +1685,7 @@ fn add_skill_from_path_universal_does_not_overwrite_existing_canonical() {
 }
 
 // -----------------------------------------------------------------------
-// Task 5: remove_skill_planned owns the post-delete lock prune.
+// remove_skill_planned owns the post-delete lock prune.
 // -----------------------------------------------------------------------
 
 // Reuse the ONE shared global-lock guard so these tests serialize on the

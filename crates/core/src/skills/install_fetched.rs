@@ -9,6 +9,9 @@
 //! the shared multi-target preflight rejects the whole batch before any write.
 //! Soft failures (`installed: false`, `error: Some(..)`) are runtime link
 //! failures on targets that passed preflight.
+//!
+//! "Decision N" below refers to the decision list in
+//! `docs/specs/2026-06-19-symlink-only-skill-install.md`.
 
 use std::path::{Path, PathBuf};
 

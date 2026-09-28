@@ -188,8 +188,9 @@ impl ConfigManager {
 	/// types flow through one [`RemovalOutcome`] DTO.
 	///
 	/// The `Layout::Copy` plan's paths are the backing `.md` file (empty for a
-	/// never-persisted agent). `needs_confirm` is always false, so the gate is
-	/// `executed == !dry_run`; the plumbing exists for a UNIFORM wire+CLI shape.
+	/// never-persisted agent). It is never destructive of shared data, so
+	/// `needs_confirm` is always false and the gate is `executed == !dry_run`;
+	/// the plumbing exists for a UNIFORM wire+CLI shape.
 	pub fn remove_sub_agent_planned(
 		&mut self,
 		name: &str,

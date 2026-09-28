@@ -34,7 +34,9 @@ pub struct SkillAdd {
 impl SkillAdd {
 	/// A real install, carrying the materializer's OWN receipt so a caller that
 	/// writes something AFTER this call (the API import route stamps the lock)
-	/// can undo exactly this call's work when that later step fails.
+	/// can undo exactly this call's work when that later step fails. The
+	/// receipt is not optional: a caller that cannot roll back is the bug this
+	/// exists to prevent.
 	fn installed(
 		skill: Skill,
 		materialized: &crate::skills::install_fetched::MaterializedMaster,
@@ -643,8 +645,9 @@ impl ConfigManager {
 	/// Deletion re-checks each path's type and containment at delete time (TOCTOU)
 	/// and tolerates already-removed paths. On execution the per-scope skill lock
 	/// is pruned and reported in [`RemovalOutcome::prune`] (`NotRun` on a
-	/// dry-run/unconfirmed op). A prune failure is non-fatal; under `Both` the two
-	/// locks prune in sequence, so a partial prune is recorded in `Failed.pruned`.
+	/// dry-run/unconfirmed op). A prune failure is non-fatal. A single-scope
+	/// failure leaves that one lock unchanged; under `Both` the two locks prune
+	/// in sequence, so a partial prune is recorded in `Failed.pruned`.
 	pub fn remove_skill_planned(
 		&mut self,
 		name: &str,
@@ -808,6 +811,7 @@ impl ConfigManager {
 		// `--all-agents` widens the read dirs to every agent's: its promise is
 		// "gone everywhere". See crates/core/AGENTS.md "Did that removal take
 		// anything away?".
+		// See docs/history/core-removal.md#all-agents-delete-asked-only-the-initiator
 		let read_dirs = if all_agents {
 			all_agent_dirs.clone()
 		} else {
@@ -907,7 +911,8 @@ impl ConfigManager {
 			} else {
 				// Name the paths, not just the other agents: a leftover
 				// Referrer in this agent's own second read dir is what the user
-				// can act on (observed on antigravity).
+				// can act on.
+				// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
 				let reason = if where_.is_empty() {
 					"skill it reads from the shared master".to_string()
 				} else {
