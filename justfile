@@ -51,7 +51,7 @@ lint:
 # push and let CI's 3-OS matrix run — the Release is now gated on it. And when
 # you touch path/fs code, add a test that SIMULATES the platform condition on
 # Linux (e.g. operate through a symlinked temp dir to mimic macOS /private).
-preflight:
+preflight: && target-cap
     bash scripts/check-test-tmpdir.sh
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
@@ -71,6 +71,22 @@ preflight:
     cd ./crates/desktop && bun run test
     cargo test --workspace
     cargo test --workspace --doc
+
+# preflight runs this last. Local-only (bash): never wire it into `test`, which
+# CI runs on Windows. Why a wipe and not cargo-sweep:
+# docs/history/tooling.md#target-dir-filled-the-disk
+# Wipe target/ once it outgrows AGHUB_TARGET_CAP_GB (default 60)
+target-cap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="${CARGO_TARGET_DIR:-target}"
+    cap_gb="${AGHUB_TARGET_CAP_GB:-60}"
+    [ -d "$dir" ] || exit 0
+    size_kb=$(du -sk "$dir" | cut -f1)
+    if [ "$size_kb" -gt $((cap_gb * 1024 * 1024)) ]; then
+        echo "target is $((size_kb / 1024 / 1024))G, over the ${cap_gb}G cap: cargo clean"
+        cargo clean
+    fi
 
 # Check the bundled skills-sh featured catalog still installs (network + `gh`).
 #
