@@ -1,14 +1,18 @@
-//! Which agents the user has turned OFF — the ONE home of that choice.
+//! Which agents the user has turned ON — the ONE home of that choice.
 //!
-//! A disabled agent is one aghub does not manage: no flow that picks its own
-//! agent set (repair, update, git sync, rename, delete-from-all) writes into a
-//! disabled agent's directories. It still counts as a READER wherever a flow
-//! asks "would anyone lose this skill" — not managing an agent must never mean
+//! Stored as an ALLOW-list: an agent aghub has never been told to manage —
+//! one a later release adds, or one that only appeared on this machine after
+//! the choice was saved — stays off until the user turns it on. Everything
+//! outside the list is "disabled": no flow that picks its own agent set
+//! (repair, update, git sync, rename, delete-from-all) writes into its
+//! directories. A disabled agent still counts as a READER wherever a flow asks
+//! "would anyone lose this skill" — not managing an agent must never mean
 //! breaking it.
 //!
 //! Persisted under [`crate::paths::app_data_dir`] so every surface (desktop,
-//! CLI, a remote's aghub-api) reads the same answer. Default: every agent is
-//! managed, which is also what a missing file means.
+//! CLI, a remote's aghub-api) reads the same answer. A missing file means
+//! nobody chose yet, and then every agent is managed (the CLI-only default;
+//! the desktop seeds a real choice on first run).
 
 use std::collections::BTreeSet;
 use std::io;
@@ -18,15 +22,24 @@ const FILE_NAME: &str = "agents.json";
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct AgentSettingsFile {
-	#[serde(default)]
-	disabled: BTreeSet<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	enabled: Option<BTreeSet<String>>,
+	/// v2.34.0 stored the complement. Read once, never written again.
+	#[serde(default, skip_serializing)]
+	disabled: Option<BTreeSet<String>>,
 }
 
 fn settings_path(data_dir: &Path) -> PathBuf {
 	data_dir.join(FILE_NAME)
 }
 
-/// The stored selection, or `None` when the user never saved one.
+fn all_ids() -> impl Iterator<Item = String> {
+	crate::AgentType::ALL.iter().map(|a| a.as_str().to_string())
+}
+
+/// The stored selection as the agents that are OFF, or `None` when the user
+/// never saved one. Every agent outside the stored allow-list counts, so an
+/// agent the choice predates is off.
 ///
 /// `Err` only for a file that exists and cannot be read or parsed.
 pub fn read_disabled_agents_in(
@@ -39,21 +52,23 @@ pub fn read_disabled_agents_in(
 	};
 	let file: AgentSettingsFile = serde_json::from_str(&text)
 		.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-	Ok(Some(file.disabled))
+	Ok(Some(match file.enabled {
+		Some(enabled) => all_ids().filter(|id| !enabled.contains(id)).collect(),
+		// A v2.34.0 file: its complement is what the user had on, so reading
+		// it this way keeps their state; the next save writes an allow-list.
+		None => file.disabled.unwrap_or_default(),
+	}))
 }
 
-/// Replace the stored selection. Unknown ids are dropped so a stale or typo'd
-/// id cannot linger in the file.
+/// Replace the stored selection: every known agent NOT in `disabled` is
+/// stored as on. Unknown ids simply do not appear.
 pub fn write_disabled_agents_in(
 	data_dir: &Path,
 	disabled: &BTreeSet<String>,
 ) -> io::Result<()> {
 	let file = AgentSettingsFile {
-		disabled: disabled
-			.iter()
-			.filter(|id| id.parse::<crate::AgentType>().is_ok())
-			.cloned()
-			.collect(),
+		enabled: Some(all_ids().filter(|id| !disabled.contains(id)).collect()),
+		disabled: None,
 	};
 	std::fs::create_dir_all(data_dir)?;
 	let path = settings_path(data_dir);
@@ -153,6 +168,40 @@ mod tests {
 		assert_eq!(
 			read_disabled_agents_in(dir.path()).unwrap(),
 			Some(BTreeSet::from(["copilot".to_string()]))
+		);
+	}
+
+	/// THE property of the allow-list: an agent the saved choice never named
+	/// (a later release's, simulated by a file that omits it) is off.
+	#[test]
+	fn an_agent_the_choice_never_named_is_disabled() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join(FILE_NAME), r#"{"enabled":["claude"]}"#)
+			.unwrap();
+		let disabled = read_disabled_agents_in(dir.path()).unwrap().unwrap();
+		assert!(disabled.contains("augmentcode"));
+		assert!(!disabled.contains("claude"));
+	}
+
+	/// A v2.34.0 file keeps meaning what it meant, and is rewritten as an
+	/// allow-list on the next save.
+	#[test]
+	fn a_legacy_disabled_file_keeps_its_meaning() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join(FILE_NAME),
+			r#"{"disabled":["copilot"]}"#,
+		)
+		.unwrap();
+		let disabled = read_disabled_agents_in(dir.path()).unwrap().unwrap();
+		assert_eq!(disabled, BTreeSet::from(["copilot".to_string()]));
+
+		write_disabled_agents_in(dir.path(), &disabled).unwrap();
+		let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+		assert!(text.contains("\"enabled\"") && !text.contains("\"disabled\""));
+		assert_eq!(
+			read_disabled_agents_in(dir.path()).unwrap(),
+			Some(disabled)
 		);
 	}
 

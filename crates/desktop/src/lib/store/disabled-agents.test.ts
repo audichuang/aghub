@@ -58,6 +58,7 @@ function source(
 		},
 		legacy: async () => legacy,
 		knownIds: new Set(["claude", "copilot", "gemini"]),
+		availableIds: new Set(["claude"]),
 	};
 }
 
@@ -73,10 +74,10 @@ test("an unconfigured server is seeded once from legacy, stale ids dropped", asy
 	assert.deepEqual(s.writes, [["copilot"]]);
 });
 
-test("nothing to seed leaves the server untouched", async () => {
+test("a first run turns on only the agents detected right now", async () => {
 	const s = source({ agents: [], configured: false }, null);
-	assert.deepEqual(await loadDisabledAgents(s), []);
-	assert.deepEqual(s.writes, []);
+	assert.deepEqual(await loadDisabledAgents(s), ["copilot", "gemini"]);
+	assert.deepEqual(s.writes, [["copilot", "gemini"]]);
 });
 
 test("an older server without the endpoint falls back to legacy", async () => {

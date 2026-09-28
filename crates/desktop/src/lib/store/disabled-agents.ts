@@ -51,12 +51,17 @@ export interface DisabledAgentsSource {
 	legacy(): Promise<string[] | null>;
 	/** Ids the server knows — a stale legacy id would be a 400. */
 	knownIds: ReadonlySet<string>;
+	/** Agents detected on that machine right now. */
+	availableIds: ReadonlySet<string>;
 }
 
 /**
  * The effective selection. A server that has never been configured is seeded
- * ONCE from the legacy selection (a remote's own key, else Local's — the old
- * first-connect inheritance), so upgrading changes nobody's choice.
+ * ONCE: from the legacy selection when there is one (a remote's own key, else
+ * Local's — the old first-connect inheritance), so upgrading changes nobody's
+ * choice; otherwise with only the agents detected right now turned on. The
+ * server stores an allow-list, so any agent that appears LATER stays off until
+ * the user turns it on.
  */
 export async function loadDisabledAgents(
 	source: DisabledAgentsSource,
@@ -65,8 +70,10 @@ export async function loadDisabledAgents(
 	if (stored === null) return (await source.legacy()) ?? [];
 	if (stored.configured) return stored.agents;
 	const legacy = await source.legacy();
-	if (legacy === null) return stored.agents;
-	const seed = legacy.filter((id) => source.knownIds.has(id));
+	const seed =
+		legacy === null
+			? [...source.knownIds].filter((id) => !source.availableIds.has(id))
+			: legacy.filter((id) => source.knownIds.has(id));
 	return (await source.write(seed)).agents;
 }
 

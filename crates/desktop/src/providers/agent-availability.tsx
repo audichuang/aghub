@@ -54,9 +54,15 @@ export function AgentAvailabilityProvider({
 				api,
 				activeId,
 				new Set(allAgents.map((agent) => agent.id)),
+				new Set(
+					availabilityData
+						.filter((a: AgentAvailabilityDto) => a.is_available)
+						.map((a: AgentAvailabilityDto) => a.id),
+				),
 			),
-		// The known ids filter a legacy seed, so wait for the roster.
-		enabled: agentsLoaded,
+		// A first-run seed is built from the roster AND what is detected, so
+		// both must have LOADED — a failed one would seed an empty world.
+		enabled: agentsLoaded && availabilityLoaded,
 	});
 	const disabledAgents = useMemo(
 		() => new Set(disabledAgentIds),

@@ -51,12 +51,14 @@ export function getDisabledAgents(
 	api: ApiClient,
 	connectionId: string,
 	knownIds: ReadonlySet<string>,
+	availableIds: ReadonlySet<string>,
 ): Promise<string[]> {
 	return loadDisabledAgents({
 		read: () => readServer(api),
 		write: (agents) => api.agents.setDisabled(agents),
 		legacy: () => getLegacyDisabledAgents(connectionId),
 		knownIds,
+		availableIds,
 	});
 }
 
