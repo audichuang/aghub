@@ -1,4 +1,4 @@
-//! Ticket 07: the `SkillRepository` contract — the skill-aware composite that
+//! The `SkillRepository` contract — the skill-aware composite that
 //! owns snapshot pinning and the SINGLE REST→gix fallback route.
 //!
 //! Every REST call goes through the injectable [`HttpTransport`] fed canned

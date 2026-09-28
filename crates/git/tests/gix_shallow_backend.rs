@@ -1,10 +1,10 @@
-//! Ticket 05: the `RepoFetchBackend` trait + `GixShallow` backend.
+//! The `RepoFetchBackend` trait + `GixShallow` backend.
 //!
 //! - `resolve` returns a `RepoSnapshot` whose `commit_oid` is the branch tip and
-//!   whose `tree_oid` is DISTINCT from the commit oid (OID separation, ticket 01).
+//!   whose `tree_oid` is DISTINCT from the commit oid (OID separation).
 //! - `read_tree` lists the tip's file entries (repo-relative, mode-tagged).
 //! - `read_blobs` returns the exact stored bytes for requested blob oids.
-//! - `materialize` writes selected sub-trees through the ticket-04
+//! - `materialize` writes selected sub-trees through the
 //!   `stage_tree_entries` materializer, producing a folder BYTE-IDENTICAL to a
 //!   real gix clone — including recreating an in-folder symlink as a symlink
 //!   (which is the observable proof it routed through `stage_tree_entries` and
@@ -148,7 +148,7 @@ fn resolve_returns_tip_commit_with_distinct_tree_oid() {
 	let snap = backend.resolve(&source_ref(&origin), None).unwrap();
 
 	// commit_oid must be the branch tip; tree_oid is a DIFFERENT object id (the
-	// tip's root tree) — never conflated (ticket 01 OID separation).
+	// tip's root tree) — never conflated.
 	let repo = gix::open(&origin).unwrap();
 	let tip = repo.head_id().unwrap().detach().to_string();
 	let tip_tree = repo.head_tree().unwrap().id.to_string();

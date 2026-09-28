@@ -72,12 +72,13 @@ Its own `zcode-configuration-guide` gives the discovery order: user
 
 So the WRITE slot is the private `.zcode/skills` — that is what makes a grant
 visible to ZCode alone — while `.agents/skills` must still be listed as a READ
-path. That second half is not cosmetic: root `AGENTS.md` keeps the whole
-shared-slot section because an agent missing from a shared dir's reader set is
-an agent `skills::shape::compat_unlink_authorized` does not count, and a
-`repair` run for a DIFFERENT agent may then detach a compat Referrer that ZCode
-is still reading. Covered reader, not read-only co-reader: ZCode has its own
-write slot at both scopes, so the quorum passes on its own coverage.
+path. That second half is not cosmetic (root `AGENTS.md`, "Master store vs
+Referrer": slot membership is read from the descriptor): an agent missing from
+a shared dir's reader set is an agent
+`skills::shape::compat_unlink_authorized` does not count, and a `repair` run
+for a DIFFERENT agent may then detach a compat Referrer that ZCode is still
+reading. Covered reader, not read-only co-reader: ZCode has its own write slot
+at both scopes, so the quorum passes on its own coverage.
 
 NOT `universal: true`: that flag appends `$XDG_CONFIG_HOME/agents/skills`,
 which ZCode never names. Its shared root is `~/.agents/skills`, spelled out in

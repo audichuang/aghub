@@ -21,8 +21,9 @@ pub(crate) fn find_available_port() -> Result<u16, String> {
 ///
 /// Reads two paths and formats a string — creates, opens and changes nothing.
 /// It keys on the legacy file EXISTING, with no marker: a copy does not silence
-/// it, only renaming the original aside does (and the message says so). A hint
-/// that stopped after a copy would invite a second copy over newer providers.
+/// it, only renaming the original aside does. Until then the hint repeats every
+/// boot, and following it a second time copies the pre-upgrade list over newer
+/// providers — so the message ends with RENAME.
 /// See docs/history/desktop-tauri.md#legacy-inference-db-migration-removed
 fn legacy_inference_db_hint(
 	old_root: &Path,

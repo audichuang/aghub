@@ -140,7 +140,7 @@ pub enum SourceDiffOutcome {
 	/// naming the host/DNS failure to a bare "could not fetch".
 	FetchFailed { detail: String },
 	/// Local/ssh/unsupported scheme — known before any fetch. Carries the
-	/// resolved git_ref too (the old route returned it on the early-out).
+	/// resolved git_ref too, even on this early-out.
 	UncheckableSource {
 		git_ref: Option<String>,
 		reason: UncheckableReason,
@@ -676,7 +676,7 @@ pub(crate) fn merged_baseline_for_source(
 	let mut recorded_ref: Option<String> = None;
 	let want = source.trim();
 	// Global first, then project, so project entries shadow global on a
-	// duplicate `skill_path` (mirrors the old route's insert order).
+	// duplicate `skill_path`.
 	for scope in scopes {
 		if matches!(scope, SourceScope::Global) {
 			insert_scope_entries(
@@ -1608,8 +1608,9 @@ pub fn plan_source_sync(
 	}))
 }
 
-/// PUBLIC API entry: merged-baseline, single-classification, flat output —
-/// byte-identical to the old route. Fetches internally via `deps`.
+/// PUBLIC API entry (the CLI `source diff` and the API sources route):
+/// merged-baseline, single-classification, flat output. Fetches internally via
+/// `deps`.
 pub fn diff_source(
 	input: SourceDiffInput,
 	deps: SourceDiffDeps<'_>,

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 // Oh My Pi (`can1357/oh-my-pi`). Write the `type` tag: omp's loader also reads
 // `transport`, but its connect-time validator reads `type` alone and silently
 // skips an entry it cannot validate. Untagged remote = streamable HTTP; the
-// native `enabled` toggle must survive. See docs/agents/omp.md.
+// native `enabled` toggle must survive. See docs/descriptors/omp.md.
 json_map_dialect!(json_map::Dialect {
 	toggle_key: json_map::ToggleKey::Enabled("enabled"),
 	untyped_remote: json_map::UntypedRemote::StreamableHttp,

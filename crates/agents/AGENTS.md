@@ -34,8 +34,10 @@ Evidence and migration constraints:
 
 ## AGENT-SPECIFIC GOTCHAS
 
-The cross-crate rules (universal-master read matrix, `registry::get()`)
-are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps:
+The cross-crate rules (Master store vs Referrer, `registry::get()`)
+are in the **root AGENTS.md** — not repeated here. Per-agent research and
+chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
+`docs/descriptors/`. The per-agent dialect traps:
 
 - **Claude**: skills from `~/.claude/skills/` SKILL.md (not JSON). Disabled MCPs
   omitted on serialize; URL MCPs as `"type": "sse"/"http"`

@@ -5,8 +5,8 @@ use crate::{define_mcp_paths, json_map_dialect};
 // ZCode: `json_map` under the nested `mcp.servers` key; the toggle is spelled
 // `enable` (missing = enabled). The `type` tag and "untagged remote = streamable
 // HTTP" are chosen, not vendor-attested; the `.agents/mcp.json` fallback is
-// deliberately not implemented. See docs/agents/zcode.md (incl. the probe that
-// settles the HTTP tag spelling).
+// deliberately not implemented. See docs/descriptors/zcode.md (incl. the probe
+// that settles the HTTP tag spelling).
 json_map_dialect!(json_map::Dialect {
 	server_key: "mcp.servers",
 	toggle_key: json_map::ToggleKey::Enabled("enable"),
@@ -25,7 +25,7 @@ define_mcp_paths! {
 // Write the private `.zcode/skills` first; `.agents/skills` must stay a READ
 // path so `compat_unlink_authorized` counts ZCode as a reader of the shared slot.
 // Not `universal: true` — ZCode names `~/.agents/skills`, never XDG.
-// See docs/agents/zcode.md#skill-roots.
+// See docs/descriptors/zcode.md#skill-roots.
 fn global_skills_paths() -> Vec<std::path::PathBuf> {
 	match home_dir() {
 		Some(home) => {

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 // the write dir goes first. `universal: false`: dsh's shared root is `~/.agents`
 // (`$DSH_AGENTS_HOME`), not XDG. MCP is deliberately unsupported (per-profile
 // Cordis YAML with `!!js` tags cannot round-trip); sub-agents not researched.
-// See docs/agents/dsh.md.
+// See docs/descriptors/dsh.md.
 
 /// `$VAR` wins over `~/<leaf>`; an empty value counts as unset.
 fn resolve_root(

@@ -148,11 +148,9 @@ pub fn parse_sub_agent_file_named(
 	if !is_regular_file(path)? {
 		return Ok(None);
 	}
-	// `.ok()?` here was the level BELOW the one `fe0db092` fixed: an
-	// unreadable file read as "no sub-agent by that name", so `transfer`'s
-	// already-exists check passed and the write OVERWROTE it. Verified: the
-	// same command exits 1 "Resource already exists" at mode 0644 and exits 0
-	// `success: true` at mode 0000, having replaced the file's contents.
+	// An unreadable file is `Err`, never `None`: `transfer`'s already-exists
+	// check would read `None` as absent and overwrite it.
+	// See docs/history/agents.md#absent-vs-unreadable-sub-agent-dir
 	let content = match fs::read_to_string(path) {
 		Ok(content) => content,
 		// Vanished between the stat and the read: gone IS the answer.
@@ -286,8 +284,7 @@ fn sanitize_filename(name: &str) -> String {
 // attacker who controls an ancestor of the user's own config dir has already won.
 fn is_regular_file(path: &Path) -> std::io::Result<bool> {
 	// NotFound is an answer; every other error means the entry is THERE and we
-	// could not look at it. Mapping that to `false` is the same "unreadable
-	// reads as absent" mistake, one level down from the dir traversal.
+	// could not look at it, so it is `Err`, never `false` (absent).
 	let meta = match fs::symlink_metadata(path) {
 		Ok(meta) => meta,
 		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -299,12 +296,8 @@ fn is_regular_file(path: &Path) -> std::io::Result<bool> {
 	Ok(file_type.is_file() && !file_type.is_symlink())
 }
 
-/// Name the path in an I/O error.
-///
-/// `std::io::Error` out of `fs` carries no path, so these failures reached the
-/// user as a bare `Permission denied (os error 13)` about a directory they had
-/// not asked about — `get mcps` dying on an unreadable `~/.claude/agents` told
-/// them nothing they could act on.
+/// Name the path in an I/O error: `fs` errors carry no path, and the user
+/// needs one to act on.
 fn at_path(path: &Path, error: std::io::Error) -> std::io::Error {
 	std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }

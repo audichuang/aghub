@@ -84,8 +84,8 @@ skill toggle, so this is a note, not a capability.
 - The official examples interpolate env/headers with the non-standard `!!js`
   YAML tag (`GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN`). A plain YAML
   serializer cannot round-trip that, so a rewrite would destroy a user's config
-  — and root AGENTS.md is explicit that a value the model cannot hold must be
-  refused, not approximated.
+  — and a value the model cannot hold is refused, not approximated (the rule
+  `crates/agents/AGENTS.md` states for OpenCode's SSE refusal).
 - Adding a row needs the `- insert:` verb; a bare `- id:` row is the OVERRIDE
   verb and silently no-ops (warning only) when the id matches nothing.
 

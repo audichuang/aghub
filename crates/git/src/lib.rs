@@ -1,5 +1,6 @@
 //! Git clone/fetch with credential injection, plus pluggable fetch backends
-//! ([`RepoFetchBackend`]: gix shallow / GitHub REST / system git).
+//! ([`RepoFetchBackend`]: gix shallow / GitHub REST), plus a system-`git` path
+//! for platform credential helpers.
 //!
 //! Credentials come from [`CloneOptions::with_credentials`], else the
 //! `GIT_USERNAME` / `GIT_PASSWORD` env vars. Clones land in a [`tempfile::TempDir`]

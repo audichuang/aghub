@@ -1,4 +1,4 @@
-//! Contract for the validated `SkillPath` newtype (ticket 02).
+//! Contract for the validated `SkillPath` newtype.
 //!
 //! A `SkillPath` is a repo-relative, POSIX skill *folder* path. Construction
 //! rejects anything that could escape the repo/clone root (`..`, absolute,

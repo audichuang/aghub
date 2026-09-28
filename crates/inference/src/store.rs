@@ -1767,12 +1767,12 @@ mod tests {
 		assert!(matches!(error, InferenceProviderError::EmptyModelName));
 	}
 
-	// ── Finding #3: rollback-failure observability ──────────────────────────
+	// ── Rollback-failure observability ──────────────────────────
 	//
-	// The store's best-effort rollback steps used to be `let _ = ...`, hiding a
-	// keyring rollback failure behind the primary DB error. They now route
-	// through `log_rollback_failure` → `rollback_failure_message`, which surfaces
-	// the dropped failure at WARN. The message builder is pure, so we assert its
+	// Best-effort rollback steps route their failures through
+	// `log_rollback_failure` → `rollback_failure_message` at WARN instead of
+	// discarding them, so a keyring rollback failure is not hidden behind the
+	// primary DB error. The message builder is pure, so we assert its
 	// contract directly (op + id + cause on Err; nothing on Ok) without a logger.
 
 	#[test]

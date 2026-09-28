@@ -681,7 +681,7 @@ mod tests {
 		toggle_key: ToggleKey::Disabled("disabled"),
 		..MCP_SERVERS
 	};
-	/// No transport tag at all — what `Option<Discriminator>::None` used to say.
+	/// No transport tag at all (empty `tag_key`).
 	const NO_SSE: Dialect = Dialect {
 		vocab: TransportVocabulary {
 			tag_key: "",

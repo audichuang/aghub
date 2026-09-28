@@ -1,4 +1,4 @@
-//! CRUX (ticket 05): the treeless/bare fetch used by every update/install path
+//! CRUX: the treeless/bare fetch used by every update/install path
 //! must be SHALLOW (depth-1) — history is dropped everywhere. Proven with a
 //! local-remote fixture: after fetching a repo whose tip has a parent, the
 //! parent commit object must be UNREACHABLE from the fetched object DB (not

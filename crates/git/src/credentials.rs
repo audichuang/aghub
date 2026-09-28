@@ -49,8 +49,9 @@ pub fn read_credentials() -> Option<Credentials> {
 ///
 /// # Errors
 ///
-/// `GitError::InvalidUrl` if the URL cannot be parsed; `GitError::NotHttps`
-/// for any non-HTTPS scheme (SSH/scp-style remotes are never injected into).
+/// `GitError::UrlParse` if the URL cannot be parsed (an scp-style
+/// `git@host:path` lands here); `GitError::NotHttps` for any other non-HTTPS
+/// scheme such as `ssh://`. Either way, credentials are never injected.
 pub fn inject_credentials(url: &str, creds: &Credentials) -> Result<String> {
 	let parsed = url::Url::parse(url).map_err(GitError::from)?;
 

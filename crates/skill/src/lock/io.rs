@@ -4,10 +4,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The interprocess mutation lock for the global lock file, so concurrent
-/// writers never interleave or observe a partially written file, and two aghub
-/// PROCESSES cannot both be told they created the same entry. Reentrant, so a core flow holding it for a whole
-/// transaction composes with these writers. Combined with temp+rename, readers
-/// always see either the old or the fully written new file.
+/// writers never interleave or observe a partially written file. It must be
+/// interprocess, not a process mutex: a process mutex cannot stop two aghub
+/// PROCESSES from both being told they created the same entry. Reentrant, so a
+/// core flow holding it for a whole transaction composes with these writers.
+/// Combined with temp+rename, readers always see either the old or the fully
+/// written new file.
 fn global_guard(op: &str) -> std::io::Result<super::guard::MutationGuard> {
 	mutation_guard(op, &[MutationScope::Global])
 }

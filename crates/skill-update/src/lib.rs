@@ -1376,9 +1376,8 @@ mod tests {
 	/// round trip to be told so. Here the ONLY disqualifier is a missing
 	/// `ref_commit` — the hashes agree — so this pins that the gate reads it.
 	///
-	/// That wasted request used to be free (a git ref advertisement costs no API
-	/// quota). It now comes out of GitHub's 60-per-hour anonymous budget, where
-	/// spending it is the difference between a working check and
+	/// The tip lookup comes out of GitHub's 60-per-hour anonymous API budget,
+	/// where spending it is the difference between a working check and
 	/// `uncheckable/network`.
 	#[tokio::test]
 	async fn an_unskippable_group_spends_no_preflight_round_trip() {
@@ -1581,7 +1580,7 @@ mod tests {
 		assert_eq!(out[0].heal_oid, Some(STUB_FETCH_OID.to_string()));
 	}
 
-	/// Ticket 01: a fetcher whose snapshot carries DISTINCT commit/tree oids —
+	/// A fetcher whose snapshot carries DISTINCT commit/tree oids —
 	/// as a GitHub REST trees fetch would (its root `sha` is a TREE oid).
 	struct DistinctOidFetcher {
 		root: PathBuf,

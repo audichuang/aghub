@@ -490,9 +490,10 @@ fn a_provider_typed_entry_applies_from_the_forge_the_row_advertises() {
 }
 
 /// A TFS/Azure-DevOps entry's `source` has more than two path segments, so it is
-/// not GitHub shorthand and does not resolve as a remote on its own — the
-/// pre-a3235178 assertion rejected it outright. A caller passing the `source`
-/// field `GET /sources` reported must still match.
+/// not GitHub shorthand and does not resolve as a remote on its own; the source
+/// assertion must not reject it. A caller passing the `source` field
+/// `GET /sources` reported must still match.
+/// See docs/history/skill-update.md#tfs-source-identifier-rejected
 ///
 /// Honest about its reach: this matches through the `entry_source == want` arm,
 /// not TFS-specific normalization (the desktop sends `row.sourceUrl`, which

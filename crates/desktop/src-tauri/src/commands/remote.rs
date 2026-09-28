@@ -7,8 +7,10 @@
 //! tracks live handles for teardown on disconnect and app exit.
 //!
 //! Threading: a sync `#[tauri::command] fn` runs ON THE MAIN (UI) thread and a
-//! blocking one freezes the webview, so every ssh/process command here is an
-//! `async fn` wrapping its blocking work in `async_runtime::spawn_blocking`.
+//! blocking one freezes the webview, so every ssh command here is an `async fn`
+//! wrapping its blocking work in `async_runtime::spawn_blocking`. Exception:
+//! `remote_install_source_available` is sync and runs local `git remote
+//! get-url` / `git branch --show-current` on the main thread.
 
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]

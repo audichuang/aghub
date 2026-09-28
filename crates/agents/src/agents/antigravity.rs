@@ -30,7 +30,7 @@ define_mcp_paths! {
 // Write `~/.gemini/config/skills` (the vendor's current root) FIRST; the two
 // older Antigravity dirs stay READ-ONLY so skills an older aghub installed are
 // not stranded. Known costs (doctor audits them `withheld`; `aghub repair`, not
-// `add`, migrates them): see docs/agents/antigravity.md.
+// `add`, migrates them): see docs/descriptors/antigravity.md.
 fn global_skills_paths() -> Vec<PathBuf> {
 	let Some(home) = home_dir() else {
 		return Vec::new();

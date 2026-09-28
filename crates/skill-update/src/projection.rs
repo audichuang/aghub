@@ -36,10 +36,11 @@ pub struct LocalHashes {
 /// Folder hashes for the installed copies of `wanted`, keyed by skill name.
 ///
 /// `wanted` is the lock's key set: restricting the sweep to it keeps this off
-/// every unlocked skill on the machine (folder-hashing reads every file; one
-/// real host hashed 464 folders for 34 locked names, d22de58c). The filter is
-/// by NAME only, so every agent's copy of a wanted name is still seen for the
-/// ambiguity detection (`local_hashes_cover_exactly_the_locked_names`).
+/// every unlocked skill on the machine (folder-hashing reads every file).
+/// The filter is by NAME only, so every agent's copy of a wanted name is still
+/// seen for the ambiguity detection
+/// (`local_hashes_cover_exactly_the_locked_names`).
+/// See docs/history/skill-update.md#update-check-hashes-only-locked-names
 ///
 /// `offline` returns empty without touching disk: an offline check has nothing
 /// to compare a local hash against (`offline_does_not_hash_anything`).

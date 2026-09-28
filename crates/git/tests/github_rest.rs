@@ -1,4 +1,4 @@
-//! Ticket 06: the `GithubRest` backend (the partial-fetch optimization).
+//! The `GithubRest` backend (the partial-fetch optimization).
 //!
 //! Every REST call goes through an injectable [`HttpTransport`] fed canned
 //! GitHub API JSON, and the seam RECORDS the request set — so these tests

@@ -1,4 +1,4 @@
-//! Contract for the Source-staging materializer (ticket 04): mode-aware writes
+//! Contract for the Source-staging materializer: mode-aware writes
 //! with symlink containment. Unix-gated: exec bit and symlinks are the
 //! semantics under test (Windows filename normalization is out of scope).
 #![cfg(unix)]

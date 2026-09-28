@@ -1,4 +1,4 @@
-//! Behavior-pinning tests for the shared skill-discovery policy (ticket 03).
+//! Behavior-pinning tests for the shared skill-discovery policy.
 //!
 //! These pin the EXACT semantics extracted from the historical `scan_skills`
 //! into the pure `discover_from_entries` fn, so that a later silent drift (a

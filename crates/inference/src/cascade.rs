@@ -275,10 +275,10 @@ mod tests {
 
 	#[test]
 	fn references_removes_dangling_claude_binding() {
-		// Regression (finding #1): a Claude binding row pointing at a provider
-		// must be torn down by the shared cascade, not left dangling. Adapters
-		// are rooted at temp config paths so no real home dir is touched and the
-		// keyring is never used (MemoryCredentialStore).
+		// Regression: a Claude binding row pointing at a provider must be torn
+		// down by the shared cascade, not left dangling. Adapters are rooted at
+		// temp config paths so no real home dir is touched and the keyring is
+		// never used (MemoryCredentialStore).
 		let (temp, store, provider) =
 			seed_provider("https://api.openai.com/v1");
 		store
@@ -300,9 +300,8 @@ mod tests {
 
 	#[test]
 	fn references_removes_dangling_codex_binding() {
-		// Finding #2: the Codex removal branch was untested. A codex binding row
-		// (binding-table backed, like Claude) pointing at the provider must be
-		// torn down too.
+		// The Codex removal branch: a codex binding row (binding-table backed,
+		// like Claude) pointing at the provider must be torn down too.
 		let (temp, store, provider) =
 			seed_provider("https://api.openai.com/v1");
 		store
@@ -324,10 +323,10 @@ mod tests {
 
 	#[test]
 	fn references_removes_matching_opencode_provider() {
-		// Finding #2: the OpenCode match/removal branch was untested. OpenCode is
-		// config-file backed: the cascade matches by (normalized base URL, api
-		// key) and must remove the matching provider + its auth entry. Seed the
-		// OpenCode config with the SAME provider+key so the (url, key) match hits.
+		// The OpenCode match/removal branch. OpenCode is config-file backed:
+		// the cascade matches by (normalized base URL, api key) and must remove
+		// the matching provider + its auth entry. Seed the OpenCode config with
+		// the SAME provider+key so the (url, key) match hits.
 		let (temp, store, provider) =
 			seed_provider("https://api.openai.com/v1");
 		let (claude, codex, opencode) = temp_adapters(temp.path());
@@ -357,7 +356,7 @@ mod tests {
 
 	#[test]
 	fn references_skips_opencode_when_no_api_key() {
-		// Finding #2: the missing-API-key branch (`get_api_key` => None) must be a
+		// The missing-API-key branch (`get_api_key` => None) must be a
 		// silent no-op, not an error — with no key there is nothing to match
 		// OpenCode against. Persist the provider (so the store row exists) then
 		// drop its key so `get_api_key` returns Ok(None), not an error.
@@ -379,7 +378,7 @@ mod tests {
 
 	#[test]
 	fn references_is_idempotent_after_partial_progress() {
-		// Finding #2: no-rollback semantics. After Claude+Codex bindings are
+		// No-rollback semantics. After Claude+Codex bindings are
 		// removed, re-running the cascade must converge (idempotent), not error on
 		// the already-removed references — this is what makes an operator retry
 		// safe after a transient mid-cascade failure.
@@ -452,8 +451,8 @@ mod tests {
 		);
 	}
 
-	/// Deterministically reproduces the P2-5 race window without real
-	/// threads: the FIRST `get_api_key` call — `delete_provider_cascade`'s
+	/// Deterministically reproduces the precondition-read race window without
+	/// real threads: the FIRST `get_api_key` call — `delete_provider_cascade`'s
 	/// own precondition read, which runs UNLOCKED before any teardown or
 	/// `store.delete` — returns the value as of that moment and, as a side
 	/// effect, commits a DIFFERENT value into the backing map. That's

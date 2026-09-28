@@ -1,4 +1,4 @@
-//! HASH-PARITY GOLDEN (ticket 04, the crux): the Source-staging materializer
+//! HASH-PARITY GOLDEN (the crux): the Source-staging materializer
 //! must produce a skill folder byte-identical to — and hashing identically
 //! under `compute_skill_folder_hash` to — a REAL gix clone/checkout of the same
 //! committed content. The ground truth is gix's OWN worktree checkout, NOT the

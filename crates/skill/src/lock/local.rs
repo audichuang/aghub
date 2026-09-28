@@ -7,9 +7,9 @@ pub(super) const LOCAL_LOCK_FILE: &str = "skills-lock.json";
 const CURRENT_VERSION: u32 = 1;
 
 /// The interprocess mutation lock for THIS project's lock file — see
-/// [`super::io`]'s `global_guard` for why the process mutex this replaced was
-/// not enough. Resolves the project dir exactly like [`get_local_lock_path`], so
-/// the guard and the file it guards can never disagree.
+/// [`super::io`]'s `global_guard` for why a process mutex is not enough.
+/// Resolves the project dir exactly like [`get_local_lock_path`], so the guard
+/// and the file it guards can never disagree.
 fn project_guard(
 	op: &str,
 	cwd: Option<&Path>,
