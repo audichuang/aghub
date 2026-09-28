@@ -1982,7 +1982,7 @@ fn plan_reconcile_skill(
 	if exhaustive && !unreadable.is_empty() {
 		return Err(ConfigError::InvalidConfig(format!(
 			"cannot decide whether removing '{}' leaves the shared \
-			 .agents/skills master unread: agent(s) '{}' could not be read \
+			 .aghub master unread: agent(s) '{}' could not be read \
 			 (skills directory unreadable), and an agent aghub cannot read may \
 			 still be holding it — naming it in --remove cannot authorize a \
 			 collection this run is unable to carry out on it. Fix or remove \
@@ -2407,7 +2407,7 @@ pub fn reconcile_skill(
 							ContentProof::Landed => None,
 							ContentProof::Differs => Some(String::from(
 								"the target already holds a same-named skill \
-								 (an existing .agents/skills master) whose \
+								 (an existing .aghub master) whose \
 								 content differs from the source, and aghub \
 								 preserves an existing master rather than \
 								 overwriting it — so the copy did not carry \

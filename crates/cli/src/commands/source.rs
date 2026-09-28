@@ -748,7 +748,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 		eprintln!(
 			"warning: --universal is deprecated and ignored; \
 			 skill installs are always symlink-only \
-			 (.agents/skills master + per-agent link)"
+			 (.aghub master + per-agent link)"
 		);
 	}
 	let source = args.source.trim().to_string();

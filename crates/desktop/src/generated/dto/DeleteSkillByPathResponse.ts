@@ -38,21 +38,18 @@ export type DeleteSkillByPathResponse = {
 	 */
 	pruned_lock_entries?: Array<string>;
 	/**
-	 * Set when the post-delete lock prune failed. The deletion still happened
-	 * (prune is non-fatal); this reports why the lock could not be reconciled.
 	 * A PREVIEW's disclosure: the lock keys a committed delete WOULD drop.
 	 * Present only on a preview; `pruned_lock_entries` is the committed
 	 * counterpart. Separate keys on purpose — a preview must not claim
 	 * entries were dropped.
 	 */
 	would_prune_lock_entries?: Array<string>;
+	/**
+	 * Set when the post-delete lock prune failed. The deletion still happened
+	 * (prune is non-fatal); this reports why the lock could not be reconciled.
+	 */
 	prune_error?: string;
 	/**
-	 * The three-way answer to "did the delete happen?" — present on every
-	 * real removal response, absent on the early `success: false` bodies that
-	 * never reached a removal at all. Prefer it over reading
-	 * `dry_run`/`executed`: those two could not distinguish a refused preview
-	 * from an already-absent resource, and serialized identically for both.
 	 * The ONE field that answers "what happened?". ALWAYS present: every
 	 * success body carries a real removal state, every early `success: false`
 	 * body carries `failed` (the `Default`).

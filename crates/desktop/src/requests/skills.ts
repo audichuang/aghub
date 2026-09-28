@@ -369,7 +369,7 @@ export function deleteSkillByPathMutationOptions({
 			// the way `skill-detail-dialogs.tsx` does.
 			if (result.outcome === "kept") {
 				throw new Error(
-					"The skill was not removed: another agent still reads the shared .agents/skills master.",
+					"The skill was not removed: another agent still reads the shared .aghub master.",
 				);
 			}
 			if (result.outcome !== "removed" && result.outcome !== "absent") {

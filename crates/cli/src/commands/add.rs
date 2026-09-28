@@ -64,7 +64,7 @@ pub fn execute(
 		eprintln!(
 			"warning: --universal is deprecated and ignored; \
 			 skill installs are always symlink-only \
-			 (.agents/skills master + per-agent link)"
+			 (.aghub master + per-agent link)"
 		);
 	}
 	// The caller prints the payload (single-agent) or wraps it in the batch
