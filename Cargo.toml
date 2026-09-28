@@ -28,7 +28,7 @@ repository = "https://github.com/audichuang/aghub"
 # Core dependencies
 serde = { version = "1.0", features = [ "derive" ] }
 serde_json = { version = "1.0", features = [ "preserve_order" ] }
-jsonc-parser = { version = "0.33", features = [
+jsonc-parser = { version = "0.34", features = [
 	"cst",
 	"serde",
 	"serde_json",
