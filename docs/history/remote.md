@@ -1,7 +1,6 @@
 # remote history
 
-Incident history moved out of `crates/remote` code comments. The code keeps
-the current rule; each entry here keeps what happened and why.
+Incidents behind the rules in `crates/remote`, the SSH remote-VM crate.
 
 ## Tunnel joined user ControlMaster
 

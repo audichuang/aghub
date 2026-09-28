@@ -1,7 +1,6 @@
-# skill crate history
+# skill history
 
-Why some rules in `crates/skill` look the way they do. The code comment keeps
-the current rule; this file keeps what happened.
+Incidents behind the rules in `crates/skill`, chiefly its lock-file I/O.
 
 ## Mutation lock no unlocked fallback
 

@@ -1,7 +1,6 @@
 # desktop-frontend history
 
-Incident history moved out of `crates/desktop/src` code comments. The code
-keeps the current rule; each entry here keeps what happened and why.
+Incidents behind the rules in the desktop React frontend, `crates/desktop/src`.
 
 ## MCP search matched nothing
 
@@ -25,6 +24,23 @@ Rule: keys are `items.<field>`; walking every member is intended (a merged
 group's members differ by agent). Pinned by `lib/mcp-search.test.ts`: "a query
 finds an agent that is not the group's first member", "the list filter and the
 open-server check agree on every query".
+
+## Skill search left an excluded group's detail open
+
+`pages/settings/skills.tsx` and `lib/skill-search.ts` — commit `be3b7143`.
+
+SkillList runs its own fuzzy search, and the page never filtered
+`activeGroup` by `searchQuery`, so a search that excluded the active group
+left its full detail (delete included) showing with no hint that it fell out
+of the results. The page's copy of the Fuse options was also hand-copied from
+`skill-list.tsx` (same keys, same threshold 0.4), and listed `searchQuery` in
+its memo deps, rebuilding the whole index on every keystroke.
+
+Rule: the "outside the results" banner and the list filter share one index
+(`createSkillSearch`), memoized on the data, never on the query — a threshold
+that drifts between the two makes the banner lie. Pinned by
+`lib/skill-search.test.ts`: "the list filter and the open-skill check agree on
+every query".
 
 ## Preference fallback written back over the stored value
 
@@ -52,7 +68,8 @@ previous value".
 The About panel's update mutations were local to the component, so switching
 pages destroyed the observer while the download carried on. Coming back reset
 the UI to "check for updates", and pressing it started a SECOND download of the
-same update.
+same update. A slow download's success toast never fired either, because
+nothing was mounted to receive it.
 
 Rule: the update phase lives in a provider that never unmounts, and
 `canStartUpdateWork` is the one place that decides whether work may start.
@@ -61,16 +78,26 @@ download is already running", "work cannot start once an update is installed".
 
 ## Migration preview conflated moves and links
 
-`lib/skill-migration.ts` `migrationSummary` — commit `f0536c33`.
+`lib/skill-migration.ts` `migrationSummary` — commits `6a96f58b` (hoisted
+scope-wide facts) and `f0536c33` (split moves from links).
 
 A fifty-skill preview repeated the store path and the fused-agent sentence
 fifty times, burying the two per-skill facts (the name, and whether it was
 refused); those scope-wide facts were hoisted into one sentence. Separately,
 `migrating` and `linking` used to be one number, which read as "your skills are
 about to move" even when only Referrers were being created or repointed at a
-Master that never moved. One level down, a single shared `totalLinks` made the
-move sentence claim links that a link-only row contributed; the link counts are
-now split per bucket (`migratingLinks` / `linkingLinks`).
+Master that never moved. The old count took any non-`tidied` row with
+referrers, sweeping in `relinked` and `reconciled`: a user whose skills were
+already in `.aghub` and who merely lacked the private slots of two newly added
+agents was told "50 skills move to ~/.aghub" — false, and false in the
+direction that invites a manual re-sort of a store that is already correct. It
+never asked what `relinked` meant, because until a second agent joined the
+roster the two answers agreed on every row anyone had looked at. `tidying` was
+likewise gated on `referrers.length === 0`, which dropped a row that both
+adopted a Master and detached a stale compat link. One level down, a single
+shared `totalLinks` made the move sentence claim links that a link-only row
+contributed; the link counts are now split per bucket (`migratingLinks` /
+`linkingLinks`).
 
 Pinned by `lib/skill-migration.test.ts`: "a relinked row is link work, not a
 content move", "a reconciled row is link work too", "an already-migrated store

@@ -1,7 +1,7 @@
 # inference history
 
-Incident history moved out of `crates/inference` code comments. The code keeps
-the current rule; each entry here keeps what happened and why.
+Incidents behind the rules in `crates/inference`: provider metadata and keyring
+storage.
 
 ## Provider delete stale key rollback
 

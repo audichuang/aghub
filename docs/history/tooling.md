@@ -1,6 +1,7 @@
-# Tooling history
+# tooling history
 
-Build, task-runner and local-environment incidents (justfile, cargo, disk).
+Incidents in build tooling and the local environment: the `justfile`, cargo and
+disk.
 
 ## Target dir filled the disk
 
@@ -37,3 +38,20 @@ is 30 days stale on an active repo) and was moved to daily `--time 3`.
 
 Also observed: on this 31G machine a cold `aghub-api` lib-test build under
 `-j8` or more is OOM-killed (signal 9); `CARGO_BUILD_JOBS=4..6` passes.
+
+## Preflight tested a stale node_modules
+
+`justfile` `preflight` — the two `bun install --frozen-lockfile` lines and
+`bun run test`, commit `b846a5b9`.
+
+CI always installs frozen, but preflight used the developer's existing
+`node_modules`, so the local gates could pass against a different dependency
+set than the one that ships. That is how a HeroUI bump that killed every
+Checkbox/Switch got through preflight, typecheck and lint untouched: the
+lockfile said 3.2.5, `node_modules` was still 3.0.2. Separately, the frontend
+unit tests (including the source-scan guards under `src/lib`) ran in CI but
+were absent from the release gate, so the guard for that bug class would not
+have been consulted before a tag.
+
+Rule: preflight installs frozen (root and desktop) before any frontend gate,
+and runs `bun run test`.

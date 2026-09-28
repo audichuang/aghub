@@ -1,7 +1,6 @@
 # core-repair-rename history
 
-Incident history moved out of `crates/core` code comments. The code keeps the
-current rule; each entry here keeps what happened and why.
+Incidents behind `crates/core/src/skills` repair, rename and discovery.
 
 ## Repair batch loop lived in each surface
 
@@ -12,6 +11,14 @@ fifty-skill desktop migration ran as fifty independently racing mutations.
 Both loops also used `?`, so an EACCES on skill 25 of 50 discarded the report
 for the 24 that had already migrated — the disk was fine (every step is
 crash-safe and idempotent) but the user was told nothing.
+
+The guard must also come BEFORE the lock read, because the lock decides which
+directory may be ADOPTED as a Master: this run reads `demo` as locked, another
+aghub deletes that entry and releases, npx drops a fresh real
+`.agents/skills/demo` in place, and this run resumes with a stale
+`in_lock = true` and adopts content nobody authorized. Dry runs take no guard
+(they write nothing), so a preview still reads outside it — deliberate, and
+the reason a preview is authority for nothing.
 
 Rule: `repair::repair_all` is the one home for the batch, under ONE outer
 mutation guard taken before the lock read; a failing skill becomes a

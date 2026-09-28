@@ -1,7 +1,7 @@
 # core-manager history
 
-Incident history moved out of `crates/core` code comments. The code keeps the
-current rule; each entry here keeps what happened and why.
+Incidents behind `crates/core/src/manager`: the ConfigManager skill mutations
+and their attribution.
 
 ## Re-add reported requested metadata
 
@@ -146,3 +146,18 @@ Rule: idempotence is decided by the RESOLVED link target (the agent slot
 canonicalizes to the Master), never by the name.
 
 Commit: 75d2452d.
+
+## Both scope load_failed was always false
+
+`load_both_annotated` merges project and global and deliberately fails open —
+a broken project config must not hide the global results — which is right for
+a listing and wrong for a decision. Without a second return value
+`AgentResources::load_failed` was a constant `false` in `Both` scope, so its
+own contract ("callers that decide something must read this flag") could not
+be honoured there, and the `load_failed: true` arm in `all_agents` was dead
+code implying otherwise.
+
+Rule: `load_both_annotated_checked` returns whether either scope failed to
+load, and `Both`-scope callers that decide read it.
+
+Commit: 355afb61.

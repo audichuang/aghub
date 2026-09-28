@@ -109,6 +109,8 @@ jobs:
               run: cargo fmt --all -- --check
             - name: Frontend + docs format (whole repo)
               run: bun run format:check
+            - name: docs/history links
+              run: node scripts/check-history-links.mjs
 
     # Rust lint (clippy + audit) - 3 OS matrix
     lint-rust:

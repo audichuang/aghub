@@ -1,7 +1,7 @@
-# aghub-api history
+# api history
 
-Incident history and superseded behaviour behind comments in `crates/api`.
-The code comment keeps the current rule; this page keeps what happened.
+Incidents behind the rules in `crates/api`: the skill routes and the
+forwarded-credential guards.
 
 ## delete-by-path absent body
 

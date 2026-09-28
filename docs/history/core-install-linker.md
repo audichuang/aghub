@@ -1,7 +1,7 @@
 # core-install-linker history
 
-Incident history moved out of `crates/core` code comments. The code keeps the
-current rule; each entry here keeps what happened and why.
+Incidents behind `crates/core/src/skills` install, linker classification and
+prune.
 
 ## Doctor listed the quarantine as a skill
 
@@ -104,3 +104,18 @@ The shared slot's dirs are also deduplicated before linking, or the sharers
 report `AlreadyLinked` against work the same call just did.
 
 - Commits: 005b1783 (creation receipts), 2d94db50 (lock-write signal)
+
+## Non directory compat component refused repair
+
+`Linker::is_link_checked` once folded `NotADirectory` into `Err`. A single
+regular file sitting where a compat read DIR belongs then refused `repair` for
+every skill at that scope (`compat_unlink_permitted` fails closed,
+`plan_repair` turns that into `RefuseReason::UnreadableCompatDir`, and any
+refusal blocks the whole plan), with a `fix:` line offering a permission to
+change and a path to move aside that do not exist.
+
+Rule: a non-directory path component is a definite absence (`Ok(false)`),
+matching `skills::shape`'s marker probe (`NotADirectory => Absent`).
+
+Pinned by: `is_link_checked_reads_a_non_directory_component_as_absent`.
+Commit: 19c5ff64.

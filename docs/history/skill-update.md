@@ -1,7 +1,7 @@
-# skill-update crate history
+# skill-update history
 
-Why some rules in `crates/skill-update` look the way they do. The code comment
-keeps the current rule; this file keeps what happened.
+Incidents behind the rules in `crates/skill-update`: update checks and the
+Sources domain.
 
 ## REST budget decline refetches over gix
 
@@ -61,3 +61,27 @@ Pinned by: `two_forges_serving_one_path_are_two_source_rows`,
 `project_two_forges_serving_one_path_are_two_source_rows`
 (`tests/source_bulk_sync_global.rs`).
 Commit: df8321a3.
+
+## Update check hashes only locked names
+
+The update check once folder-hashed every installed skill on the machine,
+locked or not; one real host hashed 464 folders for 34 locked names.
+
+Rule: `local_hashes_for_scope` restricts the sweep to the lock's names (by NAME,
+so the ambiguity detection still sees every agent's copy).
+
+Pinned by: `local_hashes_cover_exactly_the_locked_names` (`src/projection.rs`).
+Commit: d22de58c.
+
+## TFS source identifier rejected
+
+Before `a3235178`, the bulk apply's source assertion rejected a TFS/Azure-DevOps
+entry outright: its `source` has more than two path segments, so it is not
+GitHub shorthand and does not resolve as a remote on its own.
+
+Rule: the assertion matches the grouping identifier through `source_matches`,
+not the fetch coordinate.
+
+Pinned by: `tfs_style_source_identifier_matches_its_own_entry`
+(`tests/source_bulk_sync.rs`).
+Commit: a3235178.

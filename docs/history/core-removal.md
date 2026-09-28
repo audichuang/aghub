@@ -1,7 +1,7 @@
 # core-removal history
 
-Incident history moved out of `crates/core` code comments. The code keeps the
-current rule; each entry here keeps what happened and why.
+Incidents behind skill removal and resync in `crates/core`
+(`skills/removal.rs`, `skills/resync.rs`, `dto/removal.rs`).
 
 ## Slot only removal sweeps
 
@@ -157,3 +157,20 @@ Rule: `resync` owns ONE machine-code classification read by every surface;
 surfaces own only the wording.
 
 Commit: fd106912.
+
+## All agents delete asked only the initiator
+
+`remove_skill_planned` once asked discovery "did that removal take anything
+away?" over the INITIATING agent's read dirs only. That let an `all_agents`
+delete report a clean `removed` while a second agent went on discovering the
+skill from a layout the planner had missed. Separately,
+`transfer::reconcile_skill` used to keep its own copy of the verdict and
+refuse shapes that the CLI `delete` and the API delete routes — which come
+through `remove_skill_planned` — reported as `removed`.
+
+Rule: `remove_skill_planned` is the ONE home for the verdict, and with
+`all_agents` it reads every agent's dirs — the same dirs the planner just
+swept, so the two cannot disagree unless the planner really left something
+behind.
+
+Commit: 1b373c2c.

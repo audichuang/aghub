@@ -1,7 +1,7 @@
 # core-transfer history
 
-Incident history moved out of `crates/core` code comments. The code keeps the
-current rule; each entry here keeps what happened and why.
+Incidents behind `crates/core/src/transfer.rs`: batch transfer, reconcile and
+shared-backing checks.
 
 ## Batch row ok field
 

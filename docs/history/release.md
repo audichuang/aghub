@@ -1,7 +1,6 @@
 # release history
 
-Incident history moved out of `.github/workflows/release.yml` comments. The
-workflow keeps the current rule; each entry here keeps what happened and why.
+Incidents behind the release pipeline, `.github/workflows/release.yml`.
 
 ## macOS ad-hoc codesign
 
@@ -9,8 +8,10 @@ workflow keeps the current rule; each entry here keeps what happened and why.
 
 **Why a literal `-`, not a secret.** An unset secret expands to the empty
 string, and tauri-cli reads it with `var_os(...)` -> `Some("")`, which becomes
-`codesign -s ""`. That empty-identity path is the macOS build failure the
-commented-out `APPLE_*` block used to cause (the releasing-aghub skill's
+`codesign -s ""`, which fails. That is a different failure from the one the
+commented-out `APPLE_*` block used to cause: there, unset `APPLE_CERTIFICATE`
+and `APPLE_CERTIFICATE_PASSWORD` became `Some("")`, so tauri ran
+`security import` on an empty cert (the releasing-aghub skill's
 `security import: failed to import keychain certificate` row).
 
 **Why sign at all.** Without any identity tauri does not run codesign, and the

@@ -1,15 +1,15 @@
-# aghub-cli history
+# cli history
 
-Incident history and superseded behaviour behind rules the code comments in
-`crates/cli` state tersely. The rule itself lives in the code; this file keeps
-why it is that way.
+Incidents behind the rules in `crates/cli`: command defaults, scope resolution
+and output contracts.
 
 ## check scope defaults to both
 
 `check` used to follow the plain global default. Run inside a project, it
 answered "up to date" from the global lock alone without ever reading the
 project's. It now defaults to BOTH scopes like the other read-only diagnostics
-(`doctor`, `source list`, `source diff`). Commit: 4538016a.
+(`doctor`, `source list`, `source diff`). Commit: 7b2ee2d4 (help text
+corrected in 4538016a). Pinned by: `check_defaults_to_both_scopes`.
 
 ## narrowed resource args
 
@@ -62,7 +62,7 @@ the typo, on `coverage`/`doctor`/`source list`/`skill-usage`. `doctor` and
 `doctor --verify-links` — the same subcommand — disagreed about the same bad
 id. No cheap read-only probe could check a composed id; the wall came later,
 mid-write. `run()` now validates once, before every early dispatch. Commit:
-b610db98.
+b610db98. Pinned by: `invalid_agent_id_fails_consistently_across_commands`.
 
 ## source sync examples
 
@@ -70,7 +70,7 @@ The `source sync` examples used to sit in the `///` doc comment. clap re-wraps
 doc paragraphs and joined the two example lines into ONE unrunnable command
 (`… --yes aghub-cli -p source sync …`) — the only worked example in the CLI, on
 the install entry point. They now live in `SYNC_EXAMPLES`, emitted verbatim via
-`after_long_help`. Commit: b610db98.
+`after_long_help`. Commit: b610db98. Pinned by: `source_sync_help_renders`.
 
 ## doctor fail-on-issues claims
 
@@ -94,7 +94,7 @@ unpinned, not refused. Only `repair` is pinned (`plan_repair` ->
 `source diff --online` used to be a clap exit 2 whose "to pass '--online' as a
 value, use '-- --online'" tip read like a quoting problem. Since `check
 --online` exists, callers reasonably tried the same flag, so `diff` accepts it
-as a hidden no-op.
+as a hidden no-op. Pinned by: `agent_facing_message_and_flag_fixes`.
 
 ## malformed config is not missing
 
@@ -109,7 +109,8 @@ which stringified the `ConfigError` and degraded the `--json` code to
 
 Tightening that made a broken `.mcp.json` fail `check skills` and
 `prune-lock`, which never read agent config — so both now dispatch before any
-adapter is built.
+adapter is built. Pinned by:
+`malformed_agent_config_fails_delete_instead_of_reporting_success`.
 
 ## all agents message
 
@@ -117,7 +118,8 @@ adapter is built.
 'get'", contradicting both the `-a` help (`all` also works with `doctor
 --verify-links` and `source sync`) and the behaviour; its suggested remedy (a
 comma-separated list) was wrong too — lists are REJECTED by check, describe,
-coverage, prune-lock and apply-update.
+coverage, prune-lock and apply-update. Pinned by:
+`agent_facing_message_and_flag_fixes`.
 
 ## add from with name
 
@@ -152,7 +154,8 @@ and recommend deleting them. A first fix was a predicate-only probe, which left
 each command to read the file a second time through the fail-open reader; a
 non-aghub writer (an editor, `npx skills`) truncating it between the two reads
 put the empty answer back. `LockSnapshot` now reads once and is consumed
-directly.
+directly. Commit: 7b2ee2d4. Pinned by:
+`unreadable_lock_fails_the_commands_that_report_it`.
 
 ## doctor link audit
 
@@ -191,6 +194,13 @@ Other shapes of the same drift, each now closed:
   directly" long after that state was renamed `withheld` and the concept
   deleted.
 
+Pinned by: `doctor_points_a_chain_at_repair_not_at_sync`,
+`doctor_master_is_symlink_fails_both_axes`,
+`doctor_separates_orphan_masters_and_can_gate_on_issues`,
+`doctor_linked_master_prints_one_remedy_not_two`,
+`second_review_found_gaps_stay_fixed`,
+`third_review_sibling_shapes_stay_fixed`.
+
 ## source sync yes without action
 
 `source sync <repo> --yes` — the most natural spelling of "install this repo's
@@ -222,7 +232,8 @@ recorded origin, and `DiffScopeView.origin` names it.
 the dry-run return, so the preview green-lit renaming a name not in the lock
 (or `a -> a`) and the caller hit the wall only on `--yes`. The preview also
 `println!`ed prose even under `--json` on exit 0 — a strict parser read a crash
-on the success path, a lenient one read "the rename was committed".
+on the success path, a lenient one read "the rename was committed". Pinned
+by: `accept_rename_preview_validates_lock_and_honours_json`.
 
 ## reconcile without targets
 
@@ -237,4 +248,31 @@ never mentions `--add`. It is now a usage error.
 Its preview also skipped the one check that prevents data loss (no removal
 from a copy target or the source), so it green-lit plans `--yes` then refused.
 `transfer::install_scope` was once a private resolver re-reading
-`cli.global`/`cli.project`.
+`cli.global`/`cli.project`. Pinned by:
+`reconcile_rejects_empty_target_set_and_validates_source_in_preview`.
+
+## partial removal exits nonzero
+
+A removal payload with `success: false` (`RemovalKind::Partial`: the removal
+ran and at least one path could not be deleted) used to exit 0. `delete --yes`
+on a read-only directory exited 0 with the skill untouched. It now bails after
+printing the report, and suppresses the failure renderer's second document.
+Commit: 994e2e6d. Pinned by:
+`a_delete_that_removed_nothing_does_not_report_success`.
+
+## all agents sweep can keep all
+
+Since 5437da3c a `delete --all-agents` sweep can finish having taken NOTHING:
+a commit whose `blocks` is true still refuses, but the planner's own keep does
+not, and reports `kept` with `--yes` given. The single-agent `kept` message
+("re-run with --all-agents") is a dead end there, because `--all-agents` is
+what just ran, so the renderer shows the skipped list instead.
+
+## unstatable referrer test scope
+
+`a_referrer_we_cannot_stat_still_counts_as_a_referrer` covers the COPY layout
+only (`canonical_path` is None, so `plan_symlink_removal` is never entered).
+An earlier version of its comment claimed it covered the symlink sweep too,
+and reverting the symlink fix left every test there green; the symlink sweep
+has its own pair: the two arms of
+`an_agent_dir_we_cannot_stat_is_not_one_that_holds_nothing`.

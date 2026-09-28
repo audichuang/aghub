@@ -1,7 +1,7 @@
 # core-skills-shape history
 
-Incident history moved out of `crates/core` code comments. The code keeps the
-current rule; each entry here keeps what happened and why.
+Incidents behind `crates/core/src/skills/shape.rs`: shape classification,
+candidate referrers and the compat sweep.
 
 ## Candidate referrers were once shape derived
 
@@ -67,6 +67,9 @@ Commit: 6b299366.
 directory then put every agent sharing that compat dir into `grant_to`, which
 turned an absent shared row into `Create` — a managed skill granted to readers
 that never read it.
+
+This was a regression from the `ForeignDir` change: before it, the same-named
+category dir classified as `ForkedCopy` and the whole plan refused loudly.
 
 Rule: a read counts only for a root `SKILL.md` (`SkillMarker::Present`).
 
@@ -145,8 +148,8 @@ skill's source left version control: 39 deletions in `git status`, exit 0,
 doctor green. Shape cannot tell authored source from a pre-2.18 install (both
 `UnmigratedCopy`), and neither can the lock (aghub's own repo has 22 hand-edited
 skills in `skills-lock.json`). Reported against a linked worktree. Root
-`AGENTS.md`'s D7 "migration deliberately leaves alone" was only true of the
-lazy path.
+`AGENTS.md` then cited D7 (the spec's decision table) as "migration
+deliberately leaves alone", which was only true of the lazy path.
 
 Rule: a moving action on a git-tracked directory refuses (`GitTrackedSource`,
 all tracked paths on one refusal); an unanswerable probe inside a repo refuses
@@ -199,7 +202,10 @@ Rule: guard 4 (`compat_unlink_authorized`) quantifies over EVERY reader of the
 entry, matched by `entry_identity`, and an entry nobody was observed reading is
 not detachable. It is ANDed with the write-slot guard, never substituted. It is
 pure (roster and coverage as data) because the real roster has no dir read by
-two agents and written by none, and `set_skills_path_override` cannot make one.
+two agents and written by none, and `set_skills_path_override` cannot make one:
+it is a single thread-local pair that replaces an agent's read paths AND its
+write path with the same dir, which the sweep then skips as that agent's own
+slot. An end-to-end test would be green before and after the fix.
 
 Pinned by: `a_shared_compat_entry_is_spared_unless_every_reader_is_covered`,
 `the_compat_sweep_never_takes_what_it_must_not`. Commit: ff013fe3.
@@ -241,3 +247,36 @@ Rule: match the blocking shapes exhaustively so a wrong detail is unreachable.
 
 Pinned by: `commit_refuses_a_forked_copy_before_deleting_anything`.
 Commit: 74aa044a.
+
+## Verify shape reused repair refusals
+
+`verify_shape` reuses `plan_repair`'s collapsed candidate set (one entry per
+directory, with the `shared` flag) because deriving that twice is how two
+answers drift apart. It deliberately ignores the action column: repair refuses
+what it cannot FIX (a link pointing at nothing is `Refuse { MasterMissing }` —
+unfixable without a Master), while removal refuses only what it cannot UNDO.
+Unlinking a dangling link destroys nothing, so mapping repair's refusals onto
+delete refused every pre-migration user's delete outright.
+
+Rule: share the observation, not the policy; only a shared-slot `ForkedCopy`
+and an `AliasedMaster` block a removal.
+
+Commit: 74aa044a.
+
+## Antigravity write slot moved and left a compat link
+
+Antigravity's global write slot moved to `.gemini/config/skills` while
+`.gemini/antigravity/skills` kept the link an older release had made. The
+agent went on reading the skill from that compat dir, but
+`candidate_referrers` is write-dir derived, so no plan ever scheduled the
+link: "remove for this agent alone" could never take anything away and
+refused forever. The single-agent refusal had the same dead end — it named
+the other AGENTS reading the Master while staying silent about the paths, so
+the leftover Referrer in this agent's own second read dir was invisible.
+
+Rule: `plan_repair` sweeps the dirs an agent only READS for stale Referrers,
+and the single-agent removal refusal names the paths still serving the skill.
+
+Pinned by: `a_stale_compat_referrer_is_detached_once_the_write_slot_is_conformant`,
+`a_single_agent_refusal_names_the_compat_dir_still_serving_the_skill`.
+Commit: 5a14405e.

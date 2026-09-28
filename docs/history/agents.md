@@ -1,7 +1,7 @@
-# aghub-agents history
+# agents history
 
-What a flow in `crates/agents` used to do, and the rule it left behind. The
-code comments keep the current rule; this page keeps the story.
+Incidents behind the rules in `crates/agents`: descriptors, the agent roster
+and the MCP `format/` dialects.
 
 ## Json map discriminator merged into TransportVocabulary
 
@@ -40,7 +40,7 @@ broke the collinearity: `json_openclaw` writes `transport: "sse"` yet passed
 `json_opencode` passed the same lie for the same reason.
 
 **Rule**: `mcp_policy` parameters name FACTS, never dialects — a fact cannot be
-borrowed like that. Commit: `355a0a07`.
+borrowed like that. Commit: `1c0c42b9`.
 
 ## Mixed entry rule missing in three dialects
 
@@ -51,7 +51,17 @@ nobody is FORCED to call does not propagate.
 
 **Rule**: `crates/core/tests/mcp_dialect_decisions.rs` is the forcing half —
 registry-driven, one row per MCP-capable agent (`json_map` agents included).
-Commit: `1c0c42b9`.
+Commits: `8ac07b2f` (the three dialects call it), `1c0c42b9` (the forcing
+table).
+
+The decisions table does NOT force the `refuse_unwritable` call. Declaring
+`sse: ""` without the call writes an EMPTY tag instead of refusing: emptying
+Grok's `sse` and neutering the call leaves the decisions table green (its row
+says `Spelled`, and writing an empty tag still "succeeds"), while
+`every_agent_reads_back_the_transport_it_wrote` in
+`crates/core/tests/mcp_dialect_roundtrip.rs` fails with `grok cannot read back
+its own output`. That roundtrip guard, registry-driven and bidirectional via
+`NO_NATIVE_SSE`, is the forcing half for the call.
 
 ## Four hand-written roster lists
 
@@ -76,6 +86,18 @@ genuine holder was still reading.
 
 **Rule**: an existing-but-unreadable directory is `Err`; only a deliberately
 refused dir (a symlinked one) stays empty. Commit: `fe0db092`.
+
+The same mistake sat one level below, in `parse_sub_agent_file_named`: a
+`.ok()?` on the file read (and a `false` for any `symlink_metadata` error in
+`is_regular_file`) made an unreadable FILE read as "no sub-agent by that
+name", so `transfer`'s already-exists check passed and the write OVERWROTE it.
+Verified: the same command exits 1 "Resource already exists" at mode 0644 and
+exits 0 `success: true` at mode 0000, having replaced the file's contents.
+
+The bare `fs` errors that now surface carry no path, so they first reached the
+user as `Permission denied (os error 13)` about a directory they had not asked
+about — `get mcps` dying on an unreadable `~/.claude/agents`. `at_path` names
+the path.
 
 ## Hand copied env override lists leaked into real configs
 

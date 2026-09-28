@@ -99,9 +99,10 @@ macOS/Windows, so the split never shows up locally. Parity is pinned by
 `commands::tests::app_data_dir_matches_core_seam`. A desktop upgrading from
 before the unification keeps its inference db in the legacy Tauri dir and
 **aghub does not move it** — `commands/server.rs` `legacy_inference_db_hint`
-only warns, and the hint keys on the LEGACY FILE EXISTING, so a copy does not
-silence it. Do not "fix" that. Why an automatic migration was rejected:
-knowledge page `推論供應商與 app data root`.
+only warns, keyed on the LEGACY FILE EXISTING so a copy does not silence it.
+Do not "fix" that. Why:
+[`docs/history/desktop-tauri.md#legacy-inference-db-migration-removed`](docs/history/desktop-tauri.md#legacy-inference-db-migration-removed)
+and knowledge page `推論供應商與 app data root`.
 
 ## Key Design Patterns
 
