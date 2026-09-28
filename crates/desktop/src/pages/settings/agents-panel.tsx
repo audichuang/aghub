@@ -5,17 +5,22 @@ import {
 	ToggleButton,
 	ToggleButtonGroup,
 } from "@heroui/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AgentCard } from "../../components/agent-card";
 import { useAgentAvailability } from "../../hooks/use-agent-availability";
+import { useApi } from "../../hooks/use-api";
 import { useConnection } from "../../hooks/use-connection";
-import { disableAgent, enableAgent } from "../../lib/store";
+import { setAgentDisabled } from "../../lib/store";
+import { queryKeys } from "../../requests/keys";
 
 export default function AgentsPanel() {
 	const { t } = useTranslation();
 	const { availableAgents, refreshDisabledAgents } = useAgentAvailability();
-	// Toggling while connected to a remote must not rewrite Local's selection.
+	const api = useApi();
+	const queryClient = useQueryClient();
+	// Toggling while connected to a remote writes THAT server's selection.
 	const { activeId } = useConnection();
 	const [updating, setUpdating] = useState<string | null>(null);
 	const [agentFilter, setAgentFilter] = useState<
@@ -29,12 +34,13 @@ export default function AgentsPanel() {
 	) => {
 		setUpdating(agentId);
 		try {
-			if (currentlyDisabled) {
-				await enableAgent(activeId, agentId);
-			} else {
-				await disableAgent(activeId, agentId);
-			}
+			await setAgentDisabled(api, activeId, agentId, !currentlyDisabled);
 			await refreshDisabledAgents();
+			// The server plans repair around this selection, so the migration
+			// banner's preview is stale the moment it changes.
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.repairPreviews(),
+			});
 		} finally {
 			setUpdating(null);
 		}

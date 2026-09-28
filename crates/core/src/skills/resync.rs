@@ -213,7 +213,7 @@ pub fn resync_installed_skill(
 	crate::skills::linker::reject_linked_master_store(store_root)
 		.map_err(|e| ResyncError::OutOfTree(e.to_string()))?;
 
-	let agents = crate::load_all_agents(req.scope, req.project_root);
+	let agents = crate::load_managed_agents(req.scope, req.project_root);
 	let targets =
 		resync_targets_in(&agents, req.name, req.scope, req.project_root)?;
 	if targets.is_empty() {

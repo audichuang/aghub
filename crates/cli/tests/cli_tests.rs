@@ -415,6 +415,9 @@ fn isolated_cli(home: &std::path::Path, state: &std::path::Path) -> Command {
 	cmd.env("USERPROFILE", home);
 	cmd.env("APPDATA", home);
 	cmd.env("XDG_STATE_HOME", state);
+	// The app data root holds the disabled-agent selection every fan-out
+	// reads; an ambient `$XDG_DATA_HOME` would hand the test the developer's.
+	cmd.env("AGHUB_DATA_DIR", state.join("data"));
 	clear_agent_home_overrides(&mut cmd);
 	cmd.current_dir(home);
 	cmd
@@ -1231,6 +1234,56 @@ fn source_sync_dry_run_json_lists_target_agents() {
 	assert_eq!(json["actions"][0]["action"], "install");
 	// Dry-run wrote nothing.
 	assert!(!home.path().join(".aghub/my-skill").exists());
+}
+
+/// `-a all` means every MANAGED agent: one the user disabled is not in the
+/// install fan-out at all.
+#[cfg(unix)]
+#[test]
+fn source_sync_all_skips_a_disabled_agent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let source = tempfile::TempDir::new().unwrap();
+	write_source_repo(source.path(), "my-skill");
+	let sync_targets = || {
+		let out = isolated_cli(home.path(), state.path())
+			.env("AGHUB_TEST_SOURCE_FETCH_ROOT", source.path())
+			.args([
+				"-g",
+				"-a",
+				"all",
+				"source",
+				"sync",
+				"owner/testrepo",
+				"--skill",
+				"my-skill",
+				"--install-missing",
+				"--json",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"stderr: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		json["targetAgents"].clone()
+	};
+	let contains =
+		|v: &Value, id: &str| v.as_array().unwrap().iter().any(|a| a == id);
+
+	assert!(contains(&sync_targets(), "grok"), "fixture premise");
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	std::fs::write(data.join("agents.json"), r#"{"disabled":["grok"]}"#)
+		.unwrap();
+	let targets = sync_targets();
+	assert!(!contains(&targets, "grok"), "disabled agent in: {targets}");
+	assert!(
+		contains(&targets, "claude"),
+		"managed agents stay: {targets}"
+	);
 }
 
 /// An invalid agent list must fail BEFORE any fetch: no fetch root is set

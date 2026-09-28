@@ -3,10 +3,11 @@ use rocket::serde::json::Json;
 use std::path::Path;
 
 use crate::dto::agents::{
-	AgentAvailabilityDto, AgentInfo, CapabilitiesDto, McpCapabilitiesDto,
-	ScopeSupportDto, SkillCapabilitiesDto, SkillsPathsDto,
-	SubAgentCapabilitiesDto,
+	AgentAvailabilityDto, AgentInfo, CapabilitiesDto, DisabledAgentsDto,
+	McpCapabilitiesDto, ScopeSupportDto, SetDisabledAgentsRequest,
+	SkillCapabilitiesDto, SkillsPathsDto, SubAgentCapabilitiesDto,
 };
+use crate::error::{ApiError, ApiResult};
 use crate::extractors::TrustedLocalOrigin;
 
 fn format_path(path: std::path::PathBuf) -> String {
@@ -132,5 +133,96 @@ mod tests {
 		assert!(!pi.capabilities.mcp.stdio);
 		assert!(!pi.capabilities.mcp.remote);
 		assert!(pi.capabilities.skills.scopes.global);
+	}
+}
+
+fn disabled_agents_dto() -> Result<DisabledAgentsDto, ApiError> {
+	let stored = aghub_core::agent_settings::read_disabled_agents()
+		.map_err(|e| ApiError::internal(format!("agent settings: {e}")))?;
+	Ok(DisabledAgentsDto {
+		configured: stored.is_some(),
+		agents: stored.unwrap_or_default().into_iter().collect(),
+	})
+}
+
+/// The agents aghub does not manage — the one selection every surface and
+/// every server-side fan-out reads (`aghub_core::agent_settings`).
+#[get("/agents/disabled")]
+pub fn get_disabled_agents(
+	_origin: TrustedLocalOrigin,
+) -> ApiResult<DisabledAgentsDto> {
+	disabled_agents_dto().map(Json)
+}
+
+/// Replace the selection. An unknown id is a 400, not silently dropped: the
+/// caller would otherwise believe an agent is off that aghub still manages.
+#[put("/agents/disabled", format = "json", data = "<body>")]
+pub fn set_disabled_agents(
+	body: Json<SetDisabledAgentsRequest>,
+	_origin: TrustedLocalOrigin,
+) -> ApiResult<DisabledAgentsDto> {
+	let agents = body.into_inner().agents;
+	if let Some(bad) = agents
+		.iter()
+		.find(|id| id.parse::<aghub_core::AgentType>().is_err())
+	{
+		return Err(ApiError::bad_request(format!("unknown agent '{bad}'")));
+	}
+	aghub_core::agent_settings::write_disabled_agents(
+		&agents.into_iter().collect(),
+	)
+	.map_err(|e| ApiError::internal(format!("agent settings: {e}")))?;
+	disabled_agents_dto().map(Json)
+}
+
+#[cfg(test)]
+mod disabled_agents_tests {
+	use super::*;
+
+	/// The route writes where core's fan-outs read: a PUT here is what
+	/// `aghub_core::agent_settings::disabled_agents` answers afterwards.
+	#[test]
+	fn put_persists_the_selection_core_reads() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let restore = std::env::var_os(aghub_core::paths::DATA_DIR_ENV);
+		let data = tempfile::tempdir().expect("tempdir");
+		std::env::set_var(aghub_core::paths::DATA_DIR_ENV, data.path());
+
+		let before = get_disabled_agents(TrustedLocalOrigin).ok().unwrap().0;
+		assert!(!before.configured && before.agents.is_empty());
+
+		let put = |agents: &[&str]| {
+			set_disabled_agents(
+				Json(SetDisabledAgentsRequest {
+					agents: agents.iter().map(|a| a.to_string()).collect(),
+				}),
+				TrustedLocalOrigin,
+			)
+		};
+		let after = put(&["copilot"]).ok().unwrap().0;
+		assert!(after.configured);
+		assert_eq!(after.agents, vec!["copilot".to_string()]);
+		assert!(!aghub_core::agent_settings::is_managed("copilot"));
+		assert!(aghub_core::agent_settings::is_managed("claude"));
+
+		assert!(put(&["not-an-agent"]).is_err(), "unknown id is refused");
+		assert_eq!(
+			get_disabled_agents(TrustedLocalOrigin)
+				.ok()
+				.unwrap()
+				.0
+				.agents,
+			vec!["copilot".to_string()],
+			"a refused PUT leaves the stored selection untouched"
+		);
+
+		match restore {
+			Some(value) => {
+				std::env::set_var(aghub_core::paths::DATA_DIR_ENV, value)
+			}
+			None => std::env::remove_var(aghub_core::paths::DATA_DIR_ENV),
+		}
 	}
 }

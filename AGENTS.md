@@ -297,7 +297,11 @@ When you write a new test, the isolation is yours to get right. **Never pollute
 the real home**: a global-scope write still lands in `~/.aghub` plus each agent's
 own skills dir, and overriding `$HOME` alone is not enough. Isolation mechanics,
 the one-env-mutex-per-binary rule and the inode-assertion trap:
-`crates/core/AGENTS.md` Testing.
+`crates/core/AGENTS.md` Testing. The app data root also holds the
+**disabled-agent selection** every server-side fan-out reads (repair, update,
+rename, delete-from-all, `source sync -a all`): a test outside core's lib that
+expects one of those to reach a given agent must pin `$AGHUB_DATA_DIR` (the
+CLI's `isolated_cli` does), or the developer's own selection changes its answer.
 
 **A test must be able to FAIL on a real regression** — a green test that can't is
 worse than none. Assert observable OUTCOMES (values, on-disk / lock state), not a

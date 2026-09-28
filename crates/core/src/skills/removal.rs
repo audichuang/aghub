@@ -465,6 +465,13 @@ pub(crate) fn plan_removal_for_agents(
 ) -> RemovalPlan {
 	let roots = allowed_skill_roots(all_agent_dirs, project_root);
 	let safe = skill::sanitize::sanitize_name(&skill.name);
+	// "Every agent" means every MANAGED agent: a dir only disabled agents read
+	// is never swept, and a Referrer found there still keeps the Master.
+	let unmanaged = if all_agents {
+		unmanaged_skill_dirs(all_agent_dirs, project_root)
+	} else {
+		Vec::new()
+	};
 
 	if skill.canonical_path.is_some() {
 		let unselected_needs = |dir: &Path, deleting: &[PathBuf]| {
@@ -483,7 +490,7 @@ pub(crate) fn plan_removal_for_agents(
 			own_agent_dir,
 			all_agent_dirs,
 			&roots,
-			all_agents,
+			all_agents.then_some(unmanaged.as_slice()),
 			&unselected_needs,
 		)
 	} else {
@@ -491,6 +498,7 @@ pub(crate) fn plan_removal_for_agents(
 			skill,
 			&safe,
 			all_agent_dirs,
+			&unmanaged,
 			&roots,
 			project_root,
 			all_agents,
@@ -508,9 +516,12 @@ fn plan_symlink_removal(
 	own_agent_dir: Option<&Path>,
 	all_agent_dirs: &[PathBuf],
 	roots: &[PathBuf],
-	all_agents: bool,
+	// `Some(dirs only disabled agents read)` = an `--all-agents` sweep.
+	all_agents_except: Option<&[PathBuf]>,
 	unselected_needs: &impl Fn(&Path, &[PathBuf]) -> bool,
 ) -> RemovalPlan {
+	let all_agents = all_agents_except.is_some();
+	let unmanaged = all_agents_except.unwrap_or_default();
 	let canonical = crate::transfer::skill_root_unchecked(skill);
 	let canonical_real = canonical.as_ref().and_then(|c| c.canonicalize().ok());
 
@@ -541,8 +552,8 @@ fn plan_symlink_removal(
 				skipped.push(dir.clone());
 			}
 		}
-		let targeted =
-			all_agents || own_agent_dir.is_some_and(|d| d == dir.as_path());
+		let targeted = (all_agents && !unmanaged.contains(dir))
+			|| own_agent_dir.is_some_and(|d| d == dir.as_path());
 		for entry in entries {
 			// NotFound: this agent does not hold it. Any other error: the entry
 			// is THERE and unreadable — fail CLOSED, an unknown holder keeps the
@@ -661,6 +672,7 @@ fn plan_copy_removal(
 	skill: &crate::models::Skill,
 	safe: &str,
 	all_agent_dirs: &[PathBuf],
+	unmanaged: &[PathBuf],
 	roots: &[PathBuf],
 	project_root: Option<&Path>,
 	all_agents: bool,
@@ -670,7 +682,7 @@ fn plan_copy_removal(
 
 	let mut incomplete_scan = false;
 	if all_agents {
-		for dir in all_agent_dirs {
+		for dir in all_agent_dirs.iter().filter(|d| !unmanaged.contains(d)) {
 			let (entries, incomplete) =
 				candidate_entries(dir, &skill.name, safe);
 			incomplete_scan |= incomplete;
@@ -1183,6 +1195,40 @@ pub fn execute_removal(
 	Ok(report)
 }
 
+/// The dirs in `dirs` that NO managed agent reads, at either scope.
+///
+/// Spelled by the same adapter call as [`agent_skill_dirs_in_scope`], so a
+/// plain `contains` matches. Empty when nothing is disabled.
+fn unmanaged_skill_dirs(
+	dirs: &[PathBuf],
+	project_root: Option<&Path>,
+) -> Vec<PathBuf> {
+	use crate::models::ResourceScope;
+	let disabled = crate::agent_settings::disabled_agents();
+	if disabled.is_empty() {
+		return Vec::new();
+	}
+	let mut managed: Vec<PathBuf> = Vec::new();
+	for agent in crate::models::AgentType::ALL
+		.iter()
+		.filter(|agent| !disabled.contains(agent.as_str()))
+	{
+		let adapter = crate::create_adapter(*agent);
+		managed
+			.extend(adapter.get_skills_paths(None, ResourceScope::GlobalOnly));
+		if project_root.is_some() {
+			managed.extend(
+				adapter
+					.get_skills_paths(project_root, ResourceScope::ProjectOnly),
+			);
+		}
+	}
+	dirs.iter()
+		.filter(|dir| !managed.contains(dir))
+		.cloned()
+		.collect()
+}
+
 /// Union of every agent's skill read dirs for a resource scope — the set the
 /// removal planner sweeps and the prune scanner reconciles against.
 pub fn agent_skill_dirs_in_scope(
@@ -1465,6 +1511,25 @@ mod tests {
 		assert!(plan.paths.contains(&agent_dirs[0].join("foo")));
 		assert!(plan.paths.contains(&agent_dirs[1].join("foo")));
 		assert_eq!(plan.paths.len(), 3);
+	}
+
+	/// "Every agent" is every MANAGED agent: a disabled agent's Referrer is
+	/// neither unlinked nor ignored — it still holds the Master in place.
+	#[cfg(unix)]
+	#[test]
+	fn plan_removal_all_agents_skips_and_keeps_for_a_disabled_agent() {
+		let tmp = tempdir().unwrap();
+		let (canonical, agent_dirs) = symlink_layout(tmp.path());
+		let skill = symlink_skill(&canonical, &agent_dirs[0]);
+		let _off = crate::agent_settings::test_override::disable(&["cursor"]);
+		let plan =
+			plan_removal(&skill, None, &agent_dirs, Some(tmp.path()), true);
+		assert_eq!(plan.paths, vec![agent_dirs[0].join("foo")]);
+		assert!(
+			plan.skipped.contains(&canonical),
+			"the disabled agent still reads the Master: {:?}",
+			plan.skipped
+		);
 	}
 
 	#[cfg(unix)]

@@ -243,6 +243,8 @@ fn build_rocket_with_state_factories(
 				routes::preflight,
 				routes::agents::list_agents,
 				routes::agents::check_availability,
+				routes::agents::get_disabled_agents,
+				routes::agents::set_disabled_agents,
 				routes::market::search_skill_market,
 				routes::skills::list_all_agents_skills,
 				routes::skills::list_skills,

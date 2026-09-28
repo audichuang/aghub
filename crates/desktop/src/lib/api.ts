@@ -1,6 +1,7 @@
 import ky, { isHTTPError } from "ky";
 import type {
 	AgentAvailabilityDto,
+	DisabledAgentsDto,
 	AgentSkillCoverageDto,
 	AgentInfo,
 	AgentProviderResponse,
@@ -192,6 +193,15 @@ export function createApi(baseUrl: string) {
 			},
 			availability(): Promise<AgentAvailabilityDto[]> {
 				return client.get("agents/availability").json();
+			},
+			/** The agents aghub does not manage — owned by the server. */
+			disabled(): Promise<DisabledAgentsDto> {
+				return client.get("agents/disabled").json();
+			},
+			setDisabled(agents: readonly string[]): Promise<DisabledAgentsDto> {
+				return client
+					.put("agents/disabled", { json: { agents } })
+					.json();
 			},
 			skillCoverage(
 				scope: "global" | "project",

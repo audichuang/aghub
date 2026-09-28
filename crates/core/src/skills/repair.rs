@@ -901,6 +901,32 @@ mod tests {
 		);
 	}
 
+	/// A disabled agent's compat dir is not aghub's to tidy either: the same
+	/// layout as the test below, with cline off, plans no detach at all.
+	#[test]
+	fn a_disabled_agents_stale_compat_referrer_is_left_in_place() {
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "shared");
+		let write_slot = root.join(".cline").join("skills").join(name);
+		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &write_slot).unwrap();
+		let compat = root.join(".clinerules").join("skills").join(name);
+		fs::create_dir_all(compat.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &compat).unwrap();
+
+		let _off = crate::agent_settings::test_override::disable(&["cline"]);
+		let p = plan(&root, name, true);
+		assert!(
+			!p.actions.iter().any(|a| a.path == compat
+				&& a.action == crate::skills::shape::ReferrerAction::Unlink),
+			"repair must not unlink inside a disabled agent's dir: {:?}",
+			p.actions
+		);
+		assert!(p.is_noop());
+	}
+
 	/// The compat-dir sweep fires when the write slot ALREADY serves the skill.
 	///
 	/// The sibling test above covers guard 3's `Create` branch (an empty write

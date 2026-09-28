@@ -57,6 +57,8 @@ It serializes aghub against aghub only — `npx skills` takes no lock of ours, s
 
 **MCP removal contract**: root AGENTS.md states the invariant (`RemovalPlan.paths` deliberately empty). The why: a non-empty path once made the desktop preview claim it would delete `~/.claude.json`.
 
+**Disabled agents** (`agent_settings.rs`, persisted under `paths::app_data_dir()`, set via the API's `/agents/disabled`): aghub does not manage them. A flow that picks its OWN agent set and writes to it must honour that — `load_managed_agents` for a writing scan, `plan_repair` leaves a slot only disabled agents use, `plan_removal`'s `all_agents` skips dirs only they read. A "does anyone else still hold this" question keeps the full roster (`load_all_agents`, `AgentType::ALL`): a disabled agent is unmanaged, not absent, so it still keeps a Master alive. Lib unit tests read a per-thread override (`agent_settings::test_override::disable`), never the real file.
+
 **Skills discovery**: Walks directories looking for `SKILL.md`; parses YAML frontmatter between `---` markers; records `source_path` with `~` prefix.
 
 ## CONVENTIONS

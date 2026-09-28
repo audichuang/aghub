@@ -1064,6 +1064,33 @@ mod tests {
 		assert!(!p.is_noop());
 	}
 
+	/// A disabled agent is not aghub's to manage: its broken Referrer is left
+	/// exactly as found, while a managed agent's identical one is still mended.
+	#[test]
+	fn a_disabled_agents_broken_link_is_left_alone() {
+		let (_tmp, root) = project_fixture();
+		write_skill(&root.join(".aghub").join("foo"), "master");
+		let private = root.join(".claude").join("skills");
+		fs::create_dir_all(&private).unwrap();
+		unix_fs::symlink(root.join("nowhere"), private.join("foo")).unwrap();
+
+		let _off = crate::agent_settings::test_override::disable(&["claude"]);
+		let p = plan(&root, true, &[]);
+		assert_eq!(
+			action_at(&p, &private.join("foo")),
+			&ReferrerAction::Leave,
+			"repair must not write into a disabled agent's skills dir"
+		);
+		assert!(p.is_noop(), "nothing else here needs repair");
+		drop(_off);
+
+		assert_eq!(
+			action_at(&plan(&root, true, &[]), &private.join("foo")),
+			&ReferrerAction::Relink,
+			"re-enabled, the same link is repaired again"
+		);
+	}
+
 	/// Never create a Referrer before its Master exists.
 	#[test]
 	fn a_broken_link_with_no_master_refuses_instead_of_linking_to_nothing() {
@@ -2133,10 +2160,22 @@ pub fn plan_repair(
 		})
 		.collect();
 
+	// A slot only disabled agents use is not aghub's to touch
+	// (`crate::agent_settings`): it plans `Leave` whatever its shape. Decided
+	// before adoption so an unmanaged shared slot is never adopted either; the
+	// compat sweep below keeps their links too (a disabled agent is never
+	// `covered`, so guard 4 vetoes).
+	let disabled = crate::agent_settings::disabled_agents();
+	let managed =
+		|agents: &[&str]| agents.iter().any(|a| !disabled.contains(*a));
+
 	// Exactly one adoption, and only from the shared slot — never by registry
 	// order. See docs/history/core-skills-shape.md#private-copy-won-adoption-by-registry-order
-	let adopting = shaped.iter().any(|(_, shared, shape, _)| {
-		*shared && in_lock && *shape == SkillShape::UnmigratedCopy
+	let adopting = shaped.iter().any(|(_, shared, shape, agents)| {
+		*shared
+			&& in_lock
+			&& *shape == SkillShape::UnmigratedCopy
+			&& managed(agents)
 	});
 	// "Is there something to point at by the time Referrers are written?"
 	let will_have_master = master_exists || adopting;
@@ -2144,14 +2183,18 @@ pub fn plan_repair(
 	let mut planned: Vec<PlannedReferrer> = shaped
 		.into_iter()
 		.map(|(path, shared, shape, agents)| {
-			let action = action_for(
-				&shape,
-				shared,
-				in_lock,
-				will_have_master,
-				&agents,
-				grant_to,
-			);
+			let action = if managed(&agents) {
+				action_for(
+					&shape,
+					shared,
+					in_lock,
+					will_have_master,
+					&agents,
+					grant_to,
+				)
+			} else {
+				ReferrerAction::Leave
+			};
 			PlannedReferrer {
 				agents,
 				path,
@@ -2247,9 +2290,11 @@ pub fn plan_repair(
 		})
 		.collect();
 	// An agent with no write slot at this scope is never covered, so it always
-	// vetoes.
+	// vetoes. So does a disabled agent: its slot may be healthy, but detaching
+	// the compat link it reads would still be a write into its dirs.
 	let covered: std::collections::HashSet<&'static str> = roster
 		.iter()
+		.filter(|agent| !disabled.contains(agent.id))
 		.filter(|agent| {
 			let Some(slot) = agent.write.as_ref().map(|dir| dir.join(&safe))
 			else {

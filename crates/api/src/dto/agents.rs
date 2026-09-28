@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 #[derive(Debug, Serialize, TS)]
@@ -65,4 +65,19 @@ pub struct AgentAvailabilityDto {
 	pub has_global_directory: bool,
 	pub has_cli: bool,
 	pub is_available: bool,
+}
+
+/// The agents aghub does not manage. `configured` is false until someone saves
+/// a selection, so a client holding an older, local-only one can seed it.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct DisabledAgentsDto {
+	pub agents: Vec<String>,
+	pub configured: bool,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetDisabledAgentsRequest {
+	pub agents: Vec<String>,
 }

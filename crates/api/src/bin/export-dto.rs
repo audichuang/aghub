@@ -7,9 +7,9 @@ use std::{
 use aghub_api::dto::{
 	agent_coverage::AgentSkillCoverageDto,
 	agents::{
-		AgentAvailabilityDto, AgentInfo, CapabilitiesDto, McpCapabilitiesDto,
-		ScopeSupportDto, SkillCapabilitiesDto, SkillsPathsDto,
-		SubAgentCapabilitiesDto,
+		AgentAvailabilityDto, AgentInfo, CapabilitiesDto, DisabledAgentsDto,
+		McpCapabilitiesDto, ScopeSupportDto, SetDisabledAgentsRequest,
+		SkillCapabilitiesDto, SkillsPathsDto, SubAgentCapabilitiesDto,
 	},
 	common::ConfigSource,
 	credential::{
@@ -185,6 +185,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<SkillsPathsDto>(&cfg)?;
 	export_type::<AgentInfo>(&cfg)?;
 	export_type::<AgentAvailabilityDto>(&cfg)?;
+	export_type::<DisabledAgentsDto>(&cfg)?;
+	export_type::<SetDisabledAgentsRequest>(&cfg)?;
 	export_type::<ConfigSource>(&cfg)?;
 	export_type::<CreateCredentialRequest>(&cfg)?;
 	export_type::<CredentialResponse>(&cfg)?;

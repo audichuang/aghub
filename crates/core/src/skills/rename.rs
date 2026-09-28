@@ -286,10 +286,13 @@ pub fn accept_rename(
 	// P0-2 guard (a) — also enforced by adapters before fetch.
 	ensure_distinct_names(req.old_name, req.new_name)?;
 
-	// Step 2: target agents = those that ACTUALLY have the old name installed
-	// (never every agent). Mirrors apply-update only touching installed roots.
+	// Step 2: target agents = the MANAGED ones that actually have the old name
+	// installed (never every agent). Mirrors apply-update only touching
+	// installed roots. A disabled holder keeps the old name: Step 8's
+	// exhaustive removal skips dirs only disabled agents read, so it keeps the
+	// old Master too.
 	let target_agents: Vec<crate::models::AgentType> =
-		crate::load_all_agents(resource_scope, project_root)
+		crate::load_managed_agents(resource_scope, project_root)
 			.into_iter()
 			.filter(|r| r.skills.iter().any(|s| s.name == req.old_name))
 			.filter_map(|r| r.agent_id.parse().ok())

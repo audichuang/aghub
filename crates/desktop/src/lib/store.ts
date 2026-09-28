@@ -1,4 +1,4 @@
-export { disableAgent, enableAgent, getDisabledAgents } from "./store/agents";
+export { getDisabledAgents, setAgentDisabled } from "./store/agents";
 export {
 	addConnection,
 	getConnections,

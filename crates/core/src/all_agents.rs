@@ -126,3 +126,40 @@ pub fn load_all_agents(
 		})
 		.collect()
 }
+
+/// [`load_all_agents`] minus the agents the user disabled
+/// ([`crate::agent_settings`]).
+///
+/// For fan-outs that WRITE to the agents they find (resync, rename). A caller
+/// asking "who else still holds this" must keep [`load_all_agents`]: a
+/// disabled agent is unmanaged, not absent, and dropping it there would delete
+/// a Master it still reads.
+pub fn load_managed_agents(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<AgentResources> {
+	let disabled = crate::agent_settings::disabled_agents();
+	load_all_agents(scope, project_root)
+		.into_iter()
+		.filter(|agent| !disabled.contains(agent.agent_id))
+		.collect()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn managed_load_drops_only_disabled_agents() {
+		let tmp = tempfile::tempdir().unwrap();
+		let load = || {
+			load_managed_agents(ResourceScope::ProjectOnly, Some(tmp.path()))
+		};
+		assert_eq!(load().len(), registry::ALL_AGENTS.len());
+
+		let _off = crate::agent_settings::test_override::disable(&["claude"]);
+		let managed = load();
+		assert!(managed.iter().all(|a| a.agent_id != "claude"));
+		assert_eq!(managed.len(), registry::ALL_AGENTS.len() - 1);
+	}
+}

@@ -40,14 +40,24 @@ export function AgentAvailabilityProvider({
 		...agentAvailabilityQueryOptions({ api }),
 	});
 
-	// The selection is per connection: keyed by `activeId`, so switching
-	// connections reads that connection's own list instead of reusing the
-	// previous one.
-	const { data: disabledAgentIds = [], refetch: refetchDisabledAgents } =
-		useQuery({
-			queryKey: ["disabledAgents", activeId],
-			queryFn: () => getDisabledAgents(activeId),
-		});
+	// The selection lives on the SERVER the connection points at, so every
+	// server-side fan-out honours it too. Keyed by `activeId` so switching
+	// connections never shows the previous server's answer.
+	const {
+		data: disabledAgentIds = [],
+		isLoading: isLoadingDisabled,
+		refetch: refetchDisabledAgents,
+	} = useQuery({
+		queryKey: ["disabledAgents", activeId],
+		queryFn: () =>
+			getDisabledAgents(
+				api,
+				activeId,
+				new Set(allAgents.map((agent) => agent.id)),
+			),
+		// The known ids filter a legacy seed, so wait for the roster.
+		enabled: agentsLoaded,
+	});
 	const disabledAgents = useMemo(
 		() => new Set(disabledAgentIds),
 		[disabledAgentIds],
@@ -82,7 +92,9 @@ export function AgentAvailabilityProvider({
 		},
 	);
 
-	const isLoading = isLoadingAgents || isLoadingAvailability;
+	// Rendering before the selection arrives would briefly offer every agent.
+	const isLoading =
+		isLoadingAgents || isLoadingAvailability || isLoadingDisabled;
 
 	const refetch = () => {
 		void refetchAgents();

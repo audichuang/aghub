@@ -36,3 +36,45 @@ export function resolveDisabledAgents(
 	if (own !== undefined && own !== null) return own;
 	return localFallback ?? [];
 }
+
+/**
+ * Where the selection comes from now that the SERVER owns it
+ * (`aghub_core::agent_settings`): every server-side fan-out reads the same
+ * answer, so a selection kept only here would be ignored by repair, update,
+ * rename and delete-from-all.
+ */
+export interface DisabledAgentsSource {
+	/** `null` when the server predates the setting (an older remote). */
+	read(): Promise<{ agents: string[]; configured: boolean } | null>;
+	write(agents: string[]): Promise<{ agents: string[] }>;
+	/** The pre-server, per-connection selection; `null` if never saved. */
+	legacy(): Promise<string[] | null>;
+	/** Ids the server knows — a stale legacy id would be a 400. */
+	knownIds: ReadonlySet<string>;
+}
+
+/**
+ * The effective selection. A server that has never been configured is seeded
+ * ONCE from the legacy selection (a remote's own key, else Local's — the old
+ * first-connect inheritance), so upgrading changes nobody's choice.
+ */
+export async function loadDisabledAgents(
+	source: DisabledAgentsSource,
+): Promise<string[]> {
+	const stored = await source.read();
+	if (stored === null) return (await source.legacy()) ?? [];
+	if (stored.configured) return stored.agents;
+	const legacy = await source.legacy();
+	if (legacy === null) return stored.agents;
+	const seed = legacy.filter((id) => source.knownIds.has(id));
+	return (await source.write(seed)).agents;
+}
+
+/** Legacy read: `null` when neither key was ever written. */
+export function resolveLegacyDisabledAgents(
+	own: string[] | null | undefined,
+	localFallback: string[] | null | undefined,
+): string[] | null {
+	if (own == null && localFallback == null) return null;
+	return resolveDisabledAgents(own, localFallback);
+}

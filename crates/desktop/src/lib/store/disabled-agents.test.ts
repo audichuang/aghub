@@ -5,7 +5,9 @@ import { test } from "node:test";
 import {
 	disabledAgentsKey,
 	LOCAL_DISABLED_AGENTS_KEY,
+	loadDisabledAgents,
 	resolveDisabledAgents,
+	resolveLegacyDisabledAgents,
 } from "./disabled-agents.ts";
 
 test("Local keeps the bare key so existing data needs no migration", () => {
@@ -40,4 +42,53 @@ test("Local resolves from its own value alone", () => {
 	assert.deepEqual(resolveDisabledAgents(undefined, undefined), []);
 	assert.deepEqual(resolveDisabledAgents([], []), []);
 	assert.deepEqual(resolveDisabledAgents(["amp"], ["amp"]), ["amp"]);
+});
+
+function source(
+	stored: { agents: string[]; configured: boolean } | null,
+	legacy: string[] | null,
+) {
+	const writes: string[][] = [];
+	return {
+		writes,
+		read: async () => stored,
+		write: async (agents: string[]) => {
+			writes.push(agents);
+			return { agents };
+		},
+		legacy: async () => legacy,
+		knownIds: new Set(["claude", "copilot", "gemini"]),
+	};
+}
+
+test("a configured server wins over any legacy selection", async () => {
+	const s = source({ agents: ["gemini"], configured: true }, ["copilot"]);
+	assert.deepEqual(await loadDisabledAgents(s), ["gemini"]);
+	assert.deepEqual(s.writes, []);
+});
+
+test("an unconfigured server is seeded once from legacy, stale ids dropped", async () => {
+	const s = source({ agents: [], configured: false }, ["copilot", "gone"]);
+	assert.deepEqual(await loadDisabledAgents(s), ["copilot"]);
+	assert.deepEqual(s.writes, [["copilot"]]);
+});
+
+test("nothing to seed leaves the server untouched", async () => {
+	const s = source({ agents: [], configured: false }, null);
+	assert.deepEqual(await loadDisabledAgents(s), []);
+	assert.deepEqual(s.writes, []);
+});
+
+test("an older server without the endpoint falls back to legacy", async () => {
+	const s = source(null, ["copilot"]);
+	assert.deepEqual(await loadDisabledAgents(s), ["copilot"]);
+	assert.deepEqual(s.writes, []);
+});
+
+test("legacy read distinguishes never-saved from an empty selection", () => {
+	assert.equal(resolveLegacyDisabledAgents(undefined, undefined), null);
+	assert.deepEqual(resolveLegacyDisabledAgents([], undefined), []);
+	assert.deepEqual(resolveLegacyDisabledAgents(undefined, ["claude"]), [
+		"claude",
+	]);
 });

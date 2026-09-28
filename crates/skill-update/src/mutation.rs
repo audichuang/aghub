@@ -421,7 +421,7 @@ pub(crate) fn scan_agents(
 ) -> Vec<aghub_core::AgentResources> {
 	#[cfg(test)]
 	AGENT_SCANS.with(|scans| scans.set(scans.get() + 1));
-	aghub_core::load_all_agents(scope, project_root)
+	aghub_core::load_managed_agents(scope, project_root)
 }
 
 impl ScopeLock {

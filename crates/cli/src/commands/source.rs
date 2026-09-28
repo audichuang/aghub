@@ -855,10 +855,13 @@ fn sync(args: SyncArgs) -> Result<()> {
 			use aghub_core::skills::linker::{agent_link_need, LinkNeed};
 			// Registry order; keep agents that can hold a skill here.
 			// `agent_link_need` is probe-free (`classify_all` would spawn an
-			// availability subprocess per agent).
+			// availability subprocess per agent). An agent the user disabled
+			// is not aghub's to write to (`aghub_core::agent_settings`).
+			let disabled = aghub_core::agent_settings::disabled_agents();
 			aghub_core::registry::ALL_AGENTS
 				.iter()
 				.copied()
+				.filter(|d| !disabled.contains(d.id))
 				.filter(|d| {
 					!matches!(
 						agent_link_need(d, scope, project_root.as_deref()),

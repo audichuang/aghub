@@ -4,6 +4,7 @@
 
 pub mod adapter;
 pub mod adapters;
+pub mod agent_settings;
 pub mod all_agents;
 pub mod availability;
 pub mod batch;
@@ -33,7 +34,7 @@ pub use aghub_agents::{
 pub mod testing;
 
 pub use adapters::{create_adapter, AgentAdapter};
-pub use all_agents::{load_all_agents, AgentResources};
+pub use all_agents::{load_all_agents, load_managed_agents, AgentResources};
 pub use manager::ConfigManager;
 pub use transfer::{
 	InstallScope, InstallTarget, OperationAction, OperationBatchResult,
