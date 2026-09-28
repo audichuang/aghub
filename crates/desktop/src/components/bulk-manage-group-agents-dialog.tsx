@@ -62,7 +62,8 @@ export function BulkManageGroupAgentsDialog({
 	const reconcileMutation = isMcp ? mcpReconcile : skillReconcile;
 
 	// Agents that can mutate this resource kind at this scope. Their display
-	// names are keyed for the rows.
+	// names are keyed for the rows. An unavailable holder stays listed so it
+	// can be removed; a DISABLED one never is — aghub does not manage it.
 	const usableAgents = useMemo(
 		() =>
 			(availableAgents ?? []).filter(
@@ -70,6 +71,7 @@ export function BulkManageGroupAgentsDialog({
 					a != null &&
 					(a.isUsable ||
 						(!isMcp &&
+							!a.isDisabled &&
 							resources.some((resource) =>
 								resource.items.some(
 									(item) => item.agent === a.id,

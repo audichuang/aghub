@@ -72,14 +72,16 @@ export function ManageSkillAgentsDialog({
 	// dialog manages both add AND remove. The reconcile API takes `added` +
 	// `removed`, and core removal keeps shared masters intact. An installed
 	// agent is listed even when it is not currently usable (e.g. its CLI went
-	// away), otherwise there would be no way to remove the skill from it.
+	// away), otherwise there would be no way to remove the skill from it. A
+	// DISABLED agent is not listed at all: aghub does not manage it.
 	const usableAgents = useMemo(
 		() =>
 			(availableAgents ?? []).filter(
 				(a) =>
 					a != null &&
 					supportsSkillMutation(a, scope) &&
-					(a.isUsable || installedAgentIds.has(a.id)),
+					(a.isUsable ||
+						(!a.isDisabled && installedAgentIds.has(a.id))),
 			),
 		[availableAgents, installedAgentIds, scope],
 	);

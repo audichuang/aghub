@@ -293,12 +293,18 @@ pub fn execute_repair(
 		referrers: Vec::new(),
 		unlinked: Vec::new(),
 		quarantined: None,
-		fused: plan
-			.actions
-			.iter()
-			.filter(|a| a.shared)
-			.flat_map(|a| a.agents.iter().map(|id| id.to_string()))
-			.collect(),
+		// Only agents the user manages: a disabled one is not worth a line
+		// in a preview about agents aghub serves.
+		fused: {
+			let disabled = crate::agent_settings::disabled_agents();
+			plan.actions
+				.iter()
+				.filter(|a| a.shared)
+				.flat_map(|a| a.agents.iter())
+				.filter(|id| !disabled.contains(**id))
+				.map(|id| id.to_string())
+				.collect()
+		},
 		dry_run,
 	};
 
@@ -925,6 +931,20 @@ mod tests {
 			p.actions
 		);
 		assert!(p.is_noop());
+	}
+
+	/// The "still shared by" line names only managed agents.
+	#[test]
+	fn fused_omits_a_disabled_agent() {
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		write_skill(&root.join(".aghub").join(name), name, "shared");
+		let fused = |root: &Path| {
+			execute_repair(&plan(root, name, true), true).unwrap().fused
+		};
+		assert!(fused(&root).contains(&"amp".to_string()), "fixture premise");
+		let _off = crate::agent_settings::test_override::disable(&["amp"]);
+		assert!(!fused(&root).contains(&"amp".to_string()));
 	}
 
 	/// The compat-dir sweep fires when the write slot ALREADY serves the skill.
