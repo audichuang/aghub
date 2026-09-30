@@ -159,7 +159,7 @@ Examples:
 
 #[derive(Subcommand, Clone)]
 enum Commands {
-	/// List resources (skills, mcps)
+	/// List resources (skills, mcps, sub-agents)
 	Get {
 		#[arg(value_enum)]
 		resource: ResourceType,
@@ -206,9 +206,13 @@ enum Commands {
 		#[arg(long, value_name = "SECONDS")]
 		timeout: Option<u64>,
 
-		/// For skill: Description
+		/// For skill / sub-agent: Description
 		#[arg(short, long)]
 		description: Option<String>,
+
+		/// For sub-agent: instruction text (the markdown body)
+		#[arg(long)]
+		instruction: Option<String>,
 
 		/// For skill: Author name
 		#[arg(long)]
@@ -260,9 +264,13 @@ enum Commands {
 		#[arg(long, value_name = "SECONDS")]
 		timeout: Option<u64>,
 
-		/// For skill: Description
+		/// For skill / sub-agent: Description
 		#[arg(short, long)]
 		description: Option<String>,
+
+		/// For sub-agent: instruction text (the markdown body)
+		#[arg(long)]
+		instruction: Option<String>,
 
 		/// For skill: Author name
 		#[arg(long)]
@@ -583,12 +591,14 @@ pub enum SourceAction {
 	},
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum ResourceType {
 	#[value(alias = "skill")]
 	Skills,
 	#[value(alias = "mcp")]
 	Mcps,
+	#[value(name = "sub-agents", alias = "sub-agent")]
+	SubAgents,
 }
 
 /// Resource arg for the commands that ONLY work on skills.
@@ -631,6 +641,7 @@ impl ResourceType {
 		match self {
 			Self::Skills => "skill",
 			Self::Mcps => "mcp",
+			Self::SubAgents => "sub-agent",
 		}
 	}
 }
@@ -1191,6 +1202,7 @@ fn render_removal(
 		ResourceType::Skills => {
 			"no installed files (nothing on disk to remove)"
 		}
+		ResourceType::SubAgents => "the sub-agent's markdown file",
 	};
 
 	if flag("executed") != Some(true) && is_preview {
@@ -1757,6 +1769,7 @@ fn run_for_agent(
 			author,
 			version,
 			tools,
+			instruction,
 			universal,
 		} => add::execute(
 			&mut manager,
@@ -1774,6 +1787,7 @@ fn run_for_agent(
 				author,
 				version,
 				tools,
+				instruction,
 				universal,
 			},
 		)
@@ -1791,6 +1805,7 @@ fn run_for_agent(
 			author,
 			version,
 			tools,
+			instruction,
 		} => update::execute(
 			&mut manager,
 			resource,
@@ -1806,6 +1821,7 @@ fn run_for_agent(
 				author,
 				version,
 				tools,
+				instruction,
 			},
 		)
 		.map(Some),
@@ -2009,6 +2025,15 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 					 `fanout_resource` covers"
 				)
 			};
+			if resource == ResourceType::SubAgents {
+				// ponytail: core has no sub-agent batch policy (batch.rs only
+				// has run_mcp_agent_mutation / run_skill_agent_mutation) and
+				// the skill preflight must not be reused; add
+				// run_sub_agent_agent_mutation in core when a list is needed
+				return Err(anyhow::anyhow!(
+					"sub-agent add/update/delete take a single agent; pass one -a <id> (no comma list)"
+				));
+			}
 			let resource = &resource;
 			// Preflight judges the same write scope `run_for_agent` resolves;
 			// the policy itself (which capabilities, all-before-any-write)
@@ -2160,10 +2185,7 @@ mod describe {
 	) -> Result<()> {
 		let config = manager.config().context("No configuration loaded")?;
 
-		let resource_type_str = match resource {
-			ResourceType::Skills => "skill",
-			ResourceType::Mcps => "mcp",
-		};
+		let resource_type_str = resource.singular();
 		eprintln_verbose!("Describing {}: {}", resource_type_str, name);
 
 		match resource {
@@ -2199,6 +2221,19 @@ mod describe {
 					)?;
 				eprintln_verbose!("Found MCP server: {}", mcp.name);
 				print_value(&serde_json::to_value(mcp)?, json)?;
+			}
+			ResourceType::SubAgents => {
+				manager.ensure_sub_agents_readable()?;
+				let sa = config
+					.sub_agents
+					.iter()
+					.find(|s| s.name == name)
+					.ok_or_else(|| {
+						ConfigError::resource_not_found("sub_agent", &name)
+					})?;
+				eprintln_verbose!("Found sub-agent: {}", sa.name);
+				let view = aghub_core::dto::SubAgentView::from(sa);
+				print_value(&serde_json::to_value(view)?, json)?;
 			}
 		}
 

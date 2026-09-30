@@ -235,7 +235,7 @@ pub fn execute(
 		// `SkillResource`, so clap rejects `mcps` at parse time with an exact
 		// `[possible values: skills]`. Kept as defence-in-depth because this fn
 		// still takes the full `ResourceType`.
-		ResourceType::Mcps => {
+		ResourceType::Mcps | ResourceType::SubAgents => {
 			anyhow::bail!("`check` only supports skills");
 		}
 		ResourceType::Skills => {}

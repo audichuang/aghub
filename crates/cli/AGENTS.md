@@ -10,7 +10,7 @@ them, and the WHY behind each flow is in the knowledge pages named per section.
 
 ## Surface semantics (this crate is where they are written down)
 
-Aliases: `skills`/`skill`, `mcps`/`mcp`. Scope: `-a` (one id, a comma-separated
+Aliases: `skills`/`skill`, `mcps`/`mcp`, `sub-agents`/`sub-agent`. Scope: `-a` (one id, a comma-separated
 list, or `all`), `-g`/`-p`, `--all`.
 
 - **`update mcps` is a PATCH** over the freshly reloaded server (core
@@ -20,7 +20,8 @@ list, or `all`), `-g`/`-p`, `--all`.
   `-u` is refused (it used to be a silent no-op). The API PUT replaces the
   transport on purpose, because the GUI sends the whole pre-filled form and
   omits `headers` to clear them.
-- **Destructive defaults**: `delete`, `apply-update`, `prune-lock`,
+- **Destructive defaults**: `delete` (skills, mcps AND sub-agents; the same
+  `outcome` vocabulary), `apply-update`, `prune-lock`,
   `source sync`, `source accept-rename`, reconcile-with-removals → **dry-run
   unless `--yes`**. `apply-update <name>` refuses outright instead of previewing, and
   rejects `--all` from the scope table, i.e. BEFORE the `--yes` refusal.
@@ -30,6 +31,17 @@ list, or `all`), `-g`/`-p`, `--all`.
   renamed rows are skipped with an `accept-rename` hint
   and uncheckable rows are reported by name and reason, never presented as
   proof that nothing is outdated
+- **`get|describe|add|update|delete sub-agents`** are thin adapters over core
+  `add_sub_agent` / `update_sub_agent(SubAgentPatch)` / `remove_sub_agent_planned`;
+  the wire view is core `dto::SubAgentView` (shared with the API, since
+  `SubAgent`'s serde skips `instruction`; the table never prints it). `add`
+  requires `--name`, `-d` and `--instruction`; `update` is a patch (absent keeps,
+  unmodeled frontmatter survives, no rename flag); MCP-/skill-only flags (incl. `--universal`) are an
+  error naming the flag; an agent without sub-agent support is refused
+  (`UNSUPPORTED_OPERATION`) by get/describe/delete preview alike, via core
+  `ConfigManager::ensure_sub_agent_supported` (also the API's gate). **Sub-agent mutations take a single agent**: an `-a`
+  list is refused before any write (core has no sub-agent batch policy) and
+  `-a all` is refused as for every mutation; `get` accepts both.
 - **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
   `partial` | `kept` (`success: true` but THE ENTITY IS STILL THERE; the API
   adds an api-only `failed`). Read `outcome`, never `dry_run`/`executed` —

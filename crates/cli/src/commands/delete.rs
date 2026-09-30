@@ -98,6 +98,27 @@ pub fn execute(
 			payload["name"] = json!(name);
 			payload
 		}
+		ResourceType::SubAgents => {
+			if options.all_agents {
+				anyhow::bail!("--all-agents is not valid for sub-agents");
+			}
+			let is_dry_run = options.dry_run || !options.yes;
+			eprintln_verbose!(
+				"Removing sub-agent '{}' (dry_run={})",
+				name,
+				is_dry_run
+			);
+			let outcome = plan_or_noop(manager, |m| {
+				m.remove_sub_agent_planned(&name, is_dry_run, options.yes)
+			})?;
+			let view = aghub_core::dto::RemovalView::from_outcome(
+				&outcome, is_dry_run,
+			);
+			let mut payload = serde_json::to_value(&view)?;
+			payload["type"] = json!("sub-agent");
+			payload["name"] = json!(name);
+			payload
+		}
 	};
 
 	Ok(payload)

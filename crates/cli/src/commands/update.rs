@@ -20,6 +20,7 @@ pub struct UpdateArgs {
 	pub author: Option<String>,
 	pub version: Option<String>,
 	pub tools: Option<Vec<String>>,
+	pub instruction: Option<String>,
 }
 
 pub fn execute(
@@ -39,11 +40,15 @@ pub fn execute(
 		author,
 		version,
 		tools,
+		instruction,
 	} = args;
 	// The caller prints the payload (single-agent) or wraps it in the batch
 	// envelope (multi-agent) — command logic stays print-free.
 	let payload = match resource {
 		ResourceType::Skills => {
+			if instruction.is_some() {
+				anyhow::bail!("--instruction is only valid for sub-agents");
+			}
 			eprintln_verbose!("Updating skill: {}", name);
 			// Get existing skill
 			let existing = manager.get_skill(&name).ok_or_else(|| {
@@ -67,6 +72,9 @@ pub fn execute(
 			serde_json::to_value(&view)?
 		}
 		ResourceType::Mcps => {
+			if instruction.is_some() {
+				anyhow::bail!("--instruction is only valid for sub-agents");
+			}
 			eprintln_verbose!("Updating MCP server: {}", name);
 			let headers = parse_headers(headers)?;
 			let env = parse_env_vars(env_vars)?;
@@ -84,6 +92,54 @@ pub fn execute(
 			})?;
 			eprintln_verbose!("MCP server updated successfully");
 			serde_json::to_value(&mcp)?
+		}
+		ResourceType::SubAgents => {
+			if command.is_some() {
+				anyhow::bail!("--command is not valid for sub-agents");
+			}
+			if url.is_some() {
+				anyhow::bail!("--url is not valid for sub-agents");
+			}
+			if transport.is_some() {
+				anyhow::bail!("--transport is not valid for sub-agents");
+			}
+			if !headers.is_empty() {
+				anyhow::bail!("--header is not valid for sub-agents");
+			}
+			if !env_vars.is_empty() {
+				anyhow::bail!("--env is not valid for sub-agents");
+			}
+			if timeout.is_some() {
+				anyhow::bail!("--timeout is not valid for sub-agents");
+			}
+			if author.is_some() {
+				anyhow::bail!("--author is not valid for sub-agents");
+			}
+			if version.is_some() {
+				anyhow::bail!("--version is not valid for sub-agents");
+			}
+			if tools.is_some() {
+				anyhow::bail!("--tools is not valid for sub-agents");
+			}
+			if description.is_none() && instruction.is_none() {
+				anyhow::bail!(
+					"nothing to update: pass -d and/or --instruction"
+				);
+			}
+
+			eprintln_verbose!("Updating sub-agent: {}", name);
+			let patch = aghub_core::manager::sub_agent::SubAgentPatch {
+				name: None,
+				description,
+				instruction,
+			};
+			manager.update_sub_agent(&name, patch)?;
+			eprintln_verbose!("Sub-agent updated successfully");
+			let updated = manager.get_sub_agent(&name).ok_or_else(|| {
+				ConfigError::resource_not_found("sub-agent", &name)
+			})?;
+			let view = aghub_core::dto::SubAgentView::from(updated);
+			serde_json::to_value(&view)?
 		}
 	};
 
@@ -139,6 +195,7 @@ mod tests {
 				author: None,
 				version: None,
 				tools: None,
+				instruction: None,
 			},
 		)
 		.unwrap();
@@ -157,6 +214,7 @@ mod tests {
 				author: None,
 				version: None,
 				tools: None,
+				instruction: None,
 			},
 		)
 		.unwrap();
@@ -206,6 +264,7 @@ mod tests {
 				author: None,
 				version: None,
 				tools: None,
+				instruction: None,
 			},
 		)
 		.expect_err("unpersistable timeout must fail");

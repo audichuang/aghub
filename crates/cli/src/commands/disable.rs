@@ -23,6 +23,9 @@ pub fn execute(
 			eprintln_verbose!("MCP server disabled successfully");
 			json!({"enabled": false, "name": name, "type": "mcp" })
 		}
+		ResourceType::SubAgents => {
+			anyhow::bail!("only supports mcps")
+		}
 	};
 
 	Ok(payload)

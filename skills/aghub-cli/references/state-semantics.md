@@ -11,6 +11,7 @@ say when to come here.
 - [`repair --json`](#repair---json) — shapes found vs actions taken
 - [Git source versus local content](#git-source-versus-local-content) — the adoption guard
 - [Commands whose names mislead](#commands-whose-names-mislead)
+- [Sub-agents](#sub-agents) — single-agent mutations, `outcome` vocabulary
 - [Rename and interoperability edges](#rename-and-interoperability-edges)
 
 ## `doctor --json`
@@ -218,6 +219,17 @@ Each row carries `transport{type,url|command,args,env|headers,timeout}` and, on
 the all-agents paths (`-a all`, `-a a,b`), `source` and `agent`. The legacy
 top-level `type` is kept. The table shows only type and target (url or command),
 never headers or env values, which may hold tokens.
+
+## Sub-agents
+
+`get|describe|add|update|delete sub-agents` (alias `sub-agent`) manage an
+agent's sub-agent markdown files. `add` needs `--name`, `-d` and `--instruction`;
+`update <name>` patches `-d` and/or `--instruction` (absent keeps the old value,
+extra frontmatter is preserved); `delete` previews unless `--yes` and reports
+`outcome` `preview` | `removed` | `absent`. `get` shows name and description only
+(`--json` adds `instruction`). **Mutations take a single agent**: `-a a,b` and
+`-a all` are refused before any write; an agent without sub-agent support fails
+with `UNSUPPORTED_OPERATION`. `get -a all` / `-a a,b` work.
 
 ## Rename and interoperability edges
 

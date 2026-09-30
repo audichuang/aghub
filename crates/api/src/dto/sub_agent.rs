@@ -67,13 +67,14 @@ impl From<SubAgent> for SubAgentResponse {
 
 impl From<&SubAgent> for SubAgentResponse {
 	fn from(s: &SubAgent) -> Self {
+		let view = aghub_core::dto::SubAgentView::from(s);
 		SubAgentResponse {
-			name: s.name.clone(),
-			description: s.description.clone(),
-			instruction: s.instruction.clone(),
-			source_path: s.source_path.clone(),
-			source: s.config_source.map(Into::into),
-			agent: None,
+			name: view.name,
+			description: view.description,
+			instruction: view.instruction,
+			source_path: view.source_path,
+			source: view.source.map(Into::into),
+			agent: view.agent,
 		}
 	}
 }
@@ -84,5 +85,41 @@ impl From<(SubAgent, &str)> for SubAgentResponse {
 			agent: Some(agent_id.to_string()),
 			..SubAgentResponse::from(s)
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use aghub_core::dto::SubAgentView;
+	use aghub_core::models::{ConfigSource, SubAgent};
+
+	#[test]
+	fn sub_agent_response_matches_core_view() {
+		let s = SubAgent {
+			name: "reviewer".to_string(),
+			description: Some("Code reviewer".to_string()),
+			instruction: Some("Review code carefully".to_string()),
+			source_path: Some("/x/rev.md".to_string()),
+			config_source: Some(ConfigSource::Global),
+			extra_frontmatter: Default::default(),
+		};
+		assert_eq!(
+			serde_json::to_value(SubAgentResponse::from(&s)).unwrap(),
+			serde_json::to_value(SubAgentView::from(&s)).unwrap(),
+		);
+
+		let s_none = SubAgent {
+			name: "minimal".to_string(),
+			description: None,
+			instruction: None,
+			source_path: None,
+			config_source: None,
+			extra_frontmatter: Default::default(),
+		};
+		assert_eq!(
+			serde_json::to_value(SubAgentResponse::from(&s_none)).unwrap(),
+			serde_json::to_value(SubAgentView::from(&s_none)).unwrap(),
+		);
 	}
 }

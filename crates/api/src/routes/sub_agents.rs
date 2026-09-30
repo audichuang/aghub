@@ -25,18 +25,10 @@ fn check_sub_agent_supported(
 	agent: &AgentParam,
 	scope: aghub_core::models::ResourceScope,
 ) -> Result<(), ApiError> {
-	let descriptor = aghub_core::registry::get(agent.0);
-	if !descriptor.supports_sub_agent_scope(scope) {
-		return Err(ApiError::new(
-			Status::UnprocessableEntity,
-			format!(
-				"Agent '{}' does not support sub-agents in {:?} scope",
-				descriptor.id, scope
-			),
-			"UNSUPPORTED_OPERATION",
-		));
-	}
-	Ok(())
+	Ok(aghub_core::ConfigManager::ensure_sub_agent_supported(
+		&aghub_core::registry::get(agent.0),
+		scope,
+	)?)
 }
 
 #[post("/sub-agents/transfer", data = "<body>")]

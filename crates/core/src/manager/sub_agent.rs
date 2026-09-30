@@ -20,16 +20,32 @@ impl ConfigManager {
 				"No configuration loaded".to_string(),
 			));
 		}
-		if !self.adapter.supports_sub_agent_scope(self.write_scope) {
-			return Err(ConfigError::unsupported_operation(
-				"mutate",
-				"sub-agent",
-				self.adapter.name(),
-			));
-		}
+		Self::ensure_sub_agent_supported(&*self.adapter, self.write_scope)?;
 		let guard = self.scoped_write_guard("sub-agent write")?;
 		self.reload_sub_agents()?;
 		Ok(guard)
+	}
+
+	/// The ONE capability gate for sub-agent reads and writes; the CLI and
+	/// the API both call it so an unsupported agent is refused identically.
+	pub fn ensure_sub_agent_supported(
+		adapter: &dyn crate::adapters::AgentAdapter,
+		scope: crate::models::ResourceScope,
+	) -> Result<()> {
+		if adapter.supports_sub_agent_scope(scope) {
+			Ok(())
+		} else {
+			Err(ConfigError::unsupported_operation(
+				"mutate",
+				"sub-agent",
+				adapter.name(),
+			))
+		}
+	}
+
+	/// Read-side gate for this manager's own agent and scope.
+	pub fn ensure_sub_agents_readable(&self) -> Result<()> {
+		Self::ensure_sub_agent_supported(&*self.adapter, self.scope)
 	}
 
 	fn reload_sub_agents(&mut self) -> Result<()> {
@@ -228,6 +244,7 @@ impl ConfigManager {
 		// read, source comparison, tombstone move, save, and rollback. Preview
 		// refreshes without blocking another writer.
 		let _guard = if dry_run {
+			Self::ensure_sub_agent_supported(&*self.adapter, self.write_scope)?;
 			self.reload_sub_agents()?;
 			None
 		} else {

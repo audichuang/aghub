@@ -14284,3 +14284,422 @@ fn agents_list_default_is_everyone_managed_unconfigured() {
 		);
 	}
 }
+
+#[cfg(unix)]
+#[test]
+fn sub_agent_add_writes_markdown_with_frontmatter_and_body() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"add",
+			"sub-agents",
+			"--name",
+			"rev",
+			"-d",
+			"Reviews",
+			"--instruction",
+			"Be strict.",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"add sub-agents must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let file = home.path().join(".claude/agents/rev.md");
+	assert!(
+		file.exists(),
+		"sub-agent file must exist: {}",
+		file.display()
+	);
+	let content = std::fs::read_to_string(&file).unwrap();
+	assert!(
+		content.contains("description: Reviews"),
+		"frontmatter must contain description: Reviews: {content}"
+	);
+	assert!(
+		content.contains("Be strict."),
+		"body must contain instruction: {content}"
+	);
+
+	let desc = isolated_cli(home.path(), state.path())
+		.args([
+			"--json",
+			"-g",
+			"-a",
+			"claude",
+			"describe",
+			"sub-agents",
+			"rev",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		desc.status.success(),
+		"describe sub-agents must succeed; stderr: {}",
+		String::from_utf8_lossy(&desc.stderr)
+	);
+	let json: Value = serde_json::from_slice(&desc.stdout).unwrap();
+	assert_eq!(json["instruction"], "Be strict.", "{json}");
+}
+
+#[cfg(unix)]
+#[test]
+fn sub_agent_update_description_keeps_instruction_and_unmodeled_frontmatter() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let file = home.path().join(".claude/agents/rev.md");
+	std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+	std::fs::write(
+		&file,
+		"---\nname: rev\ndescription: Old\nmodel: opus\n---\n\nBe strict.\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"update",
+			"sub-agents",
+			"rev",
+			"-d",
+			"New",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"update sub-agents must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let content = std::fs::read_to_string(&file).unwrap();
+	assert!(
+		content.contains("description: New"),
+		"content must contain updated description: {content}"
+	);
+	assert!(
+		content.contains("Be strict."),
+		"content must keep instruction: {content}"
+	);
+	assert!(
+		content.contains("model: opus"),
+		"content must keep unmodeled frontmatter: {content}"
+	);
+	assert!(
+		!content.contains("description: Old"),
+		"content must no longer contain old description: {content}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn sub_agent_delete_previews_without_yes_then_removes() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let file = home.path().join(".claude/agents/rev.md");
+	std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+	std::fs::write(
+		&file,
+		"---\nname: rev\ndescription: Old\nmodel: opus\n---\n\nBe strict.\n",
+	)
+	.unwrap();
+
+	let preview = isolated_cli(home.path(), state.path())
+		.args([
+			"--json",
+			"-g",
+			"-a",
+			"claude",
+			"delete",
+			"sub-agents",
+			"rev",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		preview.status.success(),
+		"delete sub-agents preview must succeed; stderr: {}",
+		String::from_utf8_lossy(&preview.stderr)
+	);
+	let json: Value = serde_json::from_slice(&preview.stdout).unwrap();
+	assert_eq!(json["outcome"], "preview", "{json}");
+	assert!(file.exists(), "file must still exist after preview");
+
+	let removed = isolated_cli(home.path(), state.path())
+		.args([
+			"--json",
+			"-g",
+			"-a",
+			"claude",
+			"delete",
+			"sub-agents",
+			"rev",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		removed.status.success(),
+		"delete sub-agents --yes must succeed; stderr: {}",
+		String::from_utf8_lossy(&removed.stderr)
+	);
+	let json: Value = serde_json::from_slice(&removed.stdout).unwrap();
+	assert_eq!(json["outcome"], "removed", "{json}");
+	assert!(!file.exists(), "file must be gone after removal");
+
+	let absent = isolated_cli(home.path(), state.path())
+		.args([
+			"--json",
+			"-g",
+			"-a",
+			"claude",
+			"delete",
+			"sub-agents",
+			"rev",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		absent.status.success(),
+		"repeat delete sub-agents --yes must succeed; stderr: {}",
+		String::from_utf8_lossy(&absent.stderr)
+	);
+	let json: Value = serde_json::from_slice(&absent.stdout).unwrap();
+	assert_eq!(json["outcome"], "absent", "{json}");
+}
+
+#[cfg(unix)]
+#[test]
+fn sub_agent_mutation_rejects_agent_list_before_write() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,codex",
+			"add",
+			"sub-agents",
+			"--name",
+			"rev",
+			"-d",
+			"d",
+			"--instruction",
+			"i",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"sub-agent mutation with agent list must exit non-zero; stdout: {}, \
+		 stderr: {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// Must be OUR refusal, not clap rejecting an unknown resource value.
+	assert!(
+		String::from_utf8_lossy(&out.stderr).contains("take a single agent"),
+		"refusal must name the single-agent rule; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	for dir in [
+		home.path().join(".claude/agents"),
+		home.path().join(".codex/agents"),
+	] {
+		assert!(
+			!dir.join("rev.md").exists(),
+			"dir must not contain rev.md: {}",
+			dir.display()
+		);
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn sub_agent_read_and_delete_on_unsupported_agent_report_unsupported_operation()
+{
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// delete preview (no --yes), get and describe all share the commit gate.
+	for args in [
+		vec!["delete", "sub-agents", "rev"],
+		vec!["get", "sub-agents"],
+		vec!["describe", "sub-agents", "rev"],
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			.args(["--json", "-g", "-a", "cursor"])
+			.args(&args)
+			.output()
+			.unwrap();
+		assert!(
+			!out.status.success(),
+			"{args:?} on unsupported agent must exit non-zero; stdout: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout)
+			.expect("stdout must be valid JSON");
+		assert_eq!(
+			json["error"]["code"], "UNSUPPORTED_OPERATION",
+			"{args:?}: {json}"
+		);
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn sub_agent_describe_missing_uses_core_wording() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"--json",
+			"-g",
+			"-a",
+			"claude",
+			"describe",
+			"sub-agents",
+			"nope",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success());
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["error"]["code"], "RESOURCE_NOT_FOUND", "{json}");
+	assert!(
+		json["error"]["message"]
+			.as_str()
+			.unwrap()
+			.contains("sub_agent 'nope'"),
+		"{json}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn sub_agent_add_rejects_universal_flag() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"add",
+			"sub-agents",
+			"--name",
+			"rev",
+			"-d",
+			"d",
+			"--instruction",
+			"i",
+			"--universal",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success());
+	assert!(String::from_utf8_lossy(&out.stderr).contains("--universal"));
+	assert!(!home.path().join(".claude/agents/rev.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn sub_agent_add_on_unsupported_agent_reports_unsupported_operation() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"--json",
+			"-g",
+			"-a",
+			"cursor",
+			"add",
+			"sub-agents",
+			"--name",
+			"rev",
+			"-d",
+			"d",
+			"--instruction",
+			"i",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"add sub-agents on unsupported agent must exit non-zero; stdout: {}, \
+		 stderr: {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value =
+		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+	assert_eq!(json["error"]["code"], "UNSUPPORTED_OPERATION", "{json}");
+}
+
+#[cfg(unix)]
+#[test]
+fn get_sub_agents_agent_all_tags_agent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"add",
+			"sub-agents",
+			"--name",
+			"rev",
+			"-d",
+			"Reviews",
+			"--instruction",
+			"Be strict.",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"add sub-agents must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--json", "-g", "-a", "all", "get", "sub-agents"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"get sub-agents must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value =
+		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+	let arr = json.as_array().expect("output must be a JSON array");
+	let row = arr
+		.iter()
+		.find(|r| r["agent"] == "claude" && r["name"] == "rev");
+	assert!(
+		row.is_some(),
+		"expected row with agent==claude and name==rev in {json}"
+	);
+}

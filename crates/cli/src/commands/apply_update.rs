@@ -18,7 +18,9 @@ pub fn execute(
 		ResourceType::Skills => {}
 		// Unreachable from the CLI (clap rejects `mcps` at parse time via the
 		// narrowed `SkillResource`); kept because this fn takes `ResourceType`.
-		ResourceType::Mcps => bail!("`apply-update` only supports skills"),
+		ResourceType::Mcps | ResourceType::SubAgents => {
+			bail!("`apply-update` only supports skills")
+		}
 	}
 	if !yes {
 		bail!("refusing to overwrite skill files without --yes");

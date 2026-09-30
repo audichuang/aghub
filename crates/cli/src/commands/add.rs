@@ -1,7 +1,7 @@
 use crate::{eprintln_verbose, ResourceType};
 use aghub_core::{
 	manager::ConfigManager,
-	models::{McpServer, Skill},
+	models::{McpServer, Skill, SubAgent},
 };
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
@@ -37,6 +37,7 @@ pub struct AddArgs {
 	pub author: Option<String>,
 	pub version: Option<String>,
 	pub tools: Vec<String>,
+	pub instruction: Option<String>,
 	pub universal: bool,
 }
 
@@ -58,8 +59,12 @@ pub fn execute(
 		author,
 		version,
 		tools,
+		instruction,
 		universal,
 	} = args;
+	if universal && resource == ResourceType::SubAgents {
+		anyhow::bail!("--universal is not valid for sub-agents");
+	}
 	if universal {
 		eprintln!(
 			"warning: --universal is deprecated and ignored; \
@@ -71,6 +76,9 @@ pub fn execute(
 	// envelope (multi-agent) — command logic stays print-free.
 	let payload = match resource {
 		ResourceType::Skills => {
+			if instruction.is_some() {
+				anyhow::bail!("--instruction is only valid for sub-agents");
+			}
 			if let Some(from_path) = from {
 				eprintln_verbose!(
 					"Importing skill from: {}",
@@ -155,6 +163,9 @@ pub fn execute(
 			}
 		}
 		ResourceType::Mcps => {
+			if instruction.is_some() {
+				anyhow::bail!("--instruction is only valid for sub-agents");
+			}
 			let mcp_name = name
 				.ok_or_else(|| anyhow!("--name is required for MCP servers"))?;
 
@@ -171,6 +182,62 @@ pub fn execute(
 			manager.add_mcp_exact(mcp.clone())?;
 			eprintln_verbose!("MCP server added successfully");
 			serde_json::to_value(&mcp)?
+		}
+		ResourceType::SubAgents => {
+			if command.is_some() {
+				anyhow::bail!("--command is not valid for sub-agents");
+			}
+			if url.is_some() {
+				anyhow::bail!("--url is not valid for sub-agents");
+			}
+			// ponytail: the default hides an explicit -t of the default value
+			if transport != aghub_core::models::DEFAULT_REMOTE_TRANSPORT {
+				anyhow::bail!("--transport is not valid for sub-agents");
+			}
+			if !headers.is_empty() {
+				anyhow::bail!("--header is not valid for sub-agents");
+			}
+			if !env_vars.is_empty() {
+				anyhow::bail!("--env is not valid for sub-agents");
+			}
+			if timeout.is_some() {
+				anyhow::bail!("--timeout is not valid for sub-agents");
+			}
+			if from.is_some() {
+				anyhow::bail!("--from is not valid for sub-agents");
+			}
+			if author.is_some() {
+				anyhow::bail!("--author is not valid for sub-agents");
+			}
+			if version.is_some() {
+				anyhow::bail!("--version is not valid for sub-agents");
+			}
+			if !tools.is_empty() {
+				anyhow::bail!("--tools is not valid for sub-agents");
+			}
+
+			let name = name
+				.ok_or_else(|| anyhow!("--name is required for sub-agents"))?;
+			let description = description.ok_or_else(|| {
+				anyhow!("--description is required for sub-agents")
+			})?;
+			let instruction = instruction.ok_or_else(|| {
+				anyhow!("--instruction is required for sub-agents")
+			})?;
+
+			eprintln_verbose!("Adding sub-agent: {}", name);
+			let agent = SubAgent {
+				name,
+				description: Some(description),
+				instruction: Some(instruction),
+				source_path: None,
+				config_source: None,
+				extra_frontmatter: Default::default(),
+			};
+			let view = aghub_core::dto::SubAgentView::from(&agent);
+			manager.add_sub_agent(agent)?;
+			eprintln_verbose!("Sub-agent added successfully");
+			serde_json::to_value(&view)?
 		}
 	};
 

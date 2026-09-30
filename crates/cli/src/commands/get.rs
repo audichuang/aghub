@@ -1,5 +1,5 @@
 use crate::{eprintln_verbose, ResourceType};
-use aghub_core::dto::{McpView, SkillView};
+use aghub_core::dto::{McpView, SkillView, SubAgentView};
 use aghub_core::manager::ConfigManager;
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -110,6 +110,38 @@ fn print_mcps(rows: &[McpRow], json: bool) -> Result<()> {
 	Ok(())
 }
 
+/// Render sub-agents as a table, or the exact `SubAgentView` array under `--json`.
+fn print_sub_agents(views: &[SubAgentView], json: bool) -> Result<()> {
+	if json {
+		println!("{}", serde_json::to_string_pretty(views)?);
+		return Ok(());
+	}
+	if views.is_empty() {
+		println!("No sub-agents.");
+		return Ok(());
+	}
+	let with_agent = views.iter().any(|v| v.agent.is_some());
+	let mut builder = Builder::default();
+	let mut header = vec!["NAME".to_string()];
+	if with_agent {
+		header.push("AGENT".to_string());
+	}
+	header.push("DESCRIPTION".to_string());
+	builder.push_record(header);
+	for v in views {
+		let mut row = vec![v.name.clone()];
+		if with_agent {
+			row.push(v.agent.clone().unwrap_or_else(|| "—".to_string()));
+		}
+		row.push(truncate(v.description.as_deref().unwrap_or(""), 60));
+		builder.push_record(row);
+	}
+	let mut table = builder.build();
+	table.with(Style::sharp());
+	println!("{table}");
+	Ok(())
+}
+
 /// Clip a cell to `max` chars so one long description cannot widen the table
 /// past the terminal. Counts CHARS, not bytes — slicing a multi-byte
 /// description at a byte offset would panic.
@@ -145,6 +177,13 @@ pub fn execute(
 				.collect();
 			eprintln_verbose!("Found {} MCP servers", rows.len());
 			print_mcps(&rows, json)?;
+		}
+		ResourceType::SubAgents => {
+			manager.ensure_sub_agents_readable()?;
+			let views: Vec<SubAgentView> =
+				config.sub_agents.iter().map(SubAgentView::from).collect();
+			eprintln_verbose!("Found {} sub-agents", views.len());
+			print_sub_agents(&views, json)?;
 		}
 	}
 
@@ -186,6 +225,22 @@ pub fn execute_all(
 				rows.len()
 			);
 			print_mcps(&rows, json)?;
+		}
+		ResourceType::SubAgents => {
+			let views: Vec<SubAgentView> = resources
+				.into_iter()
+				.flat_map(|r| {
+					let agent_id = r.agent_id;
+					r.sub_agents.into_iter().map(move |s| {
+						SubAgentView::from(&s).with_agent(agent_id)
+					})
+				})
+				.collect();
+			eprintln_verbose!(
+				"Found {} sub-agents across all agents",
+				views.len()
+			);
+			print_sub_agents(&views, json)?;
 		}
 	}
 	Ok(())
