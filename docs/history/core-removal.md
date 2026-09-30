@@ -208,3 +208,17 @@ Tests:
 `manager::skill::tests::single_agent_remove_skill_refused_when_initiator_disabled_and_other_reader_enabled`,
 `manager::skill::tests::single_agent_remove_skill_project_scope_refused_when_initiator_disabled_and_other_reader_enabled`,
 cli test `delete_single_agent_disabled_initiator_refuses_enabled_shared_slot_reader`.
+
+## Reconcile delete order needs the full roster
+
+After disabled agents were dropped from `skill_dir_readers_outside`, reconcile's
+delete sort key (which used it with an empty exclusion) tied shared and private
+slots when the non-enabled agents were disabled; a private row could run before
+the shared row and preflight refused ("still served ... from .agents/skills").
+The key now uses `slot_reader_count` (full roster).
+
+Rule: slot sharing is structural, independent of management; delete ordering
+counts the full roster.
+
+Tests:
+`transfer::tests::reconcile_orders_shared_referrers_first_when_other_agents_disabled`.

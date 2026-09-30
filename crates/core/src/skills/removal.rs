@@ -803,6 +803,18 @@ fn readers_outside(
 		.collect()
 }
 
+/// How many in-scope agents structurally read `dir` across the full roster.
+///
+/// Full roster: slot sharing is structural, disabled agents are unmanaged not
+/// absent.
+pub(crate) fn slot_reader_count(
+	dir: &Path,
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+) -> usize {
+	readers_outside(dir, scope, project_root, &[], true).len()
+}
+
 // See docs/history/core-removal.md#disabled-agent-blocked-a-single-agent-delete
 /// Which in-scope agents read the skill folder `dir` WITHOUT being named in
 /// `requested`? The question a LOCATION delete asks: "is this a shared Master?"
@@ -842,7 +854,7 @@ fn unselected_reader_needs_referrer(
 	requested_agents: &[crate::models::AgentType],
 	deleting: &[PathBuf],
 ) -> bool {
-	if readers_outside(dir, scope, project_root, &[], true).len() < 2 {
+	if slot_reader_count(dir, scope, project_root) < 2 {
 		return false;
 	}
 	skill_dir_readers_outside(dir, scope, project_root, requested_agents)

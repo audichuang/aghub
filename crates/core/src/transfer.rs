@@ -2007,23 +2007,23 @@ fn plan_reconcile_skill(
 	);
 	// Shared slots must go first: a private Referrer cannot be revoked while
 	// the same agent still reads the shared slot this batch is removing. Reader
-	// count comes from `skill_dir_readers_outside` (empty exclusion = whole
-	// roster); never re-derive slot sharing here.
-	// The sort key now counts enabled readers only; with a single enabled
-	// reader shared slots tie, which only affects ordering.
+	// count comes from `slot_reader_count` (full roster); never re-derive slot
+	// sharing here.
+	// The sort key counts the full roster (slot_reader_count) because slot
+	// sharing is structural; filtering disabled agents ties shared and private
+	// slots and can put a private row first, which preflight then refuses.
 	// See docs/history/core-transfer.md#seventh-spelling-of-slot-sharing
+	// and docs/history/core-removal.md#reconcile-delete-order-needs-the-full-roster
 	deletes.sort_by_cached_key(|row| {
 		let scope = target_resource_scope(&row.target);
 		let readers = create_adapter(row.target.agent)
 			.target_skills_dir(row.target.project_root.as_deref(), scope)
 			.map(|dir| {
-				crate::skills::removal::skill_dir_readers_outside(
+				crate::skills::removal::slot_reader_count(
 					&dir,
 					scope,
 					row.target.project_root.as_deref(),
-					&[],
 				)
-				.len()
 			})
 			.unwrap_or(0);
 		std::cmp::Reverse(readers)
@@ -3763,6 +3763,76 @@ mod tests {
 			AgentType::ZCode,
 			AgentType::Dsh,
 		];
+		reconcile_skill_preview(&source, &[], &removed).unwrap();
+		assert!(root.join(".agents/skills/notebooklm").is_symlink());
+		let result =
+			reconcile_skill(source, vec![], removed.clone(), true).unwrap();
+		assert!(result.results.iter().all(|row| row.success), "{result:?}");
+		for agent in removed {
+			let dirs = create_adapter(agent).get_skills_paths(
+				Some(root),
+				crate::models::ResourceScope::ProjectOnly,
+			);
+			let effect = crate::skills::removal::read_effect_after(
+				&dirs,
+				"notebooklm",
+				&[],
+			);
+			assert!(
+				effect.survivors.is_empty(),
+				"{agent:?}: {:?}",
+				effect.survivors
+			);
+		}
+		assert_eq!(fs::read(master.join("SKILL.md")).unwrap(), original);
+		assert!(root.join(".claude/skills/notebooklm/SKILL.md").is_file());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_orders_shared_referrers_first_when_other_agents_disabled() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		master_with_claude_referrer(root, "notebooklm");
+		let master = root.join(".aghub/notebooklm");
+		let original = fs::read(master.join("SKILL.md")).unwrap();
+		for dir in [".opencode", ".cursor", ".pi", ".grok", ".omp"] {
+			let slot = root.join(dir).join("skills");
+			fs::create_dir_all(&slot).unwrap();
+			std::os::unix::fs::symlink(&master, slot.join("notebooklm"))
+				.unwrap();
+		}
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "notebooklm".into(),
+		};
+		// Private readers deliberately precede the shared-slot writers.
+		let removed = vec![
+			AgentType::OpenCode,
+			AgentType::Cursor,
+			AgentType::Pi,
+			AgentType::Grok,
+			AgentType::Omp,
+			AgentType::Codex,
+			AgentType::Antigravity,
+			AgentType::Gemini,
+			AgentType::Cline,
+			AgentType::Copilot,
+			AgentType::Kimi,
+			AgentType::Amp,
+			AgentType::Warp,
+			AgentType::ZCode,
+			AgentType::Dsh,
+		];
+		let ids: Vec<&str> = AgentType::ALL
+			.iter()
+			.map(|a| a.as_str())
+			.filter(|id| *id != "opencode" && *id != "claude")
+			.collect();
+		let _off = crate::agent_settings::test_override::disable(&ids);
 		reconcile_skill_preview(&source, &[], &removed).unwrap();
 		assert!(root.join(".agents/skills/notebooklm").is_symlink());
 		let result =
