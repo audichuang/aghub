@@ -3348,6 +3348,151 @@ mod tests {
 		});
 	}
 
+	#[cfg(unix)]
+	fn with_pinned_data_dir<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+		let data = tempdir().unwrap();
+		let old = std::env::var_os("AGHUB_DATA_DIR");
+		std::env::set_var("AGHUB_DATA_DIR", data.path());
+		struct Restore(Option<std::ffi::OsString>);
+		impl Drop for Restore {
+			fn drop(&mut self) {
+				match &self.0 {
+					Some(val) => std::env::set_var("AGHUB_DATA_DIR", val),
+					None => std::env::remove_var("AGHUB_DATA_DIR"),
+				}
+			}
+		}
+		let _restore = Restore(old);
+		f(data.path())
+	}
+
+	/// This pins CURRENT, DOCUMENTED behaviour — the CLI single-agent delete
+	/// refuses a real directory in a universal store (single_agent_keep_reason
+	/// -> is_universal_master) whereas the API delete-by-path removes it when
+	/// every other reader is disabled; a known gap awaiting the owner's
+	/// decision on whether to unify with the CLI; see crates/core/AGENTS.md
+	/// ("Disabled agents" paragraph) and docs/history/core-removal.md
+	/// ("Disabled agent blocked a single-agent delete"). If the test changes
+	/// because the gap is unified, update it deliberately.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_removes_real_shared_dir_when_every_other_reader_is_disabled(
+	) {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| a.as_str() != "cursor")
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				let slot = proj.join(".agents/skills/shared");
+				std::fs::create_dir_all(&slot).unwrap();
+				std::fs::write(
+					slot.join("SKILL.md"),
+					"---\nname: shared\ndescription: d\n---\n",
+				)
+				.unwrap();
+
+				let req = DeleteSkillByPathRequest {
+					source_path: slot.join("SKILL.md").display().to_string(),
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: Some(true),
+				};
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(req),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert!(
+					!slot.join("SKILL.md").exists(),
+					"a single-agent by-path delete removes the real shared dir \
+					 when every other reader is disabled"
+				);
+				assert_eq!(
+					resp.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Removed,
+				);
+			});
+		});
+	}
+
+	/// This pins CURRENT, DOCUMENTED behaviour — the CLI single-agent delete
+	/// refuses a real directory in a universal store (single_agent_keep_reason
+	/// -> is_universal_master) whereas the API delete-by-path removes it when
+	/// every other reader is disabled; a known gap awaiting the owner's
+	/// decision on whether to unify with the CLI; see crates/core/AGENTS.md
+	/// ("Disabled agents" paragraph) and docs/history/core-removal.md
+	/// ("Disabled agent blocked a single-agent delete"). If the test changes
+	/// because the gap is unified, update it deliberately.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_keeps_real_shared_dir_when_another_reader_is_enabled() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| {
+							a.as_str() != "cursor" && a.as_str() != "opencode"
+						})
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				let slot = proj.join(".agents/skills/shared");
+				std::fs::create_dir_all(&slot).unwrap();
+				std::fs::write(
+					slot.join("SKILL.md"),
+					"---\nname: shared\ndescription: d\n---\n",
+				)
+				.unwrap();
+
+				let req = DeleteSkillByPathRequest {
+					source_path: slot.join("SKILL.md").display().to_string(),
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: Some(true),
+				};
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(req),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert!(
+					slot.join("SKILL.md").exists(),
+					"a single-agent by-path delete keeps the real shared dir \
+					 when another reader is enabled"
+				);
+				assert_eq!(
+					resp.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Kept,
+				);
+			});
+		});
+	}
+
 	/// The OTHER direction, and the one the keep-guard must not swallow: the
 	/// desktop's location dialog sends EVERY agent installed at that exact
 	/// `source_path`, so nobody is left to lose the skill and the location has

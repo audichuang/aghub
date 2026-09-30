@@ -12,9 +12,12 @@
 //! a Master alive on `--all-agents`, see `unmanaged_skill_dirs`/`plan_removal`),
 //! to the "is anyone besides the initiator here" shortcut in
 //! `unselected_reader_needs_referrer` (the initiator may itself be disabled),
+//! to transfer's delete-ordering key
+//! (`removal::slot_reader_count`; slot sharing is structural),
 //! and to `load_all_agents` style "does anyone else hold this" questions. A
-//! real (non-link) directory in a universal store is still refused by a single-agent delete
-//! whoever reads it.
+//! real (non-link) directory in a universal store is still refused by a
+//! single-agent delete whoever reads it (the API's delete-by-path is the one
+//! documented exception).
 //!
 //! Persisted under [`crate::paths::app_data_dir`] so every surface (desktop,
 //! CLI, a remote's aghub-api) reads the same answer. A missing file means

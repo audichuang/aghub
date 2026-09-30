@@ -436,13 +436,15 @@ entries the message lists, then retry — do not widen the roster to `-a all`.
 If a single-agent delete refuses with "Also read there by agents not in this
 request", the skill lives in a shared slot still read by other agents. Only
 ENABLED agents are named (disabled agents never block a single-agent delete).
+Include them in the same `-a` request, or delete for every agent
+(`--all-agents`, which also unlinks it for them).
 Exception: if the shared-slot entry is a real directory (not a link), the CLI
 refuses a single-agent delete no matter who reads it, even when only disabled
-agents do; the API's delete-by-path differs (see `crates/core/AGENTS.md`).
+agents do; the API's delete-by-path instead removes that directory when every
+other reader is a disabled agent.
 If no other Referrer remains, the Master content is deleted too (the removed
-paths include `.aghub/<name>`), so re-enabling that agent later does not bring
-the skill back; it has to be reinstalled. Include them in the same `-a` request, or delete
-for every agent (`--all-agents`, which also unlinks it for them).
+paths include `.aghub/<name>`), so re-enabling a disabled agent later does not bring
+the skill back; it has to be reinstalled.
 
 An `add --from` install is intentionally untracked and has no upstream-update
 branch; refresh it through the same backed-up delete plus a re-`add` with an
