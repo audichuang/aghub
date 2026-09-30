@@ -42,9 +42,13 @@ impl McpCreateAttribution {
 		credited_output: impl FnOnce(&McpServer) -> O,
 	) -> Result<O, E> {
 		let adapter = crate::create_adapter(agent);
-		let backing = adapter
-			.mcp_config_path(project_root, write_scope)
-			.and_then(|path| crate::descriptor::mcp_backing_path(&path).ok());
+		// mcp_backing_path creates the parent dir, so only rows whose write
+		// reached disk may resolve it.
+		let backing = || {
+			adapter.mcp_config_path(project_root, write_scope).and_then(
+				|path| crate::descriptor::mcp_backing_path(&path).ok(),
+			)
+		};
 		let name = self.name.clone();
 		let read = || {
 			adapter.load_mcps(project_root, write_scope).ok().and_then(
@@ -55,7 +59,7 @@ impl McpCreateAttribution {
 		};
 		match result {
 			Ok(output) => {
-				if let Some(backing) = backing {
+				if let Some(backing) = backing() {
 					if let Some(persisted) = read() {
 						let output = credited_output(&persisted);
 						self.written_backings.insert(backing, persisted);
@@ -66,7 +70,7 @@ impl McpCreateAttribution {
 			}
 			Err(error) => {
 				if is_resource_exists {
-					if let Some(persisted) = backing
+					if let Some(persisted) = backing()
 						.as_ref()
 						.and_then(|path| self.written_backings.get(path))
 					{
@@ -824,5 +828,23 @@ mod tests {
 		assert_eq!(writes.get(), 0, "preflight must precede every write");
 		assert_eq!(error.failures.len(), 1);
 		assert_eq!(error.failures[0].target, "pi");
+	}
+
+	#[test]
+	fn mcp_create_attribution_failed_row_creates_no_config_dir() {
+		let root = tempfile::tempdir().unwrap();
+		let result = McpCreateAttribution::new("x").attribute(
+			AgentType::Cursor,
+			Some(root.path()),
+			ResourceScope::ProjectOnly,
+			Err::<(), _>("bad header"),
+			false,
+			|_| (),
+		);
+		assert!(result.is_err());
+		assert!(
+			!root.path().join(".cursor").exists(),
+			"failed row created config dir"
+		);
 	}
 }
