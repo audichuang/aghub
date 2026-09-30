@@ -1214,8 +1214,9 @@ pub fn execute_removal(
 				Err(e) => report.failed.push((path.clone(), e)),
 			}
 		} else if ft.is_dir() {
-			// Re-assert containment immediately before remove_dir_all.
-			if assert_contained(path, roots).is_some() {
+			// Re-assert STRICT containment immediately before remove_dir_all: the
+			// root itself must never be deleted.
+			if assert_strictly_contained(path, roots).is_some() {
 				match std::fs::remove_dir_all(path) {
 					Ok(()) => report.removed.push(path.clone()),
 					Err(e) => report.failed.push((path.clone(), e)),
@@ -1849,6 +1850,30 @@ mod tests {
 		};
 		execute_removal(&plan, std::slice::from_ref(&skills)).unwrap();
 		assert!(!foo.exists());
+	}
+
+	#[test]
+	fn execute_removal_refuses_root_itself() {
+		let tmp = tempdir().unwrap();
+		let root = tmp.path().join("skills");
+		let child = root.join("child");
+		write_skill_md(&child);
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			paths: vec![root.clone(), child.clone()],
+			skipped: vec![],
+			needs_confirm: false,
+			shared_master_kept: false,
+			still_read_from: Vec::new(),
+			incomplete: false,
+		};
+		let report =
+			execute_removal(&plan, std::slice::from_ref(&root)).unwrap();
+		assert!(root.exists(), "root itself must survive");
+		assert!(report.skipped.contains(&root));
+		assert!(!report.removed.contains(&root));
+		assert!(!child.exists(), "child skill dir must be removed");
+		assert!(report.removed.contains(&child));
 	}
 
 	#[test]
