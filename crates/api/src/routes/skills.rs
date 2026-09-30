@@ -221,28 +221,14 @@ pub async fn delete_skill_by_path(
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let req = body.into_inner();
 
-	if expand_tilde_path(&req.source_path)
-		.components()
-		.any(|c| c == std::path::Component::ParentDir)
-	{
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: false,
-			error: Some(
-				"Refusing to delete: source_path must not contain '..'"
-					.to_string(),
-			),
-			..Default::default()
-		}));
-	}
-
 	let skill_path = expand_tilde_path(&req.source_path);
 	let skill_dir = if skill_path.is_dir() {
-		skill_path
+		skill_path.clone()
 	} else {
 		skill_path
 			.parent()
 			.map(|p| p.to_path_buf())
-			.unwrap_or(skill_path)
+			.unwrap_or_else(|| skill_path.clone())
 	};
 
 	let resource_scope = match req.scope.as_str() {
@@ -273,6 +259,41 @@ pub async fn delete_skill_by_path(
 		.project_root
 		.as_ref()
 		.map(|r| crate::extractors::absolutize_root(r));
+
+	// See docs/history/api.md#delete-by-path-parent-dir-rule
+	if skill_path
+		.components()
+		.any(|c| c == std::path::Component::ParentDir)
+	{
+		let allowed_roots: Vec<std::path::PathBuf> = req
+			.agents
+			.iter()
+			.filter_map(|agent_str| agent_str.parse::<AgentType>().ok())
+			.flat_map(|agent| {
+				aghub_core::create_adapter(agent)
+					.get_skills_paths(project_root.as_deref(), resource_scope)
+			})
+			.collect();
+
+		let safe = allowed_roots.iter().any(|root| {
+			skill_path.strip_prefix(root).is_ok_and(|rest| {
+				!rest
+					.components()
+					.any(|c| c == std::path::Component::ParentDir)
+			})
+		});
+
+		if !safe {
+			return Ok(Json(DeleteSkillByPathResponse {
+				success: false,
+				error: Some(
+					"Refusing to delete: source_path must not contain '..' under the agent skills directories"
+						.to_string(),
+				),
+				..Default::default()
+			}));
+		}
+	}
 
 	let mut validation_errors = Vec::new();
 
@@ -4108,6 +4129,127 @@ mod tests {
 			assert!(!resp.success);
 			let err = resp.error.as_deref().unwrap_or("");
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_accepts_dotdot_in_project_root() {
+		with_isolated_env(|home, _state| {
+			let x = home.join("x");
+			let proj = home.join("proj");
+			std::fs::create_dir_all(&x).unwrap();
+			let slot = proj.join(".agents/skills");
+			let y = slot.join("y");
+			let z = slot.join("z");
+			std::fs::create_dir_all(&y).unwrap();
+			std::fs::write(
+				y.join("SKILL.md"),
+				"---\nname: y\ndescription: y\n---\n",
+			)
+			.unwrap();
+			std::fs::create_dir_all(&z).unwrap();
+			std::fs::write(
+				z.join("SKILL.md"),
+				"---\nname: z\ndescription: z\n---\n",
+			)
+			.unwrap();
+
+			let project_root = format!("{}/x/../proj", home.display());
+			let unnormalized_proj = std::path::PathBuf::from(&project_root);
+			let source_path = format!(
+				"{}/x/../proj/.agents/skills/y/SKILL.md",
+				home.display()
+			);
+
+			let req = DeleteSkillByPathRequest {
+				source_path,
+				agents: slot_readers(
+					&slot,
+					aghub_core::models::ResourceScope::ProjectOnly,
+					Some(&unnormalized_proj),
+				),
+				scope: "project".to_string(),
+				project_root: Some(project_root),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(resp.success, "delete must succeed: {:?}", resp.error);
+			assert!(!y.exists(), "skill y dir must be gone");
+			assert!(
+				z.join("SKILL.md").exists(),
+				"sibling skill z must survive"
+			);
+			assert!(slot.exists(), "slot dir must survive");
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_rejects_cross_slot_dotdot() {
+		with_isolated_env(|home, _state| {
+			let proj = home.join("proj");
+			let cursor_slot = proj.join(".cursor/skills");
+			let agents_slot = proj.join(".agents/skills");
+			std::fs::create_dir_all(&cursor_slot).unwrap();
+			let y = agents_slot.join("y");
+			let z = agents_slot.join("z");
+			std::fs::create_dir_all(&y).unwrap();
+			std::fs::write(
+				y.join("SKILL.md"),
+				"---\nname: y\ndescription: y\n---\n",
+			)
+			.unwrap();
+			std::fs::create_dir_all(&z).unwrap();
+			std::fs::write(
+				z.join("SKILL.md"),
+				"---\nname: z\ndescription: z\n---\n",
+			)
+			.unwrap();
+
+			let mut agents = slot_readers(
+				&cursor_slot,
+				aghub_core::models::ResourceScope::ProjectOnly,
+				Some(&proj),
+			);
+			agents.extend(slot_readers(
+				&agents_slot,
+				aghub_core::models::ResourceScope::ProjectOnly,
+				Some(&proj),
+			));
+			agents.sort();
+			agents.dedup();
+
+			let req = DeleteSkillByPathRequest {
+				source_path: format!(
+					"{}/.cursor/skills/../../.agents/skills/y",
+					proj.display()
+				),
+				agents,
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(!resp.success);
+			let err = resp.error.as_deref().unwrap_or("");
+			assert!(err.contains("'..'"), "error must mention '..': {err}");
+			assert!(cursor_slot.exists(), "cursor slot dir must survive");
+			assert!(agents_slot.exists(), "agents slot dir must survive");
+			assert!(y.join("SKILL.md").exists(), "skill y must survive");
+			assert!(z.join("SKILL.md").exists(), "skill z must survive");
 		});
 	}
 

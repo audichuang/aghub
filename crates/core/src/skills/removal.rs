@@ -152,21 +152,24 @@ pub fn assert_contained(target: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// Canonicalize `target` and assert it is a strict descendant of one
-/// allow-listed root. Unlike [`assert_contained`], the root itself is rejected.
+/// allow-listed root. Unlike [`assert_contained`], the root itself is rejected
+/// even when it is nested inside another root.
 pub fn assert_strictly_contained(
 	target: &Path,
 	roots: &[PathBuf],
 ) -> Option<PathBuf> {
 	let canonical = target.canonicalize().ok()?;
-	for root in roots {
-		let root_canonical =
-			root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-		if canonical != root_canonical && canonical.starts_with(&root_canonical)
-		{
-			return Some(canonical);
-		}
+	let canonical_roots: Vec<PathBuf> = roots
+		.iter()
+		.map(|root| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+		.collect();
+	if !canonical_roots.iter().any(|r| r == &canonical)
+		&& canonical_roots.iter().any(|r| canonical.starts_with(r))
+	{
+		Some(canonical)
+	} else {
+		None
 	}
-	None
 }
 
 pub fn assert_targets_strictly_contained(
@@ -1321,6 +1324,23 @@ mod tests {
 			None,
 		)
 		.is_err());
+	}
+
+	#[test]
+	fn assert_strictly_contained_rejects_inner_root_nested_in_another_root() {
+		let tmp = tempdir().unwrap();
+		let outer = tmp.path().join("outer");
+		let inner = outer.join("inner");
+		let skill = inner.join("skill");
+		std::fs::create_dir_all(&skill).unwrap();
+		let roots = vec![outer.clone(), inner.clone()];
+
+		assert_eq!(assert_strictly_contained(&inner, &roots), None);
+		assert_eq!(assert_strictly_contained(&outer, &roots), None);
+		assert_eq!(
+			assert_strictly_contained(&skill, &roots),
+			Some(skill.canonicalize().unwrap())
+		);
 	}
 
 	#[test]

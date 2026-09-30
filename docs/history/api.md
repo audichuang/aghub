@@ -128,3 +128,44 @@ Pinned by: `apply_skill_update_route_fails_closed_when_keyring_backend_unreachab
 Complement: `apply_update_forwarded_token_succeeds_even_when_keyring_backend_unreachable`.
 
 Commit: 58b06365.
+
+## delete-by-path parent-dir rule
+
+`DELETE /skills/by-path` derives the skill directory from `source_path`: the path
+itself when it is a directory, else its `parent()`. Two inputs made that land on
+the skills ROOT instead of a skill: a path ending in `..` (`Path::file_name()` is
+`None`, so nothing pins the last segment to a skill), and a non-directory
+directly under the root such as `<slot>/SKILL.md` or `<slot>/<missing-name>`
+(its `parent()` is the root). When the request's `agents` were exactly the
+slot's readers (per-agent validation passes, and the shared-slot guard sees no
+outside reader), main really deleted the whole shared slot. `agents = ALL` was
+only safe because per-agent validation rejected it.
+
+Rule, in two layers:
+
+1. The core removal containment check is STRICT (`assert_strictly_contained`):
+   the root itself is never a target, and not even when one root is nested in
+   another (a target equal to ANY root is refused).
+2. A `..` component is refused only in the part of `source_path` AFTER the
+   matching agent skills-root prefix. The first fix refused any `..` anywhere,
+   which broke legitimate requests: `project_root` is free text (remote
+   connections, raw HTTP) and `absolutize_root` returns an absolute path
+   un-normalized, so a project at `~/x/../proj` produces list `source_path`s
+   that contain `..` the user never typed. The prefix comes from the same
+   un-normalized `project_root`, so a lexical `strip_prefix` lines up. If no
+   skills root strips, the request is refused (fail closed). `y/..`, `y/../z`
+   and cross-slot `<P>/.cursor/skills/../../.agents/skills/y` all leave a `..`
+   in the remainder. The refusal text carries no filesystem path.
+
+Known, same family, NOT handled here: a by-path request naming a category
+folder (`<slot>/<category>`) removes every skill under it in one call.
+
+Pinned by: `delete_by_path_rejects_trailing_dotdot_project_agents_slot`,
+`delete_by_path_rejects_trailing_dotdot_project_cursor_slot`,
+`delete_by_path_rejects_trailing_dotdot_global_agents_slot`,
+`delete_by_path_rejects_dotdot_in_middle_of_path`,
+`delete_by_path_rejects_skills_root_itself`,
+`delete_by_path_rejects_cross_slot_dotdot`,
+`delete_by_path_accepts_dotdot_in_project_root` (`crates/api/src/routes/skills.rs`);
+`assert_strictly_contained_rejects_inner_root_nested_in_another_root`
+(`crates/core/src/skills/removal.rs`).
