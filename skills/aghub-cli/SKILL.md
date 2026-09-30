@@ -436,7 +436,7 @@ entries the message lists, then retry — do not widen the roster to `-a all`.
 If a single-agent delete refuses with "Also read there by agents not in this
 request", the skill lives in a shared slot still read by other agents. Only
 ENABLED agents are named (disabled agents never block a single-agent delete).
-Include them in the same `-a` request, or delete for every agent
+Include the named agents in the same `-a` request, or delete for every agent
 (`--all-agents`, which also unlinks it for them).
 Exception: if the shared-slot entry is a real directory (not a link), the CLI
 refuses a single-agent delete no matter who reads it, even when only disabled

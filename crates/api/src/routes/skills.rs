@@ -3348,6 +3348,9 @@ mod tests {
 		});
 	}
 
+	/// Must run inside `with_isolated_env`, which holds the binary's one env
+	/// mutex (`test_env_lock`); that lock is not reentrant, so this helper
+	/// must not take it again.
 	#[cfg(unix)]
 	fn with_pinned_data_dir<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
 		let data = tempdir().unwrap();
@@ -3429,14 +3432,8 @@ mod tests {
 		});
 	}
 
-	/// This pins CURRENT, DOCUMENTED behaviour — the CLI single-agent delete
-	/// refuses a real directory in a universal store (single_agent_keep_reason
-	/// -> is_universal_master) whereas the API delete-by-path removes it when
-	/// every other reader is disabled; a known gap awaiting the owner's
-	/// decision on whether to unify with the CLI; see crates/core/AGENTS.md
-	/// ("Disabled agents" paragraph) and docs/history/core-removal.md
-	/// ("Disabled agent blocked a single-agent delete"). If the test changes
-	/// because the gap is unified, update it deliberately.
+	/// Counterpart of the test above: with an ENABLED reader outside the
+	/// request the API still keeps the real directory. Same documented gap.
 	#[cfg(unix)]
 	#[test]
 	fn delete_by_path_keeps_real_shared_dir_when_another_reader_is_enabled() {
