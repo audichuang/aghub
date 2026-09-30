@@ -123,6 +123,53 @@ fn deleting_two_shared_referrers_cannot_revoke_an_unselected_reader() {
 }
 
 #[test]
+fn shared_referrer_keep_plans_no_paths_and_preview_matches_execution() {
+	use aghub_core::dto::removal::RemovalKind;
+
+	let _lock = env_lock();
+	let tmp = tempfile::tempdir().unwrap();
+	let _env = isolated_home(tmp.path());
+	let name = "shared-keep-no-paths";
+	let master = tmp.path().join(".aghub").join(name);
+	write_skill(&master, name);
+	let shared_dir = tmp.path().join(".agents/skills");
+	std::fs::create_dir_all(&shared_dir).unwrap();
+	let primary = shared_dir.join(name);
+	let alias = shared_dir.join("legacy-folder");
+	std::os::unix::fs::symlink(&master, &primary).unwrap();
+	std::os::unix::fs::symlink(&master, &alias).unwrap();
+
+	let mut cursor =
+		ConfigManager::new(create_adapter(AgentType::Cursor), true, None);
+	cursor.load().unwrap();
+	assert!(cursor.get_skill(name).is_some());
+	let mut cline =
+		ConfigManager::new(create_adapter(AgentType::Cline), true, None);
+	cline.load().unwrap();
+	assert!(cline.get_skill(name).is_some());
+
+	let preview = cline
+		.remove_skill_planned(name, false, true, false)
+		.unwrap();
+	assert!(
+		preview.plan.shared_master_kept && preview.plan.paths.is_empty(),
+		"a shared-referrer keep must plan no paths, got: {:?}",
+		preview.plan
+	);
+	assert!(matches!(
+		aghub_core::dto::removal::RemovalView::from_outcome(&preview, true)
+			.outcome,
+		RemovalKind::Kept
+	));
+
+	let result = cline.remove_skill_planned(name, false, false, true);
+	assert!(result.is_err());
+	assert!(primary.symlink_metadata().is_ok(), "primary Referrer gone");
+	assert!(alias.symlink_metadata().is_ok(), "alias Referrer gone");
+	assert!(master.exists(), "Master gone");
+}
+
+#[test]
 fn exact_shared_read_slot_can_be_removed_for_its_full_reader_group() {
 	let _lock = env_lock();
 	let tmp = tempfile::tempdir().unwrap();

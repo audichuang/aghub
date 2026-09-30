@@ -652,6 +652,10 @@ fn plan_symlink_removal(
 		}
 	}
 
+	debug_assert!(
+		!shared_referrer_kept || paths.is_empty(),
+		"a shared-referrer keep must plan no paths: unselected_needs is keyed by dir, so one kept entry means all targeted entries are kept"
+	);
 	// An exhaustive cleanup that kept everything must not report `removed`.
 	let shared_master_kept = shared_referrer_kept
 		|| (all_agents && paths.is_empty() && !skipped.is_empty());

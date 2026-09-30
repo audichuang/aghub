@@ -907,11 +907,18 @@ impl ConfigManager {
 
 		// A preview must still PREVIEW: record the fact (`RemovalView` reads it
 		// into `kept`) and let only an executing call refuse — pinned by
-		// `single_agent_delete_keeps_shared_master_and_reports_it`. This is the
-		// ONLY producer of `shared_master_kept` with non-empty `paths`, which
-		// `RemovalView`'s `kept` rule relies on; a preview must never green-light
-		// what the refusal below rejects. Fold `blocks`, not raw survivors, or
-		// the ALLOWED private-copy removal previews as `kept`.
+		// `single_agent_delete_keeps_shared_master_and_reports_it`. This (the
+		// refusal/blocks fold below) is the only producer of
+		// `shared_master_kept` that can carry non-empty `paths`; every other
+		// producer always has EMPTY paths: (a) the planner's shared-referrer
+		// keep (removal.rs, `shared_referrer_kept`), (b) the copy layout's
+		// UniversalMaster keep (removal.rs `KeepReason::UniversalMaster`),
+		// (c) the spared / all-agents keep. (a) is always empty because
+		// `unselected_needs` is keyed by dir and every targeted entry
+		// lives in `own_agent_dir`, so if one entry is kept, all of them are
+		// kept. A preview must never green-light what the refusal below
+		// rejects. Fold `blocks`, not raw survivors, or the ALLOWED
+		// private-copy removal previews as `kept`.
 		plan.shared_master_kept |= blocks;
 
 		// A removal that goes ahead while something else still serves the skill
