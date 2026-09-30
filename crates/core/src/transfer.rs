@@ -1096,6 +1096,52 @@ fn delete_reconciled_mcp(
 		.map(|_| true)
 }
 
+fn delete_reconciled_sub_agent(
+	source: &ResourceLocator,
+	target: &InstallTarget,
+	expected: &SubAgent,
+	protect: &[Protected],
+	copies: &[OperationPlan],
+	source_removed: bool,
+) -> Result<bool> {
+	// Re-check now that every copy has run: the file this
+	// target resolves to may be one a copy just created.
+	ensure_removals_spare(
+		protect,
+		std::slice::from_ref(target),
+		source.agent,
+		|t| sub_agent_backing_path(t, &source.name),
+	)?;
+	let mut manager = build_manager(target);
+	ensure_loaded(&mut manager)?;
+	// Same as the MCP arm: `Ok` only ever follows a real
+	// delete, so it is the credential.
+	let source_backing = expected.source_path.as_deref();
+	let current_backing = manager
+		.get_sub_agent(&source.name)
+		.and_then(|agent| agent.source_path.as_deref());
+	let shares_source = match (source_backing, current_backing) {
+		(Some(source_path), Some(current_path)) => {
+			skill::lock::resolve_existing(Path::new(source_path))
+				== skill::lock::resolve_existing(Path::new(current_path))
+		}
+		_ => false,
+	};
+	let removes_source =
+		target.agent == source.agent || (source_removed && shares_source);
+	if removes_source {
+		manager.remove_sub_agent_if_unchanged(
+			&source.name,
+			expected,
+			!copies.is_empty(),
+			|| ensure_sub_agent_copies_hold(copies, expected),
+		)?;
+	} else {
+		manager.remove_sub_agent(&source.name)?;
+	}
+	Ok(true)
+}
+
 /// Copy one sub-agent into a target. See [`copy_mcp_into`] for why equivalence
 /// (not name collision) decides. `source_path` / `config_source` are per-agent
 /// file locations, so they are excluded from the comparison.
@@ -1726,59 +1772,18 @@ pub fn reconcile_sub_agent(
 				OperationAction::Copy => {
 					copy_sub_agent_into(&plan.target, &sub_agent)
 				}
-				OperationAction::Delete => {
-					// Re-check now that every copy has run: the file this
-					// target resolves to may be one a copy just created.
-					ensure_removals_spare(
+				OperationAction::Delete => sibling_already_took_it(
+					delete_reconciled_sub_agent(
+						&source,
+						&plan.target,
+						&sub_agent,
 						&protect,
-						std::slice::from_ref(&plan.target),
-						source.agent,
-						|target| sub_agent_backing_path(target, &source.name),
-					)
-					.and_then(|()| {
-						let mut manager = build_manager(&plan.target);
-						ensure_loaded(&mut manager)?;
-						// Same as the MCP arm: `Ok` only ever follows a real
-						// delete, so it is the credential.
-						let source_backing = sub_agent.source_path.as_deref();
-						let current_backing = manager
-							.get_sub_agent(&source.name)
-							.and_then(|agent| agent.source_path.as_deref());
-						let shares_source =
-							match (source_backing, current_backing) {
-								(Some(source_path), Some(current_path)) => {
-									skill::lock::resolve_existing(Path::new(
-										source_path,
-									)) == skill::lock::resolve_existing(
-										Path::new(current_path),
-									)
-								}
-								_ => false,
-							};
-						let removes_source = plan.target.agent == source.agent
-							|| (source_removed && shares_source);
-						if removes_source {
-							// Same guard as the MCP arm: the source is the
-							// last copy only if every target still holds what
-							// was copied into it.
-							ensure_sub_agent_copies_hold(&copies, &sub_agent)?;
-						}
-						let removed = if removes_source {
-							manager.remove_sub_agent_if_unchanged(
-								&source.name,
-								&sub_agent,
-								!copies.is_empty(),
-							)
-						} else {
-							manager.remove_sub_agent(&source.name)
-						};
-						sibling_already_took_it(
-							removed.map(|()| true),
-							plan.target.agent,
-							&mut credits,
-						)
-					})
-				}
+						&copies,
+						source_removed,
+					),
+					plan.target.agent,
+					&mut credits,
+				),
 			};
 			let name = if plan.action == OperationAction::Copy {
 				&sub_agent.name
@@ -5119,6 +5124,68 @@ mod tests {
 			"copy conflict must also skip the delete"
 		);
 		assert!(fs::read_to_string(target).unwrap().contains("tools: Write"));
+	}
+
+	#[test]
+	fn reconcile_sub_agent_keeps_source_when_copy_changed_after_copy(
+	) -> Result<()> {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source_file = root.join(".claude/agents/coder.md");
+		let target_file = root.join(".opencode/agents/coder.md");
+		fs::create_dir_all(source_file.parent().unwrap()).unwrap();
+		fs::write(
+			&source_file,
+			"---\nname: coder\ndescription: Coder\ntools: Read\n---\n\nDo work.\n",
+		)
+		.unwrap();
+
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "coder".to_string(),
+		};
+		let expected = load_source_sub_agent(&source)?;
+		let target = InstallTarget {
+			agent: AgentType::OpenCode,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+		};
+		copy_sub_agent_into(&target, &expected)?;
+		let copies = vec![OperationPlan {
+			target: target.clone(),
+			action: OperationAction::Copy,
+		}];
+
+		fs::write(
+			&target_file,
+			"---\nname: coder\ndescription: Coder\ntools: Write\n---\n\nDo work.\n",
+		)
+		.unwrap();
+
+		let source_target = InstallTarget {
+			agent: source.agent,
+			scope: source.scope,
+			project_root: source.project_root.clone(),
+		};
+		let error = delete_reconciled_sub_agent(
+			&source,
+			&source_target,
+			&expected,
+			&[],
+			&copies,
+			true,
+		)
+		.expect_err("source must survive if its copy changed after copy");
+		assert!(error.to_string().contains("changed in target"));
+		assert!(source_file.exists());
+		assert!(fs::read_to_string(&source_file)
+			.unwrap()
+			.contains("tools: Read"));
+
+		Ok(())
 	}
 
 	#[test]

@@ -213,7 +213,13 @@ impl ConfigManager {
 		dry_run: bool,
 		confirm: bool,
 	) -> Result<RemovalOutcome> {
-		self.remove_sub_agent_planned_checked(name, dry_run, confirm, None)
+		self.remove_sub_agent_planned_checked(
+			name,
+			dry_run,
+			confirm,
+			None,
+			|| Ok(()),
+		)
 	}
 
 	/// Reconcile captured `expected` before copying it elsewhere. Refuse to
@@ -223,12 +229,14 @@ impl ConfigManager {
 		name: &str,
 		expected: &SubAgent,
 		copying: bool,
+		preflight: impl FnOnce() -> Result<()>,
 	) -> Result<()> {
 		self.remove_sub_agent_planned_checked(
 			name,
 			false,
 			true,
 			Some((expected, copying)),
+			preflight,
 		)
 		.map(|_| ())
 	}
@@ -239,6 +247,7 @@ impl ConfigManager {
 		dry_run: bool,
 		confirm: bool,
 		expected: Option<(&SubAgent, bool)>,
+		preflight: impl FnOnce() -> Result<()>,
 	) -> Result<RemovalOutcome> {
 		// The executing path holds the physical backing lock across the fresh
 		// read, source comparison, tombstone move, save, and rollback. Preview
@@ -302,6 +311,11 @@ impl ConfigManager {
 					)));
 				}
 			}
+		}
+
+		if !dry_run {
+			// The check lives inside the guard to close the check-then-act window.
+			preflight()?;
 		}
 
 		let executed = !dry_run && (!plan.needs_confirm || confirm);
@@ -552,7 +566,9 @@ mod tests {
 			)
 			.unwrap();
 		let error = original
-			.remove_sub_agent_if_unchanged("reviewer", &expected, true)
+			.remove_sub_agent_if_unchanged("reviewer", &expected, true, || {
+				Ok(())
+			})
 			.unwrap_err();
 		assert!(matches!(error, ConfigError::InvalidConfig(_)));
 		let content =
@@ -585,7 +601,9 @@ mod tests {
 			&expected,
 		));
 		let error = original
-			.remove_sub_agent_if_unchanged("reviewer", &expected, true)
+			.remove_sub_agent_if_unchanged("reviewer", &expected, true, || {
+				Ok(())
+			})
 			.unwrap_err();
 		assert!(matches!(error, ConfigError::InvalidConfig(_)));
 		let content = std::fs::read_to_string(&file).unwrap();
