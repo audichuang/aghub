@@ -3344,6 +3344,107 @@ fn source_accept_rename_installs_new_removes_old() {
 	);
 }
 
+/// D1: in the Master+Referrer layout a committed rename must take the old
+/// name's `.aghub/<old>` Master with it, or `doctor --fail-on-issues` fails
+/// right after a successful rename.
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_store_layout_leaves_no_orphan_master() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let master = home.path().join(".aghub/old-skill");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: old-skill\ndescription: original\n---\nbody\n",
+	)
+	.unwrap();
+	let skills = home.path().join(".claude/skills");
+	std::fs::create_dir_all(&skills).unwrap();
+	std::os::unix::fs::symlink(&master, skills.join("old-skill")).unwrap();
+	seed_global_lock_entry(
+		state.path(),
+		"old-skill",
+		"owner/repo",
+		"new-dir/SKILL.md",
+	);
+
+	let fetch_root = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(fetch_root.path().join("new-dir")).unwrap();
+	std::fs::write(
+		fetch_root.path().join("new-dir/SKILL.md"),
+		"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+	)
+	.unwrap();
+
+	// Precondition: the fixture really is a healthy store-layout install, so a
+	// malformed fixture cannot make the final assertions pass vacuously.
+	let before = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "--json", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	let before: Value = serde_json::from_slice(&before.stdout).unwrap();
+	let row = before
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|r| r["skill"] == "old-skill")
+		.expect("old-skill must be reported before the rename");
+	assert_eq!(row["linkAudit"]["state"], "verified", "{row}");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", fetch_root.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old-skill",
+			"new-skill",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let after = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"--json",
+			"doctor",
+			"--verify-links",
+			"--fail-on-issues",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		after.status.success(),
+		"doctor must be clean after a rename: {}{}",
+		String::from_utf8_lossy(&after.stdout),
+		String::from_utf8_lossy(&after.stderr)
+	);
+	let after: Value = serde_json::from_slice(&after.stdout).unwrap();
+	let rows = after.as_array().unwrap();
+	assert!(
+		rows.iter().all(|r| r["skill"] != "old-skill"),
+		"no row may remain for the old name: {after}"
+	);
+	assert!(rows.iter().any(|r| r["skill"] == "new-skill"), "{after}");
+	assert!(
+		std::fs::symlink_metadata(&master).is_err(),
+		"the old Master must be gone from the store"
+	);
+}
+
 #[cfg(unix)]
 #[test]
 fn source_accept_rename_dry_run_writes_nothing() {
@@ -13784,6 +13885,34 @@ fn repair_refuses_when_the_mutation_lock_cannot_be_created() {
 		!home.path().join(".aghub").join(name).exists(),
 		"no master may be adopted by a repair that never held the lock"
 	);
+}
+
+/// A misspelled NAME is refused (exit 1), never `conformant`, and writes nothing.
+#[test]
+fn repair_of_a_name_that_exists_nowhere_is_refused_and_exits_1() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	for extra in [None, Some("--yes")] {
+		let mut cmd = isolated_cli(home.path(), state.path());
+		cmd.args(["-g", "repair", "no-such-skill", "--json"]);
+		if let Some(f) = extra {
+			cmd.arg(f);
+		}
+		let out = cmd.output().unwrap();
+		assert_eq!(
+			out.status.code(),
+			Some(1),
+			"{extra:?}: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let v: serde_json::Value =
+			serde_json::from_slice(&out.stdout).expect("one JSON document");
+		let reason = v["skills"][0]["outcome"]["refused"]["reason"]
+			.as_str()
+			.unwrap_or_else(|| panic!("no refused outcome: {v}"));
+		assert!(reason.contains("no-such-skill"), "{reason}");
+		assert!(!home.path().join(".aghub/no-such-skill").exists());
+	}
 }
 
 /// After a migration, `doctor` must not report aghub's own bookkeeping as a

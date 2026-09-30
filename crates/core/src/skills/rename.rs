@@ -289,8 +289,9 @@ pub fn accept_rename(
 	// Step 2: target agents = the MANAGED ones that actually have the old name
 	// installed (never every agent). Mirrors apply-update only touching
 	// installed roots. A disabled holder keeps the old name: Step 8's
-	// exhaustive removal skips dirs only disabled agents read, so it keeps the
-	// old Master too.
+	// exhaustive removal skips dirs only disabled agents read, and its Master
+	// pass (pass 2) keeps the old Master while such a Referrer still points at
+	// it.
 	let target_agents: Vec<crate::models::AgentType> =
 		crate::load_managed_agents(resource_scope, project_root)
 			.into_iter()
@@ -588,6 +589,69 @@ pub fn accept_rename(
 		)));
 	}
 
+	// Step 8, pass 2: the old Master in the `.aghub` store. Pass 1 sweeps agent
+	// skill dirs only and `old_skill` has no `canonical_path`, so it took the
+	// copy planner and never saw the Master. Re-plan it as a Master (the same
+	// `canonical_path` synthesis `skill_for_planned_removal` uses) so the
+	// Referrer keep rules hold it back while a disabled agent still links to it.
+	// The snapshot already covers this path, so the rollback restores it.
+	if let Some(master) =
+		old_master_path(req.old_name, resource_scope, project_root)
+	{
+		let is_real_dir = std::fs::symlink_metadata(&master)
+			.is_ok_and(|m| m.is_dir() && !Linker::is_link(&master));
+		if is_real_dir {
+			let mut master_skill = old_skill.clone();
+			master_skill.canonical_path =
+				Some(master.join("SKILL.md").display().to_string());
+			let master_plan = crate::skills::removal::plan_removal(
+				&master_skill,
+				None,
+				&agent_dirs,
+				project_root,
+				true,
+			);
+			let outcome = if master_plan.incomplete {
+				Err(format!(
+					"Cannot finish renaming '{}': the old copy in the skill store \
+					 could not be checked completely.",
+					req.old_name
+				))
+			} else {
+				match crate::skills::removal::execute_removal(
+					&master_plan,
+					&removal_roots,
+				) {
+					Ok(r) if r.failed.is_empty() => Ok(()),
+					Ok(r) => {
+						let failed: Vec<String> = r
+							.failed
+							.iter()
+							.map(|(p, e)| format!("{}: {e}", p.display()))
+							.collect();
+						log::warn!(
+							"rename: old Master removal failed for '{}': {}",
+							req.old_name,
+							failed.join("; ")
+						);
+						Err(format!(
+							"Partial removal failure removing old skill '{}'",
+							req.old_name
+						))
+					}
+					Err(e) => Err(format!(
+						"Failed to remove old skill '{}': {e}",
+						req.old_name
+					)),
+				}
+			};
+			if let Err(msg) = outcome {
+				rollback_all(Some(&install_report));
+				return Err(RenameError::RemovalFailed(msg));
+			}
+		}
+	}
+
 	// Step 9: remove the old-name lock entry. A failure here means the txn did
 	// not fully commit -> roll everything back.
 	if let Err(e) = remove_lock_entry(req.old_name, &req.scope) {
@@ -702,6 +766,20 @@ struct SkillSnapshot {
 /// deep-copied. MUST run BEFORE any mutation: a backup failure aborts (returns
 /// `Err`) so it can never become permanent old-skill loss when a later step
 /// fails. Genuinely-absent paths are skipped.
+fn old_master_path(
+	name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Option<PathBuf> {
+	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
+		project_root
+	} else {
+		None
+	};
+	master_store_dir(canonical_root)
+		.map(|d| d.join(skill::sanitize::sanitize_name(name)))
+}
+
 fn snapshot_old_skill(
 	name: &str,
 	scope: ResourceScope,
@@ -730,13 +808,8 @@ fn snapshot_old_skill(
 		}
 		targets.extend(candidates);
 	}
-	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
-		project_root
-	} else {
-		None
-	};
-	if let Some(master) = master_store_dir(canonical_root) {
-		targets.push(master.join(&safe));
+	if let Some(master) = old_master_path(name, scope, project_root) {
+		targets.push(master);
 	}
 
 	for (idx, live) in targets.into_iter().enumerate() {
@@ -1117,6 +1190,87 @@ mod tests {
 		assert!(
 			Linker::is_link(&old_ref),
 			"old referrer must be restored as a link, not materialized"
+		);
+	}
+
+	/// A Referrer in a dir only a DISABLED agent reads keeps the old Master
+	/// alive (pass 2's keep rules), while the managed agent's old link goes.
+	/// Kiro's project dir `.kiro/skills` is read by no other agent
+	/// (`descriptor_regression::test_project_skill_paths`).
+	#[cfg(unix)]
+	#[test]
+	fn a_disabled_agents_referrer_keeps_the_old_master() {
+		let _disabled =
+			crate::agent_settings::test_override::disable(&["kiro"]);
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let master_dir =
+			master_store_dir(Some(root)).unwrap().join("old-skill");
+		std::fs::create_dir_all(&master_dir).unwrap();
+		std::fs::write(
+			master_dir.join("SKILL.md"),
+			"---\nname: old-skill\ndescription: original\n---\n",
+		)
+		.unwrap();
+		let claude_link = root.join(".claude/skills/old-skill");
+		let kiro_link = root.join(".kiro/skills/old-skill");
+		for link in [&claude_link, &kiro_link] {
+			std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+			std::os::unix::fs::symlink(&master_dir, link).unwrap();
+		}
+		let scope = RenameScope::Project {
+			root: root.to_path_buf(),
+		};
+		skill::lock::local::modify_local_lock(Some(root), |lock| {
+			lock.skills.insert(
+				"old-skill".to_string(),
+				skill::LocalSkillLockEntry {
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					skill_path: Some("new-skill/SKILL.md".to_string()),
+					computed_hash: "old".to_string(),
+					ref_commit: None,
+					source_url: None,
+				},
+			);
+		})
+		.unwrap();
+		let source = rename_source_from_lock("old-skill", &scope).unwrap();
+
+		let repo = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(repo.path().join("new-skill")).unwrap();
+		std::fs::write(
+			repo.path().join("new-skill/SKILL.md"),
+			"---\nname: new-skill\ndescription: x\n---\nbody\n",
+		)
+		.unwrap();
+
+		accept_rename(
+			RenameRequest {
+				old_name: "old-skill",
+				new_name: "new-skill",
+				scope: scope.clone(),
+			},
+			FetchedRename {
+				repo_root: repo.path(),
+				oid: "",
+				source: &source,
+			},
+		)
+		.expect("rename should succeed");
+
+		assert!(
+			master_dir.join("SKILL.md").is_file(),
+			"a disabled agent's Referrer must keep the old Master"
+		);
+		assert!(
+			Linker::is_link(&kiro_link),
+			"the disabled agent's link must be untouched"
+		);
+		assert!(
+			std::fs::symlink_metadata(&claude_link).is_err(),
+			"the managed agent's old link must be removed"
 		);
 	}
 }

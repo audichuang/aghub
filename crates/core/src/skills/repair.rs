@@ -52,9 +52,11 @@ pub enum RepairOutcome {
 	/// Nothing written. `reason` says why, `fix` is the literal next command or
 	/// path — a refused row must read as an instruction, not a diagnosis.
 	Refused { reason: String, fix: String },
-	/// The repair was attempted and the OS said no (EACCES, ENOSPC, a Windows
-	/// sharing violation). Distinct from `Refused`: a refusal is a DECISION the
-	/// next run repeats; this is transient and the next run absorbs it.
+	/// The repair was attempted and failed with ANY per-skill error: an OS
+	/// refusal (EACCES, ENOSPC, a Windows sharing violation), a mutation lock
+	/// that could not be taken, a failed copy. A re-run MAY clear it but is not
+	/// guaranteed to, so read `reason`. Distinct from `Refused`: a refusal is a
+	/// DECISION the next run repeats.
 	/// Folding them would break dry-run parity (preview and commit agree).
 	Failed { reason: String, fix: String },
 }
@@ -163,7 +165,36 @@ pub fn repair_skill(
 	) else {
 		return Ok(None);
 	};
+	// Bulk worklists hold only lock names, so this fires only for a NAMED,
+	// unlocked name that exists nowhere (a typo). A locked name with nothing
+	// on disk stays Conformant on purpose: the desktop migration banner must
+	// not start refusing.
+	if !in_lock && grant_to.is_empty() && plan.finds_nothing() {
+		return Ok(Some(not_found_report(&plan, dry_run)));
+	}
 	execute_repair(&plan, dry_run).map(Some)
+}
+
+/// The refusal for a name that is in no lock and that no agent reads.
+fn not_found_report(plan: &RepairPlan, dry_run: bool) -> RepairReport {
+	let name = &plan.name;
+	RepairReport {
+		name: name.clone(),
+		shape: plan.actions.first().map(|a| a.shape.clone()),
+		outcome: RepairOutcome::Refused {
+			reason: format!(
+				"no skill named '{name}' at this scope: no Master at {}, no lock entry, and no agent reads it from any of its skill dirs",
+				plan.master.display()
+			),
+			fix: "check the spelling: repair takes the SKILL.md frontmatter `name:`. List what exists with `aghub-cli doctor` (or `get skills -a all`); to install it, use `aghub-cli source sync <source> --skill <name> --install-missing`".to_string(),
+		},
+		master: plan.master.clone(),
+		referrers: Vec::new(),
+		unlinked: Vec::new(),
+		quarantined: None,
+		fused: Vec::new(),
+		dry_run,
+	}
 }
 
 /// Repair EVERY skill the lock names at this scope (or just `name`).
@@ -679,6 +710,67 @@ mod tests {
 	fn plan(root: &Path, name: &str, in_lock: bool) -> RepairPlan {
 		plan_repair(ResourceScope::ProjectOnly, Some(root), name, in_lock, &[])
 			.expect("project scope always names a store")
+	}
+
+	/// A NAMED repair of a name that is in no lock and on no disk is a typo, not
+	/// a healthy layout: it must be refused, while a LOCKED name with nothing
+	/// on disk stays `Conformant` (bulk worklists are lock names).
+	#[test]
+	fn a_named_repair_of_a_skill_that_exists_nowhere_is_refused() {
+		let (_tmp, root) = fixture();
+		for dry_run in [true, false] {
+			let report = repair_skill(
+				ResourceScope::ProjectOnly,
+				Some(&root),
+				"no-such-skill",
+				false,
+				dry_run,
+			)
+			.unwrap()
+			.unwrap();
+			match &report.outcome {
+				RepairOutcome::Refused { reason, fix } => {
+					assert!(reason.contains("no-such-skill"), "{reason}");
+					assert!(fix.contains("doctor"), "{fix}");
+				}
+				other => {
+					panic!("dry_run={dry_run}: expected Refused: {other:?}")
+				}
+			}
+		}
+		assert!(!root.join(".aghub/no-such-skill").exists());
+		assert!(!root.join(".claude/skills/no-such-skill").exists());
+
+		let locked = repair_skill(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			"locked-gone",
+			true,
+			true,
+		)
+		.unwrap()
+		.unwrap();
+		assert!(matches!(locked.outcome, RepairOutcome::Conformant));
+	}
+
+	/// A copy that sits only in a read-only compat dir still EXISTS (agents
+	/// read it), so the refusal must not claim the name is misspelled.
+	#[test]
+	fn a_skill_held_only_by_a_compat_dir_is_not_reported_as_not_found() {
+		let (_tmp, root) = fixture();
+		write_skill(&root.join(".clinerules/skills/foo"), "foo", "compat");
+		let report = repair_skill(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			"foo",
+			false,
+			true,
+		)
+		.unwrap()
+		.unwrap();
+		if let RepairOutcome::Refused { reason, .. } = &report.outcome {
+			assert!(!reason.contains("no skill named"), "{reason}");
+		}
 	}
 
 	#[test]

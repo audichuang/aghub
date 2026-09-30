@@ -20,6 +20,11 @@ list, or `all`), `-g`/`-p`, `--all`.
   `-u` is refused (it used to be a silent no-op). The API PUT replaces the
   transport on purpose, because the GUI sends the whole pre-filled form and
   omits `headers` to clear them.
+- **`source accept-rename`** removes the old name's `.aghub/<old>` Master in the
+  same transaction (core `rename::accept_rename`, a second removal pass with the
+  synthesized canonical path; the snapshot covers it). A Referrer in a dir only
+  disabled agents read keeps it. The CLI preview neither fetches nor names
+  agents/paths.
 - **Destructive defaults**: `delete` (skills, mcps AND sub-agents; the same
   `outcome` vocabulary), `apply-update`, `prune-lock`,
   `source sync`, `source accept-rename`, reconcile-with-removals → **dry-run
@@ -69,7 +74,11 @@ list, or `all`), `-g`/`-p`, `--all`.
 - **`repair`** also DETACHES stale Referrers in read-only compat dirs (outcome
   `tidied`, printed `unlinked:`) under four guards that must not be loosened,
   and REFUSES a real directory that git TRACKS (the refusal prints
-  `git rm -r --cached <path>`). Same page.
+  `git rm -r --cached <path>`). Same page. A NAMED skill that is in no lock, has no
+  Master and is read by no agent (any skill dir, compat included) is `refused` (core `repair_skill` → `RepairPlan::finds_nothing`),
+  never `conformant`; the API route answers the same through `repair_all`. A
+  locked name with nothing on disk stays `conformant` — bulk worklists are lock
+  names and must not start refusing.
 - **`check` is offline by default** (`checked: false`): a source nothing could
   fetch keeps its permanent reason (`local` / `ssh` / `unsupportedScheme`),
   everything else reports `network` = "we did not look", so `--online` is only

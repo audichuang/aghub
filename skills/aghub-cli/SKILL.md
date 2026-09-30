@@ -13,6 +13,10 @@ Exact syntax belongs to `aghub-cli <command> --help` — it is unusually complet
 including the destructive-default and token rules. This file carries what the
 help cannot: the storage model, which branch to take, and the traps.
 
+For the commands this file does not route — MCP servers, sub-agents, Claude Code
+plugins, inference providers, skill-usage — see
+[other commands](references/other-commands.md).
+
 ## The storage model
 
 One Master per scope at `.aghub/<name>` (`~/.aghub` global, `<root>/.aghub`
@@ -187,8 +191,9 @@ private directory does not count — repair leaves that alone.
   mistake `--update` later discards.
 - Something to point at, slot EMPTY → that is `withheld`, not damage. Repair
   leaves it alone; granting it is [Grant](#grant-an-agent).
-- Nothing to point at → repair refuses, or reports `conformant` over a skill
-  nobody can read. [Grant](#grant-an-agent) is the branch, because it fetches.
+- Nothing to point at → repair refuses (a name nothing holds at all is refused
+  outright), except that a LOCKED name with nothing on disk still reports
+  `conformant`. [Grant](#grant-an-agent) is the branch, because it fetches.
 
 | What step 2 showed                                                                                  | Branch                                                                                                                                                      |
 | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -268,7 +273,8 @@ Do not predict the outcome from the state you observed; the same state reaches
 different outcomes depending on what else is on disk. Run the preview and read
 what it says it will do.
 
-And `conformant` is not proof the layout is healthy. When there is no Master,
+And `conformant` is not proof the layout is healthy. A misspelled NAME is
+refused; a locked skill with no Master can still report conformant. When there is no Master,
 only the slots repair had planned to CREATE or RELINK turn into refusals — a
 slot it was going to leave alone stays left alone, so a plan that touches
 nothing reports `conformant` while the skill is still unreachable. A bulk run
@@ -423,9 +429,12 @@ repeat with `--yes`. Both arguments come from that row (`--help` names which
 field is which). The transaction resolves the new frontmatter name even when the
 repo directory moved. The preview names no paths and no agents. The commit grants
 the new name to every agent that could READ the old one — shared-slot readers get
-their own Referrer — and can leave the old Master behind as an untracked
-`orphanMaster`. Run `doctor --verify-links` afterwards and clear a leftover with
-`delete skills <OLD> --all-agents`.
+their own Referrer. The commit removes the old name everywhere, its `.aghub/<old>`
+Master included. The one exception is an agent you disabled (`agents list`) that
+still holds a Referrer to it: the old Master is kept for that agent and shows up
+untracked in `doctor` (enable the agent or unlink that entry, then `delete skills
+<OLD> --all-agents`). The preview does not fetch, so a name mismatch surfaces
+only on `--yes`. Run `doctor --verify-links` afterwards as the completion check.
 
 ### Clean up leftovers
 

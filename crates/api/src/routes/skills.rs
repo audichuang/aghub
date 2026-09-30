@@ -7748,6 +7748,30 @@ mod tests {
 			);
 		}
 
+		/// A NAMED repair of a name nothing holds is refused, like the CLI.
+		#[test]
+		fn a_named_repair_of_an_unknown_name_is_refused() {
+			let _guard = crate::routes::test_env_lock()
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let c = client();
+			let (_temp, root) = legacy_project(&["alpha"]);
+			let response = c
+				.post("/api/v1/skills/repair")
+				.json(&serde_json::json!({
+					"scope": "project",
+					"project_root": root.to_str().unwrap(),
+					"name": "no-such-skill",
+					"dry_run": true,
+				}))
+				.dispatch();
+			assert_eq!(response.status(), Status::Ok);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+			assert_eq!(body["refused"], true, "{body}");
+			assert_eq!(body["skills"][0]["outcome"], "refused", "{body}");
+		}
+
 		/// A scope the route cannot resolve to one store is a 400, not a
 		/// silent global write.
 		#[test]

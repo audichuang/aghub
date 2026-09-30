@@ -352,7 +352,7 @@ fn accept_rename_rolls_back_when_old_dir_cannot_be_removed() {
 			"old skill content must remain after a rolled-back transaction"
 		);
 		assert!(
-			!home.join(".agents/skills/new-skill").exists(),
+			!home.join(".aghub/new-skill").exists(),
 			"the freshly-created new-name master must be rolled back"
 		);
 		let lock = skill::lock::global::read_skill_lock();
@@ -364,6 +364,145 @@ fn accept_rename_rolls_back_when_old_dir_cannot_be_removed() {
 			!lock.skills.contains_key("new-skill"),
 			"new-skill must not be left in the lock"
 		);
+	});
+}
+
+/// The store layout (Master in `.aghub/<name>`, Referrer link in the agent dir)
+/// that `install_old_skill` deliberately does NOT seed (pre-2.18 layout).
+fn install_old_skill_store_layout(home: &Path, name: &str) {
+	let master = home.join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: original\n---\n"),
+	)
+	.unwrap();
+	let skills = home.join(".claude/skills");
+	std::fs::create_dir_all(&skills).unwrap();
+	std::os::unix::fs::symlink(&master, skills.join(name)).unwrap();
+}
+
+/// D1: a rename in the Master+Referrer layout must take the old Master with it,
+/// or `doctor` reports it as an untracked orphan right after a clean rename.
+#[test]
+fn accept_rename_removes_the_old_master_from_the_store() {
+	with_isolated_env(|home| {
+		install_old_skill_store_layout(home, "old-skill");
+		seed_global_lock("old-skill", "new-skill/SKILL.md");
+		let repo = fake_repo("new-skill", "new-skill");
+		let source = source_for("new-skill/SKILL.md");
+
+		accept_rename(
+			RenameRequest {
+				old_name: "old-skill",
+				new_name: "new-skill",
+				scope: RenameScope::Global,
+			},
+			FetchedRename {
+				repo_root: repo.path(),
+				oid: "",
+				source: &source,
+			},
+		)
+		.expect("rename should succeed");
+
+		assert!(
+			std::fs::symlink_metadata(home.join(".aghub/old-skill")).is_err(),
+			"the old Master must be removed from the store"
+		);
+		assert!(
+			std::fs::symlink_metadata(home.join(".claude/skills/old-skill"))
+				.is_err(),
+			"the old Referrer must be removed"
+		);
+		assert!(home.join(".aghub/new-skill/SKILL.md").is_file());
+		let link = home.join(".claude/skills/new-skill");
+		assert!(std::fs::symlink_metadata(&link)
+			.unwrap()
+			.file_type()
+			.is_symlink());
+		assert_eq!(
+			std::fs::canonicalize(&link).unwrap(),
+			std::fs::canonicalize(home.join(".aghub/new-skill")).unwrap()
+		);
+		let lock = skill::lock::global::read_skill_lock();
+		assert!(lock.skills.contains_key("new-skill"));
+		assert!(!lock.skills.contains_key("old-skill"));
+	});
+}
+
+/// The failure path of the Master removal: everything is restored and no
+/// new-name artifact survives.
+#[test]
+fn accept_rename_rolls_back_and_restores_the_old_master_when_it_cannot_be_removed(
+) {
+	use std::os::unix::fs::PermissionsExt;
+	with_isolated_env(|home| {
+		install_old_skill_store_layout(home, "old-skill");
+		seed_global_lock("old-skill", "new-skill/SKILL.md");
+		let repo = fake_repo("new-skill", "new-skill");
+		let source = source_for("new-skill/SKILL.md");
+
+		// A read-only Master dir: its SKILL.md cannot be unlinked. Root ignores
+		// 0o500, so probe and skip rather than false-pass.
+		let master = home.join(".aghub/old-skill");
+		let original = std::fs::metadata(&master).unwrap().permissions();
+		std::fs::set_permissions(
+			&master,
+			std::fs::Permissions::from_mode(0o500),
+		)
+		.unwrap();
+		let probe = master.join(".rename-root-probe");
+		if std::fs::write(&probe, b"x").is_ok() {
+			let _ = std::fs::remove_file(&probe);
+			std::fs::set_permissions(&master, original).unwrap();
+			eprintln!("skipping under root: 0o500 is not enforced");
+			return;
+		}
+
+		let result = accept_rename(
+			RenameRequest {
+				old_name: "old-skill",
+				new_name: "new-skill",
+				scope: RenameScope::Global,
+			},
+			FetchedRename {
+				repo_root: repo.path(),
+				oid: "",
+				source: &source,
+			},
+		);
+
+		// Restore perms before asserting so the tempdir can be cleaned up.
+		let _ = std::fs::set_permissions(&master, original);
+
+		// It must fail in the removal pass, not earlier.
+		assert!(
+			matches!(result, Err(RenameError::RemovalFailed(_))),
+			"expected RemovalFailed, got {result:?}"
+		);
+		assert_eq!(
+			std::fs::read_to_string(master.join("SKILL.md")).unwrap(),
+			"---\nname: old-skill\ndescription: original\n---\n",
+			"the old Master content must be restored"
+		);
+		assert!(
+			std::fs::symlink_metadata(home.join(".claude/skills/old-skill"))
+				.unwrap()
+				.file_type()
+				.is_symlink(),
+			"the old Referrer must be back as a link"
+		);
+		let lock = skill::lock::global::read_skill_lock();
+		assert!(lock.skills.contains_key("old-skill"));
+		assert!(!lock.skills.contains_key("new-skill"));
+		assert!(
+			std::fs::symlink_metadata(home.join(".aghub/new-skill")).is_err()
+		);
+		assert!(std::fs::symlink_metadata(
+			home.join(".claude/skills/new-skill")
+		)
+		.is_err());
 	});
 }
 
@@ -561,7 +700,7 @@ fn accept_rename_rolls_back_when_one_of_two_agents_fails_to_install() {
 			"new skill must never appear on the failing agent's write path"
 		);
 		assert!(
-			!home.join(".agents/skills/new-skill").exists(),
+			!home.join(".aghub/new-skill").exists(),
 			"the freshly-created new-name master must be rolled back"
 		);
 		let lock = skill::lock::global::read_skill_lock();

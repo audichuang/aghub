@@ -1896,6 +1896,13 @@ pub struct RepairPlan {
 }
 
 impl RepairPlan {
+	/// True when the skill exists nowhere at this scope: no Master and every
+	/// slot `Absent`.
+	pub fn finds_nothing(&self) -> bool {
+		!self.master_exists
+			&& self.actions.iter().all(|a| a.shape == SkillShape::Absent)
+	}
+
 	pub fn is_noop(&self) -> bool {
 		self.actions.iter().all(|a| {
 			matches!(

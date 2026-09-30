@@ -121,8 +121,9 @@ whenever `previousName`, `reason` or `origin` matter.
 `outcome` is a plain string for `conformant` | `migrated` | `relinked` |
 `reconciled` | `tidied`, but an object — `{"refused":{"reason","fix"}}` or
 `{"failed":{"reason","fix"}}` — otherwise, so `.outcome == "refused"` never
-matches: test `.outcome | type` first. A misspelled NAME reports `conformant`
-too (exit 0); confirm the name with `doctor` before trusting it.
+matches: test `.outcome | type` first. A NAME that has no Master, no lock entry and that
+no agent reads from any of its skill dirs at this scope is `{"refused":{…}}`, exit 1;
+the fix points at `doctor`.
 
 Read the row rather than predicting it. `shape` is what repair FOUND and
 `outcome` what it DID, and the two are not a lookup table: a plan holds one
@@ -136,8 +137,9 @@ The distinctions that change what you do next:
 
 - `conformant` is the DEFAULT outcome, not a health certificate. With no Master
   only planned `Create`/`Relink` actions become refusals; slots repair meant to
-  leave alone stay left alone, so a plan that writes nothing reports
-  `conformant` over a skill nothing can read. A bulk run (no NAME) also
+  leave alone stay left alone, so a plan that writes nothing still reports
+  `conformant` over a LOCKED skill (orphan-lock) with no Master, or a skill
+  whose only copy sits where repair leaves it alone. A bulk run (no NAME) also
   suppresses conformant rows entirely, so their absence proves nothing either.
   Confirm health with `doctor --verify-links`, not with this field.
 - `refused` is a DECISION: the next run repeats it. Its `fix` is a HINT, not
@@ -259,7 +261,8 @@ with `UNSUPPORTED_OPERATION`. `get -a all` / `-a a,b` work.
 ## Rename and interoperability edges
 
 `source accept-rename` is transactional across the old and new Master,
-Referrers, and lock. Its rollback is BEST-EFFORT, though — `--help` says "rolls
+Referrers, and lock. The old Master is removed in the same transaction, and that
+removal is covered by the same rollback. Its rollback is BEST-EFFORT, though — `--help` says "rolls
 back on any failure", but the restore path discards its own errors, so a failure
 that also fails to unwind leaves a half-state with no signal. After any failed
 rename, inspect with `doctor --verify-links` rather than assuming the disk is
