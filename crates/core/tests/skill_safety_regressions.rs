@@ -496,7 +496,7 @@ fn single_agent_refusal_names_the_unselected_readers_of_the_shared_slot() {
 	let disabled_set: std::collections::BTreeSet<String> = AgentType::ALL
 		.iter()
 		.copied()
-		.filter(|&a| a != AgentType::Cline)
+		.filter(|&a| a != AgentType::Cline && a != AgentType::Cursor)
 		.map(|a| aghub_core::registry::get(a).id.to_string())
 		.collect();
 	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
@@ -529,8 +529,8 @@ fn single_agent_refusal_names_the_unselected_readers_of_the_shared_slot() {
 		);
 	}
 	assert!(
-		message.contains("(disabled)"),
-		"refusal message must contain '(disabled)': {message}"
+		!message.contains("(disabled)"),
+		"refusal message must not contain '(disabled)': {message}"
 	);
 	assert!(
 		message.contains("--all-agents"),

@@ -1012,18 +1012,7 @@ impl ConfigManager {
 						}
 					}
 					if !readers.is_empty() {
-						let disabled = crate::agent_settings::disabled_agents();
-						let formatted = readers
-							.into_iter()
-							.map(|id| {
-								if disabled.contains(id) {
-									format!("{id} (disabled)")
-								} else {
-									id.to_string()
-								}
-							})
-							.collect::<Vec<_>>()
-							.join(", ");
+						let formatted = readers.join(", ");
 						reason.push_str(&format!(
 							". Also read there by agents not in this request: {formatted}. Include them in the same request, or delete for every agent (--all-agents, which also unlinks it for them)"
 						));

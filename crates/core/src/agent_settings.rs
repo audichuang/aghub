@@ -5,9 +5,12 @@
 //! the choice was saved — stays off until the user turns it on. Everything
 //! outside the list is "disabled": no flow that picks its own agent set
 //! (repair, update, git sync, rename, delete-from-all) writes into its
-//! directories. A disabled agent still counts as a READER wherever a flow asks
-//! "would anyone lose this skill" — not managing an agent must never mean
-//! breaking it.
+//! directories. A disabled agent is unmanaged, so it does not block a
+//! single-agent / comma-list delete by counting as an unselected reader of a
+//! shared slot ([`crate::skills::removal::skill_dir_readers_outside`] skips
+//! it); the ONE place the full roster still applies is Master retention (a
+//! disabled agent's Referrer keeps a Master alive on `--all-agents`, see
+//! `unmanaged_skill_dirs`/`plan_removal`).
 //!
 //! Persisted under [`crate::paths::app_data_dir`] so every surface (desktop,
 //! CLI, a remote's aghub-api) reads the same answer. A missing file means

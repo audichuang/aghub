@@ -434,9 +434,11 @@ are unmanaged and `aghub-cli agents enable <id>` to turn one back on (note that
 entries the message lists, then retry — do not widen the roster to `-a all`.
 
 If a single-agent delete refuses with "Also read there by agents not in this
-request", the skill lives in a shared slot still read by other agents. Include
-them in the same `-a` request, or delete for every agent (`--all-agents`, which
-also unlinks it for them).
+request", the skill lives in a shared slot still read by other agents. Only
+ENABLED agents are named (disabled agents never block a single-agent delete;
+deleting for cline removes the shared Referrer and a disabled agent that read it
+simply stops seeing the skill). Include them in the same `-a` request, or delete
+for every agent (`--all-agents`, which also unlinks it for them).
 
 An `add --from` install is intentionally untracked and has no upstream-update
 branch; refresh it through the same backed-up delete plus a re-`add` with an

@@ -174,3 +174,18 @@ swept, so the two cannot disagree unless the planner really left something
 behind.
 
 Commit: 1b373c2c.
+
+## Disabled agent blocked a single-agent delete
+
+`skill_dir_readers_outside` walked the full `AgentType::ALL`, so an unmanaged
+agent blocked `delete skills x -a cline` with "Also read there by agents not in
+this request: cursor (disabled)" and the only escape was `--all-agents` or
+re-enabling.
+
+Rule: disabled = unmanaged, excluded from unselected readers; Master retention
+still full roster.
+
+Tests:
+`manager::skill::tests::single_agent_remove_skill_shared_slot_succeeds_when_other_reader_disabled`,
+`single_agent_remove_skill_shared_slot_refused_when_other_reader_enabled`,
+cli test `delete_single_agent_ignores_disabled_shared_slot_reader`.

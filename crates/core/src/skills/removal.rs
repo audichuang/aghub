@@ -774,11 +774,14 @@ fn is_universal_master(dir: &Path, project_root: Option<&Path>) -> bool {
 	assert_strictly_contained(dir, &skill_store_roots(project_root)).is_some()
 }
 
+// See docs/history/core-removal.md#disabled-agent-blocked-a-single-agent-delete
 /// Which in-scope agents read the skill folder `dir` WITHOUT being named in
 /// `requested`? The question a LOCATION delete asks: "is this a shared Master?"
 /// alone made every Master undeletable through the desktop's per-location
 /// dialog, which sends every agent installed at that path. It is the readers
 /// LEFT OUT of a request that make it dangerous, not the layout.
+///
+/// Disabled agents are excluded because they are unmanaged.
 ///
 /// Answered from each agent's read dirs, never a `load_all_agents` scan: an
 /// agent whose config fails to parse loads zero skills and would read as "not a
@@ -789,9 +792,11 @@ pub fn skill_dir_readers_outside(
 	project_root: Option<&Path>,
 	requested: &[crate::models::AgentType],
 ) -> Vec<&'static str> {
+	let disabled = crate::agent_settings::disabled_agents();
 	let target = crate::skills::linker::classify::canonicalize_lenient(dir);
 	crate::models::AgentType::ALL
 		.iter()
+		.filter(|agent| !disabled.contains(agent.as_str()))
 		.filter(|agent| !requested.contains(agent))
 		.filter(|agent| {
 			crate::create_adapter(**agent)

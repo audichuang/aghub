@@ -7386,6 +7386,104 @@ fn delete_discloses_the_master_it_leaves_behind() {
 	);
 }
 
+#[cfg(unix)]
+#[test]
+fn delete_single_agent_ignores_disabled_shared_slot_reader() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let name = "shared-slot-disabled-reader";
+	let master = home.path().join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: shared-slot-disabled-reader\ndescription: test\n---\n",
+	)
+	.unwrap();
+	let shared_dir = home.path().join(".agents/skills");
+	std::fs::create_dir_all(&shared_dir).unwrap();
+	let referrer = shared_dir.join(name);
+	std::os::unix::fs::symlink(&master, &referrer).unwrap();
+
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled_set: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| a != aghub_core::AgentType::Cline)
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cline", "delete", "skills", name, "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"deletion must succeed for cline when other readers are disabled; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(
+		!referrer.exists() && referrer.symlink_metadata().is_err(),
+		"the Referrer symlink must be gone"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_single_agent_refuses_enabled_shared_slot_reader() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let name = "shared-slot-enabled-reader";
+	let master = home.path().join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: shared-slot-enabled-reader\ndescription: test\n---\n",
+	)
+	.unwrap();
+	let shared_dir = home.path().join(".agents/skills");
+	std::fs::create_dir_all(&shared_dir).unwrap();
+	let referrer = shared_dir.join(name);
+	std::os::unix::fs::symlink(&master, &referrer).unwrap();
+
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled_set: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| {
+				a != aghub_core::AgentType::Cline
+					&& a != aghub_core::AgentType::Cursor
+			})
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cline", "delete", "skills", name, "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"deletion must be refused when cursor also reads the shared slot; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("cursor") && stderr.contains("not in this request"),
+		"stderr must contain 'cursor' and 'not in this request'; stderr: {stderr}"
+	);
+	assert!(
+		referrer.symlink_metadata().is_ok(),
+		"the Referrer symlink must still exist"
+	);
+}
+
 /// Re-adding an installed skill writes NOTHING. It used to report the freshly
 /// parsed SOURCE file as if it had been installed, so an edited source printed
 /// its new frontmatter while disk still held the old Master.
