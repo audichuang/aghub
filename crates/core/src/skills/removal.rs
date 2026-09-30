@@ -774,6 +774,35 @@ fn is_universal_master(dir: &Path, project_root: Option<&Path>) -> bool {
 	assert_strictly_contained(dir, &skill_store_roots(project_root)).is_some()
 }
 
+fn readers_outside(
+	dir: &Path,
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+	requested: &[crate::models::AgentType],
+	include_disabled: bool,
+) -> Vec<&'static str> {
+	let disabled = crate::agent_settings::disabled_agents();
+	let target = crate::skills::linker::classify::canonicalize_lenient(dir);
+	crate::models::AgentType::ALL
+		.iter()
+		.filter(|agent| include_disabled || !disabled.contains(agent.as_str()))
+		.filter(|agent| !requested.contains(agent))
+		.filter(|agent| {
+			crate::create_adapter(**agent)
+				.get_skills_paths(project_root, scope)
+				.iter()
+				.any(|read_dir| {
+					target.starts_with(
+						crate::skills::linker::classify::canonicalize_lenient(
+							read_dir,
+						),
+					)
+				})
+		})
+		.map(|agent| crate::registry::get(*agent).id)
+		.collect()
+}
+
 // See docs/history/core-removal.md#disabled-agent-blocked-a-single-agent-delete
 /// Which in-scope agents read the skill folder `dir` WITHOUT being named in
 /// `requested`? The question a LOCATION delete asks: "is this a shared Master?"
@@ -792,31 +821,19 @@ pub fn skill_dir_readers_outside(
 	project_root: Option<&Path>,
 	requested: &[crate::models::AgentType],
 ) -> Vec<&'static str> {
-	let disabled = crate::agent_settings::disabled_agents();
-	let target = crate::skills::linker::classify::canonicalize_lenient(dir);
-	crate::models::AgentType::ALL
-		.iter()
-		.filter(|agent| !disabled.contains(agent.as_str()))
-		.filter(|agent| !requested.contains(agent))
-		.filter(|agent| {
-			crate::create_adapter(**agent)
-				.get_skills_paths(project_root, scope)
-				.iter()
-				.any(|read_dir| {
-					target.starts_with(
-						crate::skills::linker::classify::canonicalize_lenient(
-							read_dir,
-						),
-					)
-				})
-		})
-		.map(|agent| crate::registry::get(*agent).id)
-		.collect()
+	readers_outside(dir, scope, project_root, requested, false)
 }
 
 /// A shared Referrer is still needed when an unselected reader has no other
 /// discovered copy after this entry goes away. An unreadable directory keeps
 /// the grant: this check authorizes deletion, so uncertainty fails closed.
+///
+/// The `< 2` shortcut includes disabled agents (`include_disabled: true`)
+/// because the initiator itself may be disabled (e.g. `aghub-cli -a <disabled>
+/// delete skills ...`). If disabled agents were filtered out in the count, an
+/// initiator that is disabled plus one enabled reader would count as 1, falsely
+/// triggering the shortcut and deleting a shared Referrer that the enabled
+/// reader still depends on.
 fn unselected_reader_needs_referrer(
 	dir: &Path,
 	name: &str,
@@ -825,7 +842,7 @@ fn unselected_reader_needs_referrer(
 	requested_agents: &[crate::models::AgentType],
 	deleting: &[PathBuf],
 ) -> bool {
-	if skill_dir_readers_outside(dir, scope, project_root, &[]).len() < 2 {
+	if readers_outside(dir, scope, project_root, &[], true).len() < 2 {
 		return false;
 	}
 	skill_dir_readers_outside(dir, scope, project_root, requested_agents)

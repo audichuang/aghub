@@ -502,17 +502,14 @@ fn single_agent_refusal_names_the_unselected_readers_of_the_shared_slot() {
 	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
 		.unwrap();
 
-	let expected_readers =
-		aghub_core::skills::removal::skill_dir_readers_outside(
-			&shared_dir,
-			aghub_core::models::ResourceScope::GlobalOnly,
-			None,
-			&[AgentType::Cline],
-		);
-	assert!(
-		!expected_readers.is_empty(),
-		"expected readers must be non-empty"
+	let expected_readers = vec!["cursor"];
+	let actual_readers = aghub_core::skills::removal::skill_dir_readers_outside(
+		&shared_dir,
+		aghub_core::models::ResourceScope::GlobalOnly,
+		None,
+		&[AgentType::Cline],
 	);
+	assert_eq!(actual_readers, expected_readers);
 
 	let mut cline =
 		ConfigManager::new(create_adapter(AgentType::Cline), true, None);

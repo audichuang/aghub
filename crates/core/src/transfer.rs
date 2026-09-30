@@ -2009,6 +2009,8 @@ fn plan_reconcile_skill(
 	// the same agent still reads the shared slot this batch is removing. Reader
 	// count comes from `skill_dir_readers_outside` (empty exclusion = whole
 	// roster); never re-derive slot sharing here.
+	// The sort key now counts enabled readers only; with a single enabled
+	// reader shared slots tie, which only affects ordering.
 	// See docs/history/core-transfer.md#seventh-spelling-of-slot-sharing
 	deletes.sort_by_cached_key(|row| {
 		let scope = target_resource_scope(&row.target);

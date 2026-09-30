@@ -189,3 +189,22 @@ Tests:
 `manager::skill::tests::single_agent_remove_skill_shared_slot_succeeds_when_other_reader_disabled`,
 `single_agent_remove_skill_shared_slot_refused_when_other_reader_enabled`,
 cli test `delete_single_agent_ignores_disabled_shared_slot_reader`.
+
+Follow-up (review finding B1): the `< 2` "only the initiator reads this slot"
+shortcut in `unselected_reader_needs_referrer` had inherited the filter. With a
+DISABLED initiator (`-a <disabled>` is not rejected by the CLI) plus one enabled
+reader it counted 1, returned "nobody needs it", and deleted the shared Referrer
+and Master an enabled, unselected reader still used. The shortcut now counts the
+full roster (`readers_outside(.., include_disabled = true)`); only the set that
+names/blocks stays filtered.
+
+Known gap (not changed): when the shared slot entry is a real directory rather
+than a link, the CLI single-agent delete always refuses
+(`single_agent_keep_reason` -> `is_universal_master`), while the API
+delete-by-path removes it once every other reader is disabled. Whether to unify
+the two is the owner's decision.
+
+Tests:
+`manager::skill::tests::single_agent_remove_skill_refused_when_initiator_disabled_and_other_reader_enabled`,
+`manager::skill::tests::single_agent_remove_skill_project_scope_refused_when_initiator_disabled_and_other_reader_enabled`,
+cli test `delete_single_agent_disabled_initiator_refuses_enabled_shared_slot_reader`.

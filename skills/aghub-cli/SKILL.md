@@ -435,9 +435,10 @@ entries the message lists, then retry — do not widen the roster to `-a all`.
 
 If a single-agent delete refuses with "Also read there by agents not in this
 request", the skill lives in a shared slot still read by other agents. Only
-ENABLED agents are named (disabled agents never block a single-agent delete;
-deleting for cline removes the shared Referrer and a disabled agent that read it
-simply stops seeing the skill). Include them in the same `-a` request, or delete
+ENABLED agents are named (disabled agents never block a single-agent delete).
+If no other Referrer remains, the Master content is deleted too (the removed
+paths include `.aghub/<name>`), so re-enabling that agent later does not bring
+the skill back; it has to be reinstalled. Include them in the same `-a` request, or delete
 for every agent (`--all-agents`, which also unlinks it for them).
 
 An `add --from` install is intentionally untracked and has no upstream-update

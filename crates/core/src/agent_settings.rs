@@ -5,12 +5,16 @@
 //! the choice was saved — stays off until the user turns it on. Everything
 //! outside the list is "disabled": no flow that picks its own agent set
 //! (repair, update, git sync, rename, delete-from-all) writes into its
-//! directories. A disabled agent is unmanaged, so it does not block a
-//! single-agent / comma-list delete by counting as an unselected reader of a
-//! shared slot ([`crate::skills::removal::skill_dir_readers_outside`] skips
-//! it); the ONE place the full roster still applies is Master retention (a
-//! disabled agent's Referrer keeps a Master alive on `--all-agents`, see
-//! `unmanaged_skill_dirs`/`plan_removal`).
+//! directories. A disabled agent is unmanaged, so it is not counted as an
+//! unselected reader of a shared slot for a single-agent / comma-list delete
+//! ([`crate::skills::removal::skill_dir_readers_outside`] skips it). The full
+//! roster still applies to Master retention (a disabled agent's Referrer keeps
+//! a Master alive on `--all-agents`, see `unmanaged_skill_dirs`/`plan_removal`),
+//! to the "is anyone besides the initiator here" shortcut in
+//! `unselected_reader_needs_referrer` (the initiator may itself be disabled),
+//! and to `load_all_agents` style "does anyone else hold this" questions. A
+//! real (non-link) directory in a universal store is still refused by a single-agent delete
+//! whoever reads it.
 //!
 //! Persisted under [`crate::paths::app_data_dir`] so every surface (desktop,
 //! CLI, a remote's aghub-api) reads the same answer. A missing file means

@@ -751,50 +751,6 @@ fn remove_skill_refuses_a_shared_slot_other_agents_read() {
 
 #[cfg(unix)]
 #[test]
-fn remove_skill_refuses_shared_slot_with_cline_and_cursor() {
-	let _env = crate::skills::prune::test_lock::env_lock()
-		.lock()
-		.unwrap_or_else(|e| e.into_inner());
-	use crate::create_adapter;
-	use crate::models::AgentType;
-
-	let tmp = tempfile::tempdir().unwrap();
-	let root = tmp.path();
-	let master = root.join(".agents/skills/shared-slot-dir");
-	std::fs::create_dir_all(&master).unwrap();
-	std::fs::write(
-		master.join("SKILL.md"),
-		"---\nname: shared-slot-dir\ndescription: test\n---\n",
-	)
-	.unwrap();
-
-	let mut cursor = ConfigManager::new(
-		create_adapter(AgentType::Cursor),
-		false,
-		Some(root),
-	);
-	cursor.load().unwrap();
-	assert!(cursor.get_skill("shared-slot-dir").is_some());
-
-	let mut cline =
-		ConfigManager::new(create_adapter(AgentType::Cline), false, Some(root));
-	cline.load().unwrap();
-	let err = cline.remove_skill("shared-slot-dir").expect_err(
-		"removing shared skill dir for cline alone must be refused",
-	);
-	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
-		"unexpected error: {err:?}"
-	);
-	assert!(master.join("SKILL.md").exists(), "the dir must survive");
-	assert!(
-		cursor.get_skill("shared-slot-dir").is_some(),
-		"cursor must still read it"
-	);
-}
-
-#[cfg(unix)]
-#[test]
 fn single_agent_remove_skill_shared_slot_succeeds_when_other_reader_disabled() {
 	let _env = crate::skills::prune::test_lock::env_lock()
 		.lock()
@@ -929,6 +885,146 @@ fn single_agent_remove_skill_shared_slot_refused_when_other_reader_enabled() {
 	assert!(
 		!message.contains("(disabled)"),
 		"refusal message must not contain (disabled): {message}"
+	);
+	assert!(
+		shared_referrer.symlink_metadata().is_ok(),
+		"the shared referrer symlink must survive"
+	);
+	assert!(master.exists(), "master must survive in store");
+}
+
+#[cfg(unix)]
+#[test]
+fn single_agent_remove_skill_refused_when_initiator_disabled_and_other_reader_enabled(
+) {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path();
+	let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+	let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+		keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+	std::env::set_var("HOME", home);
+	std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+	std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+
+	struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+	impl Drop for Guard {
+		fn drop(&mut self) {
+			for (k, v) in &self.0 {
+				match v {
+					Some(val) => std::env::set_var(k, val),
+					None => std::env::remove_var(k),
+				}
+			}
+		}
+	}
+	let _restore = Guard(prev);
+
+	let name = "shared-symlink-initiator-disabled";
+	let master = home.join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: shared-symlink-initiator-disabled\ndescription: test\n---\n",
+	)
+	.unwrap();
+
+	let shared_referrer = home.join(".agents/skills").join(name);
+	std::fs::create_dir_all(shared_referrer.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(&master, &shared_referrer).unwrap();
+
+	// Disable every agent except Cursor (so Cline is disabled)
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cline =
+		ConfigManager::new(create_adapter(AgentType::Cline), true, None);
+	cline.load().unwrap();
+	let err = cline
+		.remove_skill_planned(name, false, false, true)
+		.expect_err(
+			"removal must be refused when cursor also reads the slot even if initiator is disabled",
+		);
+
+	assert!(
+		matches!(err, ConfigError::UnsupportedOperation(_)),
+		"expected UnsupportedOperation, got {err:?}"
+	);
+	let message = err.to_string();
+	assert!(
+		message.contains("cursor"),
+		"refusal message must contain cursor: {message}"
+	);
+	assert!(
+		shared_referrer.symlink_metadata().is_ok(),
+		"the shared referrer symlink must survive"
+	);
+	assert!(master.exists(), "master must survive in store");
+}
+
+#[cfg(unix)]
+#[test]
+fn single_agent_remove_skill_project_scope_refused_when_initiator_disabled_and_other_reader_enabled(
+) {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+
+	// Project-root detection marker
+	std::fs::create_dir_all(root.join(".cursor")).unwrap();
+
+	let name = "shared-project-initiator-disabled";
+	let master = root.join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: shared-project-initiator-disabled\ndescription: test\n---\n",
+	)
+	.unwrap();
+
+	let shared_referrer = root.join(".agents/skills").join(name);
+	std::fs::create_dir_all(shared_referrer.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(&master, &shared_referrer).unwrap();
+
+	// Disable every agent except Cursor (so Amp is disabled)
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut amp =
+		ConfigManager::new(create_adapter(AgentType::Amp), false, Some(root));
+	amp.load().unwrap();
+	let err = amp
+		.remove_skill_planned(name, false, false, true)
+		.expect_err(
+			"removal must be refused when cursor also reads project shared slot even if amp is disabled",
+		);
+
+	assert!(
+		matches!(err, ConfigError::UnsupportedOperation(_)),
+		"expected UnsupportedOperation, got {err:?}"
+	);
+	let message = err.to_string();
+	assert!(
+		message.contains("cursor"),
+		"refusal message must contain cursor: {message}"
 	);
 	assert!(
 		shared_referrer.symlink_metadata().is_ok(),
