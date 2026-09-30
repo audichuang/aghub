@@ -474,3 +474,74 @@ fn all_agents_refusal_names_the_disabled_agent_that_still_holds_the_skill() {
 		"the Master must survive the refusal"
 	);
 }
+
+#[test]
+fn single_agent_refusal_names_the_unselected_readers_of_the_shared_slot() {
+	let _lock = env_lock();
+	let tmp = tempfile::tempdir().unwrap();
+	let _env = isolated_home(tmp.path());
+	let data = tmp.path().join("data");
+	let prev = std::env::var_os("AGHUB_DATA_DIR");
+	std::env::set_var("AGHUB_DATA_DIR", &data);
+	let _data = RestoreEnv(vec![("AGHUB_DATA_DIR", prev)]);
+
+	let name = "unselected-readers-slot";
+	let master = tmp.path().join(".aghub").join(name);
+	write_skill(&master, name);
+	let shared_dir = tmp.path().join(".agents/skills");
+	std::fs::create_dir_all(&shared_dir).unwrap();
+	let referrer = shared_dir.join(name);
+	std::os::unix::fs::symlink(&master, &referrer).unwrap();
+
+	let disabled_set: std::collections::BTreeSet<String> = AgentType::ALL
+		.iter()
+		.copied()
+		.filter(|&a| a != AgentType::Cline)
+		.map(|a| aghub_core::registry::get(a).id.to_string())
+		.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+
+	let expected_readers =
+		aghub_core::skills::removal::skill_dir_readers_outside(
+			&shared_dir,
+			aghub_core::models::ResourceScope::GlobalOnly,
+			None,
+			&[AgentType::Cline],
+		);
+	assert!(
+		!expected_readers.is_empty(),
+		"expected readers must be non-empty"
+	);
+
+	let mut cline =
+		ConfigManager::new(create_adapter(AgentType::Cline), true, None);
+	cline.load().unwrap();
+	let err = cline
+		.remove_skill_planned(name, false, false, true)
+		.expect_err("removing shared skill for single agent must be refused");
+
+	let message = err.to_string();
+	for expected_id in &expected_readers {
+		assert!(
+			message.contains(expected_id),
+			"refusal message must contain expected id '{expected_id}': {message}"
+		);
+	}
+	assert!(
+		message.contains("(disabled)"),
+		"refusal message must contain '(disabled)': {message}"
+	);
+	assert!(
+		message.contains("--all-agents"),
+		"refusal message must contain '--all-agents': {message}"
+	);
+	assert!(
+		referrer.symlink_metadata().is_ok(),
+		"Referrer symlink must still exist"
+	);
+	assert!(
+		master.join("SKILL.md").exists(),
+		"Master SKILL.md must still exist"
+	);
+}

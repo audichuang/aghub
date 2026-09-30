@@ -57,12 +57,14 @@ list, or `all`), `-g`/`-p`, `--all`.
   adds an api-only `failed`). Read `outcome`, never `dry_run`/`executed` —
   `executed: true` is set for the whole execute branch even when every delete
   failed (`partial`), and `absent` outranks the caller's intent. `kept` covers
-  two situations: a shared Master another agent still reads, and an
-  `--all-agents` sweep that took NOTHING because it could not prove nothing
-  still holds the skill (`skipped` names what it could not read). The second
-  never reaches commit and runs no lock prune — fix what it could not read and
-  re-run; no flag overrides it. A preview carries `would_prune_lock_entries`,
-  deliberately separate from the committed `pruned_lock_entries`.
+  two situations: a shared Master another agent still reads (when confirmed with
+  `--yes`, a single agent blocked by shared-slot readers gets an error listing
+  the blocking agent ids), and an `--all-agents` sweep that took NOTHING because
+  it could not prove nothing still holds the skill (`skipped` names what it could
+  not read). The second never reaches commit and runs no lock prune — fix what
+  it could not read and re-run; no flag overrides it. A preview carries
+  `would_prune_lock_entries`, deliberately separate from the committed
+  `pruned_lock_entries`.
   Why: knowledge page `技能移除與 Master 回收`
 - **`doctor`'s `health` covers lock ↔ Master only** — per-agent referrer state
   needs `--verify-links`, and `linkAudit.state` is `verified` ONLY when every

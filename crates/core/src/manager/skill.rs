@@ -919,6 +919,7 @@ impl ConfigManager {
 		// kept. A preview must never green-light what the refusal below
 		// rejects. Fold `blocks`, not raw survivors, or the ALLOWED
 		// private-copy removal previews as `kept`.
+		let referrer_kept_for_readers = plan.shared_master_kept;
 		plan.shared_master_kept |= blocks;
 
 		// A removal that goes ahead while something else still serves the skill
@@ -985,7 +986,7 @@ impl ConfigManager {
 				// Referrer in this agent's own second read dir is what the user
 				// can act on.
 				// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
-				let reason = if where_.is_empty() {
+				let mut reason = if where_.is_empty() {
 					"skill it reads from the shared master".to_string()
 				} else {
 					format!(
@@ -993,6 +994,41 @@ impl ConfigManager {
 						 served to this agent from: {where_}"
 					)
 				};
+				if referrer_kept_for_readers {
+					// The gate keeps npx-era/compat leftover refusals (shared_referrer_kept=false) on their original message instead of listing unrelated readers; see docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
+					let mut readers: Vec<&'static str> = Vec::new();
+					for path in &plan.still_read_from {
+						if let Some(parent) = path.parent() {
+							for id in removal::skill_dir_readers_outside(
+								parent,
+								scope,
+								project_root.as_deref(),
+								requested_agents,
+							) {
+								if !readers.contains(&id) {
+									readers.push(id);
+								}
+							}
+						}
+					}
+					if !readers.is_empty() {
+						let disabled = crate::agent_settings::disabled_agents();
+						let formatted = readers
+							.into_iter()
+							.map(|id| {
+								if disabled.contains(id) {
+									format!("{id} (disabled)")
+								} else {
+									id.to_string()
+								}
+							})
+							.collect::<Vec<_>>()
+							.join(", ");
+						reason.push_str(&format!(
+							". Also read there by agents not in this request: {formatted}. Include them in the same request, or delete for every agent (--all-agents, which also unlinks it for them)"
+						));
+					}
+				}
 				("remove for this agent alone".to_string(), reason)
 			};
 			return Err(ConfigError::unsupported_operation(

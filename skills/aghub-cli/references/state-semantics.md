@@ -212,7 +212,11 @@ branch.
 - `outcome: "kept"` in a PREVIEW means the commit will not remove it. For a
   single agent whose directory is shared, the preview is `kept` (`success: true`,
   exit 0, the entity is still there) and the `--yes` run then FAILS
-  `UNSUPPORTED_OPERATION` (exit 1) instead of returning `kept`. It is not what `--all-agents` does with a survivor
+  `UNSUPPORTED_OPERATION` (exit 1) instead of returning `kept`. When a
+  single-agent `--yes` delete is refused with `UNSUPPORTED_OPERATION`, the
+  message names the readers of the same slot that are not in `-a` (with
+  `(disabled)` marker); fix is to list them in the same `-a` request or use
+  `--all-agents`. It is not what `--all-agents` does with a survivor
   — that asserts "gone everywhere", so a survivor makes the confirmed run ERROR
   instead. And `removed` does not prove the bytes are gone: a private Referrer
   can be removed while another copy survives, listed in `skipped`.

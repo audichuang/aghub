@@ -1041,6 +1041,77 @@ fn a_single_agent_refusal_names_the_compat_dir_still_serving_the_skill() {
 	assert!(master.join("SKILL.md").exists(), "the Master must survive");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_single_agent_refusal_with_private_copies_elsewhere_does_not_list_the_shared_slot_readers(
+) {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let name = "shared-slot-readers";
+	let master = root.join(".aghub").join(name);
+	write_skill_md(&master, name);
+
+	let write_slot = root.join(".cline/skills").join(name);
+	std::fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+	symlink(&master, &write_slot);
+
+	let shared_slot = root.join(".agents/skills").join(name);
+	std::fs::create_dir_all(shared_slot.parent().unwrap()).unwrap();
+	symlink(&master, &shared_slot);
+
+	let scope = aghub_core::models::ResourceScope::ProjectOnly;
+	let readers = aghub_core::skills::removal::skill_dir_readers_outside(
+		&root.join(".agents/skills"),
+		scope,
+		Some(root),
+		&[AgentType::Cline],
+	);
+	assert!(
+		!readers.is_empty(),
+		"readers outside cline should not be empty"
+	);
+
+	for id in &readers {
+		let agent: AgentType = id.parse().unwrap();
+		let paths = create_adapter(agent).get_skills_paths(Some(root), scope);
+		let private_dir = paths
+			.iter()
+			.find(|p| !p.starts_with(root.join(".agents/skills")));
+		if let Some(dir) = private_dir {
+			let private_slot = dir.join(name);
+			std::fs::create_dir_all(dir).unwrap();
+			symlink(&master, &private_slot);
+		}
+	}
+
+	let mut mgr =
+		ConfigManager::new(create_adapter(AgentType::Cline), false, Some(root));
+	mgr.load().unwrap();
+
+	let error = mgr
+		.remove_skill_planned(name, false, false, true)
+		.expect_err("unlinking the write slot takes nothing away — refuse");
+	let message = error.to_string();
+	assert!(
+		message.contains(&shared_slot.display().to_string()),
+		"the refusal must name the path still serving the skill, got: {message}"
+	);
+	assert!(
+		!message.contains("Also read there"),
+		"refusal must not mention other readers when gate is closed: {message}"
+	);
+	// A refusal writes nothing — the message is the whole change.
+	assert!(
+		write_slot.symlink_metadata().is_ok(),
+		"the write slot must survive a refusal"
+	);
+	assert!(
+		shared_slot.symlink_metadata().is_ok(),
+		"the shared Referrer must survive a refusal"
+	);
+	assert!(master.join("SKILL.md").exists(), "the Master must survive");
+}
+
 /// The RECONCILE preflight must name the same path the manager's refusal does.
 ///
 /// `preflight_delete` runs a dry `remove_skill_planned` and then builds its OWN

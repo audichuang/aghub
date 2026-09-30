@@ -433,6 +433,11 @@ are unmanaged and `aghub-cli agents enable <id>` to turn one back on (note that
 `-a all` and `source sync -a all` skip unmanaged agents), or unlink exactly the
 entries the message lists, then retry — do not widen the roster to `-a all`.
 
+If a single-agent delete refuses with "Also read there by agents not in this
+request", the skill lives in a shared slot still read by other agents. Include
+them in the same `-a` request, or delete for every agent (`--all-agents`, which
+also unlinks it for them).
+
 An `add --from` install is intentionally untracked and has no upstream-update
 branch; refresh it through the same backed-up delete plus a re-`add` with an
 explicit comma roster.
