@@ -121,6 +121,11 @@ same failure appears on some hosts and not others. An `ssh://` or `git@host:`
 source discards tokens entirely and reports `uncheckable` with `reason: "ssh"` —
 re-pin it to its HTTPS URL instead of hunting for a credential.
 
+`GIT_PASSWORD` is read for ANY HTTPS host and wins over `GITHUB_TOKEN` even on
+github.com. So export `GIT_PASSWORD` for a non-GitHub host, and when a github.com
+fetch fails with `auth` although `GITHUB_TOKEN` is set, look for a stale
+`GIT_PASSWORD` in the environment first.
+
 ```bash
 export GITHUB_TOKEN="$(gh auth token)"   # github.com https sources
 ```
@@ -191,9 +196,12 @@ private directory does not count — repair leaves that alone.
   mistake `--update` later discards.
 - Something to point at, slot EMPTY → that is `withheld`, not damage. Repair
   leaves it alone; granting it is [Grant](#grant-an-agent).
-- Nothing to point at → repair refuses (a name nothing holds at all is refused
-  outright), except that a LOCKED name with nothing on disk still reports
-  `conformant`. [Grant](#grant-an-agent) is the branch, because it fetches.
+- Nothing to point at → repair refuses or reports `conformant` (exit 0) and
+  writes nothing. Only a name that nothing holds at all — unlocked, no Master, no
+  copy anywhere — is refused outright. A LOCKED name with nothing on disk, or an
+  unlocked name whose only copy sits in an agent's private dir or the shared slot,
+  reports `conformant`. [Grant](#grant-an-agent) is the branch, because it
+  fetches.
 
 | What step 2 showed                                                                                  | Branch                                                                                                                                                      |
 | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -251,8 +259,9 @@ not this file, is the authority on what the run will write.
 A **`failed`** row is the exception, deliberately: it carries no `shape`, an
 empty `master`, no `referrers` and no `quarantined`, because the write may have
 landed partly and naming a path would claim it landed. So do not read that row's
-empty paths as "nothing was written" — re-run instead. Repair is idempotent and
-picks the skill up in whatever state it now holds.
+empty paths as "nothing was written" — read its `reason`, fix what it names, then
+re-run. Repair is idempotent and picks the skill up in whatever state it now
+holds, but a re-run alone is not guaranteed to clear a `failed` row.
 
 - **`-a` is not a narrowing knob here.** A scalar `-a` is ignored; a comma
   roster or `-a all` is REJECTED outright. Repair plans against every supported
@@ -273,9 +282,10 @@ Do not predict the outcome from the state you observed; the same state reaches
 different outcomes depending on what else is on disk. Run the preview and read
 what it says it will do.
 
-And `conformant` is not proof the layout is healthy. A misspelled NAME is
-refused; a locked skill with no Master can still report conformant. When there is no Master,
-only the slots repair had planned to CREATE or RELINK turn into refusals — a
+And `conformant` is not proof the layout is healthy. A NAME that
+exists nowhere is refused; a locked skill with no Master, or one whose only copy
+repair leaves alone, can still report conformant. When there is no Master, only
+the slots repair had planned to CREATE or RELINK turn into refusals — a
 slot it was going to leave alone stays left alone, so a plan that touches
 nothing reports `conformant` while the skill is still unreachable. A bulk run
 (no NAME) then suppresses that row entirely. Name the skill, and confirm with
@@ -291,7 +301,12 @@ aghub-cli <SCOPE> -a <ROSTER> source sync <SOURCE> --skill <NAMES> --install-mis
 ```
 
 Preview first and read `targetAgents`; check `coverage` before committing if the
-roster touches a shared dir. Naming a skill that is already installed is
+roster touches a shared dir. An install row's `error` in the PREVIEW is a
+predicted refusal (exit 1), so it is not something to push through with `--yes`.
+The converse does not hold: only the install rows' adoption guard is predicted.
+An update row's `SKILL_UPDATE_CONFLICT`, a per-agent slot refusal
+(`installed: false`) and an unreadable lock still surface only on `--yes`, so
+read the committed row too. Naming a skill that is already installed is
 idempotent, which makes this the branch for a Referrer that should exist and
 does not.
 
@@ -396,10 +411,10 @@ Back up outside aghub-managed directories first, then preview the normal
 `--install-missing` branch. Adoption succeeds only under narrow conditions
 (exact hash match, no symlink in the tree, no conflicting lock owner) —
 [state semantics](references/state-semantics.md) has them, and when the guard
-refuses, that refusal is the answer. The PREVIEW cannot show that refusal: it
-plans an `install` with `applied: false` and no error, and the "refusing to
-adopt it" text appears only on the `--yes` run, as the row's `error`, before
-anything is written (Master and lock untouched, exit 1).
+refuses, that refusal is the answer. The preview runs the same guard: a refusal
+shows up as that row's `error` ("refusing to adopt it" / "already owned by
+source" / "contains a link") and the preview exits 1; `--yes` would refuse
+identically before writing anything.
 
 Local content that must survive belongs in the git source first (the authoring
 branch). For a deliberate source swap: preview `delete skills <NAME>
@@ -428,13 +443,15 @@ Confirm `source diff` reports `renamed`, preview `source accept-rename`, then
 repeat with `--yes`. Both arguments come from that row (`--help` names which
 field is which). The transaction resolves the new frontmatter name even when the
 repo directory moved. The preview names no paths and no agents. The commit grants
-the new name to every agent that could READ the old one — shared-slot readers get
-their own Referrer. The commit removes the old name everywhere, its `.aghub/<old>`
+the new name to every MANAGED agent that could READ the old one — shared-slot
+readers get their own Referrer, a disabled agent gets nothing — and the committed
+`paths` can list a shared slot more than once, so dedupe before counting. The commit removes the old name everywhere, its `.aghub/<old>`
 Master included. The one exception is an agent you disabled (`agents list`) that
 still holds a Referrer to it: the old Master is kept for that agent and shows up
 untracked in `doctor` (enable the agent or unlink that entry, then `delete skills
-<OLD> --all-agents`). The preview does not fetch, so a name mismatch surfaces
-only on `--yes`. Run `doctor --verify-links` afterwards as the completion check.
+<OLD> --all-agents`). The preview does not fetch or check the disk, so a wrong
+name, a new name that already exists in the scope (`TargetExists`) and a locked
+old name with no installed copy (`NoInstalledCopy`) all preview as success (exit 0) and fail only on `--yes` (exit 1). Run `doctor --verify-links` afterwards as the completion check.
 
 ### Clean up leftovers
 

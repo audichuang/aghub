@@ -14,7 +14,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use aghub_core::adapter::set_skills_path_override;
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::install_fetched::{
-	install_fetched_skill_and_lock, FetchedSkillInstallRequest,
+	install_fetched_skill_and_lock, preflight_fetched_install,
+	FetchedSkillInstallRequest,
 };
 use aghub_core::skills::linker::LinkTarget;
 #[cfg(unix)]
@@ -292,6 +293,98 @@ fn project_existing_different_master_rejects_before_native_or_link_mutation() {
 			.contains_key("alpha"),
 		"the fetched source must not be stamped into the project lock",
 	);
+}
+
+#[test]
+fn preflight_reports_the_refusal_the_install_makes() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"fetched bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".aghub"),
+		"alpha",
+		"alpha",
+		"local bytes that must survive",
+	);
+	let before = std::fs::read(&master_md).unwrap();
+	let source = sample_source();
+	let request = || FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("deadbeef".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	};
+
+	let preflight = preflight_fetched_install(&request())
+		.expect_err("preflight must refuse a differing untracked Master")
+		.to_string();
+	assert!(preflight.contains("refusing to adopt"), "{preflight}");
+	assert_eq!(
+		std::fs::read(&master_md).unwrap(),
+		before,
+		"preflight must not touch the Master",
+	);
+	assert!(!project_root.join(".claude/skills/alpha").exists());
+	assert!(!project_root.join("skills-lock.json").exists());
+	assert!(!skill::lock::local::read_local_lock(Some(&project_root))
+		.skills
+		.contains_key("alpha"));
+
+	let install = install_fetched_skill_and_lock(request())
+		.expect_err("the install must refuse the same fixture")
+		.to_string();
+	assert_eq!(preflight, install, "one guard, one message");
+}
+
+#[test]
+fn preflight_accepts_an_exact_byte_untracked_master() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".aghub"),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let before = std::fs::read(&master_md).unwrap();
+
+	preflight_fetched_install(&FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("deadbeef".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	})
+	.expect("an exact-byte untracked Master is adoptable");
+	assert_eq!(std::fs::read(&master_md).unwrap(), before);
+	assert!(!project_root.join(".claude/skills/alpha").exists());
+	assert!(!skill::lock::local::read_local_lock(Some(&project_root))
+		.skills
+		.contains_key("alpha"));
 }
 
 #[test]

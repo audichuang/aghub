@@ -352,16 +352,20 @@ fn write_install_lock(
 	}
 }
 
-/// Install an already-fetched skill into the resolved agent dirs and write the
-/// install lock. See module docs. Performs no network / credential work.
-///
-/// Before any Master, Referrer, or lock mutation, an existing Master must hash
-/// identically to the fetched content and an existing lock must have the same
-/// normalized source owner. Exact-byte untracked Masters may be adopted. The
-/// Master is hashed again immediately before a source lock is persisted.
-pub fn install_fetched_skill_and_lock(
-	req: FetchedSkillInstallRequest<'_>,
-) -> Result<FetchedSkillInstallReport, crate::ConfigError> {
+/// What [`adoption_guard`] proved and the install then reuses.
+struct AdoptionCheck {
+	source_root: PathBuf,
+	safe_name: String,
+	installed_hash: String,
+	canonical: Option<PathBuf>,
+	existing_owner: Option<LockedSourceOwner>,
+}
+
+/// Parse + rename guard + scope guard. Pure reads; runs BEFORE the mutation
+/// lock so an unsupported request creates nothing. Returns the skill name.
+fn precheck_request(
+	req: &FetchedSkillInstallRequest<'_>,
+) -> Result<String, crate::ConfigError> {
 	let parsed = skill::parser::parse(req.skill_file).map_err(|e| {
 		crate::ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
 	})?;
@@ -388,19 +392,17 @@ pub fn install_fetched_skill_and_lock(
 			"Combined skill scope is not supported for installs".to_string(),
 		));
 	}
+	Ok(name)
+}
 
-	// Hold the interprocess mutation lock from the FIRST state read (the
-	// ownership / Master-hash guards below) through the lock write, so no other
-	// aghub process can invalidate a guard between checking it and acting on it.
-	let _mutation_guard = crate::skills::lock::mutation_guard(
-		"install skill",
-		req.scope,
-		req.project_root,
-	)
-	.map_err(crate::ConfigError::Io)?;
-
+/// Owner / Master-link / Master-hash guard. Pure reads; the install runs it
+/// under the mutation lock, [`preflight_fetched_install`] without one.
+fn adoption_guard(
+	name: &str,
+	req: &FetchedSkillInstallRequest<'_>,
+) -> Result<AdoptionCheck, crate::ConfigError> {
 	let source_root = skill_source_root(req.skill_file);
-	let safe_name = sanitize_name(&name);
+	let safe_name = sanitize_name(name);
 	let installed_hash = skill::compute_skill_folder_hash(&source_root)
 		.map_err(|e| {
 			crate::ConfigError::InvalidConfig(format!(
@@ -414,7 +416,7 @@ pub fn install_fetched_skill_and_lock(
 	};
 	let canonical = master_store_dir(canonical_root)
 		.map(|skills_dir| skills_dir.join(&safe_name));
-	let existing_owner = skill_lock_source(&name, req.scope, req.project_root);
+	let existing_owner = skill_lock_source(name, req.scope, req.project_root);
 	if let Some(existing_owner) = existing_owner.as_ref() {
 		if !same_source_owner(existing_owner, req.source) {
 			return Err(crate::ConfigError::ValidationFailed(format!(
@@ -436,8 +438,8 @@ pub fn install_fetched_skill_and_lock(
 			)));
 		}
 		if canonical.exists() {
-			ensure_link_free_master(&name, canonical)?;
-			let master_hash = hash_master(&name, canonical)?;
+			ensure_link_free_master(name, canonical)?;
+			let master_hash = hash_master(name, canonical)?;
 			if master_hash != installed_hash {
 				return Err(crate::ConfigError::ValidationFailed(format!(
 					"Pre-existing Master for skill '{name}' has different content; \
@@ -447,6 +449,55 @@ pub fn install_fetched_skill_and_lock(
 			}
 		}
 	}
+	Ok(AdoptionCheck {
+		source_root,
+		safe_name,
+		installed_hash,
+		canonical,
+		existing_owner,
+	})
+}
+
+/// Advisory dry run of the install's refusals: the same [`precheck_request`]
+/// and [`adoption_guard`] the install runs, but WITHOUT the mutation lock and
+/// with no write. The install re-runs the guard under the lock, so this
+/// answer can go stale between the call and a later install.
+pub fn preflight_fetched_install(
+	req: &FetchedSkillInstallRequest<'_>,
+) -> Result<(), crate::ConfigError> {
+	let name = precheck_request(req)?;
+	adoption_guard(&name, req).map(|_| ())
+}
+
+/// Install an already-fetched skill into the resolved agent dirs and write the
+/// install lock. See module docs. Performs no network / credential work.
+///
+/// Before any Master, Referrer, or lock mutation, an existing Master must hash
+/// identically to the fetched content and an existing lock must have the same
+/// normalized source owner. Exact-byte untracked Masters may be adopted. The
+/// Master is hashed again immediately before a source lock is persisted.
+pub fn install_fetched_skill_and_lock(
+	req: FetchedSkillInstallRequest<'_>,
+) -> Result<FetchedSkillInstallReport, crate::ConfigError> {
+	let name = precheck_request(&req)?;
+
+	// Hold the interprocess mutation lock from the FIRST state read (the
+	// ownership / Master-hash guards below) through the lock write, so no other
+	// aghub process can invalidate a guard between checking it and acting on it.
+	let _mutation_guard = crate::skills::lock::mutation_guard(
+		"install skill",
+		req.scope,
+		req.project_root,
+	)
+	.map_err(crate::ConfigError::Io)?;
+
+	let AdoptionCheck {
+		source_root,
+		safe_name,
+		installed_hash,
+		canonical,
+		existing_owner,
+	} = adoption_guard(&name, &req)?;
 
 	// LAST preflight before the first write: an unreadable lock refused at
 	// the END would leave an untracked partial install. Refuse while there is

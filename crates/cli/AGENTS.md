@@ -36,6 +36,11 @@ list, or `all`), `-g`/`-p`, `--all`.
   renamed rows are skipped with an `accept-rename` hint
   and uncheckable rows are reported by name and reason, never presented as
   proof that nothing is outdated
+- **`source sync --install-missing` PREVIEW** runs core
+  `install_fetched::preflight_fetched_install` per install row — the same
+  `precheck_request` + `adoption_guard` the install runs under the lock — so a
+  predicted refusal is the row's `error` and the preview exits 1 (after
+  `note_answer_on_stdout`). Never re-implement the guard in the surface.
 - **`get|describe|add|update|delete sub-agents`** are thin adapters over core
   `add_sub_agent` / `update_sub_agent(SubAgentPatch)` / `remove_sub_agent_planned`;
   the wire view is core `dto::SubAgentView` (shared with the API, since

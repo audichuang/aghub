@@ -2539,6 +2539,93 @@ fn source_sync_dry_run_writes_nothing() {
 	assert!(!lock.exists(), "dry-run must not create the global lock");
 }
 
+/// Seed `home/.aghub/alpha/SKILL.md` (an untracked global Master) and run the
+/// `--install-missing` PREVIEW (no `--yes`) against a source that ships `alpha`.
+#[cfg(unix)]
+fn preview_install_with_untracked_master(
+	master_body: &str,
+) -> (
+	tempfile::TempDir,
+	tempfile::TempDir,
+	std::path::PathBuf,
+	std::process::Output,
+) {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	let master = home.path().join(".aghub/alpha/SKILL.md");
+	std::fs::create_dir_all(master.parent().unwrap()).unwrap();
+	std::fs::write(&master, master_body).unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--install-missing",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	(home, state, master, out)
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_install_missing_preview_reports_the_adoption_refusal() {
+	let differing = "---\nname: alpha\ndescription: d\n---\nlocal edits\n";
+	let (home, state, master, out) =
+		preview_install_with_untracked_master(differing);
+	assert_eq!(
+		out.status.code(),
+		Some(1),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout)
+		.expect("stdout must be exactly one JSON document");
+	assert_eq!(json["dryRun"], true);
+	let action = &json["actions"][0];
+	assert!(
+		action["error"]
+			.as_str()
+			.is_some_and(|e| e.contains("refusing to adopt")),
+		"action: {action}"
+	);
+	assert_eq!(action["applied"], false);
+	assert_eq!(std::fs::read_to_string(&master).unwrap(), differing);
+	assert!(!home.path().join(".claude/skills/alpha").exists());
+	assert!(!state.path().join("skills/.skill-lock.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_install_missing_preview_passes_an_exact_byte_untracked_master() {
+	let same = "---\nname: alpha\ndescription: d\n---\nbody\n";
+	let (home, state, _master, out) =
+		preview_install_with_untracked_master(same);
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["dryRun"], true);
+	assert!(
+		json["actions"][0].get("error").is_none(),
+		"action: {}",
+		json["actions"][0]
+	);
+	assert!(!home.path().join(".claude/skills/alpha").exists());
+	assert!(!state.path().join("skills/.skill-lock.json").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn source_sync_project_scope_reports_project_and_skips_global_lock() {

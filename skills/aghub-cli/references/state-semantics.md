@@ -42,7 +42,7 @@ stat the path yourself before acting on that pair.
 | `linkAudit.state` | `issues`                   | At least one row is not                                                                                                 | Read the rows                                                                                                                                                                                                                                                                                                                                                                                               |
 | `agents[].state`  | `linked`                   | Referrer resolves to this Master                                                                                        | The only pass for a requested agent                                                                                                                                                                                                                                                                                                                                                                         |
 | `agents[].state`  | `withheld`                 | Master healthy and no Referrer in this agent's write dir OR any dir only it reads                                       | Installed but NOT granted. Fine if unrequested; a gap if requested. A Referrer in a private read-only dir reads `linked` instead; the SHARED slot does not count as one                                                                                                                                                                                                                                     |
-| `agents[].state`  | `missing`                  | Empty slot and no Master that RESOLVES                                                                                  | Usually pairs with `orphan-lock` → `source sync --install-missing`. But a Master that is a DANGLING SYMLINK also lands here, and its health reads `master-is-symlink`: check the health field before syncing, because that one needs inspecting, not reinstalling An agent that HAS a slot reads `masterUnusable` instead; `missing` is for an agent with no slot.                                          |
+| `agents[].state`  | `missing`                  | Empty slot and no Master that RESOLVES                                                                                  | Usually pairs with `orphan-lock` → `source sync --install-missing`. But a Master that is a DANGLING SYMLINK also lands here, and its health reads `master-is-symlink`: check the health field before syncing, because that one needs inspecting, not reinstalling. An agent that HAS a slot reads `masterUnusable` instead; `missing` is for an agent with no slot.                                         |
 | `agents[].state`  | `dangling`                 | Either end of the link fails to resolve — so an ABSENT MASTER lands here too, not only a broken symlink                 | `repair` when there is a Master or an adoptable shared copy; otherwise `source sync --install-missing`                                                                                                                                                                                                                                                                                                      |
 | `agents[].state`  | `foreignLink`              | Slot links to a different target                                                                                        | Preserve and inspect before replacing                                                                                                                                                                                                                                                                                                                                                                       |
 | `agents[].state`  | `realPathConflict`         | A real directory occupies the slot                                                                                      | With a Master present, `repair` compares the fork and quarantines it only when the bytes match. With no Master there is ONE exception — a lock-named copy in the SHARED slot is adoptable, which is the migration case — and otherwise repair cannot compare: inspect and move it aside yourself, no verb will overwrite it. Check ownership first either way; the directory may be another installer's     |
@@ -173,7 +173,10 @@ already-correct Referrer is enough coverage to write the new source lock. Before
 any mutation it rejects a differing Master hash, any symlink or junction
 anywhere in the existing Master tree, and a lock owned by another provider or
 canonical host/repo identity. A legacy non-GitHub project lock with no
-`sourceUrl` also fails closed, because its original host cannot be proven. Every
+`sourceUrl` also fails closed, because its original host cannot be proven. `source sync --install-missing` previews run this guard (unlocked, advisory) for
+install rows only and report its refusal per row; an error-free preview is not a
+guarantee, because update conflicts and per-agent slot refusals still appear only
+on `--yes`. Every
 intentional source change therefore goes through the backed-up delete/reinstall
 branch.
 
@@ -261,8 +264,9 @@ with `UNSUPPORTED_OPERATION`. `get -a all` / `-a a,b` work.
 ## Rename and interoperability edges
 
 `source accept-rename` is transactional across the old and new Master,
-Referrers, and lock. The old Master is removed in the same transaction, and that
-removal is covered by the same rollback. Its rollback is BEST-EFFORT, though — `--help` says "rolls
+Referrers, and lock. The old Master is removed in the same transaction (covered by the same
+rollback) unless a disabled agent's Referrer still points at it; then it is kept,
+silently, and shows up untracked in `doctor`. Its rollback is BEST-EFFORT, though — `--help` says "rolls
 back on any failure", but the restore path discards its own errors, so a failure
 that also fails to unwind leaves a half-state with no signal. After any failed
 rename, inspect with `doctor --verify-links` rather than assuming the disk is

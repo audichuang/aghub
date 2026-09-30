@@ -17,9 +17,11 @@ Claude Code plugins, inference providers and `skill-usage`. Syntax is in
 ## MCP servers
 
 `get|describe|add|update|delete mcps` manage MCP servers in an agent's config;
-`enable|disable mcps <NAME>` toggle one (MCP only, and an agent that cannot
-toggle refuses, naming itself). Scope and `-a` apply as everywhere; a comma list
-fans out, `-a all` is accepted by `get` only.
+`enable|disable mcps <NAME>` toggle one (MCP only). An agent that cannot toggle
+refuses, naming itself — claude, the `-a` default, is one, so always pass `-a`.
+Scope and `-a` apply as everywhere; a comma list fans out for
+get/add/update/delete/enable/disable (`describe` takes one agent), and `-a all`
+is accepted by `get` only.
 
 `add mcps` takes `-c/--command` (stdio) or `-u/--url` (HTTP/SSE), plus
 `-t/--transport` (`streamable-http` default, or `sse`), `--header KEY:VALUE`,
@@ -43,8 +45,8 @@ Both copy normalized resources between agents; neither manages git provenance.
 
 - `transfer mcp|sub-agent --from-agent A --name N --to B ...` writes at once.
 - `reconcile mcp|sub-agent --from-agent A --name N --add X --remove Y [--yes]`
-  needs at least one `--add`/`--remove` and ignores `-a`. A reconcile that
-  removes previews unless `--yes`.
+  needs at least one `--add`/`--remove` and ignores `-a`. An add-only reconcile
+  writes at once (no preview); one that removes previews unless `--yes`.
 - An already-present equivalent target is an idempotent success
   (`already_present: true`).
 - The preview is a plan echo (`{dry_run, add, remove}`) and does NOT check that
@@ -59,7 +61,7 @@ Both copy normalized resources between agents; neither manages git provenance.
 Claude Code plugins and marketplaces (`list`, `install`, `uninstall`, `update`,
 `enable`, `disable`, `prune`, `validate`, `marketplace list|add|remove|update`).
 
-- Ignores `-g`/`-p`/`--all` and `-a`: one shared store. No preview.
+- Ignores `-g`/`-p`/`--all` and `-a`: one shared store. Mutations write at once; only `prune` has a `--dry-run` preview.
 - Only `plugin list [--available]` and `plugin marketplace list` emit JSON. Every
   other action REJECTS `--json` (error, non-zero) instead of printing prose.
 - `install <PLUGIN_ID>` takes `name@marketplace`; `--scope` is one of `global`

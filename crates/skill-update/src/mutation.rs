@@ -125,15 +125,40 @@ pub fn install_fetched_source(
 	aghub_core::skills::install_fetched::FetchedSkillInstallReport,
 	InstallMutationError,
 > {
-	use aghub_core::skills::install_fetched::{
-		install_fetched_skill_and_lock, FetchedSkillInstallRequest,
-	};
-	use aghub_core::skills::linker::LinkTarget;
-
 	let skill_file = fetched_skill_file(fetched, request.lock_skill_path)
 		.ok_or(InstallMutationError::InvalidSkillPath)?;
-	install_fetched_skill_and_lock(FetchedSkillInstallRequest {
-		skill_file: &skill_file,
+	aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
+		core_install_request(fetched, &request, &skill_file),
+	)
+	.map_err(InstallMutationError::Install)
+}
+
+/// Advisory, lock-free dry run of [`install_fetched_source`]'s refusals. It
+/// builds the identical core request and runs the identical guard; the install
+/// re-checks under the mutation lock, so the answer can go stale.
+pub fn preflight_fetched_source(
+	fetched: &FetchedSource,
+	request: FetchedInstallRequest<'_>,
+) -> Result<(), InstallMutationError> {
+	let skill_file = fetched_skill_file(fetched, request.lock_skill_path)
+		.ok_or(InstallMutationError::InvalidSkillPath)?;
+	aghub_core::skills::install_fetched::preflight_fetched_install(
+		&core_install_request(fetched, &request, &skill_file),
+	)
+	.map_err(InstallMutationError::Install)
+}
+
+/// The ONE construction of the core install request, so the preview and the
+/// install cannot disagree about what is being installed.
+fn core_install_request<'a>(
+	fetched: &FetchedSource,
+	request: &FetchedInstallRequest<'a>,
+	skill_file: &'a Path,
+) -> aghub_core::skills::install_fetched::FetchedSkillInstallRequest<'a> {
+	use aghub_core::skills::linker::LinkTarget;
+
+	aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
+		skill_file,
 		source: request.source,
 		lock_skill_path: request.lock_skill_path.to_string(),
 		ref_commit: Some(fetched.oid().to_string()),
@@ -146,8 +171,7 @@ pub fn install_fetched_source(
 		} else {
 			LinkTarget::Absolute
 		},
-	})
-	.map_err(InstallMutationError::Install)
+	}
 }
 
 pub fn fetch_for_mutation(

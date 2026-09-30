@@ -911,17 +911,6 @@ fn sync(args: SyncArgs) -> Result<()> {
 		}
 	}
 
-	if !args.yes {
-		// Dry-run (default): print the plan, write nothing.
-		return print_dry_run(
-			&source,
-			scope_label,
-			&plan,
-			&target_agents,
-			args.json,
-		);
-	}
-
 	// Resolve the lock source ONCE from the RECOVERED fetch coordinate
 	// (recorded `sourceUrl` for a non-github host, else the arg), NOT the raw
 	// shorthand — a TFS `Collection/_git/repo` would misparse as github.
@@ -948,6 +937,24 @@ fn sync(args: SyncArgs) -> Result<()> {
 		ref_name: sync_plan.git_ref.clone(),
 	};
 	let fetched = skill_update::mutation::FetchedSource::from_repo(repo);
+
+	if !args.yes {
+		// Dry-run (default): print the plan, write nothing. The fetch already
+		// succeeded and the request construction is pure.
+		return print_dry_run(
+			&source,
+			scope_label,
+			&plan,
+			&target_agents,
+			args.json,
+			&PreviewContext {
+				fetched: &fetched,
+				lock_source: &lock_source,
+				scope,
+				project_root: project_root.as_deref(),
+			},
+		);
+	}
 
 	let plan_targets = plan_target_agents(&plan, &target_agents);
 	let action_report = aghub_core::batch::run_multi_target_mutation(
@@ -1154,24 +1161,58 @@ fn print_no_action_plan(
 	Ok(())
 }
 
+/// What the preview needs to run the install's own refusal guard per row.
+struct PreviewContext<'a> {
+	fetched: &'a skill_update::mutation::FetchedSource,
+	lock_source: &'a skill::InstallLockSource,
+	scope: ResourceScope,
+	project_root: Option<&'a Path>,
+}
+
 fn print_dry_run(
 	source: &str,
 	scope_label: &'static str,
 	plan: &[(&'static str, &SourceSkillDiff)],
 	target_agents: &[AgentType],
 	json: bool,
+	ctx: &PreviewContext<'_>,
 ) -> Result<()> {
 	let plan_targets = plan_target_agents(plan, target_agents);
+	// An install row predicted to be refused by the SAME guard `--yes` runs
+	// (advisory: unlocked, and the install re-checks under the lock).
+	let predicted: Vec<Option<String>> = plan
+		.iter()
+		.map(|(kind, d)| {
+			(*kind == "install")
+				.then(|| {
+					skill_update::mutation::preflight_fetched_source(
+						ctx.fetched,
+						install_request(
+							d,
+							ctx.lock_source,
+							ctx.scope,
+							ctx.project_root,
+							target_agents,
+						),
+					)
+					.err()
+					.map(install_error_message)
+				})
+				.flatten()
+		})
+		.collect();
+	let would_fail = predicted.iter().any(Option::is_some);
 
 	if json {
 		let actions: Vec<SyncActionView> = plan
 			.iter()
-			.map(|(kind, d)| SyncActionView {
+			.zip(&predicted)
+			.map(|((kind, d), error)| SyncActionView {
 				action: kind,
 				name: d.name.clone(),
 				skill_path: d.skill_path.clone(),
 				applied: false,
-				error: None,
+				error: error.clone(),
 				error_code: None,
 				agents: Vec::new(),
 			})
@@ -1184,7 +1225,7 @@ fn print_dry_run(
 			actions,
 		};
 		println!("{}", serde_json::to_string_pretty(&view)?);
-		return Ok(());
+		return preview_verdict(would_fail);
 	}
 
 	if plan.is_empty() {
@@ -1207,10 +1248,54 @@ fn print_dry_run(
 			plan_targets.join(", ")
 		);
 	}
-	for (kind, d) in plan {
-		println!("  would {}: {} ({})", kind, d.name, d.skill_path);
+	for ((kind, d), error) in plan.iter().zip(&predicted) {
+		match error {
+			None => println!("  would {}: {} ({})", kind, d.name, d.skill_path),
+			Some(err) => {
+				println!("  would {} — refused: {} — {err}", kind, d.name)
+			}
+		}
+	}
+	preview_verdict(would_fail)
+}
+
+/// A predicted refusal exits 1 like the `--yes` run would. The view is already
+/// on stdout, so mark the answer there before bailing (one JSON document).
+fn preview_verdict(would_fail: bool) -> Result<()> {
+	if would_fail {
+		crate::note_answer_on_stdout();
+		bail!("one or more sync actions would fail (see the preview above)");
 	}
 	Ok(())
+}
+
+fn install_request<'a>(
+	d: &'a SourceSkillDiff,
+	lock_source: &'a skill::InstallLockSource,
+	scope: ResourceScope,
+	project_root: Option<&'a Path>,
+	target_agents: &'a [AgentType],
+) -> skill_update::mutation::FetchedInstallRequest<'a> {
+	skill_update::mutation::FetchedInstallRequest {
+		source: lock_source,
+		lock_skill_path: &d.skill_path,
+		expected_name: Some(&d.name),
+		scope,
+		project_root,
+		target_agents,
+	}
+}
+
+fn install_error_message(
+	error: skill_update::mutation::InstallMutationError,
+) -> String {
+	use skill_update::mutation::InstallMutationError;
+	match error {
+		InstallMutationError::InvalidSkillPath => {
+			"skillPath was not found in the source".to_string()
+		}
+		InstallMutationError::Install(error) => error.to_string(),
+	}
 }
 
 fn apply_install(
@@ -1221,18 +1306,10 @@ fn apply_install(
 	target_agents: &[AgentType],
 	lock_source: &skill::InstallLockSource,
 ) -> SyncActionView {
-	use skill_update::mutation::{
-		install_fetched_source, FetchedInstallRequest, InstallMutationError,
-	};
+	use skill_update::mutation::install_fetched_source;
 
-	let req = FetchedInstallRequest {
-		source: lock_source,
-		lock_skill_path: &d.skill_path,
-		expected_name: Some(&d.name),
-		scope,
-		project_root,
-		target_agents,
-	};
+	let req =
+		install_request(d, lock_source, scope, project_root, target_agents);
 
 	match install_fetched_source(fetched, req) {
 		Ok(report) => {
@@ -1267,12 +1344,7 @@ fn apply_install(
 			name: d.name.clone(),
 			skill_path: d.skill_path.clone(),
 			applied: false,
-			error: Some(match error {
-				InstallMutationError::InvalidSkillPath => {
-					"skillPath was not found in the source".to_string()
-				}
-				InstallMutationError::Install(error) => error.to_string(),
-			}),
+			error: Some(install_error_message(error)),
 			error_code: None,
 			agents: Vec::new(),
 		},
