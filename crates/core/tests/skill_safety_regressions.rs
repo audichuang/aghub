@@ -381,3 +381,49 @@ fn global_store_symlink_keeps_install_update_and_delete_working() {
 	);
 	assert!(!home.join(".claude/skills/dotted").exists());
 }
+
+/// `--all-agents` leaves a dir only disabled agents read alone, then refuses
+/// because the skill is still served from it. The refusal has to name that
+/// cause — "still discoverable" alone sends the user hunting for a bug.
+#[test]
+fn all_agents_refusal_names_the_disabled_agent_that_still_holds_the_skill() {
+	let _lock = env_lock();
+	let tmp = tempfile::tempdir().unwrap();
+	let _env = isolated_home(tmp.path());
+	let data = tmp.path().join("data");
+	let prev = std::env::var_os("AGHUB_DATA_DIR");
+	std::env::set_var("AGHUB_DATA_DIR", &data);
+	let _data = RestoreEnv(vec![("AGHUB_DATA_DIR", prev)]);
+
+	let name = "held-by-disabled";
+	let master = tmp.path().join(".aghub").join(name);
+	write_skill(&master, name);
+	for dir in [".claude/skills", ".cursor/skills"] {
+		let referrer = tmp.path().join(dir).join(name);
+		std::fs::create_dir_all(referrer.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&master, &referrer).unwrap();
+	}
+	aghub_core::agent_settings::write_disabled_agents_in(
+		&data,
+		&["cursor".to_string()].into_iter().collect(),
+	)
+	.unwrap();
+
+	let mut claude =
+		ConfigManager::new(create_adapter(AgentType::Claude), true, None);
+	claude.load().unwrap();
+	let err = claude
+		.remove_skill_planned(name, true, false, true)
+		.expect_err("a disabled agent's Referrer keeps the Master alive");
+
+	let message = err.to_string();
+	assert!(
+		message.contains("disabled agent")
+			&& message.contains(".cursor/skills"),
+		"refusal must name the disabled agent's dir: {message}"
+	);
+	assert!(
+		master.join("SKILL.md").exists(),
+		"the Master must survive the refusal"
+	);
+}

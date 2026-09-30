@@ -904,10 +904,31 @@ impl ConfigManager {
 			// `--all-agents` is a DIFFERENT failure (the sweep left a copy
 			// behind) and needs its own wording.
 			let (operation, reason) = if all_agents {
-				(
-					"remove from every agent".to_string(),
-					format!("skill still discoverable afterwards in: {where_}"),
-				)
+				// A dir only disabled agents read is never swept (they are
+				// unmanaged, not absent), so it is the usual reason this sweep
+				// cannot finish — say so and say what to do about it.
+				let unmanaged = removal::unmanaged_skill_dirs(
+					&all_agent_dirs,
+					project_root.as_deref(),
+				);
+				let held_by_disabled = plan
+					.still_read_from
+					.iter()
+					.filter(|path| {
+						unmanaged.iter().any(|dir| path.starts_with(dir))
+					})
+					.map(|path| path.display().to_string())
+					.collect::<Vec<_>>();
+				let mut reason =
+					format!("skill still discoverable afterwards in: {where_}");
+				if !held_by_disabled.is_empty() {
+					reason.push_str(&format!(
+						". Read only by disabled agent(s), which --all-agents never touches: {}. \
+						 Re-enable those agents or unlink these entries yourself, then retry",
+						held_by_disabled.join(", ")
+					));
+				}
+				("remove from every agent".to_string(), reason)
 			} else {
 				// Name the paths, not just the other agents: a leftover
 				// Referrer in this agent's own second read dir is what the user

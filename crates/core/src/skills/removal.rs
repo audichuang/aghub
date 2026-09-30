@@ -1199,7 +1199,7 @@ pub fn execute_removal(
 ///
 /// Spelled by the same adapter call as [`agent_skill_dirs_in_scope`], so a
 /// plain `contains` matches. Empty when nothing is disabled.
-fn unmanaged_skill_dirs(
+pub(crate) fn unmanaged_skill_dirs(
 	dirs: &[PathBuf],
 	project_root: Option<&Path>,
 ) -> Vec<PathBuf> {

@@ -364,7 +364,12 @@ refuses, that refusal is the answer.
 Local content that must survive belongs in the git source first (the authoring
 branch). For a deliberate source swap: preview `delete skills <NAME>
 --all-agents`, read every path in the preview — it includes the Master —
-`--yes` it, then install from the new source.
+`--yes` it, then install from the new source with an explicit `-a` roster.
+
+If that delete refuses with "Read only by disabled agent(s)", those agents were
+disabled after being granted the skill. aghub never sweeps a disabled agent, and
+its link keeps the Master alive. Re-enable the agent (or unlink exactly the
+entries the message lists), then retry — do not widen the roster to `-a all`.
 
 An `add --from` install is intentionally untracked and has no upstream-update
 branch; refresh it through the same backed-up delete plus a re-`add` with an
