@@ -1,4 +1,4 @@
-use aghub_core::models::Skill;
+use aghub_core::{manager::skill::SkillPatch, models::Skill};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -50,19 +50,16 @@ pub struct UpdateSkillRequest {
 	pub enabled: Option<bool>,
 }
 
-impl UpdateSkillRequest {
-	pub fn apply_to(self, existing: Skill) -> Skill {
-		Skill {
-			name: self.name.unwrap_or(existing.name),
-			enabled: self.enabled.unwrap_or(existing.enabled),
-			description: self.description.or(existing.description),
-			author: self.author.or(existing.author),
-			version: self.version.or(existing.version),
-			content: self.content.or(existing.content),
-			tools: self.tools.unwrap_or(existing.tools),
-			source_path: existing.source_path,
-			canonical_path: existing.canonical_path,
-			config_source: existing.config_source,
+impl From<UpdateSkillRequest> for SkillPatch {
+	fn from(req: UpdateSkillRequest) -> Self {
+		SkillPatch {
+			name: req.name,
+			description: req.description,
+			author: req.author,
+			version: req.version,
+			content: req.content,
+			tools: req.tools,
+			enabled: req.enabled,
 		}
 	}
 }

@@ -124,6 +124,35 @@ pub fn is_managed(agent_id: &str) -> bool {
 	!disabled_agents().contains(agent_id)
 }
 
+/// Turn the given agents on (managed=true) or off, keeping every other agent's
+/// state. The API PUT keeps its own full-replace route.
+pub fn set_agents_managed_in(
+	data_dir: &Path,
+	agents: &[crate::AgentType],
+	managed: bool,
+) -> io::Result<BTreeSet<String>> {
+	let mut disabled = read_disabled_agents_in(data_dir)?.unwrap_or_default();
+	for agent in agents {
+		let id = agent.as_str();
+		if managed {
+			disabled.remove(id);
+		} else {
+			disabled.insert(id.to_string());
+		}
+	}
+	write_disabled_agents_in(data_dir, &disabled)?;
+	Ok(disabled)
+}
+
+/// [`set_agents_managed_in`] at [`crate::paths::app_data_dir`]. The API PUT
+/// keeps its own full-replace route.
+pub fn set_agents_managed(
+	agents: &[crate::AgentType],
+	managed: bool,
+) -> io::Result<BTreeSet<String>> {
+	set_agents_managed_in(&crate::paths::app_data_dir(), agents, managed)
+}
+
 #[cfg(test)]
 pub(crate) mod test_override {
 	use std::cell::RefCell;
@@ -152,6 +181,7 @@ pub(crate) mod test_override {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::AgentType;
 
 	#[test]
 	fn missing_file_means_never_configured() {
@@ -213,5 +243,41 @@ mod tests {
 			read_disabled_agents_in(dir.path()).unwrap(),
 			Some(BTreeSet::new())
 		);
+	}
+
+	#[test]
+	fn set_agents_managed_in_toggles_only_named_agents() {
+		let dir = tempfile::tempdir().unwrap();
+		let disabled =
+			set_agents_managed_in(dir.path(), &[AgentType::Claude], false)
+				.unwrap();
+		let claude_set = BTreeSet::from(["claude".to_string()]);
+		assert_eq!(disabled, claude_set);
+		assert_eq!(
+			read_disabled_agents_in(dir.path()).unwrap(),
+			Some(claude_set)
+		);
+
+		let disabled =
+			set_agents_managed_in(dir.path(), &[AgentType::Claude], true)
+				.unwrap();
+		let empty_set = BTreeSet::new();
+		assert_eq!(disabled, empty_set);
+		assert_eq!(
+			read_disabled_agents_in(dir.path()).unwrap(),
+			Some(empty_set)
+		);
+	}
+
+	#[test]
+	fn set_agents_managed_in_refuses_corrupt_file() {
+		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join(FILE_NAME);
+		std::fs::write(&file, b"{not json").unwrap();
+
+		let res =
+			set_agents_managed_in(dir.path(), &[AgentType::Claude], false);
+		assert!(res.is_err());
+		assert_eq!(std::fs::read(&file).unwrap(), b"{not json");
 	}
 }

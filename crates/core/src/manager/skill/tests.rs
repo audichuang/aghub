@@ -3088,3 +3088,51 @@ fn cli_add_and_fetched_install_produce_identical_master_and_link() {
 	assert!(cli_link.join("SKILL.md").exists());
 	assert!(fetched_link.join("SKILL.md").exists());
 }
+
+#[test]
+fn skill_patch_blank_tools_clear_and_absent_keep() {
+	let existing = Skill {
+		name: "test-skill".into(),
+		enabled: false,
+		description: None,
+		author: None,
+		version: None,
+		content: None,
+		tools: vec!["x".into(), "y".into()],
+		source_path: None,
+		canonical_path: None,
+		config_source: None,
+	};
+
+	// tools None -> ["x", "y"]
+	let patched = super::SkillPatch {
+		tools: None,
+		..Default::default()
+	}
+	.apply_to(existing.clone());
+	assert_eq!(patched.tools, vec!["x", "y"]);
+
+	// Some(vec![""]) -> []
+	let patched = super::SkillPatch {
+		tools: Some(vec!["".into()]),
+		..Default::default()
+	}
+	.apply_to(existing.clone());
+	assert_eq!(patched.tools, Vec::<String>::new());
+
+	// Some(vec![" a ".into(), "".into()]) -> ["a"]
+	let patched = super::SkillPatch {
+		tools: Some(vec![" a ".into(), "".into()]),
+		..Default::default()
+	}
+	.apply_to(existing.clone());
+	assert_eq!(patched.tools, vec!["a"]);
+
+	// Some(vec![]) -> []
+	let patched = super::SkillPatch {
+		tools: Some(vec![]),
+		..Default::default()
+	}
+	.apply_to(existing);
+	assert_eq!(patched.tools, Vec::<String>::new());
+}

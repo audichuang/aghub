@@ -145,31 +145,12 @@ impl CreateMcpRequest {
 /// both. No dialect writes the model-level field, so keeping it there would make
 /// every edit "lose a field"; fold it into the transport, whose fit the dialect
 /// probe actually answers. A timeout the transport already spells wins.
-fn fold_timeout(transport: McpTransport, timeout: Option<u64>) -> McpTransport {
-	let own = transport_timeout(&transport);
-	set_timeout(transport, own.or(timeout))
-}
-
-fn transport_timeout(transport: &McpTransport) -> Option<u64> {
-	match transport {
-		McpTransport::Stdio { timeout, .. }
-		| McpTransport::Sse { timeout, .. }
-		| McpTransport::StreamableHttp { timeout, .. } => *timeout,
-	}
-}
-
-/// Replace the transport's timeout; `None` leaves it untouched.
-fn set_timeout(
+fn fold_timeout(
 	mut transport: McpTransport,
-	value: Option<u64>,
+	timeout: Option<u64>,
 ) -> McpTransport {
-	if let Some(value) = value {
-		match &mut transport {
-			McpTransport::Stdio { timeout, .. }
-			| McpTransport::Sse { timeout, .. }
-			| McpTransport::StreamableHttp { timeout, .. } => *timeout = Some(value),
-		}
-	}
+	let own = transport.timeout();
+	transport.set_timeout(own.or(timeout));
 	transport
 }
 
@@ -210,6 +191,12 @@ impl UpdateMcpRequest {
 		Ok(())
 	}
 
+	/// Apply this update onto an existing MCP server.
+	///
+	/// A PUT that carries a transport is a FULL REPLACEMENT on purpose: the GUI
+	/// form always sends the whole transport and omits `headers`/`env` to CLEAR
+	/// them; merging would resurrect them. The CLI `update mcps` is a patch and
+	/// uses `McpTransport::apply_edit` in core instead.
 	pub fn apply_to(self, existing: McpServer) -> McpServer {
 		McpServer {
 			name: self.name.unwrap_or(existing.name),
@@ -218,7 +205,11 @@ impl UpdateMcpRequest {
 			// the request-level timeout is an edit of the existing transport's.
 			transport: match self.transport {
 				Some(transport) => fold_timeout(transport.into(), self.timeout),
-				None => set_timeout(existing.transport, self.timeout),
+				None => {
+					let mut t = existing.transport;
+					t.set_timeout(self.timeout.or(t.timeout()));
+					t
+				}
 			},
 			timeout: existing.timeout,
 			config_source: existing.config_source,
@@ -248,13 +239,14 @@ impl From<McpServer> for McpResponse {
 
 impl From<&McpServer> for McpResponse {
 	fn from(s: &McpServer) -> Self {
+		let view = aghub_core::dto::McpView::from(s);
 		McpResponse {
-			name: s.name.clone(),
-			enabled: s.enabled,
-			transport: TransportDto::from(&s.transport),
-			timeout: s.timeout,
-			source: s.config_source.map(Into::into),
-			agent: None,
+			name: view.name,
+			enabled: view.enabled,
+			transport: TransportDto::from(&view.transport),
+			timeout: view.timeout,
+			source: view.source.map(Into::into),
+			agent: view.agent,
 		}
 	}
 }
@@ -371,5 +363,73 @@ mod batch_dto_tests {
 			decl.contains("error?"),
 			"error must be optional in TS: {decl}"
 		);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use aghub_core::dto::McpView;
+	use aghub_core::models::{ConfigSource, McpServer, McpTransport};
+	use serde_json::Value;
+
+	// TransportDto skips None env/headers while McpTransport's own serde
+	// serializes them as null, so nulls are stripped before comparing.
+	fn strip_nulls(value: Value) -> Value {
+		match value {
+			Value::Object(map) => Value::Object(
+				map.into_iter()
+					.filter(|(_, v)| !v.is_null())
+					.map(|(k, v)| (k, strip_nulls(v)))
+					.collect(),
+			),
+			Value::Array(vec) => {
+				Value::Array(vec.into_iter().map(strip_nulls).collect())
+			}
+			other => other,
+		}
+	}
+
+	#[test]
+	fn mcp_response_matches_core_mcp_view() {
+		let mut env = HashMap::new();
+		env.insert("KEY".to_string(), "VAL".to_string());
+
+		let stdio_server = McpServer {
+			name: "stdio-srv".to_string(),
+			enabled: true,
+			transport: McpTransport::Stdio {
+				command: "echo".to_string(),
+				args: vec!["hello".to_string()],
+				env: Some(env),
+				timeout: None,
+			},
+			timeout: None,
+			config_source: Some(ConfigSource::Global),
+		};
+
+		let sse_server = McpServer::new(
+			"sse-srv",
+			McpTransport::Sse {
+				url: "http://example.com/events".to_string(),
+				headers: None,
+				timeout: None,
+			},
+		);
+
+		let mut timeout_server = McpServer::new(
+			"timeout-srv",
+			McpTransport::streamable_http("http://example.com/stream"),
+		);
+		timeout_server.timeout = Some(30);
+
+		for s in [stdio_server, sse_server, timeout_server] {
+			assert_eq!(
+				strip_nulls(
+					serde_json::to_value(McpResponse::from(&s)).unwrap()
+				),
+				strip_nulls(serde_json::to_value(McpView::from(&s)).unwrap()),
+			);
+		}
 	}
 }

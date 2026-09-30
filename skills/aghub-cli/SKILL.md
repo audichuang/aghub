@@ -368,8 +368,10 @@ branch). For a deliberate source swap: preview `delete skills <NAME>
 
 If that delete refuses with "Read only by disabled agent(s)", those agents were
 disabled after being granted the skill. aghub never sweeps a disabled agent, and
-its link keeps the Master alive. Re-enable the agent (or unlink exactly the
-entries the message lists), then retry — do not widen the roster to `-a all`.
+its link keeps the Master alive. Run `aghub-cli agents list` to see which agents
+are unmanaged and `aghub-cli agents enable <id>` to turn one back on (note that
+`-a all` and `source sync -a all` skip unmanaged agents), or unlink exactly the
+entries the message lists, then retry — do not widen the roster to `-a all`.
 
 An `add --from` install is intentionally untracked and has no upstream-update
 branch; refresh it through the same backed-up delete plus a re-`add` with an

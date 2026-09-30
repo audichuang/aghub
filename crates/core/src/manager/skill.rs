@@ -540,7 +540,51 @@ impl ConfigManager {
 		// a skill and rewrites `.mcp.json` as a side effect. See `add_skill`.
 		Ok(())
 	}
+}
 
+/// Patch representation for updating an existing [`Skill`].
+///
+/// Omitted fields (`None`) retain their existing values, while provided
+/// fields overwrite them. For `tools`, passing an empty list or blank strings
+/// clears the allowed tools list.
+#[derive(Debug, Default, Clone)]
+pub struct SkillPatch {
+	pub name: Option<String>,
+	pub description: Option<String>,
+	pub author: Option<String>,
+	pub version: Option<String>,
+	pub content: Option<String>,
+	pub tools: Option<Vec<String>>, // Some(vec![]) = clear
+	pub enabled: Option<bool>,
+}
+
+impl SkillPatch {
+	pub fn apply_to(self, existing: Skill) -> Skill {
+		let tools = match self.tools {
+			Some(list) => list
+				.into_iter()
+				.map(|s| s.trim().to_string())
+				.filter(|s| !s.is_empty())
+				.collect(),
+			None => existing.tools,
+		};
+
+		Skill {
+			name: self.name.unwrap_or(existing.name),
+			enabled: self.enabled.unwrap_or(existing.enabled),
+			description: self.description.or(existing.description),
+			author: self.author.or(existing.author),
+			version: self.version.or(existing.version),
+			content: self.content.or(existing.content),
+			tools,
+			source_path: existing.source_path,
+			canonical_path: existing.canonical_path,
+			config_source: existing.config_source,
+		}
+	}
+}
+
+impl ConfigManager {
 	pub fn remove_skill(&mut self, name: &str) -> Result<()> {
 		// Recorded before the re-read: afterwards "another process removed it"
 		// (goal met) and "no such skill" (not-found) look identical.

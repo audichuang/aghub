@@ -15,8 +15,8 @@ use aghub_core::{
 mod commands;
 
 use commands::{
-	add, check, delete, disable, enable, get, inference, plugin, prune, repair,
-	transfer, update,
+	add, agents, check, delete, disable, enable, get, inference, plugin, prune,
+	repair, transfer, update,
 };
 
 /// Global verbose flag used by the eprintln_verbose macro
@@ -244,14 +244,9 @@ enum Commands {
 		#[arg(short, long, group = "mcp_config")]
 		url: Option<String>,
 
-		/// For MCP with URL: Transport type (streamable-http, sse)
-		#[arg(
-			short,
-			long,
-			value_name = "TYPE",
-			default_value = aghub_core::models::DEFAULT_REMOTE_TRANSPORT
-		)]
-		transport: String,
+		/// For MCP: switch the transport kind (streamable-http, sse); absent keeps the current kind. On a stdio server it needs --url
+		#[arg(short, long, value_name = "TYPE")]
+		transport: Option<String>,
 
 		/// For MCP with URL: HTTP headers
 		#[arg(long = "header", value_name = "KEY:VALUE")]
@@ -278,9 +273,9 @@ enum Commands {
 		#[arg(long)]
 		version: Option<String>,
 
-		/// For skill: Comma-separated list of tool names
+		/// For skill: Comma-separated tool names; pass --tools '' to clear
 		#[arg(long, value_delimiter = ',')]
-		tools: Vec<String>,
+		tools: Option<Vec<String>>,
 	},
 	/// Delete a resource permanently.
 	///
@@ -439,6 +434,12 @@ enum Commands {
 	Inference {
 		#[command(subcommand)]
 		action: inference::InferenceAction,
+	},
+	/// Show or change which agents aghub manages (the selection `-a all` and
+	/// other fan-outs read)
+	Agents {
+		#[command(subcommand)]
+		action: agents::AgentsAction,
 	},
 	/// Copy a resource from one agent into one or more target agents
 	Transfer {
@@ -849,6 +850,12 @@ fn run(cli: Cli) -> Result<()> {
 	// keyring). Dispatch it before the adapter/ConfigManager setup too.
 	if let Commands::Inference { action } = &cli.command {
 		return commands::inference::execute(action, cli.json);
+	}
+
+	// Managed-agents selection ignores scope and -a, and needs no adapter or
+	// ConfigManager. Dispatch it before adapter setup too.
+	if let Commands::Agents { action } = &cli.command {
+		return commands::agents::execute(action, cli.json);
 	}
 
 	// `plugin` manages Claude Code's plugin store and IGNORES the scope flags
@@ -1447,7 +1454,9 @@ fn scope_policy(command: &Commands) -> Option<ScopePolicy> {
 			SourceAction::Sync { .. } => SOURCE_SYNC_SCOPE,
 			SourceAction::AcceptRename { .. } => ACCEPT_RENAME_SCOPE,
 		},
-		Commands::Inference { .. } | Commands::Plugin { .. } => return None,
+		Commands::Inference { .. }
+		| Commands::Plugin { .. }
+		| Commands::Agents { .. } => return None,
 	})
 }
 
@@ -1851,6 +1860,9 @@ fn run_for_agent(
 		Commands::Inference { .. } => {
 			unreachable!("`inference` is dispatched before agent-config setup")
 		}
+		Commands::Agents { .. } => {
+			unreachable!("`agents` is dispatched before agent-config setup")
+		}
 		Commands::Transfer { .. } => {
 			unreachable!("`transfer` is dispatched before agent-config setup")
 		}
@@ -1901,7 +1913,7 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 fn mcp_transport_for_preflight(
 	command: &Commands,
 ) -> Option<aghub_core::models::McpTransport> {
-	let (cmd, url, transport, headers, env_vars, timeout) = match command {
+	match command {
 		Commands::Add {
 			command,
 			url,
@@ -1910,8 +1922,17 @@ fn mcp_transport_for_preflight(
 			env_vars,
 			timeout,
 			..
-		}
-		| Commands::Update {
+		} => commands::parse_mcp_transport(
+			command.clone(),
+			url.clone(),
+			transport,
+			headers.clone(),
+			env_vars.clone(),
+			*timeout,
+		)
+		.ok()
+		.flatten(),
+		Commands::Update {
 			command,
 			url,
 			transport,
@@ -1919,19 +1940,42 @@ fn mcp_transport_for_preflight(
 			env_vars,
 			timeout,
 			..
-		} => (command, url, transport, headers, env_vars, timeout),
-		_ => return None,
-	};
-	commands::parse_mcp_transport(
-		cmd.clone(),
-		url.clone(),
-		transport,
-		headers.clone(),
-		env_vars.clone(),
-		*timeout,
-	)
-	.ok()
-	.flatten()
+		} => {
+			if command.is_some() {
+				commands::parse_mcp_transport(
+					command.clone(),
+					url.clone(),
+					"streamable-http",
+					headers.clone(),
+					env_vars.clone(),
+					*timeout,
+				)
+				.ok()
+				.flatten()
+			} else if let Some(transport) = transport {
+				// ponytail: the probe only answers kind support via
+				// supports_mcp_transport, so the url is irrelevant; upgrade
+				// path: read each agent's existing server if a per-row check
+				// is ever needed
+				let probe_url = url
+					.clone()
+					.or_else(|| Some("http://placeholder.invalid".to_string()));
+				commands::parse_mcp_transport(
+					None,
+					probe_url,
+					transport,
+					headers.clone(),
+					env_vars.clone(),
+					*timeout,
+				)
+				.ok()
+				.flatten()
+			} else {
+				None
+			}
+		}
+		_ => None,
+	}
 }
 
 /// Fan a comma-separated `-a` list across the named agents. `get` aggregates
@@ -2472,6 +2516,7 @@ mod tests {
 		// wanted a scope.
 		(&["aghub-cli", "plugin", "list"], None),
 		(&["aghub-cli", "inference", "list"], None),
+		(&["aghub-cli", "agents", "list"], None),
 	];
 
 	/// The policy table itself. It is exhaustive over `Commands` (and over

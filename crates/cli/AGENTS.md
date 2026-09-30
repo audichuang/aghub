@@ -13,6 +13,13 @@ them, and the WHY behind each flow is in the knowledge pages named per section.
 Aliases: `skills`/`skill`, `mcps`/`mcp`. Scope: `-a` (one id, a comma-separated
 list, or `all`), `-g`/`-p`, `--all`.
 
+- **`update mcps` is a PATCH** over the freshly reloaded server (core
+  `McpTransport::apply_edit`, applied under the lock): an absent flag keeps the
+  old value, `--header`/`--env` REPLACE the whole map, `-t` switches the remote
+  kind (url and headers kept), and `-t`/`--header` on a stdio server without
+  `-u` is refused (it used to be a silent no-op). The API PUT replaces the
+  transport on purpose, because the GUI sends the whole pre-filled form and
+  omits `headers` to clear them.
 - **Destructive defaults**: `delete`, `apply-update`, `prune-lock`,
   `source sync`, `source accept-rename`, reconcile-with-removals → **dry-run
   unless `--yes`**. `apply-update <name>` refuses outright instead of previewing, and
@@ -108,6 +115,18 @@ list, or `all`), `-g`/`-p`, `--all`.
 - **`inference`**: provider inventory + keyring keys. Bindings/routing are
   desktop/API-only — there is no `inference bind` here. `--api-key -` reads the
   key from stdin on `inference add` ONLY — `update` stores a literal `-`
+- **`agents list|enable|disable`** reads/writes core `agent_settings` (the
+  selection every fan-out reads: `-a all`, `source sync -a all`, repair, rename,
+  delete-from-all); ids parse through the ONE `AgentSelection::parse`; ignores
+  scope and `-a`; an unreadable agents.json is a failure for list AND for
+  enable/disable (never overwritten); a toggle is reversible so there is no
+  preview; `list --json` is `{configured, agents:[{id,display_name,managed}]}`
+  in roster order, `configured:false` means nobody chose yet so every agent is
+  managed
+- **`get mcps` wire view is core `dto::McpView`**, shared with the API's
+  `McpResponse`; do not add a field in only one place. `--json` rows also keep a
+  legacy top-level `type` (`McpTransport::kind()`); the table shows type and
+  target only, never header/env values
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
 - Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
 
@@ -119,8 +138,8 @@ args), so that rejection is exit **1**, not clap's exit 2. ONE table
 (`scope_policy`), ONE resolver (`resolve_scope`), ONE resolved value (`Scope`). `scope_policy` is **exhaustive** over `Commands` and
 over `SourceAction`, so a new subcommand does not COMPILE until it is
 classified — it used to end in `_ => AllowBoth` and rely on a comment. `None`
-means the command ignores scope entirely (`inference`, `plugin`) and must not
-reach the resolver.
+means the command ignores scope entirely (`inference`, `plugin`, `agents`) and
+must not reach the resolver.
 
 Command modules receive a `Scope`, never `cli.global/project/all`; its fields
 are private **to `mod scope`**, so there is nothing left for them to re-derive.
@@ -159,7 +178,7 @@ that a new subcommand cannot escape the case table —
 than a second hand-written one.
 
 **Early dispatch.** `check`, `repair`, `prune-lock`, `plugin`, `source`,
-`apply-update`, `inference`, `transfer`,
+`apply-update`, `inference`, `agents`, `transfer`,
 `reconcile`, `coverage`, `doctor` and `skill-usage` run BEFORE any adapter or
 `ConfigManager` exists, so a missing or malformed agent config cannot block a
 command that never needed one. The `unreachable!()` arms in `run_for_agent`'s

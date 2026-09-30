@@ -1,5 +1,5 @@
 use crate::{eprintln_verbose, ResourceType};
-use aghub_core::dto::SkillView;
+use aghub_core::dto::{McpView, SkillView};
 use aghub_core::manager::ConfigManager;
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -7,33 +7,17 @@ use tabled::builder::Builder;
 use tabled::settings::Style;
 
 #[derive(Serialize)]
-pub(crate) struct McpView {
-	name: String,
-	enabled: bool,
+struct McpRow {
+	#[serde(flatten)]
+	view: McpView,
 	#[serde(rename = "type")]
-	transport_type: String,
-	/// Agent identifier (only set when using --agent all)
-	#[serde(skip_serializing_if = "Option::is_none")]
-	agent: Option<&'static str>,
+	kind: &'static str,
 }
 
-pub(crate) fn mcp_to_view(
-	m: &aghub_core::models::McpServer,
-	agent: Option<&'static str>,
-) -> McpView {
-	McpView {
-		name: m.name.clone(),
-		enabled: m.enabled,
-		transport_type: match &m.transport {
-			aghub_core::models::McpTransport::Stdio { .. } => {
-				"stdio".to_string()
-			}
-			aghub_core::models::McpTransport::Sse { .. } => "sse".to_string(),
-			aghub_core::models::McpTransport::StreamableHttp { .. } => {
-				"streamable-http".to_string()
-			}
-		},
-		agent,
+impl From<McpView> for McpRow {
+	fn from(view: McpView) -> Self {
+		let kind = view.transport.kind();
+		Self { view, kind }
 	}
 }
 
@@ -75,17 +59,17 @@ fn print_skills(views: &[SkillView], json: bool) -> Result<()> {
 	Ok(())
 }
 
-/// Render MCP servers as a table, or the exact `McpView` array under `--json`.
-fn print_mcps(views: &[McpView], json: bool) -> Result<()> {
+/// Render MCP servers as a table, or the exact `McpRow` array under `--json`.
+fn print_mcps(rows: &[McpRow], json: bool) -> Result<()> {
 	if json {
-		println!("{}", serde_json::to_string_pretty(views)?);
+		println!("{}", serde_json::to_string_pretty(rows)?);
 		return Ok(());
 	}
-	if views.is_empty() {
+	if rows.is_empty() {
 		println!("No MCP servers.");
 		return Ok(());
 	}
-	let with_agent = views.iter().any(|v| v.agent.is_some());
+	let with_agent = rows.iter().any(|r| r.view.agent.is_some());
 	let mut builder = Builder::default();
 	let mut header = vec!["NAME".to_string()];
 	if with_agent {
@@ -93,14 +77,31 @@ fn print_mcps(views: &[McpView], json: bool) -> Result<()> {
 	}
 	header.push("ENABLED".to_string());
 	header.push("TRANSPORT".to_string());
+	header.push("TARGET".to_string());
 	builder.push_record(header);
-	for v in views {
-		let mut row = vec![v.name.clone()];
+	for r in rows {
+		let mut row = vec![r.view.name.clone()];
 		if with_agent {
-			row.push(v.agent.unwrap_or("—").to_string());
+			row.push(r.view.agent.clone().unwrap_or_else(|| "—".to_string()));
 		}
-		row.push(if v.enabled { "yes" } else { "no" }.to_string());
-		row.push(v.transport_type.clone());
+		row.push(if r.view.enabled { "yes" } else { "no" }.to_string());
+		row.push(r.kind.to_string());
+		let target = match &r.view.transport {
+			aghub_core::models::McpTransport::Stdio {
+				command, args, ..
+			} => {
+				if args.is_empty() {
+					command.clone()
+				} else {
+					format!("{command} {}", args.join(" "))
+				}
+			}
+			aghub_core::models::McpTransport::Sse { url, .. }
+			| aghub_core::models::McpTransport::StreamableHttp {
+				url, ..
+			} => url.clone(),
+		};
+		row.push(truncate(&target, 60));
 		builder.push_record(row);
 	}
 	let mut table = builder.build();
@@ -137,10 +138,13 @@ pub fn execute(
 			print_skills(&views, json)?;
 		}
 		ResourceType::Mcps => {
-			let views: Vec<McpView> =
-				config.mcps.iter().map(|m| mcp_to_view(m, None)).collect();
-			eprintln_verbose!("Found {} MCP servers", views.len());
-			print_mcps(&views, json)?;
+			let rows: Vec<McpRow> = config
+				.mcps
+				.iter()
+				.map(|m| McpRow::from(McpView::from(m)))
+				.collect();
+			eprintln_verbose!("Found {} MCP servers", rows.len());
+			print_mcps(&rows, json)?;
 		}
 	}
 
@@ -168,20 +172,20 @@ pub fn execute_all(
 			print_skills(&views, json)?;
 		}
 		ResourceType::Mcps => {
-			let views: Vec<McpView> = resources
+			let rows: Vec<McpRow> = resources
 				.into_iter()
 				.flat_map(|r| {
 					let agent_id = r.agent_id;
-					r.mcps
-						.into_iter()
-						.map(move |m| mcp_to_view(&m, Some(agent_id)))
+					r.mcps.into_iter().map(move |m| {
+						McpRow::from(McpView::from(&m).with_agent(agent_id))
+					})
 				})
 				.collect();
 			eprintln_verbose!(
 				"Found {} MCP servers across all agents",
-				views.len()
+				rows.len()
 			);
-			print_mcps(&views, json)?;
+			print_mcps(&rows, json)?;
 		}
 	}
 	Ok(())

@@ -975,6 +975,77 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn update_mcp_full_transport_without_headers_clears_them() {
+		let project = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		let mut seed_headers = std::collections::HashMap::new();
+		seed_headers.insert("X".to_string(), "1".to_string());
+		create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Claude),
+			scope(),
+			Json(CreateMcpRequest {
+				name: "sse-server".to_string(),
+				transport: TransportDto::Sse {
+					url: "https://example.com/sse".to_string(),
+					headers: Some(seed_headers),
+					timeout: None,
+				},
+				timeout: None,
+			}),
+		)
+		.ok()
+		.expect("seed SSE server");
+
+		let config_path = project.path().join(".mcp.json");
+		let seed_disk: serde_json::Value = serde_json::from_str(
+			&std::fs::read_to_string(&config_path).unwrap(),
+		)
+		.unwrap();
+		assert_eq!(seed_disk["mcpServers"]["sse-server"]["headers"]["X"], "1");
+
+		update_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Claude),
+			"sse-server",
+			scope(),
+			Json(UpdateMcpRequest {
+				name: None,
+				transport: Some(TransportDto::Sse {
+					url: "https://example.com/sse-updated".to_string(),
+					headers: None,
+					timeout: None,
+				}),
+				enabled: None,
+				timeout: None,
+			}),
+		)
+		.ok()
+		.expect("update SSE server");
+
+		let updated_disk: serde_json::Value = serde_json::from_str(
+			&std::fs::read_to_string(&config_path).unwrap(),
+		)
+		.unwrap();
+		assert_eq!(
+			updated_disk["mcpServers"]["sse-server"]["url"],
+			"https://example.com/sse-updated"
+		);
+		let headers = updated_disk["mcpServers"]["sse-server"].get("headers");
+		assert!(
+			headers.is_none()
+				|| headers.is_some_and(|h| h
+					.as_object()
+					.is_some_and(|m| m.is_empty())),
+			"headers key must be absent or empty, but got {headers:?}"
+		);
+	}
+
 	// --- delete_mcp dry-run/confirm gate (Phase 3 #5) -----------------------
 
 	/// Seed one Cursor MCP in a project-scoped temp root so delete tests have

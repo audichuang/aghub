@@ -1,33 +1,25 @@
 use crate::{eprintln_verbose, ResourceType};
 use aghub_core::{
-	errors::ConfigError, manager::ConfigManager, models::McpTransport,
+	errors::ConfigError,
+	manager::{skill::SkillPatch, ConfigManager},
+	models::McpTransportEdit,
 };
 use anyhow::Result;
 
-use super::parse_mcp_transport;
-
-/// Patch the per-transport `timeout` field in place (used when only
-/// `--timeout` is given on an MCP update, with no new `--command`/`--url`).
-fn set_transport_timeout(transport: &mut McpTransport, value: Option<u64>) {
-	match transport {
-		McpTransport::Stdio { timeout, .. }
-		| McpTransport::Sse { timeout, .. }
-		| McpTransport::StreamableHttp { timeout, .. } => *timeout = value,
-	}
-}
+use super::{parse_env_vars, parse_headers};
 
 /// The `update` clap flags, forwarded as one value.
 pub struct UpdateArgs {
 	pub command: Option<String>,
 	pub url: Option<String>,
-	pub transport: String,
+	pub transport: Option<String>,
 	pub headers: Vec<String>,
 	pub env_vars: Vec<String>,
 	pub timeout: Option<u64>,
 	pub description: Option<String>,
 	pub author: Option<String>,
 	pub version: Option<String>,
-	pub tools: Vec<String>,
+	pub tools: Option<Vec<String>>,
 }
 
 pub fn execute(
@@ -58,21 +50,14 @@ pub fn execute(
 				ConfigError::resource_not_found("skill", &name)
 			})?;
 
-			let mut skill = existing.clone();
-
-			// Update fields if provided
-			if let Some(desc) = description {
-				skill.description = Some(desc);
+			let skill = SkillPatch {
+				description,
+				author,
+				version,
+				tools,
+				..Default::default()
 			}
-			if let Some(auth) = author {
-				skill.author = Some(auth);
-			}
-			if let Some(ver) = version {
-				skill.version = Some(ver);
-			}
-			if !tools.is_empty() {
-				skill.tools = tools;
-			}
+			.apply_to(existing.clone());
 
 			manager.update_skill(&name, skill.clone())?;
 			eprintln_verbose!("Skill updated successfully");
@@ -83,28 +68,18 @@ pub fn execute(
 		}
 		ResourceType::Mcps => {
 			eprintln_verbose!("Updating MCP server: {}", name);
-			// Parse input errors before taking the mutation lock. The existing
-			// server and its inherited timeout are read only after fresh reload.
-			let parsed_transport = parse_mcp_transport(
-				command, url, &transport, headers, env_vars, timeout,
-			)?;
+			let headers = parse_headers(headers)?;
+			let env = parse_env_vars(env_vars)?;
+			let edit = McpTransportEdit {
+				command,
+				url,
+				transport_type: transport,
+				headers,
+				env,
+				timeout,
+			};
 			let mcp = manager.update_mcp_with(&name, move |mcp| {
-				let inherited_timeout = match &mcp.transport {
-					McpTransport::Stdio { timeout, .. }
-					| McpTransport::Sse { timeout, .. }
-					| McpTransport::StreamableHttp { timeout, .. } => *timeout,
-				};
-				if let Some(mut new_transport) = parsed_transport {
-					if timeout.is_none() {
-						set_transport_timeout(
-							&mut new_transport,
-							inherited_timeout,
-						);
-					}
-					mcp.transport = new_transport;
-				} else if timeout.is_some() {
-					set_transport_timeout(&mut mcp.transport, timeout);
-				}
+				mcp.transport = mcp.transport.apply_edit(edit)?;
 				Ok(())
 			})?;
 			eprintln_verbose!("MCP server updated successfully");
@@ -120,7 +95,7 @@ mod tests {
 	use super::*;
 	use aghub_core::{
 		adapters::create_adapter,
-		models::{AgentType, McpServer},
+		models::{AgentType, McpServer, McpTransport},
 	};
 
 	#[test]
@@ -156,14 +131,14 @@ mod tests {
 			UpdateArgs {
 				command: Some("new".into()),
 				url: None,
-				transport: "stdio".into(),
+				transport: None,
 				headers: vec![],
 				env_vars: vec![],
 				timeout: None,
 				description: None,
 				author: None,
 				version: None,
-				tools: vec![],
+				tools: None,
 			},
 		)
 		.unwrap();
@@ -174,14 +149,14 @@ mod tests {
 			UpdateArgs {
 				command: None,
 				url: None,
-				transport: "stdio".into(),
+				transport: None,
 				headers: vec![],
 				env_vars: vec![],
 				timeout: Some(45),
 				description: None,
 				author: None,
 				version: None,
-				tools: vec![],
+				tools: None,
 			},
 		)
 		.unwrap();
@@ -223,14 +198,14 @@ mod tests {
 			UpdateArgs {
 				command: None,
 				url: None,
-				transport: "stdio".into(),
+				transport: None,
 				headers: vec![],
 				env_vars: vec![],
 				timeout: Some(45),
 				description: None,
 				author: None,
 				version: None,
-				tools: vec![],
+				tools: None,
 			},
 		)
 		.expect_err("unpersistable timeout must fail");

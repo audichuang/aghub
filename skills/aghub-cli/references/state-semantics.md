@@ -166,8 +166,13 @@ branch.
 
 ## Commands whose names mislead
 
-- `update skills <name>` edits metadata. It does not pull upstream content —
-  that is `source sync --update` or `apply-update`.
+- `update skills <name>` edits metadata: absent flags keep; `--tools ''` clears
+  allowed-tools; the API PUT uses the same core SkillPatch. It does not pull
+  upstream content — that is `source sync --update` or `apply-update`.
+- `update mcps <name>` is a patch: flags you omit keep their old value (`-u`
+  alone keeps the SSE/HTTP kind and headers; `-c` alone keeps `--env`).
+  `--header`/`--env` replace the whole map, `-t` switches the remote kind, and
+  `-t` on a stdio server needs `-u` (otherwise it is refused, nothing written).
 - `repair` does not take a roster: a scalar `-a` is ignored, a comma list or
   `-a all` is rejected outright. It plans against every supported agent's slot
   and grants a new Referrer only to an agent that can already READ the skill.
@@ -203,6 +208,16 @@ branch.
   agent's Referrer (`delete skills <NAME> -a <AGENT>`, or `reconcile --remove`),
   and check `coverage` first: on a shared directory that removes it for every
   agent sharing it.
+- `agents list|enable|disable` configures which agents aghub manages (the
+  selection `-a all`, `source sync -a all`, repair, rename, and delete-from-all
+  read). `enable` / `disable` is a reversible toggle (no preview needed).
+
+## `get mcps --json`
+
+Each row carries `transport{type,url|command,args,env|headers,timeout}` and, on
+the all-agents paths (`-a all`, `-a a,b`), `source` and `agent`. The legacy
+top-level `type` is kept. The table shows only type and target (url or command),
+never headers or env values, which may hold tokens.
 
 ## Rename and interoperability edges
 

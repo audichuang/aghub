@@ -152,6 +152,14 @@ pub enum McpTransport {
 }
 
 impl McpTransport {
+	pub fn kind(&self) -> &'static str {
+		match self {
+			Self::Stdio { .. } => "stdio",
+			Self::Sse { .. } => "sse",
+			Self::StreamableHttp { .. } => DEFAULT_REMOTE_TRANSPORT,
+		}
+	}
+
 	pub fn stdio(command: impl Into<String>, args: Vec<String>) -> Self {
 		Self::Stdio {
 			command: command.into(),
@@ -301,6 +309,176 @@ impl McpTransport {
 		Ok(None)
 	}
 
+	pub fn timeout(&self) -> Option<u64> {
+		match self {
+			Self::Stdio { timeout, .. }
+			| Self::Sse { timeout, .. }
+			| Self::StreamableHttp { timeout, .. } => *timeout,
+		}
+	}
+
+	pub fn set_timeout(&mut self, value: Option<u64>) {
+		match self {
+			Self::Stdio { timeout, .. }
+			| Self::Sse { timeout, .. }
+			| Self::StreamableHttp { timeout, .. } => *timeout = value,
+		}
+	}
+
+	fn remote(
+		kind: &str,
+		url: String,
+		headers: Option<HashMap<String, String>>,
+		timeout: Option<u64>,
+	) -> crate::errors::Result<Self> {
+		match kind {
+			"sse" => Ok(Self::Sse {
+				url,
+				headers,
+				timeout,
+			}),
+			"streamable-http" => Ok(Self::StreamableHttp {
+				url,
+				headers,
+				timeout,
+			}),
+			other => {
+				Err(crate::errors::ConfigError::ValidationFailed(format!(
+				"unknown transport type '{other}' (expected sse or streamable-http)"
+			)))
+			}
+		}
+	}
+
+	/// Applies a partial edit to this transport, validating flag compatibility
+	/// and returning the updated transport.
+	///
+	/// If either `command` or `url` is specified, the transport switches or
+	/// remains as the respective transport kind. When neither is given, the
+	/// existing transport is edited in place. Unspecified fields (`None`)
+	/// inherit their existing values where compatible.
+	pub fn apply_edit(
+		&self,
+		edit: McpTransportEdit,
+	) -> crate::errors::Result<McpTransport> {
+		reject_zero_timeout(edit.timeout)?;
+		if edit.command.is_some() && edit.url.is_some() {
+			return Err(crate::errors::ConfigError::ValidationFailed(
+				"--command and --url are mutually exclusive".to_string(),
+			));
+		}
+
+		let timeout = edit.timeout.or(self.timeout());
+
+		// ponytail: --header/--env replace the whole map (merging would make
+		// removing a key impossible); clearing to an empty map is not supported
+		// by the CLI flags
+		let mut result = match (edit.command, edit.url) {
+			(Some(cmd), None) => {
+				if edit.headers.is_some() {
+					return Err(crate::errors::ConfigError::ValidationFailed(
+						"--header is only valid with --url".to_string(),
+					));
+				}
+				if edit.transport_type.is_some() {
+					return Err(crate::errors::ConfigError::ValidationFailed(
+						"--transport only applies to a URL server; pass --url to switch"
+							.to_string(),
+					));
+				}
+				let mut parts = cmd.split_whitespace().map(String::from);
+				let Some(program) = parts.next() else {
+					return Err(crate::errors::ConfigError::ValidationFailed(
+						"command cannot be empty".to_string(),
+					));
+				};
+				let args: Vec<String> = parts.collect();
+				let env = edit.env.or_else(|| match self {
+					Self::Stdio { env, .. } => env.clone(),
+					_ => None,
+				});
+				Self::Stdio {
+					command: program,
+					args,
+					env,
+					timeout,
+				}
+			}
+			(None, Some(url)) => {
+				if edit.env.is_some() {
+					return Err(crate::errors::ConfigError::ValidationFailed(
+						"--env is only valid with --command".to_string(),
+					));
+				}
+				let kind = match &edit.transport_type {
+					Some(k) => k.as_str(),
+					None => match self {
+						Self::Sse { .. } => "sse",
+						Self::StreamableHttp { .. } => "streamable-http",
+						Self::Stdio { .. } => DEFAULT_REMOTE_TRANSPORT,
+					},
+				};
+				let headers = edit.headers.or_else(|| match self {
+					Self::Sse { headers, .. }
+					| Self::StreamableHttp { headers, .. } => headers.clone(),
+					Self::Stdio { .. } => None,
+				});
+				Self::remote(kind, url, headers, timeout)?
+			}
+			(None, None) => match self {
+				Self::Stdio {
+					command, args, env, ..
+				} => {
+					if edit.transport_type.is_some() {
+						return Err(crate::errors::ConfigError::ValidationFailed(
+							"--transport only applies to a URL server; pass --url to switch this stdio server"
+								.to_string(),
+						));
+					}
+					if edit.headers.is_some() {
+						return Err(crate::errors::ConfigError::ValidationFailed(
+							"--header is only valid with --url; pass --url to switch this stdio server"
+								.to_string(),
+						));
+					}
+					let env = edit.env.or_else(|| env.clone());
+					Self::Stdio {
+						command: command.clone(),
+						args: args.clone(),
+						env,
+						timeout,
+					}
+				}
+				Self::Sse { url, headers, .. }
+				| Self::StreamableHttp { url, headers, .. } => {
+					if edit.env.is_some() {
+						return Err(
+							crate::errors::ConfigError::ValidationFailed(
+								"--env is only valid with --command"
+									.to_string(),
+							),
+						);
+					}
+					let kind = match &edit.transport_type {
+						Some(k) => k.as_str(),
+						None => match self {
+							Self::Sse { .. } => "sse",
+							Self::StreamableHttp { .. } => "streamable-http",
+							Self::Stdio { .. } => unreachable!(),
+						},
+					};
+					let headers = edit.headers.or_else(|| headers.clone());
+					Self::remote(kind, url.clone(), headers, timeout)?
+				}
+			},
+			(Some(_), Some(_)) => unreachable!(),
+		};
+
+		result.set_timeout(timeout);
+		result.validate_values()?;
+		Ok(result)
+	}
+
 	/// Reject structurally-empty values that would build an unusable MCP: an
 	/// empty stdio command or an empty remote URL. The single shared rule for
 	/// both surfaces — the CLI reaches it through `from_inputs` (which builds a
@@ -328,6 +506,17 @@ impl McpTransport {
 		}
 		Ok(())
 	}
+}
+
+/// Partial edit of an MCP transport (CLI `update mcps` flags). `None` = keep.
+#[derive(Debug, Default, Clone)]
+pub struct McpTransportEdit {
+	pub command: Option<String>, // whitespace-split like from_inputs
+	pub url: Option<String>,
+	pub transport_type: Option<String>, // "sse" | "streamable-http"
+	pub headers: Option<HashMap<String, String>>, // Some = REPLACE whole map
+	pub env: Option<HashMap<String, String>>, // Some = REPLACE whole map
+	pub timeout: Option<u64>,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -966,5 +1155,306 @@ mod tests {
 			timeout: None,
 		};
 		assert!(ok.validate_values().is_ok());
+	}
+
+	#[test]
+	fn apply_edit_url_only_keeps_sse_and_headers() {
+		let transport = McpTransport::Sse {
+			url: "http://a".to_string(),
+			headers: Some(headers(&[("X", "1")])),
+			timeout: Some(5),
+		};
+		let edit = McpTransportEdit {
+			url: Some("http://b".to_string()),
+			..Default::default()
+		};
+		let updated = transport.apply_edit(edit).unwrap();
+		assert_eq!(
+			updated,
+			McpTransport::Sse {
+				url: "http://b".to_string(),
+				headers: Some(headers(&[("X", "1")])),
+				timeout: Some(5),
+			}
+		);
+	}
+
+	#[test]
+	fn apply_edit_type_only_switches_remote_kind() {
+		let transport = McpTransport::StreamableHttp {
+			url: "http://example.com".to_string(),
+			headers: Some(headers(&[("X", "1")])),
+			timeout: None,
+		};
+		let edit = McpTransportEdit {
+			transport_type: Some("sse".to_string()),
+			..Default::default()
+		};
+		let updated = transport.apply_edit(edit).unwrap();
+		assert_eq!(
+			updated,
+			McpTransport::Sse {
+				url: "http://example.com".to_string(),
+				headers: Some(headers(&[("X", "1")])),
+				timeout: None,
+			}
+		);
+
+		let bogus_edit = McpTransportEdit {
+			transport_type: Some("bogus".to_string()),
+			..Default::default()
+		};
+		let err = transport.apply_edit(bogus_edit).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("unknown transport type")
+		));
+	}
+
+	#[test]
+	fn apply_edit_type_without_url_on_stdio_is_rejected() {
+		let transport = McpTransport::stdio("node", vec![]);
+		let edit = McpTransportEdit {
+			transport_type: Some("sse".to_string()),
+			..Default::default()
+		};
+		let err = transport.apply_edit(edit).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("--url")
+		));
+	}
+
+	#[test]
+	fn apply_edit_command_only_keeps_env_and_args_with_spaces() {
+		let transport = McpTransport::Stdio {
+			command: "node".to_string(),
+			args: vec!["a b".to_string(), "c".to_string()],
+			env: Some(headers(&[("K", "V")])),
+			timeout: None,
+		};
+
+		let noop_edit = McpTransportEdit {
+			command: None,
+			url: None,
+			transport_type: None,
+			headers: None,
+			env: None,
+			timeout: None,
+		};
+		let updated = transport.apply_edit(noop_edit).unwrap();
+		assert_eq!(
+			updated,
+			McpTransport::Stdio {
+				command: "node".to_string(),
+				args: vec!["a b".to_string(), "c".to_string()],
+				env: Some(headers(&[("K", "V")])),
+				timeout: None,
+			}
+		);
+
+		let cmd_edit = McpTransportEdit {
+			command: Some("echo bye".to_string()),
+			..Default::default()
+		};
+		let updated = transport.apply_edit(cmd_edit).unwrap();
+		assert_eq!(
+			updated,
+			McpTransport::Stdio {
+				command: "echo".to_string(),
+				args: vec!["bye".to_string()],
+				env: Some(headers(&[("K", "V")])),
+				timeout: None,
+			}
+		);
+
+		let timeout_edit = McpTransportEdit {
+			timeout: Some(9),
+			..Default::default()
+		};
+		let updated = transport.apply_edit(timeout_edit).unwrap();
+		assert_eq!(
+			updated,
+			McpTransport::Stdio {
+				command: "node".to_string(),
+				args: vec!["a b".to_string(), "c".to_string()],
+				env: Some(headers(&[("K", "V")])),
+				timeout: Some(9),
+			}
+		);
+	}
+
+	#[test]
+	fn apply_edit_command_on_remote_drops_headers() {
+		let transport = McpTransport::Sse {
+			url: "http://example.com".to_string(),
+			headers: Some(headers(&[("X", "1")])),
+			timeout: Some(30),
+		};
+
+		let cmd_edit = McpTransportEdit {
+			command: Some("echo hi".to_string()),
+			env: Some(headers(&[("K", "V")])),
+			..Default::default()
+		};
+		let updated = transport.apply_edit(cmd_edit).unwrap();
+		assert_eq!(
+			updated,
+			McpTransport::Stdio {
+				command: "echo".to_string(),
+				args: vec!["hi".to_string()],
+				env: Some(headers(&[("K", "V")])),
+				timeout: Some(30),
+			}
+		);
+
+		let invalid_edit = McpTransportEdit {
+			command: Some("echo hi".to_string()),
+			headers: Some(headers(&[("Y", "2")])),
+			..Default::default()
+		};
+		let err = transport.apply_edit(invalid_edit).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("--header")
+		));
+	}
+
+	#[test]
+	fn apply_edit_header_on_stdio_is_rejected() {
+		let transport = McpTransport::stdio("echo", vec![]);
+		let edit = McpTransportEdit {
+			headers: Some(headers(&[("X", "1")])),
+			..Default::default()
+		};
+		let err = transport.apply_edit(edit).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("--header")
+		));
+	}
+
+	#[test]
+	fn apply_edit_env_on_remote_is_rejected() {
+		let transport = McpTransport::sse("http://example.com");
+		let edit = McpTransportEdit {
+			env: Some(headers(&[("K", "V")])),
+			..Default::default()
+		};
+		let err = transport.apply_edit(edit).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("--env is only valid with --command")
+		));
+	}
+
+	#[test]
+	fn apply_edit_absent_timeout_is_inherited() {
+		let transport = McpTransport::Sse {
+			url: "http://a".to_string(),
+			headers: None,
+			timeout: Some(7),
+		};
+
+		let edit = McpTransportEdit {
+			url: Some("http://b".to_string()),
+			..Default::default()
+		};
+		let updated = transport.apply_edit(edit).unwrap();
+		assert_eq!(updated.timeout(), Some(7));
+		assert_eq!(
+			updated,
+			McpTransport::Sse {
+				url: "http://b".to_string(),
+				headers: None,
+				timeout: Some(7),
+			}
+		);
+
+		let zero_timeout_edit = McpTransportEdit {
+			timeout: Some(0),
+			..Default::default()
+		};
+		let err = transport.apply_edit(zero_timeout_edit).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("timeout must be greater than 0")
+		));
+	}
+
+	#[test]
+	fn apply_edit_url_on_stdio_becomes_remote() {
+		let transport = McpTransport::Stdio {
+			command: "node".to_string(),
+			args: vec![],
+			env: Some(headers(&[("K", "V")])),
+			timeout: Some(15),
+		};
+
+		let edit1 = McpTransportEdit {
+			url: Some("http://h".to_string()),
+			..Default::default()
+		};
+		let updated1 = transport.apply_edit(edit1).unwrap();
+		assert_eq!(
+			updated1,
+			McpTransport::StreamableHttp {
+				url: "http://h".to_string(),
+				headers: None,
+				timeout: Some(15),
+			}
+		);
+
+		let edit2 = McpTransportEdit {
+			url: Some("http://h".to_string()),
+			transport_type: Some("sse".to_string()),
+			headers: Some(headers(&[("X", "1")])),
+			..Default::default()
+		};
+		let updated2 = transport.apply_edit(edit2).unwrap();
+		assert_eq!(
+			updated2,
+			McpTransport::Sse {
+				url: "http://h".to_string(),
+				headers: Some(headers(&[("X", "1")])),
+				timeout: Some(15),
+			}
+		);
+
+		let edit3 = McpTransportEdit {
+			url: Some("http://h".to_string()),
+			env: Some(headers(&[("K2", "V2")])),
+			..Default::default()
+		};
+		let err = transport.apply_edit(edit3).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("--env")
+		));
+	}
+
+	#[test]
+	fn apply_edit_command_and_url_together_is_rejected() {
+		let transport = McpTransport::stdio("node", vec![]);
+		let edit = McpTransportEdit {
+			command: Some("echo hi".to_string()),
+			url: Some("http://example.com".to_string()),
+			..Default::default()
+		};
+		let err = transport.apply_edit(edit).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("mutually exclusive")
+		));
+	}
+
+	#[test]
+	fn mcp_transport_kind() {
+		assert_eq!(McpTransport::stdio("echo", vec![]).kind(), "stdio");
+		assert_eq!(McpTransport::sse("http://example.com").kind(), "sse");
+		assert_eq!(
+			McpTransport::streamable_http("http://example.com").kind(),
+			DEFAULT_REMOTE_TRANSPORT
+		);
 	}
 }

@@ -103,7 +103,15 @@ pub fn load_all_agents(
 						AgentResources {
 							agent_id: descriptor.id,
 							skills,
-							mcps: config.mcps.clone(),
+							mcps: config
+								.mcps
+								.iter()
+								.cloned()
+								.map(|mut m| {
+									m.config_source = config_source;
+									m
+								})
+								.collect(),
 							sub_agents,
 							load_failed: false,
 						}

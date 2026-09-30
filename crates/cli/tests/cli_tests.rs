@@ -717,6 +717,119 @@ fn mcp_listed(
 	json.as_array().unwrap().iter().any(|m| m["name"] == name)
 }
 
+#[cfg(unix)]
+#[test]
+fn get_mcps_json_includes_full_transport_and_source() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"srv",
+			"--url",
+			"http://a",
+			"--transport",
+			"sse",
+			"--header",
+			"X:1",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"add mcps must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--json", "-a", "claude,codex", "--all", "get", "mcps"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"get mcps must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = json
+		.as_array()
+		.expect("output must be a JSON array")
+		.iter()
+		.find(|m| m["name"] == "srv")
+		.expect("must find MCP named srv");
+	// `source` is load-time provenance: only the all-agents paths tag it.
+
+	assert_eq!(row["type"], "sse");
+	assert_eq!(row["transport"]["type"], "sse");
+	assert_eq!(row["transport"]["url"], "http://a");
+	assert_eq!(row["transport"]["headers"]["X"], "1");
+	assert_eq!(row["source"], "global");
+
+	// The single-scope `-a all` path must tag MCPs too, as it does skills.
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--json", "-a", "all", "get", "mcps"])
+		.output()
+		.unwrap();
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = json
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|m| m["name"] == "srv")
+		.expect("must find MCP named srv under -a all");
+	assert_eq!(row["source"], "global");
+}
+
+#[cfg(unix)]
+#[test]
+fn get_mcps_table_never_prints_header_values() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"srv",
+			"--url",
+			"http://a",
+			"--transport",
+			"sse",
+			"--header",
+			"X:sekret123",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"add mcps must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "get", "mcps"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"get mcps must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(stdout.contains("http://a"));
+	assert!(!stdout.contains("sekret123"));
+}
+
 /// `-a claude,opencode add mcps` must write EACH agent's own config — the
 /// desktop multi-select's CLI parity. Asserted via per-agent reads, not the
 /// add's exit code alone.
@@ -1651,6 +1764,113 @@ fn update_skill_outputs_skill_view_shape() {
 	assert_eq!(json["description"], "newdesc");
 	// update does no install prep, so the advisory stays false.
 	assert_eq!(json["shared_with"], serde_json::json!([]));
+}
+
+#[cfg(unix)]
+#[test]
+fn update_skill_empty_tools_clears_allowed_tools_on_disk() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "add", "skills", "-n", "foo", "-d", "d",
+			"--tools", "a,b",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let update = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "update", "skills", "foo", "--tools", "",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		update.status.success(),
+		"update must succeed; stderr: {}",
+		String::from_utf8_lossy(&update.stderr)
+	);
+
+	let skill_md =
+		std::fs::read_to_string(home.path().join(".aghub/foo/SKILL.md"))
+			.unwrap();
+	assert!(
+		!skill_md.contains("allowed-tools"),
+		"SKILL.md must not contain allowed-tools: {skill_md}"
+	);
+
+	let describe = isolated_cli(home.path(), state.path())
+		.args(["--json", "-g", "-a", "claude", "describe", "skills", "foo"])
+		.output()
+		.unwrap();
+	assert!(
+		describe.status.success(),
+		"describe must succeed; stderr: {}",
+		String::from_utf8_lossy(&describe.stderr)
+	);
+	let json: Value = serde_json::from_slice(&describe.stdout).unwrap();
+	assert_eq!(json["tools"], serde_json::json!([]));
+}
+
+#[cfg(unix)]
+#[test]
+fn update_skill_without_tools_flag_keeps_tools() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "add", "skills", "-n", "foo", "-d", "d",
+			"--tools", "a,b",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let update = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "update", "skills", "foo", "-d", "new"])
+		.output()
+		.unwrap();
+	assert!(
+		update.status.success(),
+		"update must succeed; stderr: {}",
+		String::from_utf8_lossy(&update.stderr)
+	);
+
+	let skill_md =
+		std::fs::read_to_string(home.path().join(".aghub/foo/SKILL.md"))
+			.unwrap();
+	assert!(
+		skill_md.contains("allowed-tools"),
+		"SKILL.md must contain allowed-tools: {skill_md}"
+	);
+	assert!(
+		skill_md.contains("a,b"),
+		"SKILL.md must contain a,b: {skill_md}"
+	);
+
+	let describe = isolated_cli(home.path(), state.path())
+		.args(["--json", "-g", "-a", "claude", "describe", "skills", "foo"])
+		.output()
+		.unwrap();
+	assert!(
+		describe.status.success(),
+		"describe must succeed; stderr: {}",
+		String::from_utf8_lossy(&describe.stderr)
+	);
+	let json: Value = serde_json::from_slice(&describe.stdout).unwrap();
+	assert_eq!(json["description"], "new");
+	assert_eq!(json["tools"], serde_json::json!(["a", "b"]));
 }
 
 #[cfg(unix)]
@@ -4074,11 +4294,9 @@ fn update_mcp_timeout_flag_overrides_existing() {
 #[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn update_mcp_zero_timeout_is_rejected() {
-	// The update path has its own timeout code (effective_timeout +
-	// set_transport_timeout). --timeout 0 alone (no --command/--url) still
-	// routes through parse_mcp_transport -> from_inputs, which rejects a zero
-	// timeout BEFORE returning Ok(None). Pin that so the rejection can't
-	// silently regress if the update path stops calling from_inputs.
+	// `--timeout 0` alone (no --command/--url) is rejected by the shared
+	// `McpTransport::apply_edit` (reject_zero_timeout). Pin that so the
+	// rejection can't silently regress if the update path stops validating.
 	let home = tempfile::tempdir().unwrap();
 	let state = tempfile::tempdir().unwrap();
 	let add = isolated_cli(home.path(), state.path())
@@ -4102,6 +4320,216 @@ fn update_mcp_zero_timeout_is_rejected() {
 	assert!(
 		stderr.contains("timeout must be greater than 0"),
 		"stderr must explain the rejection, got: {stderr}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn update_mcp_url_only_keeps_sse_type_and_headers() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-a", "claude", "add", "mcps", "-n", "srv", "-u", "http://a", "-t",
+			"sse", "--header", "X:1",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "update", "mcps", "srv", "-u", "http://b"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"update must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let stored: Value = serde_json::from_str(
+		&std::fs::read_to_string(home.path().join(".claude.json")).unwrap(),
+	)
+	.unwrap();
+	let srv = &stored["mcpServers"]["srv"];
+	assert_eq!(srv["type"], "sse", "{stored}");
+	assert_eq!(srv["url"], "http://b", "{stored}");
+	assert_eq!(srv["headers"]["X"], "1", "{stored}");
+}
+
+#[cfg(unix)]
+#[test]
+fn update_mcp_command_only_keeps_env() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-a", "claude", "add", "mcps", "-n", "st", "-c", "echo hi", "-e",
+			"K=V",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "update", "mcps", "st", "-c", "echo bye"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"update must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let stored: Value = serde_json::from_str(
+		&std::fs::read_to_string(home.path().join(".claude.json")).unwrap(),
+	)
+	.unwrap();
+	let st = &stored["mcpServers"]["st"];
+	assert_eq!(st["command"], "echo", "{stored}");
+	assert_eq!(st["args"], serde_json::json!(["bye"]), "{stored}");
+	assert_eq!(st["env"]["K"], "V", "{stored}");
+}
+
+#[cfg(unix)]
+#[test]
+fn update_mcp_transport_only_switches_remote_kind() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"-n",
+			"srv",
+			"-u",
+			"http://a",
+			"-t",
+			"streamable-http",
+			"--header",
+			"X:1",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "update", "mcps", "srv", "-t", "sse"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"update must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let stored: Value = serde_json::from_str(
+		&std::fs::read_to_string(home.path().join(".claude.json")).unwrap(),
+	)
+	.unwrap();
+	let srv = &stored["mcpServers"]["srv"];
+	assert_eq!(srv["type"], "sse", "{stored}");
+	assert_eq!(srv["url"], "http://a", "{stored}");
+	assert_eq!(srv["headers"]["X"], "1", "{stored}");
+}
+
+#[cfg(unix)]
+#[test]
+fn update_mcp_transport_on_stdio_is_refused_and_disk_unchanged() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let add = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "add", "mcps", "-n", "st", "-c", "echo hi"])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let config_path = home.path().join(".claude.json");
+	let original = std::fs::read(&config_path).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "update", "mcps", "st", "-t", "sse"])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"switching transport on stdio without --url must be refused"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("--url"),
+		"stderr must explain that --url is required, got: {stderr}"
+	);
+	assert_eq!(
+		std::fs::read(&config_path).unwrap(),
+		original,
+		"config file must be byte-identical after refused update"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn update_mcp_agent_list_sse_switch_preflights_before_writing() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude,opencode",
+			"add",
+			"mcps",
+			"-n",
+			"m",
+			"-u",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude,opencode", "update", "mcps", "m", "-t", "sse"])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"batch update must fail preflight when an agent cannot represent SSE"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("opencode") && stderr.contains("nothing was written"),
+		"stderr must name opencode and promise nothing was written, got: {stderr}"
+	);
+
+	let stored: Value = serde_json::from_str(
+		&std::fs::read_to_string(home.path().join(".claude.json")).unwrap(),
+	)
+	.unwrap();
+	assert_eq!(
+		stored["mcpServers"]["m"]["type"], "http",
+		"claude config must stay unchanged after preflight rejection: {stored}"
 	);
 }
 
@@ -13662,4 +14090,197 @@ fn doctor_points_a_chain_at_repair_not_at_sync() {
 		"a chain is the ONLY referrer issue here, so the sync note must not \
 		 fire at all — it cannot fix one: {stderr}"
 	);
+}
+
+#[test]
+fn agents_disable_writes_allow_list_core_reads() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["agents", "disable", "claude"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"agents disable claude must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let settings_file = state.path().join("data").join("agents.json");
+	let content: Value =
+		serde_json::from_str(&std::fs::read_to_string(&settings_file).unwrap())
+			.unwrap();
+	let enabled = content["enabled"]
+		.as_array()
+		.expect("enabled must be a JSON array");
+	assert!(
+		!enabled.iter().any(|v| v == "claude"),
+		"enabled array must not contain claude: {content}"
+	);
+	assert!(
+		enabled.iter().any(|v| v == "codex"),
+		"enabled array must contain codex: {content}"
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--json", "agents", "list"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"agents list must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["configured"], true, "{json}");
+
+	let agents = json["agents"].as_array().expect("agents must be an array");
+	let claude = agents
+		.iter()
+		.find(|a| a["id"] == "claude")
+		.expect("claude must be present in agents list");
+	assert_eq!(claude["managed"], false, "{claude}");
+
+	let codex = agents
+		.iter()
+		.find(|a| a["id"] == "codex")
+		.expect("codex must be present in agents list");
+	assert_eq!(codex["managed"], true, "{codex}");
+
+	assert_eq!(
+		aghub_core::agent_settings::read_disabled_agents_in(
+			&state.path().join("data")
+		)
+		.unwrap(),
+		Some(std::collections::BTreeSet::from(["claude".to_string()]))
+	);
+}
+
+#[test]
+fn agents_enable_restores_agent() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["agents", "disable", "claude"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"agents disable claude must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["agents", "enable", "claude"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"agents enable claude must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--json", "agents", "list"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"agents list must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let agents = json["agents"].as_array().expect("agents must be an array");
+	let claude = agents
+		.iter()
+		.find(|a| a["id"] == "claude")
+		.expect("claude must be present in agents list");
+	assert_eq!(claude["managed"], true, "{claude}");
+}
+
+#[test]
+fn agents_disable_unknown_id_is_rejected_and_file_untouched() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["agents", "disable", "nosuchagent"])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"agents disable nosuchagent must exit non-zero"
+	);
+	// A clap "unrecognized subcommand" would also exit non-zero: the
+	// rejection must come from the id parser, naming the bad id.
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(stderr.contains("nosuchagent"), "stderr: {stderr}");
+	assert!(
+		!stderr.contains("unrecognized subcommand"),
+		"stderr: {stderr}"
+	);
+
+	let settings_file = state.path().join("data").join("agents.json");
+	assert!(
+		!settings_file.exists(),
+		"agents.json must not exist after rejected disable: {settings_file:?}"
+	);
+}
+
+#[test]
+fn agents_list_fails_on_corrupt_settings() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let data_dir = state.path().join("data");
+	std::fs::create_dir_all(&data_dir).unwrap();
+	std::fs::write(data_dir.join("agents.json"), b"{not json").unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["agents", "list"])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"agents list must fail on corrupt settings"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		!stderr.contains("unrecognized subcommand"),
+		"stderr: {stderr}"
+	);
+}
+
+#[test]
+fn agents_list_default_is_everyone_managed_unconfigured() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--json", "agents", "list"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"agents list must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["configured"], false, "{json}");
+	let agents = json["agents"].as_array().expect("agents must be an array");
+	assert_eq!(
+		agents.len(),
+		aghub_core::AgentType::ALL.len(),
+		"all known agents must be listed in default unconfigured state"
+	);
+	for agent in agents {
+		assert_eq!(
+			agent["managed"], true,
+			"agent {} must have managed==true by default: {agent}",
+			agent["id"]
+		);
+	}
 }

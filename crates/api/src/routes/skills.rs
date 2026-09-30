@@ -4,6 +4,7 @@ use aghub_core::create_adapter;
 use aghub_core::{
 	errors::ConfigError,
 	load_all_agents,
+	manager::skill::SkillPatch,
 	models::{AgentType, ResourceScope, Skill},
 	registry, transfer,
 };
@@ -1265,7 +1266,7 @@ pub async fn update_skill(
 		})?
 		.clone();
 	ensure_skill_not_plugin_managed(&existing, "update").await?;
-	let updated = body.into_inner().apply_to(existing);
+	let updated = SkillPatch::from(body.into_inner()).apply_to(existing);
 	let response = SkillResponse::from(&updated);
 	let name = name.to_string();
 	// `update_skill` takes the mutation lock (a rename is a Master move plus a
