@@ -1,7 +1,7 @@
 use crate::{
 	create_adapter,
 	errors::{ConfigError, Result},
-	manager::ConfigManager,
+	manager::{sub_agent::same_sub_agent_content, ConfigManager},
 	models::{AgentType, McpServer, Skill, SubAgent},
 	registry,
 };
@@ -1106,9 +1106,7 @@ fn copy_sub_agent_into(
 	let mut manager = build_manager(target);
 	ensure_loaded(&mut manager)?;
 	if let Some(existing) = manager.get_sub_agent(&sub_agent.name) {
-		let equivalent = existing.description == sub_agent.description
-			&& existing.instruction == sub_agent.instruction
-			&& existing.extra_frontmatter == sub_agent.extra_frontmatter;
+		let equivalent = same_sub_agent_content(existing, sub_agent);
 		if equivalent {
 			return Ok(true);
 		}
@@ -1128,10 +1126,9 @@ fn ensure_sub_agent_copies_hold(
 	for copy in copies {
 		let mut copied = build_manager(&copy.target);
 		ensure_loaded(&mut copied)?;
-		let holds = copied.get_sub_agent(&sub_agent.name).is_some_and(|held| {
-			held.description == sub_agent.description
-				&& held.instruction == sub_agent.instruction
-		});
+		let holds = copied
+			.get_sub_agent(&sub_agent.name)
+			.is_some_and(|held| same_sub_agent_content(held, sub_agent));
 		if !holds {
 			return Err(ConfigError::InvalidConfig(format!(
 				"Sub-agent '{}' changed in target '{}' during reconcile; source kept",
@@ -2576,6 +2573,58 @@ mod tests {
 			)
 			.unwrap();
 		assert!(ensure_sub_agent_copies_hold(&copies, &agent).is_err());
+	}
+
+	#[test]
+	fn sub_agent_copy_hold_rejects_frontmatter_only_change() {
+		let project = tempdir().unwrap();
+		let root = project.path();
+		let mut agent = SubAgent::new("mover");
+		agent.instruction = Some("body".into());
+		let mut extra = serde_yaml::Mapping::new();
+		extra.insert(
+			serde_yaml::Value::String("tools".into()),
+			serde_yaml::Value::String("Read".into()),
+		);
+		agent.extra_frontmatter = extra;
+
+		let copies = vec![OperationPlan {
+			target: InstallTarget {
+				agent: AgentType::OpenCode,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+			},
+			action: OperationAction::Copy,
+		}];
+
+		copy_sub_agent_into(&copies[0].target, &agent).unwrap();
+
+		let mut target_manager = build_manager(&copies[0].target);
+		ensure_loaded(&mut target_manager).unwrap();
+		let copied = target_manager
+			.get_sub_agent("mover")
+			.expect("copied sub-agent should exist in target");
+		assert_eq!(copied.extra_frontmatter, agent.extra_frontmatter);
+		ensure_sub_agent_copies_hold(&copies, &agent).unwrap();
+
+		let copy_path = copied
+			.source_path
+			.as_ref()
+			.expect("sub-agent should have source_path");
+		let content = fs::read_to_string(copy_path).unwrap();
+		let updated = content.replace("tools: Read", "tools: Write");
+		assert_ne!(
+			content, updated,
+			"disk content should have contained 'tools: Read'"
+		);
+		fs::write(copy_path, updated).unwrap();
+
+		let err = ensure_sub_agent_copies_hold(&copies, &agent)
+			.expect_err("should reject copy with changed frontmatter");
+		assert!(
+			err.to_string().contains("changed in target"),
+			"expected 'changed in target' in error message, got: {err}"
+		);
 	}
 
 	#[cfg(unix)]

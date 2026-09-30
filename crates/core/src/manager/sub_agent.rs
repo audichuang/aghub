@@ -451,6 +451,17 @@ fn restore_tombstones(tombstones: &[(PathBuf, PathBuf)]) {
 	}
 }
 
+/// The ONLY equivalence check for sub-agent copies.
+///
+/// Compares `description`, `instruction`, and `extra_frontmatter`.
+/// `source_path` and `config_source` are deliberately NOT compared as they are
+/// per-agent file locations and scopes.
+pub(crate) fn same_sub_agent_content(a: &SubAgent, b: &SubAgent) -> bool {
+	a.description == b.description
+		&& a.instruction == b.instruction
+		&& a.extra_frontmatter == b.extra_frontmatter
+}
+
 fn same_sub_agent_source(current: &SubAgent, expected: &SubAgent) -> bool {
 	let same_path = match (
 		current.source_path.as_deref(),
@@ -464,9 +475,7 @@ fn same_sub_agent_source(current: &SubAgent, expected: &SubAgent) -> bool {
 		_ => false,
 	};
 	current.name == expected.name
-		&& current.description == expected.description
-		&& current.instruction == expected.instruction
-		&& current.extra_frontmatter == expected.extra_frontmatter
+		&& same_sub_agent_content(current, expected)
 		&& same_path
 }
 
