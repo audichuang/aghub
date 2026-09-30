@@ -71,7 +71,10 @@ crates/
   markdown/      # YAML frontmatter helpers
 ```
 
-Also at the repo root: `.agents/skills/` (this repo's own hand-edited skills, a
+Also at the repo root: `skills/` (skills SHIPPED to users, e.g. `aghub-cli`;
+installed with `aghub-cli source sync audichuang/aghub --skill aghub-cli`. Keep it
+apart from `.agents/skills/`, which is this repo's own dev tooling. Edit the skill
+in the same change as the CLI behaviour it describes), `.agents/skills/` (this repo's own hand-edited skills, a
 real-directory layout lazy migration leaves alone — it moves only the one skill
 it mutates) and `justfile` (task runner). `repair` still moves a real directory there into the
 store when git does NOT track it; a tracked one is refused, and the refusal
