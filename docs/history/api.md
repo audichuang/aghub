@@ -38,8 +38,11 @@ Rule: refuse only a request that names SOME of the location's readers, and let
 a request covering the whole set through. The verdict is owned by core's
 `single_agent_keep_reason` (the route no longer hand-writes the OR of
 `skill_dir_readers_outside` and `dir_has_external_referrer`), so CLI, by-name
-and by-path answer identically; a real directory inside `.aghub` is kept, and so
-is one git tracks. The kept answer goes through the `RemovalView` seam
+and by-path answer identically; this includes a private directory co-read
+through another agent's dotfiles-style symlinked skills root. A real directory
+inside `.aghub` is kept, and so is a shared-root directory git tracks. A
+GitTracked response includes the exact `git rm -r --cached <path>` escape in its
+`error` field. The kept answer goes through the `RemovalView` seam
 (`outcome: "kept"`); it used to be a hand-built `success: true`, and the desktop
 dialog closed on it as if deleted.
 
@@ -57,8 +60,12 @@ Pinned by: `delete_by_path_keeps_shared_slot_read_by_other_agents`,
 `delete_by_path_full_group_keeps_shared_slot_with_legacy_named_referrer`,
 `delete_by_path_release_also_unlinks_requested_agents_private_link`,
 `delete_by_path_git_tracked_is_kept_untracked_is_deleted`,
-`delete_by_path_refuses_real_dir_in_aghub_store`
+`dotfiles_shared_private_dir_is_kept_by_name_and_by_path_for_either_reader`
 (`crates/api/src/routes/skills.rs` tests).
+
+`delete_by_path_rejects_aghub_store_path_before_the_keep_rule` pins the earlier
+per-agent path validation only; it deliberately does not claim to reach or pin
+the core keep rule.
 
 Commit: 1b373c2c.
 

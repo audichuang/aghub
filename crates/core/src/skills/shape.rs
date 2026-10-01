@@ -1970,6 +1970,17 @@ pub(crate) fn git_tracked(path: &Path) -> GitTracked {
 		.stdin(std::process::Stdio::null())
 		.stdout(std::process::Stdio::null())
 		.stderr(std::process::Stdio::null());
+	// git hooks set GIT_DIR; inherited vars make git answer for another repository.
+	for var in [
+		"GIT_DIR",
+		"GIT_WORK_TREE",
+		"GIT_INDEX_FILE",
+		"GIT_COMMON_DIR",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_NAMESPACE",
+	] {
+		cmd.env_remove(var);
+	}
 	#[cfg(windows)]
 	{
 		use std::os::windows::process::CommandExt;
@@ -1985,6 +1996,84 @@ pub(crate) fn git_tracked(path: &Path) -> GitTracked {
 		// a signal, or no `git` binary at all. We know a repository is there
 		// and cannot say — see `RefuseReason::GitTrackingUndecided`.
 		Ok(_) | Err(_) => GitTracked::Undecided,
+	}
+}
+
+#[cfg(all(test, unix))]
+mod git_env_tests {
+	use super::{git_tracked, GitTracked};
+
+	const GIT_VARS: &[&str] = &[
+		"GIT_DIR",
+		"GIT_WORK_TREE",
+		"GIT_INDEX_FILE",
+		"GIT_COMMON_DIR",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_NAMESPACE",
+	];
+
+	struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+	impl RestoreEnv {
+		fn clear() -> Self {
+			let saved = GIT_VARS
+				.iter()
+				.map(|&key| (key, std::env::var_os(key)))
+				.collect();
+			for key in GIT_VARS {
+				std::env::remove_var(key);
+			}
+			Self(saved)
+		}
+	}
+
+	impl Drop for RestoreEnv {
+		fn drop(&mut self) {
+			for (key, value) in &self.0 {
+				match value {
+					Some(value) => std::env::set_var(key, value),
+					None => std::env::remove_var(key),
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn git_tracked_ignores_inherited_repository_environment() {
+		use crate::skills::removal::tests::git_fixture;
+
+		if !git_fixture::has_git() {
+			eprintln!("skipping test: git binary unavailable");
+			return;
+		}
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
+		let _restore = RestoreEnv::clear();
+		let repo = tempfile::tempdir().unwrap();
+		let other = tempfile::tempdir().unwrap();
+		let tracked = repo.path().join("d");
+		std::fs::create_dir_all(&tracked).unwrap();
+		std::fs::write(tracked.join("SKILL.md"), "---\nname: d\n---\n")
+			.unwrap();
+		git_fixture::git(repo.path(), &["init", "-q"]);
+		git_fixture::git(repo.path(), &["add", "--", "d/SKILL.md"]);
+		git_fixture::git(other.path(), &["init", "-q"]);
+
+		std::env::set_var("GIT_DIR", other.path().join(".git"));
+		assert_eq!(
+			git_tracked(&tracked),
+			GitTracked::Yes,
+			"GIT_DIR must not make git answer for the unrelated repository"
+		);
+
+		std::env::remove_var("GIT_DIR");
+		std::env::set_var("GIT_WORK_TREE", other.path());
+		assert_eq!(
+			git_tracked(&tracked),
+			GitTracked::Yes,
+			"GIT_WORK_TREE must not replace the repository selected by -C"
+		);
 	}
 }
 

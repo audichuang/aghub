@@ -1100,6 +1100,10 @@ fn real_dir_shared_slot_single_agent_remove_succeeds_when_other_readers_disabled
 		"shared_master_kept must be false"
 	);
 	assert!(
+		outcome.plan.needs_confirm,
+		"a destructive real-directory release requires confirmation"
+	);
+	assert!(
 		!skill_dir.exists(),
 		"the real skill directory must be removed"
 	);
@@ -1415,6 +1419,184 @@ fn real_dir_shared_slot_removed_when_request_names_every_enabled_reader() {
 		!skill_dir.exists(),
 		"the real skill directory must be removed"
 	);
+}
+
+#[cfg(unix)]
+#[test]
+fn dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set() {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|error| error.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	fn write_skill(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+		let dir = root.join(".claude/skills").join(name);
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: test\n---\n"),
+		)
+		.unwrap();
+		dir
+	}
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	std::fs::create_dir_all(root.join(".cursor")).unwrap();
+	std::os::unix::fs::symlink(
+		root.join(".claude/skills"),
+		root.join(".cursor/skills"),
+	)
+	.unwrap();
+	std::fs::create_dir_all(root.join(".opencode")).unwrap();
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&agent| {
+			!matches!(
+				agent,
+				AgentType::Claude | AgentType::Cursor | AgentType::OpenCode
+			)
+		})
+		.map(|agent| agent.as_str())
+		.collect();
+
+	{
+		let _disabled =
+			crate::agent_settings::test_override::disable(&disabled);
+		let shared = write_skill(root, "dotfiles-kept");
+		for (agent, other) in
+			[(AgentType::Cursor, "claude"), (AgentType::Claude, "cursor")]
+		{
+			let mut manager =
+				ConfigManager::new(create_adapter(agent), false, Some(root));
+			manager.load().unwrap();
+			let preview = manager
+				.remove_skill_planned_for_agents(
+					"dotfiles-kept",
+					false,
+					true,
+					false,
+					&[agent],
+				)
+				.expect("preview must report a keep");
+			assert!(!preview.executed);
+			assert!(preview.plan.shared_master_kept);
+			assert!(preview.plan.paths.is_empty(), "{preview:?}");
+
+			let error = manager
+				.remove_skill_planned_for_agents(
+					"dotfiles-kept",
+					false,
+					false,
+					true,
+					&[agent],
+				)
+				.expect_err("confirmed delete must refuse the same keep");
+			assert!(
+				error.to_string().contains(other),
+				"refusal must name {other}: {error}"
+			);
+			assert!(shared.join("SKILL.md").is_file());
+			assert!(
+				std::fs::symlink_metadata(root.join(".cursor/skills"))
+					.unwrap()
+					.file_type()
+					.is_symlink(),
+				"the dotfiles directory link must remain intact"
+			);
+		}
+
+		let released = write_skill(root, "dotfiles-released");
+		let mut cursor = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(root),
+		);
+		cursor.load().unwrap();
+		let preview = cursor
+			.remove_skill_planned_for_agents(
+				"dotfiles-released",
+				false,
+				true,
+				false,
+				&[AgentType::Claude, AgentType::Cursor],
+			)
+			.unwrap();
+		assert!(preview.plan.paths.iter().any(|path| {
+			skill::lock::resolve_existing(path)
+				== skill::lock::resolve_existing(&released)
+		}));
+		let outcome = cursor
+			.remove_skill_planned_for_agents(
+				"dotfiles-released",
+				false,
+				false,
+				true,
+				&[AgentType::Claude, AgentType::Cursor],
+			)
+			.expect("naming both enabled readers must release the directory");
+		assert!(outcome.executed);
+		assert!(!released.exists());
+	}
+
+	{
+		let disabled: Vec<&str> = AgentType::ALL
+			.iter()
+			.filter(|&&agent| agent != AgentType::Claude)
+			.map(|agent| agent.as_str())
+			.collect();
+		let _disabled =
+			crate::agent_settings::test_override::disable(&disabled);
+		let released = write_skill(root, "dotfiles-disabled-reader");
+		let mut claude = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		claude.load().unwrap();
+		let outcome = claude
+			.remove_skill_planned_for_agents(
+				"dotfiles-disabled-reader",
+				false,
+				false,
+				true,
+				&[AgentType::Claude],
+			)
+			.expect("a disabled co-reader must not block deletion");
+		assert!(outcome.executed);
+		assert!(!released.exists());
+	}
+
+	{
+		let private_root = root.join("private-project");
+		let private = write_skill(&private_root, "private-copy");
+		std::fs::create_dir_all(private_root.join(".cursor/skills")).unwrap();
+		let disabled: Vec<&str> = AgentType::ALL
+			.iter()
+			.filter(|&&agent| agent != AgentType::Claude)
+			.map(|agent| agent.as_str())
+			.collect();
+		let _disabled =
+			crate::agent_settings::test_override::disable(&disabled);
+		let mut claude = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&private_root),
+		);
+		claude.load().unwrap();
+		let outcome = claude
+			.remove_skill_planned_for_agents(
+				"private-copy",
+				false,
+				false,
+				true,
+				&[AgentType::Claude],
+			)
+			.expect("a private copy with no co-reader stays deletable");
+		assert!(outcome.executed);
+		assert!(!private.exists());
+	}
 }
 
 // The direction that must NOT regress: a private per-agent copy (a real dir
@@ -4177,6 +4359,13 @@ fn real_dir_git_tracked_single_agent_delete_is_refused() {
 	assert!(
 		matches!(err, ConfigError::UnsupportedOperation(_)),
 		"expected UnsupportedOperation, got {err:?}"
+	);
+	let message = err.to_string();
+	assert!(
+		message.contains("tracked by git")
+			&& message.contains("git rm -r --cached")
+			&& message.contains(&skill_dir.display().to_string()),
+		"refusal must include the tracked path and escape command: {message}"
 	);
 	assert!(
 		skill_dir.exists(),

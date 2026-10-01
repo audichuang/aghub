@@ -7708,6 +7708,166 @@ fn real_dir_delete_keeps_when_enabled_reader_not_listed() {
 
 #[cfg(unix)]
 #[test]
+fn dotfiles_shared_private_dir_delete_uses_the_complete_agent_list() {
+	fn write_skill(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+		let dir = root.join(".claude/skills").join(name);
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: test\n---\n"),
+		)
+		.unwrap();
+		dir
+	}
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let root = project.path();
+	std::fs::create_dir_all(root.join(".cursor")).unwrap();
+	std::os::unix::fs::symlink(
+		root.join(".claude/skills"),
+		root.join(".cursor/skills"),
+	)
+	.unwrap();
+	std::fs::create_dir_all(root.join(".opencode")).unwrap();
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|agent| {
+				!matches!(
+					agent,
+					aghub_core::AgentType::Claude
+						| aghub_core::AgentType::Cursor
+						| aghub_core::AgentType::OpenCode
+				)
+			})
+			.map(|agent| agent.as_str().to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled)
+		.unwrap();
+
+	let kept = write_skill(root, "dotfiles-kept");
+	for (agent, other) in [("cursor", "claude"), ("claude", "cursor")] {
+		let preview = isolated_cli(home.path(), state.path())
+			.current_dir(root)
+			.args([
+				"-p",
+				"--json",
+				"-a",
+				agent,
+				"delete",
+				"skills",
+				"dotfiles-kept",
+			])
+			.output()
+			.unwrap();
+		assert!(preview.status.success(), "{preview:?}");
+		let json: serde_json::Value = serde_json::from_slice(&preview.stdout)
+			.expect("preview must be JSON");
+		assert_eq!(json["outcome"], "kept", "{json}");
+		assert_eq!(json["executed"], false, "{json}");
+		assert_eq!(json["paths"], serde_json::json!([]), "{json}");
+
+		let committed = isolated_cli(home.path(), state.path())
+			.current_dir(root)
+			.args([
+				"-p",
+				"-a",
+				agent,
+				"delete",
+				"skills",
+				"dotfiles-kept",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(!committed.status.success(), "{committed:?}");
+		assert!(
+			String::from_utf8_lossy(&committed.stderr).contains(other),
+			"refusal for {agent} must name {other}: {}",
+			String::from_utf8_lossy(&committed.stderr)
+		);
+		assert!(kept.join("SKILL.md").is_file());
+		assert!(std::fs::symlink_metadata(root.join(".cursor/skills"))
+			.unwrap()
+			.file_type()
+			.is_symlink());
+	}
+
+	let released = write_skill(root, "dotfiles-released");
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(root)
+		.args([
+			"-p",
+			"-a",
+			"claude,cursor",
+			"delete",
+			"skills",
+			"dotfiles-released",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"naming both readers must release the directory: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(!released.exists());
+
+	let disabled: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|agent| *agent != aghub_core::AgentType::Claude)
+			.map(|agent| agent.as_str().to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled)
+		.unwrap();
+	let disabled_reader = write_skill(root, "dotfiles-disabled-reader");
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(root)
+		.args([
+			"-p",
+			"-a",
+			"claude",
+			"delete",
+			"skills",
+			"dotfiles-disabled-reader",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(out.status.success(), "{out:?}");
+	assert!(!disabled_reader.exists());
+
+	let private_project = tempfile::TempDir::new().unwrap();
+	let private = write_skill(private_project.path(), "private-copy");
+	std::fs::create_dir_all(private_project.path().join(".cursor/skills"))
+		.unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(private_project.path())
+		.args([
+			"-p",
+			"-a",
+			"claude",
+			"delete",
+			"skills",
+			"private-copy",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(out.status.success(), "{out:?}");
+	assert!(!private.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn delete_real_dir_git_tracked_is_refused_untracked_allowed() {
 	if !cli_has_git() {
 		eprintln!("skipping test: git binary unavailable");
@@ -7774,6 +7934,13 @@ fn delete_real_dir_git_tracked_is_refused_untracked_allowed() {
 		"deletion of git-tracked real dir must exit 1; stdout: {}, stderr: {}",
 		String::from_utf8_lossy(&out.stdout),
 		String::from_utf8_lossy(&out.stderr)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("tracked by git")
+			&& stderr.contains("git rm -r --cached")
+			&& stderr.contains(&skill_dir.display().to_string()),
+		"refusal must carry the tracked path and escape command: {stderr}"
 	);
 	assert!(
 		skill_dir.exists(),
@@ -8461,7 +8628,7 @@ fn delete_help_reflects_shared_location_doc() {
 	);
 	assert!(
 		normalized.contains("`--yes` then exits 1")
-			&& normalized.contains("git tracks the directory"),
+			&& normalized.contains("git tracks the real directory in the shared slot"),
 		"help must say a refused delete exits 1 and mention git tracking, got: {stdout}"
 	);
 }

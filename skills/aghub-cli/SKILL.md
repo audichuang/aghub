@@ -441,7 +441,10 @@ Include the named agents in the same `-a` request, or delete for every agent
 The same rule applies when the shared-slot entry is a real directory (not a
 link): it is deleted once every ENABLED agent reading that slot is in the `-a`
 list (disabled agents never count), and refused, naming the readers left out,
-otherwise. A symlink to it from an agent NOT in the `-a` list also blocks it: the
+otherwise. It also applies outside a shared slot: if a private real directory is
+co-read because another agent's skills root is a dotfiles-style symlink to it,
+that enabled reader must be in the same `-a` list. A symlink to it from an agent
+NOT in the `-a` list also blocks it: the
 delete exits 1 and lists the paths that stay readable, including that link (for
 example `.claude/skills/<name>` when claude was left out of the request); the
 message gives paths, not agent names, and a link from a DISABLED agent's own
@@ -449,9 +452,12 @@ directory blocks the same way. A symlink from
 an agent that IS in the `-a` list does not block it; that agent's own row
 unlinks it, and the verdict is the same in whatever order `-a` lists the agents
 (preview and `--yes` agree). A real directory inside `.aghub` is never deleted by
-a single-agent delete, and neither is a real directory that git tracks (exit 1;
+a single-agent delete, and neither is a real directory in a shared slot that git tracks (exit 1;
 untrack it with `git rm -r --cached <path>` first, or keep authoring it there;
-if git cannot answer, the directory counts as untracked). `reconcile --remove` and the desktop's manage-agents /
+if git cannot answer, the directory counts as untracked). The refusal itself
+includes that exact command and path. The current `--all-agents` flow does not
+apply this GitTracked guard and may delete the directory; do not use it as a
+bypass—untrack deliberately first. `reconcile --remove` and the desktop's manage-agents /
 bulk dialogs apply this same rule to their removal list. A real directory has no
 `.aghub` Master behind it, so deleting it deletes the content and the lock entry
 is pruned too. Local edits are gone for good; if the skill originally came from a

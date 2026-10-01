@@ -198,18 +198,22 @@ and Master an enabled, unselected reader still used. The shortcut now counts the
 full roster (`readers_outside(.., include_disabled = true)`); only the set that
 names/blocks stays filtered.
 
-Resolved (was a known gap): when the shared slot entry is a real directory
-rather than a link, the CLI/core single-agent delete used to always refuse
-(`single_agent_keep_reason` -> `is_universal_master`) even when `-a` named every
-enabled reader, while the API delete-by-path decided by readers. The verdict now
-lives in `single_agent_keep_reason` alone, in this order: (1) inside the
-`.aghub` store -> keep unconditionally (no agent reads it, so "no reader
-outside" would misfire and delete a Master); (2) a symlink resolving to it ->
-keep, EXCEPT a link in a requested agent's own private skills dir that no
-unrequested enabled agent also reads (below); (3) inside a shared Referrer
-root: empty `requested` keeps (fail closed), otherwise keep iff an ENABLED
-reader is outside `requested` (disabled agents are unmanaged and never count),
-and a directory git tracks is kept too (below); (4) a private copy -> delete.
+Resolved (was a known gap): when a real directory is read by more than one
+agent, the CLI/core single-agent delete must protect every enabled reader even
+if the directory is outside a shared slot. The original fix handled a real
+directory in `.agents/skills`, but API by-path then exposed a second data-loss
+case: `.claude/skills/x` was a real directory while `.cursor/skills` was a
+dotfiles-style symlink to `.claude/skills`; deleting by either agent alone
+removed the bytes from both. The verdict now lives in
+`single_agent_keep_reason` alone, in this order: (1) inside the `.aghub` store
+-> keep unconditionally (no agent reads it, so "no reader outside" would
+misfire and delete a Master); (2) a symlink resolving to it -> keep, EXCEPT a
+link in a requested agent's own private skills dir that no unrequested enabled
+agent also reads (below); (3) with non-empty `requested`, any real directory is
+kept iff an ENABLED reader is outside the request (disabled agents are
+unmanaged and never count); an empty request fails closed only inside a shared
+Referrer root; (4) a shared-root directory git tracks is kept too (below); (5)
+a private copy with no outside enabled reader -> delete.
 It is stricter than the link rule: no `slot_reader_count < 2` shortcut and no
 "the other reader has another copy" release, because deleting a real directory
 deletes content. There is no `.aghub` Master behind it, so the lock entry is
@@ -263,7 +267,18 @@ refuses it (`KeepReason::GitTracked`; the warning prints
 also refuses when tracking cannot be decided (git missing, unusable
 repository); a delete treats that as untracked and goes ahead, because git being
 absent must not make a skill undeletable. Only the shared-slot real-directory
-release is gated; `--all-agents` and the link layout are not.
+release is gated; `--all-agents` and the link layout are not. The refusal
+message itself carries the tracked path and `git rm -r --cached <path>` escape;
+the current `--all-agents` path can still delete such a directory and is not a
+supported bypass. `git_tracked` clears inherited `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY` and `GIT_NAMESPACE`
+before spawning git, so a hook or parent process cannot make the probe answer
+for another repository.
+
+A released real directory under a shared Referrer root keeps the symlink
+planner's `needs_confirm: true` wire contract. The shared assembly helper had
+temporarily reported `false`; ordinary private copies remain `false` and retain
+their original no-extra-confirm behavior.
 
 Known edges: the planner unlinks the requested agents' links BEFORE the
 directory, so if `remove_dir_all` then fails (a read-only parent, mode 555) the
@@ -277,7 +292,9 @@ from a DISABLED agent's private dir points at the directory, the refusal path
 lists only the path, not the agent. Neither is changed.
 
 Tests:
+`manager::skill::tests::dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set`,
 `manager::skill::tests::real_dir_shared_slot_single_agent_remove_succeeds_when_other_readers_disabled`,
+`skills::removal::tests::plan_removal_copy_single_agent_removes_only_targeted_copy`,
 `manager::skill::tests::real_dir_shared_slot_kept_when_enabled_reader_not_in_request`,
 `manager::skill::tests::real_dir_shared_slot_removed_when_request_names_every_enabled_reader`,
 `manager::skill::tests::real_dir_batch_verdict_is_independent_of_order`,
@@ -288,15 +305,18 @@ Tests:
 `manager::skill::tests::real_dir_git_tracked_single_agent_delete_is_refused`,
 `manager::skill::tests::real_dir_untracked_in_git_repo_single_agent_delete_is_allowed`,
 `skills::removal::tests::single_agent_keep_reason_git_tracked_refuses_untracked_allows`,
+`skills::removal::tests::single_agent_keep_reason_protects_private_dir_shared_by_dotfiles_layout`,
+`skills::shape::git_env_tests::git_tracked_ignores_inherited_repository_environment`,
 `skills::removal::tests::single_agent_keep_reason_aghub_store_real_dir_is_kept_when_everyone_is_requested`,
-cli tests `real_dir_delete_*`, `real_dir_npx_layout_*`,
+cli tests `dotfiles_shared_private_dir_delete_uses_the_complete_agent_list`,
+`real_dir_delete_*`, `real_dir_npx_layout_*`,
 `delete_real_dir_with_own_links_is_order_independent`,
 `reconcile_skill_remove_real_dir_with_own_links_is_order_independent`,
 `delete_real_dir_with_unrequested_enabled_linker_is_refused_any_order`,
-`delete_real_dir_git_tracked_is_refused_untracked_allowed`, api test
-`delete_by_name_removes_real_shared_dir_when_request_names_every_enabled_reader`.
-
-Tests:
+`delete_real_dir_git_tracked_is_refused_untracked_allowed`, api tests
+`dotfiles_shared_private_dir_is_kept_by_name_and_by_path_for_either_reader`,
+`delete_by_path_release_also_unlinks_requested_agents_private_link`,
+`delete_by_name_removes_real_shared_dir_when_request_names_every_enabled_reader`,
 `manager::skill::tests::single_agent_remove_skill_refused_when_initiator_disabled_and_other_reader_enabled`,
 `manager::skill::tests::single_agent_remove_skill_project_scope_refused_when_initiator_disabled_and_other_reader_enabled`,
 cli test `delete_single_agent_disabled_initiator_refuses_enabled_shared_slot_reader`.

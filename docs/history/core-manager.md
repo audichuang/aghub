@@ -76,12 +76,14 @@ Pinning test: `remove_skill_refuses_master_another_agent_links_to`
 (`manager::skill::tests`).
 
 Later: `single_agent_keep_reason` now takes `scope` and the requested agents and
-decides a real directory in a shared slot by its ENABLED readers (see
+decides any real directory by its ENABLED readers, including a private directory
+co-read through a dotfiles-style symlinked skills root (see
 `core-removal.md#disabled-agent-blocked-a-single-agent-delete`). The planned
 seam passes the batch's agents, so naming every enabled reader deletes; the
 plain `remove_skill` seam passes none, so it stays strict and still refuses. The
 same rule also gates a symlink-layout row whose Master is such a real directory
-(`plan_removal_for_agents`), and a git-tracked directory is kept; see
+(`plan_removal_for_agents`), and a git-tracked shared-root directory is kept;
+that refusal includes the untrack command and path. See
 `core-removal.md#disabled-agent-blocked-a-single-agent-delete`.
 Commit: d7d1ea91.
 

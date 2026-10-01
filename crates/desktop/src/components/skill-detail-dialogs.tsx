@@ -75,9 +75,10 @@ export function DeleteSkillLocationDialog({
 				// dialog and refreshed the list as if the skill were gone —
 				// while it was still installed and still visible.
 				throw new Error(
-					t("deleteSkillKeptSharedMaster", {
-						name: skillName,
-					}),
+					result.error ||
+						t("deleteSkillKeptSharedMaster", {
+							name: skillName,
+						}),
 				);
 			}
 			if (result.outcome === "partial") {

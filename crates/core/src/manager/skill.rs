@@ -642,7 +642,8 @@ impl ConfigManager {
 		if let Some(path) = file_path {
 			if path.exists() {
 				// The plain seam stays strict because it passes no requested
-				// set; the planned seam decides by readers, owned links and git
+				// set; the planned seam decides by readers (including a private
+				// dir co-read through a dotfiles symlink), owned links and git
 				// tracking (`single_agent_keep_reason`).
 				// See docs/history/core-manager.md#remove-skill-ate-a-shared-master
 				if !is_link {
@@ -955,6 +956,23 @@ impl ConfigManager {
 				.map(|path| path.display().to_string())
 				.collect::<Vec<_>>()
 				.join(", ");
+			// Reuse the planner's one keep rule to explain a GitTracked keep;
+			// presentation must not invent a second verdict.
+			let git_tracked_refusal =
+				plan.still_read_from.iter().find_map(|path| {
+					matches!(
+						removal::single_agent_keep_reason(
+							path,
+							&all_agent_dirs,
+							name,
+							project_root.as_deref(),
+							scope,
+							requested_agents,
+						),
+						Some(removal::KeepReason::GitTracked)
+					)
+					.then(|| removal::untrack_hint(path))
+				});
 			// `--all-agents` is a DIFFERENT failure (the sweep left a copy
 			// behind) and needs its own wording.
 			let (operation, reason) = if all_agents {
@@ -988,7 +1006,9 @@ impl ConfigManager {
 				// Referrer in this agent's own second read dir is what the user
 				// can act on.
 				// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
-				let mut reason = if where_.is_empty() {
+				let mut reason = if let Some(reason) = git_tracked_refusal {
+					reason
+				} else if where_.is_empty() {
 					"skill it reads from a location shared with other agents"
 						.to_string()
 				} else {

@@ -241,7 +241,8 @@ pub struct RemovalPlan {
 	/// kept because another view still references it / canonicalize failed) — warn.
 	pub skipped: Vec<std::path::PathBuf>,
 	/// True when destructive execution requires an explicit confirm flag
-	/// (symlink-layout full removal, or copy `--all-agents`).
+	/// (symlink-layout removal, copy `--all-agents`, or releasing a real
+	/// directory from a shared Referrer root).
 	pub needs_confirm: bool,
 	/// This removal took NOTHING, and the caller must not report otherwise.
 	///
@@ -838,6 +839,9 @@ fn assemble_copy_release_plan(
 ) -> RemovalPlan {
 	let mut paths = Vec::new();
 	let mut skipped = Vec::new();
+	// A shared-slot real-directory release came from the symlink policy and
+	// keeps its confirmation contract; an ordinary private copy stays false.
+	let needs_confirm = is_universal_master(&root, project_root);
 	let start_len = paths.len();
 	push_contained(root, roots, &mut paths, &mut skipped);
 	if paths.len() > start_len {
@@ -858,7 +862,7 @@ fn assemble_copy_release_plan(
 		layout: Layout::Copy,
 		paths,
 		skipped,
-		needs_confirm: false,
+		needs_confirm,
 		shared_master_kept: false,
 		still_read_from: Vec::new(),
 		incomplete: false,
@@ -1241,8 +1245,11 @@ pub fn plan_owned_inbound_links(
 /// 2. Any in-scope symlink resolves into it (excluding links owned by
 ///    requested agents in private skills dirs with no outside enabled
 ///    readers) -> [`KeepReason::ExternalReferrer`].
-/// 3. Inside a shared Referrer root: empty `requested` keeps (fail closed);
-///    otherwise keep iff an ENABLED reader is outside `requested`.
+/// 3. Non-empty `requested` and an ENABLED reader outside `requested` still
+///    reads the dir (private or shared) ->
+///    [`KeepReason::UniversalMaster`]. Empty `requested` fails closed
+///    ONLY for shared Referrer roots (so the plain `ConfigManager::remove_skill`
+///    seam, which passes no requested set, keeps deleting private copies).
 /// 4. Inside a shared Referrer root and tracked by git -> [`KeepReason::GitTracked`].
 /// 5. Otherwise `None` (a private copy or untracked shared slot).
 ///
@@ -1283,11 +1290,13 @@ pub fn single_agent_keep_reason(
 	}
 	// The `.aghub` roots already returned above, so any store root hit here is
 	// a shared Referrer root.
-	if is_universal_master(dir, project_root)
-		&& (requested.is_empty()
-			|| !skill_dir_readers_outside(dir, scope, project_root, requested)
-				.is_empty())
+	if !requested.is_empty()
+		&& !skill_dir_readers_outside(dir, scope, project_root, requested)
+			.is_empty()
 	{
+		return Some(KeepReason::UniversalMaster);
+	}
+	if requested.is_empty() && is_universal_master(dir, project_root) {
 		return Some(KeepReason::UniversalMaster);
 	}
 	if is_universal_master(dir, project_root) {
@@ -2599,6 +2608,106 @@ pub(crate) mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn single_agent_keep_reason_protects_private_dir_shared_by_dotfiles_layout()
+	{
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
+		let tmp = tempdir().unwrap();
+		let root = tmp.path();
+		let scope = crate::models::ResourceScope::ProjectOnly;
+		let skill = root.join(".claude/skills/x");
+		write_skill_md(&skill);
+		std::fs::create_dir_all(root.join(".cursor")).unwrap();
+		std::os::unix::fs::symlink(
+			root.join(".claude/skills"),
+			root.join(".cursor/skills"),
+		)
+		.unwrap();
+		std::fs::create_dir_all(root.join(".opencode")).unwrap();
+		let disabled: Vec<&str> = crate::models::AgentType::ALL
+			.iter()
+			.filter(|&&agent| {
+				!matches!(
+					agent,
+					crate::models::AgentType::Claude
+						| crate::models::AgentType::Cursor
+						| crate::models::AgentType::OpenCode
+				)
+			})
+			.map(|agent| agent.as_str())
+			.collect();
+		let _disabled =
+			crate::agent_settings::test_override::disable(&disabled);
+		let dirs = agent_skill_dirs_in_scope(scope, Some(root));
+
+		for requested in [
+			vec![crate::models::AgentType::Cursor],
+			vec![crate::models::AgentType::Claude],
+		] {
+			assert_eq!(
+				single_agent_keep_reason(
+					&skill,
+					&dirs,
+					"x",
+					Some(root),
+					scope,
+					&requested,
+				),
+				Some(KeepReason::UniversalMaster),
+				"the other enabled reader must keep the shared private directory"
+			);
+		}
+		assert_eq!(
+			single_agent_keep_reason(
+				&skill,
+				&dirs,
+				"x",
+				Some(root),
+				scope,
+				&[
+					crate::models::AgentType::Claude,
+					crate::models::AgentType::Cursor,
+				],
+			),
+			None,
+			"naming both enabled readers releases the directory"
+		);
+		assert_eq!(
+			single_agent_keep_reason(
+				&skill,
+				&dirs,
+				"x",
+				Some(root),
+				scope,
+				&[],
+			),
+			None,
+			"an empty request fails closed only inside shared roots"
+		);
+
+		let private_root = root.join("private-project");
+		let private = private_root.join(".claude/skills/y");
+		write_skill_md(&private);
+		std::fs::create_dir_all(private_root.join(".cursor/skills")).unwrap();
+		let private_dirs =
+			agent_skill_dirs_in_scope(scope, Some(&private_root));
+		assert_eq!(
+			single_agent_keep_reason(
+				&private,
+				&private_dirs,
+				"y",
+				Some(&private_root),
+				scope,
+				&[crate::models::AgentType::Claude],
+			),
+			None,
+			"a private copy with no co-reader stays deletable"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn single_agent_keep_reason_git_tracked_refuses_untracked_allows() {
 		if !git_fixture::has_git() {
 			eprintln!("skipping test: git binary unavailable");
@@ -2633,6 +2742,20 @@ pub(crate) mod tests {
 			root,
 			&["add", "--", ".agents/skills/git-test-skill/SKILL.md"],
 		);
+		let other = tempdir().unwrap();
+		git_fixture::git(other.path(), &["init", "-q"]);
+		let old_git_dir = std::env::var_os("GIT_DIR");
+		struct RestoreGitDir(Option<std::ffi::OsString>);
+		impl Drop for RestoreGitDir {
+			fn drop(&mut self) {
+				match &self.0 {
+					Some(value) => std::env::set_var("GIT_DIR", value),
+					None => std::env::remove_var("GIT_DIR"),
+				}
+			}
+		}
+		let _restore_git_dir = RestoreGitDir(old_git_dir);
+		std::env::set_var("GIT_DIR", other.path().join(".git"));
 
 		// When tracked: Some(KeepReason::GitTracked)
 		assert_eq!(
