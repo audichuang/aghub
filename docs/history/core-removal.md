@@ -280,16 +280,11 @@ planner's `needs_confirm: true` wire contract. The shared assembly helper had
 temporarily reported `false`; ordinary private copies remain `false` and retain
 their original no-extra-confirm behavior.
 
-Known edges: the planner unlinks the requested agents' links BEFORE the
-directory, so if `remove_dir_all` then fails (a read-only parent, mode 555) the
-links are already gone and nothing restores them. The reconcile refusal's "the
-shared master is still read by ..." clause (`ReconcileSkillPlan::keepers`) comes
-from `skill_holders`, which walks the FULL roster because it answers the
-Master-GC question, so it may list a disabled agent and is not limited to the
-enabled reader or link that actually blocked the row; the clause that does name
-the blocking link is "it is still served to this agent from ...". When a link
-from a DISABLED agent's private dir points at the directory, the refusal path
-lists only the path, not the agent. Neither is changed.
+Known edge: when a link from a DISABLED agent's private dir points at the
+directory, the refusal path lists only the path, not the agent. Not changed.
+The two other edges that used to be listed here are fixed:
+[a failed directory delete](#dir-delete-failure-left-links-unlinked) and the
+reconcile "still read by" clause naming disabled agents (below).
 
 Tests:
 `manager::skill::tests::dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set`,
@@ -334,3 +329,32 @@ counts the full roster.
 
 Tests:
 `transfer::tests::reconcile_orders_shared_referrers_first_when_other_agents_disabled`.
+
+## Dir delete failure left links unlinked
+
+A real-directory release planned `[owned inbound links..., directory]`, and
+`execute_removal` runs a plan in order. When `remove_dir_all` then failed (a
+read-only parent, mode 555: the children go, the final `rmdir` is refused) the
+requested agents' links were already gone and nothing restored them, so a
+failed delete still revoked the grants.
+
+The order is now `[directory, links...]`, from the one producer
+`removal::plan_dir_release_paths` (the manager's copy-release assembly and the
+API by-path route both call it), and `execute_removal` skips a link that
+resolves into a directory whose removal failed, reporting it in `skipped`
+beside the directory in `failed`. Restoring unlinked links was rejected: it
+needs a link constructor per platform (junctions on Windows) and can fail too.
+Residual: `remove_dir_all` is not atomic, so the directory may be emptied
+while the links stay; the surfaces report the directory as failed, and a
+re-run deletes the leftovers.
+
+The reconcile refusal's "the shared master is still read by ..." clause
+(`ReconcileSkillPlan::keepers`) comes from `skill_holders`, which walks the FULL
+roster because it also answers the Master-GC question (`exhaustive`). The
+clause now drops disabled agents: they still keep a Master alive but are not
+readers, so the message must not name them. The refusal VERDICT is untouched
+(`read_effect_after`).
+
+Tests:
+`manager::skill::tests::real_dir_delete_failure_keeps_the_requested_agents_links`,
+`transfer::tests::reconcile_refusal_does_not_name_a_disabled_agent_as_a_reader`.
