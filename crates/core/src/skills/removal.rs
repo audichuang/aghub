@@ -504,7 +504,9 @@ pub(crate) fn plan_removal_for_agents(
 			&unmanaged,
 			&roots,
 			project_root,
+			scope,
 			all_agents,
+			requested_agents,
 		)
 	}
 }
@@ -675,6 +677,7 @@ fn plan_symlink_removal(
 
 /// Copy layout (no `canonical_path`): default removes only the targeted agent's
 /// copy (from `source_path`); `--all-agents` removes every same-named copy.
+#[allow(clippy::too_many_arguments)]
 fn plan_copy_removal(
 	skill: &crate::models::Skill,
 	safe: &str,
@@ -682,7 +685,9 @@ fn plan_copy_removal(
 	unmanaged: &[PathBuf],
 	roots: &[PathBuf],
 	project_root: Option<&Path>,
+	scope: crate::models::ResourceScope,
 	all_agents: bool,
+	requested_agents: &[crate::models::AgentType],
 ) -> RemovalPlan {
 	let mut paths: Vec<PathBuf> = Vec::new();
 	let mut skipped: Vec<PathBuf> = Vec::new();
@@ -724,26 +729,58 @@ fn plan_copy_removal(
 					all_agent_dirs,
 					&skill.name,
 					project_root,
+					scope,
+					requested_agents,
 				) {
 					Some(KeepReason::UniversalMaster) => {
 						shared_master_kept = true;
 						skipped.push(root);
 					}
 					Some(KeepReason::ExternalReferrer(referrer)) => {
-						// Name the referrer, not just the kept dir: `skipped`
-						// lists only the caller's own path, so a keep decided
-						// by another agent's dir is otherwise undiagnosable.
-						// The reason CARRIES the path for this: an extraction
-						// that dropped it would silently undo the diagnosis.
-						log::warn!(
-							"keeping {}: {} still references it",
-							root.display(),
-							referrer.display()
-						);
-						skipped.push(root);
+						if is_universal_master(&root, project_root) {
+							shared_master_kept = true;
+							skipped.push(root);
+							skipped.push(referrer);
+						} else {
+							// Name the referrer, not just the kept dir: `skipped`
+							// lists only the caller's own path, so a keep decided
+							// by another agent's dir is otherwise undiagnosable.
+							// The reason CARRIES the path for this: an extraction
+							// that dropped it would silently undo the diagnosis.
+							log::warn!(
+								"keeping {}: {} still references it",
+								root.display(),
+								referrer.display()
+							);
+							skipped.push(root);
+						}
 					}
 					None => {
-						push_contained(root, roots, &mut paths, &mut skipped)
+						let start_len = paths.len();
+						push_contained(root, roots, &mut paths, &mut skipped);
+						if paths.len() > start_len {
+							let root_path =
+								paths.pop().expect("root was just pushed");
+							let owned = owned_inbound_links(
+								&root_path,
+								all_agent_dirs,
+								&skill.name,
+								project_root,
+								scope,
+								requested_agents,
+							);
+							for link in owned {
+								if std::fs::symlink_metadata(&link).is_ok()
+									&& !paths.contains(&link) && link
+									.parent()
+									.is_some_and(|p| {
+										assert_contained(p, roots).is_some()
+									}) {
+									paths.push(link);
+								}
+							}
+							paths.push(root_path);
+						}
 					}
 				}
 			}
@@ -885,6 +922,25 @@ pub fn dir_has_external_referrer(
 	all_agent_dirs: &[PathBuf],
 	name: &str,
 ) -> Option<PathBuf> {
+	dir_has_external_referrer_excluding(
+		target_dir,
+		all_agent_dirs,
+		name,
+		&|_| false,
+		None,
+	)
+}
+
+/// Identical to [`dir_has_external_referrer`] except that when a link entry
+/// resolves to the target and `ignore(&entry)` is true, it is skipped.
+/// When `ignored` is `Some`, every link skipped via `ignore` is pushed into it.
+pub fn dir_has_external_referrer_excluding(
+	target_dir: &Path,
+	all_agent_dirs: &[PathBuf],
+	name: &str,
+	ignore: &dyn Fn(&Path) -> bool,
+	mut ignored: Option<&mut Vec<PathBuf>>,
+) -> Option<PathBuf> {
 	let target_real = target_dir.canonicalize().ok()?;
 	let safe = skill::sanitize::sanitize_name(name);
 	// Same union as the symlink sweep: a Referrer this loop cannot see is one
@@ -944,6 +1000,14 @@ pub fn dir_has_external_referrer(
 			match std::fs::canonicalize(&entry) {
 				Ok(resolved) => {
 					if resolved == target_real {
+						if ignore(&entry) {
+							if let Some(ref mut list) = ignored {
+								if !list.contains(&entry) {
+									list.push(entry);
+								}
+							}
+							continue;
+						}
 						return Some(entry);
 					}
 				}
@@ -978,38 +1042,140 @@ fn dir_lists_name(dir: &Path, safe: &str) -> Option<bool> {
 /// Why a SINGLE-agent removal must keep a skill folder instead of deleting it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeepReason {
-	/// The dir is a shared universal Master — shared BY CONSTRUCTION, so no
-	/// single-agent removal may take it. Reported to the caller as
-	/// `shared_master_kept`.
+	/// A `.aghub` Master, or a real directory in a shared Referrer slot that an
+	/// enabled reader outside the request (or an empty request) still needs.
+	/// Reported to the caller as `shared_master_kept`.
 	UniversalMaster,
 	/// Not a Master, but another in-scope agent's symlink resolves into it;
 	/// deleting it would orphan that live link. Carries THAT link, because the
-	/// caller can only report a keep it can name.
+	/// caller can only report a keep it can name. Links in private skills dirs
+	/// owned by requested agents (with no unrequested enabled readers) are
+	/// excluded so batch deletions remain order-independent.
 	ExternalReferrer(PathBuf),
 }
 
-/// The one rule for "may a single-agent removal `remove_dir_all` this folder?".
-/// BOTH criteria are load-bearing:
-/// - [`is_universal_master`] — an agent reading a shared store dir directly
-///   leaves no symlink, so the referrer sweep alone cannot see it.
-/// - [`dir_has_external_referrer`] — a plain copy OUTSIDE the store roots can
-///   still have an inbound symlink.
+fn link_owned_by_requested(
+	link: &Path,
+	requested: &[crate::models::AgentType],
+	project_root: Option<&Path>,
+	scope: crate::models::ResourceScope,
+) -> bool {
+	if requested.is_empty() {
+		return false;
+	}
+	let Some(p) = link.parent() else {
+		return false;
+	};
+	let resolved_p = ::skill::lock::resolve_existing(p);
+	let store_roots: Vec<PathBuf> = skill_store_roots(project_root)
+		.into_iter()
+		.map(|r| ::skill::lock::resolve_existing(&r))
+		.collect();
+
+	let mut in_private_dir = false;
+	for agent in requested {
+		for dir in
+			crate::create_adapter(*agent).get_skills_paths(project_root, scope)
+		{
+			let resolved_dir = ::skill::lock::resolve_existing(&dir);
+			if store_roots
+				.iter()
+				.any(|root| resolved_dir.starts_with(root))
+			{
+				continue;
+			}
+			if resolved_p.starts_with(&resolved_dir) {
+				in_private_dir = true;
+				break;
+			}
+		}
+		if in_private_dir {
+			break;
+		}
+	}
+	if !in_private_dir {
+		return false;
+	}
+
+	skill_dir_readers_outside(p, scope, project_root, requested).is_empty()
+}
+
+/// Inbound links to `dir` that were ignored by [`dir_has_external_referrer_excluding`]
+/// because they are owned by `requested` agents in their private skills dirs with
+/// no outside enabled readers.
+pub fn owned_inbound_links(
+	dir: &Path,
+	all_agent_dirs: &[PathBuf],
+	name: &str,
+	project_root: Option<&Path>,
+	scope: crate::models::ResourceScope,
+	requested: &[crate::models::AgentType],
+) -> Vec<PathBuf> {
+	let mut links = Vec::new();
+	let _ = dir_has_external_referrer_excluding(
+		dir,
+		all_agent_dirs,
+		name,
+		&|link| link_owned_by_requested(link, requested, project_root, scope),
+		Some(&mut links),
+	);
+	links
+}
+
+/// The one rule for "may a single-agent / comma-list removal delete a real
+/// directory skill folder?". Evaluated in order:
+/// 1. Inside the `.aghub` store -> [`KeepReason::UniversalMaster`], always.
+/// 2. Any in-scope symlink resolves into it (excluding links owned by
+///    requested agents in private skills dirs with no outside enabled
+///    readers) -> [`KeepReason::ExternalReferrer`].
+/// 3. Inside a shared Referrer root: empty `requested` keeps (fail closed);
+///    otherwise keep iff an ENABLED reader is outside `requested`.
+/// 4. Otherwise `None` (a private copy).
 ///
-/// Shared by [`plan_copy_removal`] and `ConfigManager::remove_skill`; never
-/// hand-mirror the OR (a copy enforcing only half lost a shared Master).
-/// See docs/history/core-manager.md#remove-skill-ate-a-shared-master
+/// Shared by [`plan_copy_removal`], `ConfigManager::remove_skill` (which passes
+/// no `requested` set, so it stays strict) and the API by-path route; never
+/// hand-mirror it.
+/// See docs/history/core-removal.md#disabled-agent-blocked-a-single-agent-delete
 pub fn single_agent_keep_reason(
 	dir: &Path,
 	all_agent_dirs: &[PathBuf],
 	name: &str,
 	project_root: Option<&Path>,
+	scope: crate::models::ResourceScope,
+	requested: &[crate::models::AgentType],
 ) -> Option<KeepReason> {
-	if is_universal_master(dir, project_root) {
-		Some(KeepReason::UniversalMaster)
-	} else {
-		dir_has_external_referrer(dir, all_agent_dirs, name)
-			.map(KeepReason::ExternalReferrer)
+	let master_roots: Vec<PathBuf> = skill_store_roots(project_root)
+		.into_iter()
+		.filter(|root| {
+			root.file_name()
+				== Some(std::ffi::OsStr::new(
+					crate::skills::linker::MASTER_STORE_DIR_NAME,
+				))
+		})
+		.collect();
+
+	if assert_strictly_contained(dir, &master_roots).is_some() {
+		return Some(KeepReason::UniversalMaster);
 	}
+	if let Some(referrer) = dir_has_external_referrer_excluding(
+		dir,
+		all_agent_dirs,
+		name,
+		&|link| link_owned_by_requested(link, requested, project_root, scope),
+		None,
+	) {
+		return Some(KeepReason::ExternalReferrer(referrer));
+	}
+	// The `.aghub` roots already returned above, so any store root hit here is
+	// a shared Referrer root.
+	if is_universal_master(dir, project_root)
+		&& (requested.is_empty()
+			|| !skill_dir_readers_outside(dir, scope, project_root, requested)
+				.is_empty())
+	{
+		return Some(KeepReason::UniversalMaster);
+	}
+	None
 }
 
 fn push_contained(
@@ -2103,13 +2269,14 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn single_agent_keep_reason_covers_both_criteria() {
-		// `is_universal_master` reads HOME / XDG_CONFIG_HOME through
-		// `skill_store_roots`; one env mutex per test binary.
+		// `skill_store_roots` reads HOME / XDG_CONFIG_HOME;
+		// one env mutex per test binary.
 		let _env = crate::skills::prune::test_lock::env_lock()
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
 		let tmp = tempdir().unwrap();
 		let root = tmp.path();
+		let scope = crate::models::ResourceScope::ProjectOnly;
 
 		// (1) A universal Master with NO inbound link: only the roots test
 		// sees it, and every project Master has NativeReaders.
@@ -2128,21 +2295,143 @@ mod tests {
 
 		let dirs = vec![claude.clone(), root.join(".codex/skills")];
 		assert_eq!(
-			single_agent_keep_reason(&master, &dirs, "shared", Some(root)),
+			single_agent_keep_reason(
+				&master,
+				&dirs,
+				"shared",
+				Some(root),
+				scope,
+				&[],
+			),
 			Some(KeepReason::UniversalMaster)
 		);
 		assert!(
 			matches!(
-				single_agent_keep_reason(&copy, &dirs, "linked", Some(root)),
+				single_agent_keep_reason(
+					&copy,
+					&dirs,
+					"linked",
+					Some(root),
+					scope,
+					&[],
+				),
 				Some(KeepReason::ExternalReferrer(ref r))
 					if r == &claude.join("linked")
 			),
 			"the reason must name the link that decided it: {:?}",
-			single_agent_keep_reason(&copy, &dirs, "linked", Some(root))
+			single_agent_keep_reason(
+				&copy,
+				&dirs,
+				"linked",
+				Some(root),
+				scope,
+				&[],
+			)
 		);
 		assert_eq!(
-			single_agent_keep_reason(&lone, &dirs, "lone", Some(root)),
+			single_agent_keep_reason(
+				&lone,
+				&dirs,
+				"lone",
+				Some(root),
+				scope,
+				&[],
+			),
 			None
+		);
+
+		// (a) a real dir in the `.aghub` store is kept whoever is named.
+		let aghub_mstr = root.join(".aghub/mstr");
+		write_skill_md(&aghub_mstr);
+		assert_eq!(
+			single_agent_keep_reason(
+				&aghub_mstr,
+				&dirs,
+				"mstr",
+				Some(root),
+				scope,
+				&[
+					crate::models::AgentType::Cursor,
+					crate::models::AgentType::OpenCode,
+				],
+			),
+			Some(KeepReason::UniversalMaster)
+		);
+
+		// (b) naming the whole roster leaves no reader outside: released.
+		assert_eq!(
+			single_agent_keep_reason(
+				&master,
+				&dirs,
+				"shared",
+				Some(root),
+				scope,
+				crate::models::AgentType::ALL,
+			),
+			None
+		);
+
+		// (c) an enabled reader (opencode) outside the request keeps it.
+		let disabled: Vec<&str> = crate::models::AgentType::ALL
+			.iter()
+			.filter(|&&a| {
+				a != crate::models::AgentType::Cursor
+					&& a != crate::models::AgentType::OpenCode
+			})
+			.map(|a| a.as_str())
+			.collect();
+		let _guard = crate::agent_settings::test_override::disable(&disabled);
+		assert_eq!(
+			single_agent_keep_reason(
+				&master,
+				&dirs,
+				"shared",
+				Some(root),
+				scope,
+				&[crate::models::AgentType::Cursor],
+			),
+			Some(KeepReason::UniversalMaster)
+		);
+
+		// (d) link owned by requested agent in private dir:
+		let claude_link = claude.join("linked");
+		let requested_three = [
+			crate::models::AgentType::Claude,
+			crate::models::AgentType::Cursor,
+			crate::models::AgentType::OpenCode,
+		];
+		let disabled_except_three: Vec<&str> = crate::models::AgentType::ALL
+			.iter()
+			.filter(|&&a| !requested_three.contains(&a))
+			.map(|a| a.as_str())
+			.collect();
+		let _guard_three = crate::agent_settings::test_override::disable(
+			&disabled_except_three,
+		);
+		assert_eq!(
+			single_agent_keep_reason(
+				&copy,
+				&dirs,
+				"linked",
+				Some(root),
+				scope,
+				&requested_three,
+			),
+			None
+		);
+		assert_eq!(
+			single_agent_keep_reason(
+				&copy,
+				&dirs,
+				"linked",
+				Some(root),
+				scope,
+				&[
+					crate::models::AgentType::Cursor,
+					crate::models::AgentType::OpenCode,
+				],
+			),
+			Some(KeepReason::ExternalReferrer(claude_link))
 		);
 	}
 

@@ -34,9 +34,11 @@ unable to drop any Master at all. The dialog groups installs by exact
 `source_path` and sends every agent installed there, which means "drop this
 location" with nobody left to surprise.
 
-Rule: refuse only a request that names SOME of the location's readers — ask
-`skill_dir_readers_outside` who is left over (plus `dir_has_external_referrer`
-for links), and let a request covering the whole set through. The kept answer
+Rule: refuse only a request that names SOME of the location's readers, and let
+a request covering the whole set through. The verdict is owned by core's
+`single_agent_keep_reason` (the route no longer hand-writes the OR of
+`skill_dir_readers_outside` and `dir_has_external_referrer`), so CLI, by-name
+and by-path answer identically; a real directory inside `.aghub` is kept. The kept answer
 goes through the `RemovalView` seam (`outcome: "kept"`); it used to be a
 hand-built `success: true`, and the desktop dialog closed on it as if deleted.
 

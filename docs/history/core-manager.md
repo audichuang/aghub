@@ -74,6 +74,12 @@ verbatim rather than restated — and refuses, pointing at
 
 Pinning test: `remove_skill_refuses_master_another_agent_links_to`
 (`manager::skill::tests`).
+
+Later: `single_agent_keep_reason` now takes `scope` and the requested agents and
+decides a real directory in a shared slot by its ENABLED readers (see
+`core-removal.md#disabled-agent-blocked-a-single-agent-delete`). The planned
+seam passes the batch's agents, so naming every enabled reader deletes; the
+plain `remove_skill` seam passes none, so it stays strict and still refuses.
 Commit: d7d1ea91.
 
 ## Nested broken link reached commit

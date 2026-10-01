@@ -482,43 +482,37 @@ pub async fn delete_skill_by_path(
 			.collect();
 
 		if !canonical_layout {
-			// Guard: this non-link branch bypasses `plan_removal`'s referrer
-			// sweep, so re-apply it. Refuse to `remove_dir_all` a real dir that
-			// is still referenced OR read by an in-scope agent the request did
-			// not name. Two halves because a shared slot is read by SCANNING —
-			// its readers leave no link for the sweep to find. Ask "who is left
-			// over" (`skill_dir_readers_outside`), not "is this a Master": a
-			// request naming every reader of the location goes through.
+			// This non-link branch bypasses `plan_removal`, so ask core's ONE
+			// single-agent rule whether the real directory may go; never
+			// restate it here.
 			// See docs/history/api.md#delete-by-path-shared-slot-guard
 			let all_in_scope =
 				aghub_core::skills::removal::agent_skill_dirs_in_scope(
 					resource_scope,
 					project_root.as_deref(),
 				);
-			let referrer =
-				aghub_core::skills::removal::dir_has_external_referrer(
+			let keep_reason =
+				aghub_core::skills::removal::single_agent_keep_reason(
 					&skill_dir,
 					&all_in_scope,
 					&skill_name,
-				);
-			if let Some(referrer) = referrer.as_deref() {
-				// Name WHICH path kept it: the sweep runs over every in-scope
-				// agent dir, so "kept" without a pointer is undiagnosable.
-				log::warn!(
-					"keeping {}: {} still references it",
-					skill_dir.display(),
-					referrer.display()
-				);
-			}
-			if referrer.is_some()
-				|| !aghub_core::skills::removal::skill_dir_readers_outside(
-					&skill_dir,
-					resource_scope,
 					project_root.as_deref(),
+					resource_scope,
 					&requested_agents,
-				)
-				.is_empty()
-			{
+				);
+			if let Some(reason) = keep_reason {
+				if let aghub_core::skills::removal::KeepReason::ExternalReferrer(
+					ref referrer,
+				) = reason
+				{
+					// Name WHICH path kept it: the sweep runs over every in-scope
+					// agent dir, so "kept" without a pointer is undiagnosable.
+					log::warn!(
+						"keeping {}: {} still references it",
+						skill_dir.display(),
+						referrer.display()
+					);
+				}
 				// Kept because SHARED: through the `RemovalView` seam so it
 				// reads `outcome: "kept"`, never a success that means "deleted".
 				// `shared_master_kept: true` is this route's OWN judgement
@@ -542,9 +536,29 @@ pub async fn delete_skill_by_path(
 					dry_run,
 				)));
 			}
+			let mut paths = Vec::new();
+			let owned = aghub_core::skills::removal::owned_inbound_links(
+				&skill_dir,
+				&all_in_scope,
+				&skill_name,
+				project_root.as_deref(),
+				resource_scope,
+				&requested_agents,
+			);
+			for link in owned {
+				if std::fs::symlink_metadata(&link).is_ok()
+					&& !paths.contains(&link)
+					&& link.parent().is_some_and(|p| {
+						aghub_core::skills::removal::assert_contained(p, &roots)
+							.is_some()
+					}) {
+					paths.push(link);
+				}
+			}
+			paths.push(skill_dir.clone());
 			let plan = aghub_core::skills::removal::RemovalPlan {
 				layout: aghub_core::skills::removal::Layout::Copy,
-				paths: vec![skill_dir.clone()],
+				paths,
 				skipped: vec![],
 				needs_confirm: false,
 				shared_master_kept: false,
@@ -3408,14 +3422,10 @@ mod tests {
 		f(data.path())
 	}
 
-	/// This pins CURRENT, DOCUMENTED behaviour — the CLI single-agent delete
-	/// refuses a real directory in a universal store (single_agent_keep_reason
-	/// -> is_universal_master) whereas the API delete-by-path removes it when
-	/// every other reader is disabled; a known gap awaiting the owner's
-	/// decision on whether to unify with the CLI; see crates/core/AGENTS.md
-	/// ("Disabled agents" paragraph) and docs/history/core-removal.md
-	/// ("Disabled agent blocked a single-agent delete"). If the test changes
-	/// because the gap is unified, update it deliberately.
+	/// A real directory in a shared slot goes when every other reader is
+	/// disabled. The verdict is core's `single_agent_keep_reason`, the same one
+	/// the CLI and by-name delete use; see docs/history/core-removal.md
+	/// ("Disabled agent blocked a single-agent delete").
 	#[cfg(unix)]
 	#[test]
 	fn delete_by_path_removes_real_shared_dir_when_every_other_reader_is_disabled(
@@ -3472,7 +3482,7 @@ mod tests {
 	}
 
 	/// Counterpart of the test above: with an ENABLED reader outside the
-	/// request the API still keeps the real directory. Same documented gap.
+	/// request the real directory is kept (same core verdict as the CLI).
 	#[cfg(unix)]
 	#[test]
 	fn delete_by_path_keeps_real_shared_dir_when_another_reader_is_enabled() {
@@ -3604,6 +3614,122 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn delete_by_path_release_also_unlinks_requested_agents_private_link() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| {
+							a.as_str() != "cursor" && a.as_str() != "opencode"
+						})
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				let real_dir = proj.join(".agents/skills/x");
+				std::fs::create_dir_all(&real_dir).unwrap();
+				std::fs::write(
+					real_dir.join("SKILL.md"),
+					"---\nname: x\ndescription: d\n---\n",
+				)
+				.unwrap();
+
+				let cursor_skills = proj.join(".cursor/skills");
+				std::fs::create_dir_all(&cursor_skills).unwrap();
+				let cursor_link = cursor_skills.join("x");
+				std::os::unix::fs::symlink(&real_dir, &cursor_link).unwrap();
+
+				let readers =
+					aghub_core::skills::removal::skill_dir_readers_outside(
+						&real_dir,
+						aghub_core::models::ResourceScope::ProjectOnly,
+						Some(proj),
+						&[],
+					);
+				assert_eq!(
+					readers,
+					vec!["opencode", "cursor"],
+					"only opencode and cursor are enabled readers"
+				);
+
+				let dry_req = DeleteSkillByPathRequest {
+					source_path: real_dir
+						.join("SKILL.md")
+						.display()
+						.to_string(),
+					agents: readers.iter().map(|id| id.to_string()).collect(),
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: None,
+				};
+				let dry_resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(dry_req),
+				))
+				.ok()
+				.expect("dry run handler returned ok")
+				.into_inner();
+
+				assert!(
+					real_dir.join("SKILL.md").exists(),
+					"real dir must not be deleted by dry run"
+				);
+				assert!(
+					std::fs::symlink_metadata(&cursor_link).is_ok(),
+					"link must not be unlinked by dry run"
+				);
+
+				let req = DeleteSkillByPathRequest {
+					source_path: real_dir
+						.join("SKILL.md")
+						.display()
+						.to_string(),
+					agents: readers.iter().map(|id| id.to_string()).collect(),
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: Some(true),
+				};
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(req),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert_eq!(
+					resp.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Removed
+				);
+				assert!(!real_dir.exists(), "real dir must be gone");
+				assert!(
+					std::fs::symlink_metadata(&cursor_link).is_err(),
+					"<root>/.cursor/skills/x no longer exists even as a dangling link"
+				);
+
+				assert!(
+					dry_resp.paths.contains(&cursor_link.display().to_string()),
+					"dry run paths must contain cursor link, got: {:?}",
+					dry_resp.paths
+				);
+				assert!(
+					dry_resp.paths.contains(&real_dir.display().to_string()),
+					"dry run paths must contain real dir, got: {:?}",
+					dry_resp.paths
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn delete_by_path_removes_shared_referrer_when_every_reader_is_requested() {
 		with_isolated_env(|home, _state| {
 			let master = home.join(".aghub/full-group-link");
@@ -3717,6 +3843,120 @@ mod tests {
 			);
 			assert!(std::fs::symlink_metadata(&shared).is_err());
 			assert!(!master.exists());
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_removes_real_shared_dir_when_request_names_every_enabled_reader(
+	) {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| {
+							a.as_str() != "cursor" && a.as_str() != "opencode"
+						})
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				let slot = proj.join(".agents/skills/shared");
+				std::fs::create_dir_all(&slot).unwrap();
+				std::fs::write(
+					slot.join("SKILL.md"),
+					"---\nname: shared\ndescription: d\n---\n",
+				)
+				.unwrap();
+
+				let req = DeleteSkillParams {
+					scope: Some("project".to_string()),
+					project_root: Some(proj.display().to_string()),
+					confirm: Some(true),
+					all_agents: None,
+					agents: Some("cursor,opencode".to_string()),
+				};
+				let resp = block_on(delete_skill(
+					TrustedLocalOrigin,
+					AgentParam(AgentType::Cursor),
+					"shared",
+					req,
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert!(
+					!slot.exists(),
+					"naming every enabled reader must remove the real shared dir"
+				);
+				assert_eq!(
+					resp.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Removed,
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_keeps_real_shared_dir_when_enabled_reader_not_in_request()
+	{
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| {
+							a.as_str() != "cursor" && a.as_str() != "opencode"
+						})
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				let slot = proj.join(".agents/skills/shared");
+				std::fs::create_dir_all(&slot).unwrap();
+				std::fs::write(
+					slot.join("SKILL.md"),
+					"---\nname: shared\ndescription: d\n---\n",
+				)
+				.unwrap();
+
+				let req = DeleteSkillParams {
+					scope: Some("project".to_string()),
+					project_root: Some(proj.display().to_string()),
+					confirm: None,
+					all_agents: None,
+					agents: Some("cursor".to_string()),
+				};
+				let resp = block_on(delete_skill(
+					TrustedLocalOrigin,
+					AgentParam(AgentType::Cursor),
+					"shared",
+					req,
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert!(
+					slot.join("SKILL.md").exists(),
+					"the real shared dir must survive when an enabled reader is not in request"
+				);
+				assert_eq!(
+					resp.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Kept,
+				);
+			});
 		});
 	}
 

@@ -438,10 +438,20 @@ request", the skill lives in a shared slot still read by other agents. Only
 ENABLED agents are named (disabled agents never block a single-agent delete).
 Include the named agents in the same `-a` request, or delete for every agent
 (`--all-agents`, which also unlinks it for them).
-Exception: if the shared-slot entry is a real directory (not a link), the CLI
-refuses a single-agent delete no matter who reads it, even when only disabled
-agents do; the API's delete-by-path instead removes that directory when every
-other reader is a disabled agent.
+The same rule applies when the shared-slot entry is a real directory (not a
+link): it is deleted once every ENABLED agent reading that slot is in the `-a`
+list (disabled agents never count), and refused, naming the readers left out,
+otherwise. A symlink to it from an agent NOT in the `-a` list also blocks it: the
+delete exits 1 and names that link and agent (for example
+`.claude/skills/<name>` when claude was left out of the request). A symlink from
+an agent that IS in the `-a` list does not block it; that agent's own row
+unlinks it, and the verdict is the same in whatever order `-a` lists the agents
+(preview and `--yes` agree). A real directory inside `.aghub` is never deleted by
+a single-agent delete. `reconcile --remove` and the desktop's manage-agents /
+bulk dialogs apply this same rule to their removal list. A real directory has no
+`.aghub` Master behind it, so deleting it deletes the content and the lock entry
+is pruned too. Local edits are gone for good; if the skill originally came from a
+source, `source sync <repo>` can install a fresh copy of the source's version.
 If no other Referrer remains, the Master content is deleted too (the removed
 paths include `.aghub/<name>`), so re-enabling a disabled agent later does not bring
 the skill back; it has to be reinstalled.

@@ -7535,6 +7535,477 @@ fn delete_single_agent_disabled_initiator_refuses_enabled_shared_slot_reader() {
 	assert!(master.is_dir(), "the Master directory must still exist");
 }
 
+#[cfg(unix)]
+#[test]
+fn real_dir_delete_single_agent_removes_when_other_readers_disabled() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let name = "real-dir-disabled-readers";
+	let skill_dir = home.path().join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled_set: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| a != aghub_core::AgentType::Cursor)
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cursor", "delete", "skills", name, "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"deletion must succeed for cursor when other readers are disabled; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(
+		!skill_dir.exists(),
+		"the real skill directory must be removed"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_delete_naming_every_enabled_reader_removes_it() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let name = "real-dir-every-enabled-reader";
+	let skill_dir = home.path().join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled_set: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| {
+				a != aghub_core::AgentType::Cursor
+					&& a != aghub_core::AgentType::OpenCode
+			})
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"cursor,opencode",
+			"delete",
+			"skills",
+			name,
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"naming every enabled reader must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(
+		!skill_dir.exists(),
+		"the real skill directory must be removed"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_delete_keeps_when_enabled_reader_not_listed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let name = "real-dir-reader-unlisted";
+	let skill_dir = home.path().join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled_set: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| {
+				a != aghub_core::AgentType::Cursor
+					&& a != aghub_core::AgentType::OpenCode
+			})
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cursor", "delete", "skills", name, "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"deletion must be refused when opencode also reads the shared slot; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("opencode"),
+		"stderr must contain 'opencode'; stderr: {stderr}"
+	);
+	assert!(
+		skill_dir.exists(),
+		"the real skill directory must still exist"
+	);
+}
+
+#[cfg(unix)]
+fn collect_disk_state(
+	root: &std::path::Path,
+) -> std::collections::BTreeSet<(PathBuf, String)> {
+	let mut entries = std::collections::BTreeSet::new();
+	fn walk(
+		base: &std::path::Path,
+		dir: &std::path::Path,
+		entries: &mut std::collections::BTreeSet<(PathBuf, String)>,
+	) {
+		if let Ok(rd) = std::fs::read_dir(dir) {
+			for entry in rd.flatten() {
+				let p = entry.path();
+				let rel = p.strip_prefix(base).unwrap().to_path_buf();
+				let meta = std::fs::symlink_metadata(&p).unwrap();
+				let kind = if meta.file_type().is_symlink() {
+					"symlink".to_string()
+				} else if meta.file_type().is_dir() {
+					walk(base, &p, entries);
+					"dir".to_string()
+				} else {
+					"file".to_string()
+				};
+				entries.insert((rel, kind));
+			}
+		}
+	}
+	walk(root, root, &mut entries);
+	entries
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_npx_layout_batch_is_order_independent() {
+	let orders = ["claude,cursor,opencode", "cursor,opencode,claude"];
+
+	struct OrderRun {
+		order: &'static str,
+		yes_status: std::process::ExitStatus,
+		disk_state: std::collections::BTreeSet<(PathBuf, String)>,
+	}
+
+	let mut runs = Vec::new();
+
+	for order in orders {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let name = "x";
+		let skill_dir = home.path().join(".agents/skills").join(name);
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: test\n---\n"),
+		)
+		.unwrap();
+
+		let claude_skills = home.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude_skills).unwrap();
+		let claude_link = claude_skills.join(name);
+		std::os::unix::fs::symlink(&skill_dir, &claude_link).unwrap();
+
+		let data = state.path().join("data");
+		std::fs::create_dir_all(&data).unwrap();
+		let disabled_set: std::collections::BTreeSet<String> =
+			aghub_core::AgentType::ALL
+				.iter()
+				.copied()
+				.filter(|&a| {
+					a != aghub_core::AgentType::Claude
+						&& a != aghub_core::AgentType::Cursor
+						&& a != aghub_core::AgentType::OpenCode
+				})
+				.map(|a| aghub_core::registry::get(a).id.to_string())
+				.collect();
+		aghub_core::agent_settings::write_disabled_agents_in(
+			&data,
+			&disabled_set,
+		)
+		.unwrap();
+
+		let paths_before_delete: std::collections::HashSet<PathBuf> =
+			[skill_dir.clone(), claude_link.clone()]
+				.into_iter()
+				.collect();
+
+		// (a) preview run: `-a <order> delete skills x --json` (no --yes)
+		let preview_out = isolated_cli(home.path(), state.path())
+			.args(["-g", "-a", order, "delete", "skills", name, "--json"])
+			.output()
+			.unwrap();
+
+		assert!(
+			preview_out.status.success(),
+			"preview run for {order} must succeed; stderr: {}",
+			String::from_utf8_lossy(&preview_out.stderr)
+		);
+
+		let preview_json: serde_json::Value =
+			serde_json::from_slice(&preview_out.stdout)
+				.expect("preview output must be valid JSON");
+		let results = preview_json["results"]
+			.as_array()
+			.expect("preview json must contain results array");
+
+		let mut preview_paths = std::collections::HashSet::new();
+		for row in results {
+			assert_eq!(
+				row["ok"], true,
+				"row for agent {} in {order} must be ok: {row}",
+				row["agent"]
+			);
+			let outcome = row["output"]["outcome"]
+				.as_str()
+				.expect("row output must contain outcome");
+			assert_ne!(
+				outcome, "kept",
+				"preview must never claim outcome is kept for full-roster request {order}: {row}"
+			);
+			assert_eq!(
+				outcome, "preview",
+				"start state must preview as deletable (outcome 'preview') for {order}: {row}"
+			);
+
+			if let Some(paths) = row["output"]["paths"].as_array() {
+				for p in paths {
+					if let Some(s) = p.as_str() {
+						preview_paths.insert(PathBuf::from(s));
+					}
+				}
+			}
+		}
+
+		assert!(
+			preview_paths
+				.iter()
+				.any(|p| p.ends_with(".agents/skills/x")),
+			"previewed paths must name .agents/skills/x for {order}: {preview_paths:?}"
+		);
+
+		// (b) then --yes run on the same fixture
+		let yes_out = isolated_cli(home.path(), state.path())
+			.args(["-g", "-a", order, "delete", "skills", name, "--yes"])
+			.output()
+			.unwrap();
+
+		assert_eq!(
+			yes_out.status.code(),
+			Some(0),
+			"order {order} expected exit code 0, got {:?}; stderr: {}, stdout: {}",
+			yes_out.status.code(),
+			String::from_utf8_lossy(&yes_out.stderr),
+			String::from_utf8_lossy(&yes_out.stdout)
+		);
+
+		assert!(
+			!skill_dir.exists(),
+			"the real skill directory must be gone for {order}"
+		);
+		assert!(
+			std::fs::symlink_metadata(&claude_link).is_err(),
+			"the claude symlink must be gone (no dangling entry) for {order}"
+		);
+
+		let disappeared: std::collections::HashSet<PathBuf> =
+			paths_before_delete
+				.into_iter()
+				.filter(|p| std::fs::symlink_metadata(p).is_err())
+				.collect();
+		assert_eq!(
+			preview_paths, disappeared,
+			"removed-paths reported by preview must equal what disappeared from disk for {order}"
+		);
+
+		let disk_state = collect_disk_state(home.path());
+		runs.push(OrderRun {
+			order,
+			yes_status: yes_out.status,
+			disk_state,
+		});
+	}
+
+	assert_eq!(runs.len(), 2, "must have executed both orders");
+	assert_eq!(
+		runs[0].yes_status.code(),
+		runs[1].yes_status.code(),
+		"exit codes must be identical between {} ({:?}) and {} ({:?})",
+		runs[0].order,
+		runs[0].yes_status.code(),
+		runs[1].order,
+		runs[1].yes_status.code()
+	);
+	assert_eq!(
+		runs[0].disk_state, runs[1].disk_state,
+		"final on-disk state must be identical between {} and {}",
+		runs[0].order, runs[1].order
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_npx_layout_refuses_when_link_belongs_to_unrequested_agent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let name = "x";
+	let skill_dir = home.path().join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	let claude_skills = home.path().join(".claude/skills");
+	std::fs::create_dir_all(&claude_skills).unwrap();
+	let claude_link = claude_skills.join(name);
+	std::os::unix::fs::symlink(&skill_dir, &claude_link).unwrap();
+
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled_set: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| {
+				a != aghub_core::AgentType::Claude
+					&& a != aghub_core::AgentType::Cursor
+					&& a != aghub_core::AgentType::OpenCode
+			})
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+
+	// Preview run: -a cursor,opencode delete skills x --json (no --yes)
+	let preview_out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"cursor,opencode",
+			"delete",
+			"skills",
+			name,
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		preview_out.status.success(),
+		"preview run must succeed; stderr: {}",
+		String::from_utf8_lossy(&preview_out.stderr)
+	);
+
+	let preview_json: serde_json::Value =
+		serde_json::from_slice(&preview_out.stdout)
+			.expect("preview output must be valid JSON");
+	let results = preview_json["results"]
+		.as_array()
+		.expect("preview json must contain results array");
+	for row in results {
+		assert_eq!(
+			row["output"]["outcome"], "kept",
+			"preview must report outcome 'kept' when unrequested agent holds link: {row}"
+		);
+	}
+
+	// --yes run: -a cursor,opencode delete skills x --yes
+	let yes_out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"cursor,opencode",
+			"delete",
+			"skills",
+			name,
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		yes_out.status.code(),
+		Some(1),
+		"deletion must exit with code 1; status: {:?}, stdout: {}, stderr: {}",
+		yes_out.status,
+		String::from_utf8_lossy(&yes_out.stdout),
+		String::from_utf8_lossy(&yes_out.stderr)
+	);
+
+	let stdout = String::from_utf8_lossy(&yes_out.stdout);
+	let stderr = String::from_utf8_lossy(&yes_out.stderr);
+	let combined_err = format!("{stderr}\n{stdout}");
+
+	assert!(
+		combined_err.contains("claude"),
+		"refusal output must contain 'claude'; stderr: {stderr}, stdout: {stdout}"
+	);
+	assert!(
+		combined_err.contains(".claude/skills/x"),
+		"refusal output must contain link path '.claude/skills/x'; stderr: {stderr}, stdout: {stdout}"
+	);
+
+	assert!(
+		skill_dir.exists(),
+		"the real skill directory must still exist"
+	);
+	assert!(
+		claude_link.symlink_metadata().is_ok(),
+		"the claude symlink must still exist"
+	);
+}
+
+#[test]
+fn delete_help_reflects_shared_location_doc() {
+	let out = aghub_cli().args(["delete", "--help"]).output().unwrap();
+	assert!(out.status.success());
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	let normalized: String =
+		stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+	assert!(
+		!normalized.contains("master is still there"),
+		"help must not contain 'master is still there', got: {stdout}"
+	);
+	assert!(
+		normalized.contains("location shared with other agents"),
+		"help must contain 'location shared with other agents', got: {stdout}"
+	);
+}
+
 /// Re-adding an installed skill writes NOTHING. It used to report the freshly
 /// parsed SOURCE file as if it had been installed, so an edited source printed
 /// its new frontmatter while disk still held the old Master.

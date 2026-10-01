@@ -2238,7 +2238,7 @@ impl ReconcileSkillPlan {
 		let ConfigError::UnsupportedOperation(mut message) =
 			ConfigError::unsupported_operation(
 				"remove for this agent alone",
-				"skill it reads from the shared master",
+				"skill it reads from a location shared with other agents",
 				agent,
 			)
 		else {

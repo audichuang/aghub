@@ -1033,6 +1033,390 @@ fn single_agent_remove_skill_project_scope_refused_when_initiator_disabled_and_o
 	assert!(master.exists(), "master must survive in store");
 }
 
+#[cfg(unix)]
+#[test]
+fn real_dir_shared_slot_single_agent_remove_succeeds_when_other_readers_disabled(
+) {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path();
+	let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+	let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+		keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+	std::env::set_var("HOME", home);
+	std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+	std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+
+	struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+	impl Drop for Guard {
+		fn drop(&mut self) {
+			for (k, v) in &self.0 {
+				match v {
+					Some(val) => std::env::set_var(k, val),
+					None => std::env::remove_var(k),
+				}
+			}
+		}
+	}
+	let _restore = Guard(prev);
+
+	let name = "real-dir-skill-disabled-readers";
+	let skill_dir = home.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	// Disable all readers outside cursor
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor =
+		ConfigManager::new(create_adapter(AgentType::Cursor), true, None);
+	cursor.load().unwrap();
+	let outcome = cursor
+		.remove_skill_planned(name, false, false, true)
+		.expect("removal must succeed when other readers are disabled");
+
+	assert!(outcome.executed, "removal must be executed");
+	assert!(!outcome.absent, "removal must not be absent");
+	assert!(
+		outcome.failed_paths.is_empty(),
+		"failed_paths must be empty"
+	);
+	assert!(
+		!outcome.plan.shared_master_kept,
+		"shared_master_kept must be false"
+	);
+	assert!(
+		!skill_dir.exists(),
+		"the real skill directory must be removed"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_shared_slot_preview_lists_the_directory_when_other_readers_disabled(
+) {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path();
+	let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+	let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+		keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+	std::env::set_var("HOME", home);
+	std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+	std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+
+	struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+	impl Drop for Guard {
+		fn drop(&mut self) {
+			for (k, v) in &self.0 {
+				match v {
+					Some(val) => std::env::set_var(k, val),
+					None => std::env::remove_var(k),
+				}
+			}
+		}
+	}
+	let _restore = Guard(prev);
+
+	let name = "real-dir-skill-preview";
+	let skill_dir = home.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	// Disable all readers outside cursor
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor =
+		ConfigManager::new(create_adapter(AgentType::Cursor), true, None);
+	cursor.load().unwrap();
+	let outcome = cursor
+		.remove_skill_planned(name, false, true, false)
+		.expect("preview must succeed when other readers are disabled");
+
+	assert!(!outcome.executed, "preview must not execute");
+	assert!(skill_dir.exists(), "directory must survive in preview");
+	assert!(
+		!outcome.plan.shared_master_kept,
+		"shared_master_kept must be false"
+	);
+	assert!(
+		outcome.plan.skipped.is_empty(),
+		"skipped must be empty: {:?}",
+		outcome.plan.skipped
+	);
+	assert!(
+		outcome.plan.paths.iter().any(|p| p == &skill_dir
+			|| crate::skills::linker::classify::canonicalize_lenient(p)
+				== crate::skills::linker::classify::canonicalize_lenient(
+					&skill_dir
+				)),
+		"plan.paths must contain the directory: {:?}",
+		outcome.plan.paths
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_shared_slot_kept_when_initiator_disabled_and_other_reader_enabled()
+{
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path();
+	let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+	let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+		keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+	std::env::set_var("HOME", home);
+	std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+	std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+
+	struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+	impl Drop for Guard {
+		fn drop(&mut self) {
+			for (k, v) in &self.0 {
+				match v {
+					Some(val) => std::env::set_var(k, val),
+					None => std::env::remove_var(k),
+				}
+			}
+		}
+	}
+	let _restore = Guard(prev);
+
+	let name = "real-dir-initiator-disabled";
+	let skill_dir = home.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	// Disable all except opencode (so Cursor is disabled)
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::OpenCode)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor =
+		ConfigManager::new(create_adapter(AgentType::Cursor), true, None);
+	cursor.load().unwrap();
+	let err = cursor
+		.remove_skill_planned(name, false, false, true)
+		.expect_err(
+			"removal must be refused when opencode also reads the slot even if initiator is disabled",
+		);
+
+	assert!(
+		matches!(err, ConfigError::UnsupportedOperation(_)),
+		"expected UnsupportedOperation, got {err:?}"
+	);
+	let message = err.to_string();
+	assert!(
+		message.contains("opencode"),
+		"refusal message must contain opencode: {message}"
+	);
+	assert!(
+		skill_dir.exists(),
+		"the shared skill directory must survive"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_shared_slot_kept_when_enabled_reader_not_in_request() {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path();
+	let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+	let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+		keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+	std::env::set_var("HOME", home);
+	std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+	std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+
+	struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+	impl Drop for Guard {
+		fn drop(&mut self) {
+			for (k, v) in &self.0 {
+				match v {
+					Some(val) => std::env::set_var(k, val),
+					None => std::env::remove_var(k),
+				}
+			}
+		}
+	}
+	let _restore = Guard(prev);
+
+	let name = "real-dir-reader-not-in-request";
+	let skill_dir = home.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	// Enabled = cursor and opencode (all other agents disabled)
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor && a != AgentType::OpenCode)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor =
+		ConfigManager::new(create_adapter(AgentType::Cursor), true, None);
+	cursor.load().unwrap();
+
+	// Preview: outcome is kept, directory survives
+	let preview = cursor
+		.remove_skill_planned(name, false, true, false)
+		.expect("preview must succeed");
+	assert!(
+		preview.plan.shared_master_kept,
+		"shared_master_kept must be true in preview"
+	);
+	assert!(skill_dir.exists(), "directory must survive preview");
+
+	// Execute (--yes): refused with error naming opencode, directory survives
+	let err = cursor
+		.remove_skill_planned(name, false, false, true)
+		.expect_err(
+			"removal must be refused when opencode is also an enabled reader",
+		);
+
+	assert!(
+		matches!(err, ConfigError::UnsupportedOperation(_)),
+		"expected UnsupportedOperation, got {err:?}"
+	);
+	let message = err.to_string();
+	assert!(
+		message.contains("opencode"),
+		"refusal message must contain opencode: {message}"
+	);
+	assert!(
+		skill_dir.exists(),
+		"the shared skill directory must survive"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_shared_slot_removed_when_request_names_every_enabled_reader() {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path();
+	let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+	let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+		keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+	std::env::set_var("HOME", home);
+	std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+	std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+
+	struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+	impl Drop for Guard {
+		fn drop(&mut self) {
+			for (k, v) in &self.0 {
+				match v {
+					Some(val) => std::env::set_var(k, val),
+					None => std::env::remove_var(k),
+				}
+			}
+		}
+	}
+	let _restore = Guard(prev);
+
+	let name = "real-dir-every-enabled-reader";
+	let skill_dir = home.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	// Enabled = cursor and opencode (all other agents disabled)
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor && a != AgentType::OpenCode)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor =
+		ConfigManager::new(create_adapter(AgentType::Cursor), true, None);
+	cursor.load().unwrap();
+	let outcome = cursor
+		.remove_skill_planned_for_agents(
+			name,
+			false,
+			false,
+			true,
+			&[AgentType::Cursor, AgentType::OpenCode],
+		)
+		.expect("removal must succeed when request names every enabled reader");
+
+	assert!(outcome.executed, "removal must be executed");
+	assert!(!outcome.absent, "removal must not be absent");
+	assert!(
+		outcome.failed_paths.is_empty(),
+		"failed_paths must be empty"
+	);
+	assert!(
+		!outcome.plan.shared_master_kept,
+		"shared_master_kept must be false"
+	);
+	assert!(
+		!skill_dir.exists(),
+		"the real skill directory must be removed"
+	);
+}
+
 // The direction that must NOT regress: a private per-agent copy (a real dir
 // outside the universal roots, nothing linking into it) is still deletable
 // through the seam. The guard is about shared storage, not about dirs.
@@ -3419,4 +3803,315 @@ fn skill_patch_blank_tools_clear_and_absent_keep() {
 	}
 	.apply_to(existing);
 	assert_eq!(patched.tools, Vec::<String>::new());
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_batch_verdict_is_independent_of_order() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let orders = [
+		(
+			"Order A",
+			vec![AgentType::Claude, AgentType::Cursor, AgentType::OpenCode],
+		),
+		(
+			"Order B",
+			vec![AgentType::Cursor, AgentType::OpenCode, AgentType::Claude],
+		),
+	];
+
+	for (order_name, order) in orders {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let tmp = tempfile::tempdir().unwrap();
+		let home = tmp.path();
+		let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+		let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+			keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+		std::env::set_var("HOME", home);
+		std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+		std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+
+		struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+		impl Drop for Guard {
+			fn drop(&mut self) {
+				for (k, v) in &self.0 {
+					match v {
+						Some(val) => std::env::set_var(k, val),
+						None => std::env::remove_var(k),
+					}
+				}
+			}
+		}
+		let _restore = Guard(prev);
+
+		let name = "x";
+		let skill_dir = home.join(".agents/skills").join(name);
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: x\ndescription: test\n---\n",
+		)
+		.unwrap();
+
+		let claude_dir = home.join(".claude/skills");
+		std::fs::create_dir_all(&claude_dir).unwrap();
+		let claude_link = claude_dir.join(name);
+		std::os::unix::fs::symlink(&skill_dir, &claude_link).unwrap();
+
+		let enabled_three =
+			[AgentType::Claude, AgentType::Cursor, AgentType::OpenCode];
+		let disabled: Vec<&str> = AgentType::ALL
+			.iter()
+			.filter(|&&a| !enabled_three.contains(&a))
+			.map(|a| a.as_str())
+			.collect();
+		let _agent_guard =
+			crate::agent_settings::test_override::disable(&disabled);
+
+		let requested = enabled_three;
+
+		// Phase 1: dry-run preview of every row from the untouched start state
+		let mut previews = Vec::new();
+		for &agent in &order {
+			let mut mgr = ConfigManager::new(create_adapter(agent), true, None);
+			mgr.load().unwrap();
+			let outcome = mgr
+				.remove_skill_planned_for_agents(
+					name, false, true, false, &requested,
+				)
+				.expect("preview must succeed");
+			previews.push((
+				agent,
+				outcome.plan.shared_master_kept,
+				outcome.plan.paths.clone(),
+			));
+		}
+
+		// Phase 2: execute (dry_run=false, confirm=true) rows in that order on the same fixture
+		let mut executed = Vec::new();
+		for &agent in &order {
+			let mut mgr = ConfigManager::new(create_adapter(agent), true, None);
+			let load_res = mgr.load();
+			let res = if load_res.is_ok() {
+				mgr.remove_skill_planned_for_agents(
+					name, false, false, true, &requested,
+				)
+			} else {
+				Err(ConfigError::resource_not_found("skill", name))
+			};
+
+			match res {
+				Ok(outcome) if outcome.absent => {
+					executed.push((agent, None));
+				}
+				Ok(outcome) => {
+					executed.push((agent, Some(outcome.plan.paths)));
+				}
+				Err(ConfigError::ResourceNotFound { .. }) => {
+					executed.push((agent, None));
+				}
+				Err(e) => {
+					panic!("{order_name}: unexpected error executing row for {agent:?}: {e}");
+				}
+			}
+		}
+
+		// (i) for every row that executed, its executed paths are a subset of its preview paths;
+		// and the UNION of preview paths across rows equals the UNION of executed paths across rows, for both orders.
+		let mut preview_union = std::collections::BTreeSet::new();
+		let mut executed_union = std::collections::BTreeSet::new();
+
+		for ((prev_agent, _kept, prev_paths), (exec_agent, exec_paths)) in
+			previews.iter().zip(executed.iter())
+		{
+			assert_eq!(prev_agent, exec_agent);
+			for p in prev_paths {
+				preview_union.insert(p.clone());
+			}
+			if let Some(exec_paths) = exec_paths {
+				for p in exec_paths {
+					assert!(
+						prev_paths.contains(p),
+						"{order_name}: executed path {:?} not in preview paths {:?} for {prev_agent:?}",
+						p,
+						prev_paths
+					);
+					executed_union.insert(p.clone());
+				}
+			}
+		}
+		assert_eq!(
+			preview_union, executed_union,
+			"{order_name}: union of preview paths != union of executed paths. Previews: {previews:?}, Executed: {executed:?}"
+		);
+
+		// (iii) no order reports a preview `kept` for a row that then deletes
+		for ((prev_agent, kept, _prev_paths), (_exec_agent, exec_paths)) in
+			previews.iter().zip(executed.iter())
+		{
+			if *kept {
+				if let Some(paths) = exec_paths {
+					assert!(
+						paths.is_empty(),
+						"{order_name}: {prev_agent:?} reported preview kept=true but executed deletion of {paths:?}"
+					);
+				}
+			}
+		}
+
+		// (ii) both orders end in the same final disk state: real dir gone AND claude link gone
+		let real_dir_exists = skill_dir.exists();
+		let link_exists = claude_link.symlink_metadata().is_ok();
+		drop(_agent_guard);
+		drop(_restore);
+		drop(_env);
+		assert!(
+			!real_dir_exists && !link_exists,
+			"{order_name} final state mismatch: real_dir exists = {real_dir_exists}, claude link exists = {link_exists}. Previews: {previews:?}, Executed: {executed:?}"
+		);
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_keeps_and_refuses_when_link_belongs_to_unrequested_agent() {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path();
+	let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+	let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+		keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+	std::env::set_var("HOME", home);
+	std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+	std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+
+	struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+	impl Drop for Guard {
+		fn drop(&mut self) {
+			for (k, v) in &self.0 {
+				match v {
+					Some(val) => std::env::set_var(k, val),
+					None => std::env::remove_var(k),
+				}
+			}
+		}
+	}
+	let _restore = Guard(prev);
+
+	let name = "x";
+	let skill_dir = home.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		"---\nname: x\ndescription: test\n---\n",
+	)
+	.unwrap();
+
+	let claude_dir = home.join(".claude/skills");
+	std::fs::create_dir_all(&claude_dir).unwrap();
+	let claude_link = claude_dir.join(name);
+	std::os::unix::fs::symlink(&skill_dir, &claude_link).unwrap();
+
+	let enabled = [AgentType::Claude, AgentType::Cursor, AgentType::OpenCode];
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| !enabled.contains(&a))
+		.map(|a| a.as_str())
+		.collect();
+	let _agent_guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let requested = [AgentType::Cursor, AgentType::OpenCode];
+
+	let mut cursor =
+		ConfigManager::new(create_adapter(AgentType::Cursor), true, None);
+	cursor.load().unwrap();
+
+	let preview = cursor
+		.remove_skill_planned_for_agents(name, false, true, false, &requested)
+		.expect("preview must succeed");
+	assert!(
+		preview.plan.shared_master_kept,
+		"shared_master_kept must be true in preview"
+	);
+	assert!(
+		preview.plan.paths.is_empty(),
+		"plan.paths must be empty in preview, got: {:?}",
+		preview.plan.paths
+	);
+
+	let err = cursor
+		.remove_skill_planned_for_agents(name, false, false, true, &requested)
+		.expect_err("execution must be refused");
+	assert!(
+		matches!(err, ConfigError::UnsupportedOperation(_)),
+		"expected UnsupportedOperation, got {err:?}"
+	);
+	let msg = err.to_string();
+	assert!(
+		msg.contains("claude"),
+		"message must contain 'claude': {msg}"
+	);
+	assert!(
+		msg.contains(&claude_link.display().to_string()),
+		"message must contain link path '{}': {msg}",
+		claude_link.display()
+	);
+	assert!(skill_dir.exists(), "real dir must still exist");
+	assert!(
+		claude_link.symlink_metadata().is_ok(),
+		"symlink must still exist"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_empty_request_fails_closed() {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	std::fs::create_dir_all(root.join(".claude")).unwrap();
+
+	let name = "x";
+	let skill_dir = root.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		"---\nname: x\ndescription: test\n---\n",
+	)
+	.unwrap();
+
+	// Disable ALL agents
+	let disabled: Vec<&str> =
+		AgentType::ALL.iter().map(|a| a.as_str()).collect();
+	let _agent_guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	cursor.load().unwrap();
+
+	let err = cursor
+		.remove_skill(name)
+		.expect_err("remove_skill with empty requested must fail closed");
+
+	assert!(
+		skill_dir.exists(),
+		"real directory must still exist after failed removal, err: {err}"
+	);
 }

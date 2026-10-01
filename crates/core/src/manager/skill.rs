@@ -603,9 +603,10 @@ impl ConfigManager {
 		let agent_name = self.adapter.name().to_string();
 		// Allow-listed roots for the containment guard, plus the agent dirs the
 		// referrer guard sweeps. Both computed before the mutable borrow below.
+		let scope = self.scope;
 		let project_root = self.project_root.clone();
 		let all_agent_dirs = crate::skills::removal::agent_skill_dirs_in_scope(
-			self.scope,
+			scope,
 			project_root.as_deref(),
 		);
 		let roots = crate::skills::removal::allowed_skill_roots(
@@ -640,10 +641,8 @@ impl ConfigManager {
 
 		if let Some(path) = file_path {
 			if path.exists() {
-				// PUBLIC seam whose `!is_link` branch ends in `remove_dir_all`:
-				// a shared directory discovered with `canonical_path = None`
-				// must not be eaten. The rule is `plan_copy_removal`'s, shared
-				// verbatim rather than restated.
+				// The plain seam stays strict because it passes no requested
+				// set; the planned seam decides by readers.
 				// See docs/history/core-manager.md#remove-skill-ate-a-shared-master
 				if !is_link {
 					if let Some(dir) = path.parent() {
@@ -652,6 +651,8 @@ impl ConfigManager {
 							&all_agent_dirs,
 							name,
 							project_root.as_deref(),
+							scope,
+							&[],
 						)
 						.is_some()
 						{
@@ -987,10 +988,11 @@ impl ConfigManager {
 				// can act on.
 				// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
 				let mut reason = if where_.is_empty() {
-					"skill it reads from the shared master".to_string()
+					"skill it reads from a location shared with other agents"
+						.to_string()
 				} else {
 					format!(
-						"skill it reads from the shared master; it is still \
+						"skill it reads from a location shared with other agents; it is still \
 						 served to this agent from: {where_}"
 					)
 				};

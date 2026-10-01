@@ -323,7 +323,9 @@ fn confirmed_single_agent_delete_of_a_shared_master_errors() {
 		.remove_skill_planned("shared", false, false, true)
 		.expect_err("an executing delete that removes nothing must fail");
 	assert!(
-		error.to_string().contains("shared master"),
+		error
+			.to_string()
+			.contains("location shared with other agents"),
 		"the error must say why, got: {error}"
 	);
 	assert!(master.join("SKILL.md").exists());
@@ -375,7 +377,9 @@ fn delete_refuses_when_the_agent_keeps_reading_it_from_the_master() {
 		 Referrer alone must be refused",
 	);
 	assert!(
-		error.to_string().contains("shared master"),
+		error
+			.to_string()
+			.contains("location shared with other agents"),
 		"the error must say why, got: {error}"
 	);
 }
@@ -423,7 +427,9 @@ fn grok_delete_refuses_when_the_master_slot_still_serves_it() {
 		.remove_skill_planned("shared", false, false, true)
 		.expect_err("removing grok's Referrer alone changes nothing it reads");
 	assert!(
-		error.to_string().contains("shared master"),
+		error
+			.to_string()
+			.contains("location shared with other agents"),
 		"the error must say why, got: {error}"
 	);
 

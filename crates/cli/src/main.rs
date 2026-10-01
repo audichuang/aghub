@@ -296,10 +296,12 @@ enum Commands {
 	///
 	/// Read `outcome`, not `dry_run`/`executed`: `preview` | `removed` |
 	/// `absent` | `partial` | `kept`. `kept` means nothing was removed and the
-	/// `.aghub/<name>` master is still there — either another agent still
-	/// reads it, or an `--all-agents` sweep could not clear everything holding
-	/// it. `success: true` AND THE SKILL IS STILL THERE; the payload's
-	/// `skipped` names what stayed.
+	/// skill is still there: an agent outside the request still reads it from a
+	/// location shared with other agents (a `.aghub/<name>` master, or a real
+	/// directory in a shared slot such as `.agents/skills`), a symlink from an
+	/// agent outside the request still points at it, or an `--all-agents`
+	/// sweep could not clear everything holding it. `success: true` AND THE
+	/// SKILL IS STILL THERE; the payload's `skipped` names what stayed.
 	Delete {
 		#[arg(value_enum)]
 		resource: ResourceType,
@@ -1160,9 +1162,11 @@ fn render_removal(
 			// Names no directory: the remedies suffice, and a hardcoded path
 			// went stale once the Master moved to `.aghub`.
 			"{} '{name}' was NOT removed: this agent still reads it from a \
-			 master shared with other agents. Delete it for all agents \
-			 (--all-agents), or remove it from the other agents sharing that \
-			 master first.\n",
+			 location shared with other agents (a .aghub master, or a real \
+			 directory in a shared slot). Delete it for all agents \
+			 (--all-agents), or name the other agents that read it in the \
+			 same -a list / remove it from the other agents sharing it \
+			 first.\n",
 			resource.singular()
 		);
 	}
@@ -2764,7 +2768,7 @@ mod tests {
 			false,
 		);
 		assert!(
-			single.contains("master shared with other agents")
+			single.contains("location shared with other agents")
 				&& single.contains("(--all-agents)"),
 			"the single-agent remedy is correct there and must stay: {single}"
 		);
