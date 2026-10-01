@@ -4550,6 +4550,75 @@ fn setup_real_dir_fixture(
 	(skill_dir, claude_link, cursor_link)
 }
 
+// A failed `remove_dir_all` must not leave the requested agents' links
+// already unlinked. A read-only parent fails AFTER the destructive step
+// began (the directory's children go first, the final rmdir is refused), so
+// only the link/dir ORDER decides what is left behind.
+// See docs/history/core-removal.md#dir-delete-failure-left-links-unlinked
+#[cfg(unix)]
+#[test]
+fn real_dir_delete_failure_keeps_the_requested_agents_links() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+	use std::os::unix::fs::PermissionsExt;
+
+	let enabled_three =
+		[AgentType::Claude, AgentType::Cursor, AgentType::OpenCode];
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| !enabled_three.contains(&a))
+		.map(|a| a.as_str())
+		.collect();
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let _agent_guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path().to_path_buf();
+	let (skill_dir, claude_link, cursor_link) =
+		setup_real_dir_fixture(&root, "x");
+	let slot = root.join(".agents/skills");
+	std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o555))
+		.unwrap();
+	// Root ignores the mode bits, so the failure this test needs cannot happen.
+	let writable_anyway = std::fs::write(slot.join(".probe"), b"").is_ok();
+
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(&root),
+	);
+	manager.load().unwrap();
+	let result = manager.remove_skill_planned_for_agents(
+		"x",
+		false,
+		false,
+		true,
+		&enabled_three,
+	);
+	std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o755))
+		.unwrap();
+	if writable_anyway {
+		return;
+	}
+
+	let outcome = result.expect("a failed unlink is reported, not an error");
+	assert!(
+		outcome.failed_paths.iter().any(|path| path == &skill_dir),
+		"the directory removal must be the reported failure: {:?}",
+		outcome.failed_paths
+	);
+	assert!(
+		std::fs::symlink_metadata(&claude_link).is_ok(),
+		"claude's link must survive a failed directory delete"
+	);
+	assert!(
+		std::fs::symlink_metadata(&cursor_link).is_ok(),
+		"cursor's link must survive a failed directory delete"
+	);
+}
+
 #[cfg(unix)]
 #[test]
 fn real_dir_batch_with_own_links_is_order_independent() {

@@ -556,17 +556,15 @@ pub async fn delete_skill_by_path(
 				response.error = error;
 				return Ok(Json(response));
 			}
-			let mut paths =
-				aghub_core::skills::removal::plan_owned_inbound_links(
-					&skill_dir,
-					&all_in_scope,
-					&roots,
-					&skill_name,
-					project_root.as_deref(),
-					resource_scope,
-					&requested_agents,
-				);
-			paths.push(skill_dir.clone());
+			let paths = aghub_core::skills::removal::plan_dir_release_paths(
+				skill_dir.clone(),
+				&all_in_scope,
+				&roots,
+				&skill_name,
+				project_root.as_deref(),
+				resource_scope,
+				&requested_agents,
+			);
 			let plan = aghub_core::skills::removal::RemovalPlan {
 				layout: aghub_core::skills::removal::Layout::Copy,
 				paths,

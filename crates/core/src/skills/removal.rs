@@ -846,8 +846,8 @@ fn assemble_copy_release_plan(
 	push_contained(root, roots, &mut paths, &mut skipped);
 	if paths.len() > start_len {
 		let root_path = paths.pop().expect("root was just pushed");
-		let owned = plan_owned_inbound_links(
-			&root_path,
+		paths = plan_dir_release_paths(
+			root_path,
 			all_agent_dirs,
 			roots,
 			name,
@@ -855,8 +855,6 @@ fn assemble_copy_release_plan(
 			scope,
 			requested_agents,
 		);
-		paths.extend(owned);
-		paths.push(root_path);
 	}
 	RemovalPlan {
 		layout: Layout::Copy,
@@ -1239,6 +1237,34 @@ pub fn plan_owned_inbound_links(
 	paths
 }
 
+/// The paths that release a real directory: the directory FIRST, then the
+/// inbound links the requested agents own. `execute_removal` skips a link into
+/// a directory whose removal failed, so a failed `remove_dir_all` leaves those
+/// links in place instead of half-releasing the skill.
+/// See docs/history/core-removal.md#dir-delete-failure-left-links-unlinked
+pub fn plan_dir_release_paths(
+	dir: PathBuf,
+	all_agent_dirs: &[PathBuf],
+	roots: &[PathBuf],
+	name: &str,
+	project_root: Option<&Path>,
+	scope: crate::models::ResourceScope,
+	requested: &[crate::models::AgentType],
+) -> Vec<PathBuf> {
+	let mut paths = vec![dir];
+	let owned = plan_owned_inbound_links(
+		&paths[0],
+		all_agent_dirs,
+		roots,
+		name,
+		project_root,
+		scope,
+		requested,
+	);
+	paths.extend(owned);
+	paths
+}
+
 /// The one rule for "may a single-agent / comma-list removal delete a real
 /// directory skill folder?". Evaluated in order:
 /// 1. Inside the `.aghub` store -> [`KeepReason::UniversalMaster`], always.
@@ -1430,7 +1456,8 @@ impl RemovalOutcome {
 			.map_err(crate::errors::ConfigError::Io)?;
 		for path in &report.skipped {
 			log::warn!(
-				"skipped removal of '{}' (outside skills roots)",
+				"skipped removal of '{}' (outside skills roots, or its directory \
+				 could not be removed)",
 				path.display()
 			);
 		}
@@ -1502,6 +1529,8 @@ pub fn execute_removal(
 	roots: &[PathBuf],
 ) -> std::io::Result<RemovalReport> {
 	let mut report = RemovalReport::default();
+	// Directories whose removal failed, resolved while they still exist.
+	let mut failed_dirs: Vec<PathBuf> = Vec::new();
 	for path in &plan.paths {
 		let meta = match std::fs::symlink_metadata(path) {
 			Ok(m) => m,
@@ -1513,6 +1542,16 @@ pub fn execute_removal(
 		};
 		let ft = meta.file_type();
 		if Linker::is_link(path) {
+			// Keep a link into a directory we failed to delete: unlinking it
+			// would revoke a grant while the content is still there.
+			// See docs/history/core-removal.md#dir-delete-failure-left-links-unlinked
+			if !failed_dirs.is_empty() {
+				let target = ::skill::lock::resolve_existing(path);
+				if failed_dirs.iter().any(|dir| target.starts_with(dir)) {
+					report.skipped.push(path.clone());
+					continue;
+				}
+			}
 			match Linker::unlink(path) {
 				Ok(()) => report.removed.push(path.clone()),
 				Err(e) => report.failed.push((path.clone(), e)),
@@ -1523,7 +1562,10 @@ pub fn execute_removal(
 			if assert_strictly_contained(path, roots).is_some() {
 				match std::fs::remove_dir_all(path) {
 					Ok(()) => report.removed.push(path.clone()),
-					Err(e) => report.failed.push((path.clone(), e)),
+					Err(e) => {
+						failed_dirs.push(::skill::lock::resolve_existing(path));
+						report.failed.push((path.clone(), e));
+					}
 				}
 			} else {
 				report.skipped.push(path.clone());
