@@ -102,6 +102,11 @@ line** — don't reword it). Pass `--port N` to pin one.
   user action deletes from. A shared config file / Referrer is removed only
   when all of its readers are in it; desktop sends the group's agents. Absent
   means the path agent alone; an unknown id is a 400.
+- `DELETE /skills/by-path` accepts only a skill directory (own parsable
+  `SKILL.md`) or that `SKILL.md`; a category folder, a skill's subdirectory or
+  stray file, and an unresolvable path (ELOOP) are refused with path-free
+  messages — core's `by_path_skill_dir` / `by_path_skill_name`. Why:
+  `docs/history/api.md#delete-by-path-target-must-be-a-skill-root`.
 - Batch routes answer HTTP 200 for a handled batch whose rows failed — the row's
   `error` is the answer, and failed rows are also logged (never the source URL
   or a forwarded token).
