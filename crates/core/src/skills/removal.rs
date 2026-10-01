@@ -745,6 +745,17 @@ fn plan_copy_removal(
 			}
 			for copy in entries {
 				if copy.exists() && !paths.contains(&copy) {
+					// A tracked (or undecidable) real directory survives the
+					// sweep; the survivor is what blocks the commit.
+					if let Some(reason) =
+						shared_slot_git_keep(&copy, project_root)
+					{
+						if let Some(hint) = git_keep_hint(&reason, &copy) {
+							log::warn!("{hint}");
+						}
+						skipped.push(copy);
+						continue;
+					}
 					push_contained(copy, roots, &mut paths, &mut skipped);
 				}
 			}
@@ -793,9 +804,14 @@ fn plan_copy_removal(
 							skipped.push(root);
 						}
 					}
-					Some(KeepReason::GitTracked) => {
+					Some(
+						reason @ (KeepReason::GitTracked
+						| KeepReason::GitUndecided),
+					) => {
 						shared_master_kept = true;
-						log::warn!("{}", untrack_hint(&root));
+						if let Some(hint) = git_keep_hint(&reason, &root) {
+							log::warn!("{hint}");
+						}
 						skipped.push(root);
 					}
 					None => {
@@ -1107,14 +1123,33 @@ fn dir_lists_name(dir: &Path, safe: &str) -> Option<bool> {
 	Some(found)
 }
 
-/// Builds the warning hint message when a single-agent removal is refused
-/// because the skill directory is tracked by git.
+/// Builds the refusal text when a delete is refused because git tracks the
+/// skill directory. `--all-agents` is refused too, so it names no agent count.
 pub fn untrack_hint(path: &Path) -> String {
 	format!(
-		"{} is tracked by git, so deleting it for some agents is refused; keep authoring it there, or untrack it deliberately with `git rm -r --cached {}` (and commit that), then delete again",
+		"{} is tracked by git, so deleting it is refused; keep authoring it there, or untrack it deliberately with `git rm -r --cached {}` (and commit that), then delete again",
 		path.display(),
 		path.display()
 	)
+}
+
+/// The refusal text when git could not say whether it tracks `path` (git
+/// missing, unusable repository, `dubious ownership`, or a probe that timed
+/// out). Deleting an authored directory on a guess is the worse failure.
+pub fn git_undecided_hint(path: &Path) -> String {
+	format!(
+		"could not tell whether git tracks {} (git missing, unusable repository or timed out), so deleting it is refused; fix git for that repository and delete again, or remove the directory yourself",
+		path.display()
+	)
+}
+
+/// The refusal text for a git-driven keep, `None` for every other reason.
+pub fn git_keep_hint(reason: &KeepReason, path: &Path) -> Option<String> {
+	match reason {
+		KeepReason::GitTracked => Some(untrack_hint(path)),
+		KeepReason::GitUndecided => Some(git_undecided_hint(path)),
+		KeepReason::UniversalMaster | KeepReason::ExternalReferrer(_) => None,
+	}
 }
 
 /// Why a SINGLE-agent removal must keep a skill folder instead of deleting it.
@@ -1133,6 +1168,8 @@ pub enum KeepReason {
 	/// A real directory in a shared slot that is tracked by git. Deleting it
 	/// for only some agents is refused to avoid destroying authored source.
 	GitTracked,
+	/// Same population, but git could not answer. Fails CLOSED, like `repair`.
+	GitUndecided,
 }
 
 fn link_owned_by_requested(
@@ -1250,7 +1287,8 @@ pub fn plan_owned_inbound_links(
 ///    [`KeepReason::UniversalMaster`]. Empty `requested` fails closed
 ///    ONLY for shared Referrer roots (so the plain `ConfigManager::remove_skill`
 ///    seam, which passes no requested set, keeps deleting private copies).
-/// 4. Inside a shared Referrer root and tracked by git -> [`KeepReason::GitTracked`].
+/// 4. Inside a shared Referrer root and tracked by git -> [`KeepReason::GitTracked`];
+///    git unable to answer -> [`KeepReason::GitUndecided`] (see [`shared_slot_git_keep`]).
 /// 5. Otherwise `None` (a private copy or untracked shared slot).
 ///
 /// Shared by [`plan_copy_removal`], the symlink-row release in
@@ -1299,18 +1337,30 @@ pub fn single_agent_keep_reason(
 	if requested.is_empty() && is_universal_master(dir, project_root) {
 		return Some(KeepReason::UniversalMaster);
 	}
-	if is_universal_master(dir, project_root) {
-		// Deliberate divergence from repair (which refuses on Undecided):
-		// a single-agent delete treats Undecided (git missing, not a repo, error)
-		// as untracked and continues to None, so git absence or an unreadable repo
-		// does not block deletion.
-		if crate::skills::shape::git_tracked(dir)
-			== crate::skills::shape::GitTracked::Yes
-		{
-			return Some(KeepReason::GitTracked);
-		}
+	shared_slot_git_keep(dir, project_root)
+}
+
+/// The git half of the real-directory keep rule, shared by the single-agent
+/// verdict and the `--all-agents` sweep so the two cannot disagree: a real
+/// directory in a shared Referrer root that git tracks (or that git cannot
+/// answer for) is authored source and is never deleted. `None` for anything
+/// else, including a symlink — a tracked link is a Referrer, not a directory.
+/// See docs/history/core-removal.md#git-probe-had-no-deadline
+pub fn shared_slot_git_keep(
+	dir: &Path,
+	project_root: Option<&Path>,
+) -> Option<KeepReason> {
+	use crate::skills::shape::{git_tracked, GitTracked};
+	if !is_universal_master(dir, project_root)
+		|| !std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
+	{
+		return None;
 	}
-	None
+	match git_tracked(dir) {
+		GitTracked::Yes => Some(KeepReason::GitTracked),
+		GitTracked::Undecided => Some(KeepReason::GitUndecided),
+		GitTracked::No => None,
+	}
 }
 
 fn push_contained(

@@ -1961,6 +1961,35 @@ pub(crate) enum GitTracked {
 	Undecided,
 }
 
+/// Upper bound for one `git ls-files` probe. A healthy answer takes
+/// milliseconds; a hung git (stalled network filesystem, a lock held by
+/// something else) must not freeze a delete or repair, so past this it counts
+/// as [`GitTracked::Undecided`].
+/// See docs/history/core-removal.md#git-probe-had-no-deadline
+const GIT_PROBE_TIMEOUT: std::time::Duration =
+	std::time::Duration::from_secs(10);
+
+/// Runs `cmd` to completion for at most `limit`. `Ok(None)` means the deadline
+/// passed: the child was killed and reaped, so nothing is left running.
+fn status_within(
+	cmd: &mut std::process::Command,
+	limit: std::time::Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+	let mut child = cmd.spawn()?;
+	let deadline = std::time::Instant::now() + limit;
+	loop {
+		if let Some(status) = child.try_wait()? {
+			return Ok(Some(status));
+		}
+		if std::time::Instant::now() >= deadline {
+			let _ = child.kill();
+			let _ = child.wait();
+			return Ok(None);
+		}
+		std::thread::sleep(std::time::Duration::from_millis(5));
+	}
+}
+
 pub(crate) fn git_tracked(path: &Path) -> GitTracked {
 	let Some(parent) = path.parent() else {
 		return GitTracked::No;
@@ -2000,20 +2029,41 @@ pub(crate) fn git_tracked(path: &Path) -> GitTracked {
 		// skill when the desktop app runs a bulk repair.
 		cmd.creation_flags(0x0800_0000);
 	}
-	match cmd.status() {
-		Ok(s) if s.success() => GitTracked::Yes,
+	match status_within(&mut cmd, GIT_PROBE_TIMEOUT) {
+		Ok(Some(s)) if s.success() => GitTracked::Yes,
 		// Exactly 1 is "no pathspec matched": the definite negative.
-		Ok(s) if s.code() == Some(1) => GitTracked::No,
+		Ok(Some(s)) if s.code() == Some(1) => GitTracked::No,
 		// 128 (not a repository, an unusable gitfile, a path outside the repo),
-		// a signal, or no `git` binary at all. We know a repository is there
-		// and cannot say — see `RefuseReason::GitTrackingUndecided`.
+		// a signal, a timeout, or no `git` binary at all. We know a repository
+		// is there and cannot say — see `RefuseReason::GitTrackingUndecided`.
 		Ok(_) | Err(_) => GitTracked::Undecided,
 	}
 }
 
 #[cfg(all(test, unix))]
 mod git_env_tests {
-	use super::{git_tracked, GitTracked};
+	use super::{git_tracked, status_within, GitTracked};
+
+	#[test]
+	fn status_within_kills_a_child_that_outlives_the_deadline() {
+		let started = std::time::Instant::now();
+		let mut cmd = std::process::Command::new("sleep");
+		cmd.arg("30");
+		let outcome =
+			status_within(&mut cmd, std::time::Duration::from_millis(200))
+				.unwrap();
+		assert!(outcome.is_none(), "a hung child must report the timeout");
+		assert!(
+			started.elapsed() < std::time::Duration::from_secs(10),
+			"the probe must return at the deadline, not when the child exits"
+		);
+
+		let mut quick = std::process::Command::new("true");
+		let done =
+			status_within(&mut quick, std::time::Duration::from_secs(10))
+				.unwrap();
+		assert!(done.is_some_and(|s| s.success()));
+	}
 
 	const GIT_VARS: &[&str] = &[
 		"GIT_DIR",

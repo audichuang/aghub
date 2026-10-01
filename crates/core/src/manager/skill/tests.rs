@@ -4800,3 +4800,167 @@ fn real_dir_with_unrequested_enabled_linker_refuses_the_direct_reader_row() {
 		);
 	}
 }
+
+/// A project with ONE real directory skill in the shared `.agents/skills` slot,
+/// for the git-keep tests below.
+#[cfg(unix)]
+fn shared_slot_real_dir(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+	let tmp = tempfile::tempdir().unwrap();
+	std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+	let skill_dir = tmp.path().join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+	(tmp, skill_dir)
+}
+
+/// Only cursor + opencode enabled (every other agent disabled).
+#[cfg(unix)]
+fn only_cursor_and_opencode_enabled() -> impl Drop {
+	use crate::models::AgentType;
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor && a != AgentType::OpenCode)
+		.map(|a| a.as_str())
+		.collect();
+	crate::agent_settings::test_override::disable(&disabled)
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_git_tracked_all_agents_delete_is_refused() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	if !crate::skills::removal::tests::git_fixture::has_git() {
+		eprintln!("skipping test: git binary unavailable");
+		return;
+	}
+	let name = "all-agents-git-tracked";
+	let (tmp, skill_dir) = shared_slot_real_dir(name);
+	let root = tmp.path();
+	crate::skills::removal::tests::git_fixture::git(root, &["init", "-q"]);
+	crate::skills::removal::tests::git_fixture::git(
+		root,
+		&["add", "--", &format!(".agents/skills/{name}/SKILL.md")],
+	);
+	let _guard = only_cursor_and_opencode_enabled();
+	let mut cursor = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	cursor.load().unwrap();
+	let everyone = [AgentType::Cursor, AgentType::OpenCode];
+
+	let preview = cursor
+		.remove_skill_planned_for_agents(name, true, true, false, &everyone)
+		.expect("a preview previews");
+	assert!(
+		preview.plan.paths.is_empty() && preview.plan.shared_master_kept,
+		"the preview must not promise a delete the commit refuses: {:?}",
+		preview.plan
+	);
+
+	let err = cursor
+		.remove_skill_planned_for_agents(name, true, false, true, &everyone)
+		.expect_err("--all-agents must not delete a git-tracked directory");
+	let message = err.to_string();
+	assert!(
+		message.contains("tracked by git")
+			&& message.contains("git rm -r --cached")
+			&& message.contains(&skill_dir.display().to_string()),
+		"refusal must carry the path and the escape command: {message}"
+	);
+	assert!(
+		skill_dir.join("SKILL.md").exists(),
+		"nothing may be deleted"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_untracked_in_git_repo_all_agents_delete_is_allowed() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	if !crate::skills::removal::tests::git_fixture::has_git() {
+		eprintln!("skipping test: git binary unavailable");
+		return;
+	}
+	let name = "all-agents-git-untracked";
+	let (tmp, skill_dir) = shared_slot_real_dir(name);
+	crate::skills::removal::tests::git_fixture::git(
+		tmp.path(),
+		&["init", "-q"],
+	);
+	let _guard = only_cursor_and_opencode_enabled();
+	let mut cursor = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(tmp.path()),
+	);
+	cursor.load().unwrap();
+	let outcome = cursor
+		.remove_skill_planned_for_agents(
+			name,
+			true,
+			false,
+			true,
+			&[AgentType::Cursor, AgentType::OpenCode],
+		)
+		.expect("an untracked directory is still removable");
+	assert!(outcome.executed && !skill_dir.exists());
+}
+
+/// An unusable gitfile above the skill makes `git ls-files` exit 128: a
+/// repository is there and git cannot answer. Both delete verbs fail closed.
+#[cfg(unix)]
+#[test]
+fn real_dir_git_undecided_refuses_single_agent_and_all_agents_delete() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	if !crate::skills::removal::tests::git_fixture::has_git() {
+		eprintln!("skipping test: git binary unavailable");
+		return;
+	}
+	for all_agents in [false, true] {
+		let name = "git-undecided";
+		let (tmp, skill_dir) = shared_slot_real_dir(name);
+		std::fs::write(tmp.path().join(".git"), "gitdir: /nonexistent\n")
+			.unwrap();
+		let _guard = only_cursor_and_opencode_enabled();
+		let mut cursor = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(tmp.path()),
+		);
+		cursor.load().unwrap();
+		let err = cursor
+			.remove_skill_planned_for_agents(
+				name,
+				all_agents,
+				false,
+				true,
+				&[AgentType::Cursor, AgentType::OpenCode],
+			)
+			.expect_err("an undecidable probe must refuse the delete");
+		let message = err.to_string();
+		assert!(
+			message.contains("could not tell whether git tracks")
+				&& message.contains(&skill_dir.display().to_string()),
+			"all_agents={all_agents}: {message}"
+		);
+		assert!(skill_dir.exists(), "all_agents={all_agents}: still there");
+	}
+}

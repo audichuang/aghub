@@ -1256,6 +1256,8 @@ const zhHant: typeof en = {
 		"`{{name}}` 只刪掉一部分:有些檔案移除失敗(權限,或檔案正在使用中)。請檢查該 skill 的資料夾後再試一次。",
 	deleteSkillKeptSharedMaster:
 		"`{{name}}` 沒有被刪除:還有其他 agent 在讀它的共用位置。請先從那些 agent 移除;若 git 正在追蹤該目錄,請先明確取消追蹤後再試。",
+	deleteSkillKeptGit:
+		"`{{name}}` 沒有被刪除:git 正在追蹤 `{{path}}`,或無法向 git 查詢。請先執行 `git rm -r --cached {{path}}` 明確取消追蹤(並提交),或修復該儲存庫的 git,再試一次。",
 	sourceRemovedCleanFailed: "清理 `{{name}}` 失敗。",
 	sourceRemovedCleanLockOnly:
 		"`{{name}}` 的檔案已經不在磁碟上,所以這次沒有移除任何東西。清單已重新整理:若這一列消失,表示它已被別處清掉;若還在,代表只剩 lock 裡的殘留紀錄,請用上方的孤兒 lock 清理把它移除。",

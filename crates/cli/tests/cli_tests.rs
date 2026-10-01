@@ -7868,6 +7868,55 @@ fn dotfiles_shared_private_dir_delete_uses_the_complete_agent_list() {
 	assert!(!private.exists());
 }
 
+/// `--all-agents` promises "gone everywhere" but must not be the way around the
+/// git-tracked refusal that a single-agent delete honours.
+#[cfg(unix)]
+#[test]
+fn delete_all_agents_real_dir_git_tracked_is_refused() {
+	if !cli_has_git() {
+		eprintln!("skipping test: git binary unavailable");
+		return;
+	}
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let proj = project.path();
+	std::fs::create_dir_all(proj.join(".claude")).unwrap();
+	cli_git(proj, &["init", "-q"]);
+
+	let name = "all-agents-tracked";
+	let skill_dir = proj.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+	cli_git(
+		proj,
+		&["add", "--", &format!(".agents/skills/{name}/SKILL.md")],
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(proj)
+		.args(["-p", "delete", "skills", name, "--all-agents", "--yes"])
+		.output()
+		.unwrap();
+	let all = format!(
+		"{}{}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert_eq!(out.status.code(), Some(1), "{all}");
+	assert!(
+		all.contains("tracked by git")
+			&& all.contains("git rm -r --cached")
+			&& all.contains(&skill_dir.display().to_string()),
+		"refusal must carry the path and escape command: {all}"
+	);
+	assert!(skill_dir.join("SKILL.md").exists(), "must stay: {all}");
+}
+
 #[cfg(unix)]
 #[test]
 fn delete_real_dir_git_tracked_is_refused_untracked_allowed() {

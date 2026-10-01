@@ -263,14 +263,11 @@ Git-tracked directories: a real directory git TRACKS is authored source, and
 deleting it for "some agents" would remove it from version control. Like
 `repair` (`GitTrackedSource`, reusing `shape::git_tracked`), the release step
 refuses it (`KeepReason::GitTracked`; the warning prints
-`git rm -r --cached <path>` as the escape). Divergence on purpose: `repair`
-also refuses when tracking cannot be decided (git missing, unusable
-repository); a delete treats that as untracked and goes ahead, because git being
-absent must not make a skill undeletable. Only the shared-slot real-directory
-release is gated; `--all-agents` and the link layout are not. The refusal
-message itself carries the tracked path and `git rm -r --cached <path>` escape;
-the current `--all-agents` path can still delete such a directory and is not a
-supported bypass. `git_tracked` clears inherited `GIT_DIR`, `GIT_WORK_TREE`,
+`git rm -r --cached <path>` as the escape). `--all-agents` is gated by the same
+rule (below), and an undecidable probe now refuses too — see
+[Git probe had no deadline](#git-probe-had-no-deadline). The link layout is not
+gated. The refusal message itself carries the tracked path and the
+`git rm -r --cached <path>` escape. `git_tracked` clears inherited `GIT_DIR`, `GIT_WORK_TREE`,
 `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY` and `GIT_NAMESPACE`
 before spawning git, so a hook or parent process cannot make the probe answer
 for another repository.
@@ -320,6 +317,46 @@ cli tests `dotfiles_shared_private_dir_delete_uses_the_complete_agent_list`,
 `manager::skill::tests::single_agent_remove_skill_refused_when_initiator_disabled_and_other_reader_enabled`,
 `manager::skill::tests::single_agent_remove_skill_project_scope_refused_when_initiator_disabled_and_other_reader_enabled`,
 cli test `delete_single_agent_disabled_initiator_refuses_enabled_shared_slot_reader`.
+
+## Git probe had no deadline
+
+Three gaps in the git-tracked guard, closed together because they share one
+probe (`shape::git_tracked`) and one rule (`removal::shared_slot_git_keep`):
+
+- `--all-agents` (CLI, API by-name, the desktop's delete-from-all) deleted a
+  git-tracked real directory in a shared slot that single-agent, comma-list and
+  by-path deletes refused. It was a documented residual risk, not a design: the
+  sweep's copy branch pushed every same-named copy into `paths` without asking
+  git. Now each copy asks `shared_slot_git_keep`; a hit goes to `skipped`, the
+  survivor trips the `--all-agents` "gone everywhere" check BEFORE commit, and
+  the error is the git hint instead of "still discoverable afterwards". Preview
+  and `--yes` agree. This is a BEHAVIOUR CHANGE: scripts that relied on
+  `--all-agents` to delete tracked source now exit 1 and must untrack first.
+- The probe had no deadline, so a hung git froze a delete or a repair. It now
+  gets 10 s (`GIT_PROBE_TIMEOUT`); the child is killed and reaped, and the
+  answer is `Undecided`.
+- `Undecided` (git missing, unusable gitfile, `dubious ownership`, timeout)
+  used to count as untracked for deletes, while `repair` refused. Now it
+  refuses for deletes too (`KeepReason::GitUndecided`), so one probe has one
+  meaning everywhere. The blast radius is only a real directory in a shared
+  slot under a git ancestor; the escape is fixing git for that repository (or
+  removing the directory by hand). `doctor` and `repair` already refused on it.
+
+Not covered on purpose: a git-tracked project `.aghub/<name>` Master under
+`--all-agents` (it is a Master, not a shared-slot real directory; single-agent
+deletes always keep it, `--all-agents` still removes it by design), and a
+tracked directory in an agent's PRIVATE skills dir (the guard has always been
+shared-slot only). The desktop used to show the server's English `error` for a
+`kept` git refusal instead of its localized text; it now picks the localized
+`deleteSkillKeptGit` and uses the server text only for the path.
+
+Tests: `manager::skill::tests::real_dir_git_tracked_all_agents_delete_is_refused`,
+`manager::skill::tests::real_dir_untracked_in_git_repo_all_agents_delete_is_allowed`,
+`manager::skill::tests::real_dir_git_undecided_refuses_single_agent_and_all_agents_delete`,
+`skills::shape::git_env_tests::status_within_kills_a_child_that_outlives_the_deadline`,
+cli `delete_all_agents_real_dir_git_tracked_is_refused`, api
+`delete_by_name_all_agents_refuses_git_tracked_real_dir`, desktop
+`src/lib/skill-delete-message.test.ts`.
 
 ## Reconcile delete order needs the full roster
 

@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next";
 import type { SkillResponse } from "../generated/dto";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
+import { keptDeleteMessage } from "../lib/skill-delete-message";
 import { invalidateSkillQueries } from "../requests/skills";
 import type { LocationGroup, SkillGroup } from "./skill-detail-helpers";
 
@@ -74,12 +75,10 @@ export function DeleteSkillLocationDialog({
 				// request was understood), and reading only that closed this
 				// dialog and refreshed the list as if the skill were gone —
 				// while it was still installed and still visible.
-				throw new Error(
-					result.error ||
-						t("deleteSkillKeptSharedMaster", {
-							name: skillName,
-						}),
-				);
+				//
+				// Never `result.error ||` here: that is English, set only by a
+				// git refusal, and it overrode the localized text.
+				throw new Error(keptDeleteMessage(result, skillName, t));
 			}
 			if (result.outcome === "partial") {
 				// Some paths went, some did not. Still an error for the user —

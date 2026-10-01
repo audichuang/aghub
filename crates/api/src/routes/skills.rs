@@ -501,14 +501,9 @@ pub async fn delete_skill_by_path(
 					&requested_agents,
 				);
 			if let Some(reason) = keep_reason {
-				let error = match &reason {
-					aghub_core::skills::removal::KeepReason::GitTracked => {
-						Some(aghub_core::skills::removal::untrack_hint(
-							&skill_dir,
-						))
-					}
-					_ => None,
-				};
+				let error = aghub_core::skills::removal::git_keep_hint(
+					&reason, &skill_dir,
+				);
 				match reason {
 					aghub_core::skills::removal::KeepReason::ExternalReferrer(
 						ref referrer,
@@ -521,13 +516,11 @@ pub async fn delete_skill_by_path(
 							referrer.display()
 						);
 					}
-					aghub_core::skills::removal::KeepReason::GitTracked => {
-						log::warn!(
-							"{}",
-							aghub_core::skills::removal::untrack_hint(
-								&skill_dir
-							)
-						);
+					aghub_core::skills::removal::KeepReason::GitTracked
+					| aghub_core::skills::removal::KeepReason::GitUndecided => {
+						if let Some(hint) = &error {
+							log::warn!("{hint}");
+						}
 					}
 					aghub_core::skills::removal::KeepReason::UniversalMaster => {}
 				}
@@ -4154,6 +4147,73 @@ mod tests {
 				assert_eq!(
 					resp.outcome,
 					crate::dto::skill::RemovalOutcomeKind::Removed,
+				);
+			});
+		});
+	}
+
+	/// `all_agents` must not be a way around the git-tracked refusal that the
+	/// single-agent and by-path deletes honour.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_all_agents_refuses_git_tracked_real_dir() {
+		if !test_has_git() {
+			eprintln!("skipping test: git binary unavailable");
+			return;
+		}
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| {
+							a.as_str() != "cursor" && a.as_str() != "opencode"
+						})
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				test_git(proj, &["init", "-q"]);
+				let slot = proj.join(".agents/skills/tracked-all");
+				std::fs::create_dir_all(&slot).unwrap();
+				std::fs::write(
+					slot.join("SKILL.md"),
+					"---\nname: tracked-all\ndescription: d\n---\n",
+				)
+				.unwrap();
+				test_git(
+					proj,
+					&["add", "--", ".agents/skills/tracked-all/SKILL.md"],
+				);
+
+				let req = DeleteSkillParams {
+					scope: Some("project".to_string()),
+					project_root: Some(proj.display().to_string()),
+					confirm: Some(true),
+					all_agents: Some(true),
+					agents: None,
+				};
+				let result = block_on(delete_skill(
+					TrustedLocalOrigin,
+					AgentParam(AgentType::Cursor),
+					"tracked-all",
+					req,
+				));
+				let message = match result {
+					Ok(resp) => format!("{:?}", resp.into_inner().error),
+					Err(error) => error.body.error,
+				};
+				assert!(
+					slot.join("SKILL.md").exists(),
+					"all_agents must not delete a git-tracked directory: {message}"
+				);
+				assert!(
+					message.contains("git rm -r --cached"),
+					"the refusal must carry the escape command: {message}"
 				);
 			});
 		});

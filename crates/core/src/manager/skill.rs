@@ -956,23 +956,24 @@ impl ConfigManager {
 				.map(|path| path.display().to_string())
 				.collect::<Vec<_>>()
 				.join(", ");
-			// Reuse the planner's one keep rule to explain a GitTracked keep;
-			// presentation must not invent a second verdict.
-			let git_tracked_refusal =
-				plan.still_read_from.iter().find_map(|path| {
-					matches!(
-						removal::single_agent_keep_reason(
-							path,
-							&all_agent_dirs,
-							name,
-							project_root.as_deref(),
-							scope,
-							requested_agents,
-						),
-						Some(removal::KeepReason::GitTracked)
+			// Reuse the planner's one git keep rule to explain a git keep;
+			// presentation must not invent a second verdict. `--all-agents`
+			// has no requested set, so it asks the shared git half directly.
+			let git_refusal = plan.still_read_from.iter().find_map(|path| {
+				let reason = if all_agents {
+					removal::shared_slot_git_keep(path, project_root.as_deref())
+				} else {
+					removal::single_agent_keep_reason(
+						path,
+						&all_agent_dirs,
+						name,
+						project_root.as_deref(),
+						scope,
+						requested_agents,
 					)
-					.then(|| removal::untrack_hint(path))
-				});
+				}?;
+				removal::git_keep_hint(&reason, path)
+			});
 			// `--all-agents` is a DIFFERENT failure (the sweep left a copy
 			// behind) and needs its own wording.
 			let (operation, reason) = if all_agents {
@@ -991,8 +992,12 @@ impl ConfigManager {
 					})
 					.map(|path| path.display().to_string())
 					.collect::<Vec<_>>();
-				let mut reason =
-					format!("skill still discoverable afterwards in: {where_}");
+				let mut reason = match git_refusal {
+					Some(hint) => hint,
+					None => format!(
+						"skill still discoverable afterwards in: {where_}"
+					),
+				};
 				if !held_by_disabled.is_empty() {
 					reason.push_str(&format!(
 						". Read only by disabled agent(s), which --all-agents never touches: {}. \
@@ -1006,7 +1011,7 @@ impl ConfigManager {
 				// Referrer in this agent's own second read dir is what the user
 				// can act on.
 				// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
-				let mut reason = if let Some(reason) = git_tracked_refusal {
+				let mut reason = if let Some(reason) = git_refusal {
 					reason
 				} else if where_.is_empty() {
 					"skill it reads from a location shared with other agents"

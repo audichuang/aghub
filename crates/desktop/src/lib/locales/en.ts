@@ -1323,6 +1323,8 @@ export default {
 		"`{{name}}` was only partly deleted: some files could not be removed (permissions, or a file in use). Check the skill's folder and try again.",
 	deleteSkillKeptSharedMaster:
 		"`{{name}}` was not deleted: another agent still reads its shared location. Remove it from those agents first. If git tracks the directory, untrack it deliberately before retrying.",
+	deleteSkillKeptGit:
+		"`{{name}}` was not deleted: git tracks `{{path}}`, or git could not be queried for it. Untrack it deliberately with `git rm -r --cached {{path}}` (and commit that), or fix git for that repository, then try again.",
 	sourceRemovedCleanFailed: "Failed to clean `{{name}}`.",
 	sourceRemovedCleanLockOnly:
 		"`{{name}}` is already gone from disk, so nothing was removed. The list has been refreshed: if the row disappeared, something else already cleaned it; if it is still there, only a stale lock entry remains — use the stale lock cleanup above.",

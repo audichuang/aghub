@@ -221,9 +221,10 @@ branch.
   leftovers does not name readers); fix is to list them in the same `-a`
   request. A shared-root real directory that git TRACKS is refused the same way
   (exit 1, and the refusal itself includes its path): keep authoring it there,
-  or untrack it with `git rm -r --cached <path>` and delete again. The current
-  `--all-agents` path does not apply that guard and may delete it, so it is not
-  a bypass. This is not what `--all-agents` does with a survivor
+  or untrack it with `git rm -r --cached <path>` and delete again. `--all-agents`
+  applies the same guard and refuses it too, so it is not a bypass. The same
+  refusal covers a directory git cannot be asked about (git missing, unusable
+  repository, `dubious ownership`, or a probe over its 10 s limit). This is not what `--all-agents` does with a survivor
   — that asserts "gone everywhere", so a survivor makes the confirmed run ERROR
   instead. And `removed` does not prove the bytes are gone: a private Referrer
   can be removed while another copy survives, listed in `skipped`.

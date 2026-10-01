@@ -454,10 +454,11 @@ unlinks it, and the verdict is the same in whatever order `-a` lists the agents
 (preview and `--yes` agree). A real directory inside `.aghub` is never deleted by
 a single-agent delete, and neither is a real directory in a shared slot that git tracks (exit 1;
 untrack it with `git rm -r --cached <path>` first, or keep authoring it there;
-if git cannot answer, the directory counts as untracked). The refusal itself
-includes that exact command and path. The current `--all-agents` flow does not
-apply this GitTracked guard and may delete the directory; do not use it as a
-bypass—untrack deliberately first. `reconcile --remove` and the desktop's manage-agents /
+if git cannot answer — missing, an unusable repository, `dubious ownership`, or a probe that
+exceeds its 10 s limit — the delete is refused as well and says so). The refusal itself
+includes that exact command and path. `--all-agents` applies the same guard and
+refuses such a directory too (exit 1, nothing deleted), so it is not a bypass—untrack
+deliberately first. `reconcile --remove` and the desktop's manage-agents /
 bulk dialogs apply this same rule to their removal list. A real directory has no
 `.aghub` Master behind it, so deleting it deletes the content and the lock entry
 is pruned too. Local edits are gone for good; if the skill originally came from a

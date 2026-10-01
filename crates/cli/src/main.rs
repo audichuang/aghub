@@ -303,7 +303,8 @@ enum Commands {
 	/// in a shared slot such as `.agents/skills`, or a private real directory
 	/// reached through another agent's symlinked skills root), a symlink from an agent
 	/// outside the request still points at it, or git tracks the real directory in the shared slot
-	/// (untrack it first with `git rm -r --cached <path>`). An `--all-agents`
+	/// (untrack it first with `git rm -r --cached <path>`; `--all-agents`
+	/// refuses it too, and so does a directory git cannot be asked about). An `--all-agents`
 	/// sweep that could not clear everything holding the skill also reports
 	/// `kept` (`success: true` AND THE SKILL IS STILL THERE); the payload's
 	/// `skipped` names what stayed.
@@ -1170,9 +1171,8 @@ fn render_removal(
 			 location shared with other agents (a .aghub master, or a real \
 			 directory in a shared slot). Name the other agents that read it \
 			 in the same -a list / remove it from the other agents sharing it \
-			 first. A real directory in a shared slot that git tracks is also kept; untrack it \
-			 first with `git rm -r --cached <path>`; do not use \
-			 --all-agents to bypass that protection.\n",
+			 first. A real directory in a shared slot that git tracks (or cannot be asked about) is also kept; untrack it \
+			 first with `git rm -r --cached <path>` (--all-agents refuses it too).\n",
 			resource.singular()
 		);
 	}
@@ -2765,8 +2765,8 @@ mod tests {
 			 {all}"
 		);
 
-		// The single-agent wording must not offer `--all-agents` as a way
-		// around the GitTracked refusal.
+		// The single-agent wording must say `--all-agents` is no way around
+		// the GitTracked refusal.
 		let single = render_removal(
 			ResourceType::Skills,
 			"demo",
@@ -2777,7 +2777,7 @@ mod tests {
 		assert!(
 			single.contains("location shared with other agents")
 				&& single.contains("git rm -r --cached <path>")
-				&& single.contains("do not use --all-agents"),
+				&& single.contains("--all-agents refuses it too"),
 			"the single-agent remedy must distinguish reader and git keeps: {single}"
 		);
 	}
