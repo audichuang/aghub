@@ -2056,10 +2056,14 @@ fn plan_reconcile_skill(
 		exhaustive,
 		// Unreadable agents get their own clause in the refusal, so leaving
 		// them out here keeps a message from naming the same agent twice.
+		// A disabled agent is unmanaged, not a reader: it still keeps the
+		// Master alive (`exhaustive` above) but is never NAMED as one.
 		keepers: holders
 			.iter()
 			.filter(|held| {
-				!removed.contains(held) && !unreadable.contains(&held.as_str())
+				!removed.contains(held)
+					&& !unreadable.contains(&held.as_str())
+					&& crate::agent_settings::is_managed(held.as_str())
 			})
 			.map(|held| held.as_str())
 			.collect(),
@@ -4529,6 +4533,63 @@ mod tests {
 			)
 			.to_string();
 		assert!(message.contains("nothing was written"), "got: {message}");
+	}
+
+	// A disabled agent is not a reader (docs/history/core-removal.md
+	// #disabled-agent-blocked-a-single-agent-delete), so the refusal must not
+	// name it as one. `keepers` comes from the full-roster Master-GC scan and
+	// used to list every disabled holder.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_refusal_does_not_name_a_disabled_agent_as_a_reader() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".aghub/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
+		)
+		.unwrap();
+		// Codex (disabled below) and claude (enabled) both hold the skill;
+		// opencode's stale private link beside the shared one makes its own
+		// removal a no-op, which is what refuses the row.
+		for dir in [".agents/skills", ".claude/skills", ".opencode/skills"] {
+			let slot = root.join(dir);
+			fs::create_dir_all(&slot).unwrap();
+			std::os::unix::fs::symlink(&master, slot.join("mover")).unwrap();
+		}
+		let ids: Vec<&str> = AgentType::ALL
+			.iter()
+			.map(|a| a.as_str())
+			.filter(|id| *id != "opencode" && *id != "claude")
+			.collect();
+		let _off = crate::agent_settings::test_override::disable(&ids);
+
+		let message = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::OpenCode,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![],
+			vec![AgentType::OpenCode],
+			true,
+		)
+		.expect_err("opencode still reads the shared link, so the row refuses")
+		.to_string();
+
+		assert!(
+			message.contains("still read by 'claude'"),
+			"the enabled keeper is named: {message}"
+		);
+		assert!(
+			!message.contains("codex"),
+			"a disabled agent is not a reader: {message}"
+		);
 	}
 
 	// The preflight refuses UNREACHABLE end states, not rows that merely look
