@@ -222,6 +222,8 @@ pub async fn delete_skill_by_path(
 	let req = body.into_inner();
 
 	let skill_path = expand_tilde_path(&req.source_path);
+	// Provisional, for the per-agent path validation below; the authoritative
+	// shape check (`by_path_skill_dir`) follows it.
 	let skill_dir = if skill_path.is_dir() {
 		skill_path.clone()
 	} else {
@@ -342,6 +344,20 @@ pub async fn delete_skill_by_path(
 		}));
 	}
 
+	// The target must be a skill directory or its SKILL.md, and resolvable.
+	// See docs/history/api.md#delete-by-path-target-must-be-a-skill-root
+	let skill_dir =
+		match aghub_core::skills::removal::by_path_skill_dir(&skill_path) {
+			Ok(dir) => dir,
+			Err(refusal) => {
+				return Ok(Json(DeleteSkillByPathResponse {
+					success: false,
+					error: Some(refusal.to_string()),
+					..Default::default()
+				}));
+			}
+		};
+
 	if !skill_dir.exists() {
 		// Idempotent: nothing on disk to remove. Answer through the shared
 		// no-op seam (`outcome: "absent"`), never a hand-built body.
@@ -427,16 +443,17 @@ pub async fn delete_skill_by_path(
 
 		let confirm = req.confirm.unwrap_or(false);
 		let dry_run = !confirm;
-		let skill_file = skill_dir.join("SKILL.md");
-		let skill_name = skill::parser::parse(&skill_file)
-			.map(|parsed| parsed.name)
-			.unwrap_or_else(|_| {
-				skill_dir
-					.file_name()
-					.and_then(|n| n.to_str())
-					.unwrap_or_default()
-					.to_string()
-			});
+		let skill_name =
+			match aghub_core::skills::removal::by_path_skill_name(&skill_dir) {
+				Ok(name) => name,
+				Err(refusal) => {
+					return Ok(Json(DeleteSkillByPathResponse {
+						success: false,
+						error: Some(refusal.to_string()),
+						..Default::default()
+					}));
+				}
+			};
 		let Some(first_agent) =
 			req.agents.iter().find_map(|a| a.parse::<AgentType>().ok())
 		else {
@@ -556,26 +573,17 @@ pub async fn delete_skill_by_path(
 				response.error = error;
 				return Ok(Json(response));
 			}
-			let mut paths =
-				aghub_core::skills::removal::plan_owned_inbound_links(
-					&skill_dir,
-					&all_in_scope,
-					&roots,
-					&skill_name,
-					project_root.as_deref(),
-					resource_scope,
-					&requested_agents,
-				);
-			paths.push(skill_dir.clone());
-			let plan = aghub_core::skills::removal::RemovalPlan {
-				layout: aghub_core::skills::removal::Layout::Copy,
-				paths,
-				skipped: vec![],
-				needs_confirm: false,
-				shared_master_kept: false,
-				still_read_from: Vec::new(),
-				incomplete: false,
-			};
+			// The same producer the by-name copy planner uses, so the two report
+			// one `needs_confirm` for one directory.
+			let plan = aghub_core::skills::removal::assemble_copy_release_plan(
+				skill_dir.clone(),
+				&roots,
+				&all_in_scope,
+				&skill_name,
+				project_root.as_deref(),
+				resource_scope,
+				&requested_agents,
+			);
 			// Preview and commit both go through the core-owned producers; a
 			// hand-built `RemovalOutcome` drifts from the manager's.
 			// See docs/history/api.md#delete-by-path-hand-built-outcome
@@ -4224,9 +4232,11 @@ mod tests {
 			let shared_dir = home.join(".agents/skills");
 			std::fs::create_dir_all(&shared_dir).unwrap();
 			let mut entries = Vec::new();
+			// Both entries are folders named after the skill (a by-path target
+			// must be), one grouped under a category so they can coexist.
 			for (folder, master_name) in [
-				("first-link", "first-master"),
-				("second-link", "second-master"),
+				(name.to_string(), "first-master"),
+				(format!("team/{name}"), "second-master"),
 			] {
 				let master = home.join(".aghub").join(master_name);
 				std::fs::create_dir_all(&master).unwrap();
@@ -4236,6 +4246,7 @@ mod tests {
 				)
 				.unwrap();
 				let entry = shared_dir.join(folder);
+				std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
 				std::os::unix::fs::symlink(&master, &entry).unwrap();
 				entries.push((entry, master));
 			}
@@ -4251,14 +4262,15 @@ mod tests {
 				.source_path
 				.as_ref()
 				.unwrap();
-			let target = if selected.ends_with("first-link/SKILL.md") {
-				&entries[1].0
+			let target = if selected.ends_with(&format!("team/{name}/SKILL.md"))
+			{
+				&entries[0].0
 			} else {
 				assert!(
-					selected.ends_with("second-link/SKILL.md"),
+					selected.ends_with(&format!("skills/{name}/SKILL.md")),
 					"{selected}"
 				);
-				&entries[0].0
+				&entries[1].0
 			};
 			let readers =
 				aghub_core::skills::removal::skill_dir_readers_outside(
@@ -4307,7 +4319,7 @@ mod tests {
 	{
 		with_isolated_env(|home, _state| {
 			let proj = home;
-			let slot = proj.join(".agents/skills/dirname");
+			let slot = proj.join(".agents/skills/realname");
 			std::fs::create_dir_all(&slot).unwrap();
 			std::fs::write(
 				slot.join("SKILL.md"),
@@ -5102,6 +5114,204 @@ mod tests {
 			assert!(!resp.success);
 			let err = resp.error.as_deref().unwrap_or("");
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
+		});
+	}
+
+	#[cfg(unix)]
+	fn claude_by_path(
+		source_path: &std::path::Path,
+		confirm: bool,
+	) -> DeleteSkillByPathRequest {
+		DeleteSkillByPathRequest {
+			source_path: source_path.display().to_string(),
+			agents: vec!["claude".to_string()],
+			scope: "global".to_string(),
+			project_root: None,
+			all_agents: None,
+			confirm: Some(confirm),
+		}
+	}
+
+	/// A category folder (`<slot>/team`, skills only underneath) is not a skill:
+	/// naming it must refuse and leave every skill beneath it alone, dry-run or
+	/// confirmed. See docs/history/api.md#delete-by-path-target-must-be-a-skill-root
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_refuses_category_folder_and_keeps_every_skill_under_it() {
+		with_isolated_env(|home, _state| {
+			let team = home.join(".claude/skills/team");
+			for name in ["a", "b"] {
+				let dir = team.join(name);
+				std::fs::create_dir_all(&dir).unwrap();
+				std::fs::write(
+					dir.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: d\n---\n"),
+				)
+				.unwrap();
+			}
+
+			for confirm in [false, true] {
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(claude_by_path(&team, confirm)),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+				assert!(!resp.success, "category folder must be refused");
+				assert!(!resp.executed);
+				assert!(resp.paths.is_empty(), "nothing may be planned");
+				let err = resp.error.as_deref().unwrap_or_default();
+				assert!(
+					err.contains("SKILL.md"),
+					"the refusal must say what a target needs: {err}"
+				);
+				assert!(
+					!err.contains(&home.display().to_string()),
+					"the refusal must not echo filesystem paths: {err}"
+				);
+				assert!(team.join("a/SKILL.md").exists());
+				assert!(team.join("b/SKILL.md").exists());
+			}
+		});
+	}
+
+	/// A directory INSIDE a skill, or a stray file inside it, must not resolve to
+	/// the enclosing skill either: `<slot>/z/scripts`, `<slot>/z/scripts/run.sh`
+	/// and `<slot>/z/gone.txt` (whose `parent()` is the skill root) all refuse.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_refuses_skill_subdirectory_and_stray_file() {
+		with_isolated_env(|home, _state| {
+			let z = home.join(".claude/skills/z");
+			std::fs::create_dir_all(z.join("scripts")).unwrap();
+			std::fs::write(
+				z.join("SKILL.md"),
+				"---\nname: z\ndescription: d\n---\n",
+			)
+			.unwrap();
+			std::fs::write(z.join("scripts/run.sh"), "#!/bin/sh\n").unwrap();
+
+			for target in [
+				z.join("scripts"),
+				z.join("scripts/run.sh"),
+				z.join("gone.txt"),
+			] {
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(claude_by_path(&target, true)),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+				assert!(
+					!resp.success && !resp.executed,
+					"{} must be refused",
+					target.display()
+				);
+				assert!(z.join("SKILL.md").exists(), "the skill must survive");
+				assert!(z.join("scripts/run.sh").exists());
+			}
+		});
+	}
+
+	/// The by-path preview reports the SAME `needs_confirm` core's by-name plan
+	/// does: releasing a real directory from a shared Referrer root needs it, a
+	/// private copy does not. The route used to hand-build `false` for both.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_needs_confirm_matches_core_plan_for_shared_slot() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| a.as_str() != "cursor")
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				let shared = proj.join(".agents/skills/shared");
+				std::fs::create_dir_all(&shared).unwrap();
+				std::fs::write(
+					shared.join("SKILL.md"),
+					"---\nname: shared\ndescription: d\n---\n",
+				)
+				.unwrap();
+				let private = proj.join(".cursor/skills/private");
+				std::fs::create_dir_all(&private).unwrap();
+				std::fs::write(
+					private.join("SKILL.md"),
+					"---\nname: private\ndescription: d\n---\n",
+				)
+				.unwrap();
+
+				let ask = |dir: &std::path::Path| {
+					let req = DeleteSkillByPathRequest {
+						source_path: dir.join("SKILL.md").display().to_string(),
+						agents: vec!["cursor".to_string()],
+						scope: "project".to_string(),
+						project_root: Some(proj.display().to_string()),
+						all_agents: None,
+						confirm: None,
+					};
+					block_on(delete_skill_by_path(
+						TrustedLocalOrigin,
+						Json(req),
+					))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner()
+				};
+				let shared_resp = ask(&shared);
+				assert!(shared_resp.success, "{:?}", shared_resp.error);
+				assert!(
+					shared_resp.needs_confirm,
+					"a shared-slot release needs confirm, as in the by-name plan"
+				);
+				let private_resp = ask(&private);
+				assert!(private_resp.success, "{:?}", private_resp.error);
+				assert!(!private_resp.needs_confirm);
+				assert!(shared.exists() && private.exists(), "dry-run only");
+			});
+		});
+	}
+
+	/// A symlink loop as the target must refuse without echoing a filesystem
+	/// path, and must not read as "already gone".
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_symlink_loop_refuses_without_leaking_paths() {
+		with_isolated_env(|home, _state| {
+			let skills = home.join(".claude/skills");
+			std::fs::create_dir_all(&skills).unwrap();
+			let looped = skills.join("loop");
+			std::os::unix::fs::symlink("loop", &looped).unwrap();
+
+			for target in [looped.clone(), looped.join("SKILL.md")] {
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(claude_by_path(&target, true)),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+				let json = serde_json::to_string(&resp).unwrap();
+				eprintln!("ELOOP {} => {json}", target.display());
+				assert!(!resp.success, "a loop must be refused: {json}");
+				assert!(
+					!json.contains(&home.display().to_string()),
+					"no internal path may reach the response: {json}"
+				);
+				assert!(
+					std::fs::symlink_metadata(&looped).is_ok(),
+					"the link itself must be untouched"
+				);
+			}
 		});
 	}
 

@@ -106,6 +106,57 @@ Rule: the guard lives in its own binary, `tests/log_fairing_redaction.rs`
 
 Commit: 6971c515.
 
+## delete-by-path target must be a skill root
+
+`DELETE /skills/by-path` took the directory a `source_path` named (or the parent
+of a non-directory) and, when `SKILL.md` did not parse, fell back to the FOLDER
+name as the skill name. So `<slot>/team` (a category folder with skills only
+underneath) looked like a skill called `team` and `remove_dir_all` took every
+skill under it; `<slot>/z/scripts` and `<slot>/z/scripts/run.sh` removed a
+subdirectory (or `scripts`), and a missing file such as `<slot>/z/gone.txt`
+resolved to its parent, the whole skill `z`. A symlink loop (`ELOOP`) made
+`is_dir()` false, so the target silently became the slot root and the refusal
+echoed that path (`skipped`) although the request never named it. The same
+route also hand-built its copy-removal plan with `needs_confirm: false`, while
+the by-name planner reports `true` for releasing a real directory from a shared
+root.
+
+Rule, owned by core (`removal::by_path_skill_dir` / `by_path_skill_name`):
+
+1. A directory is taken as is; a file must be a `SKILL.md` (its parent is the
+   skill); anything else is `NotSkillRoot`. A missing `SKILL.md` still yields
+   its parent so the already-gone answer is unchanged.
+2. Any metadata error other than not-found (ELOOP, EACCES, a non-directory
+   ancestor) is `Unresolvable`: the shape is unknown, so nothing is derived
+   from it. Both refusals are fixed strings with no filesystem path.
+3. The directory must hold its OWN parsable `SKILL.md`; the name is the
+   frontmatter's, and the folder must be that name's slot name (a `folder-v2`
+   with `name: real` is refused). A nested skill under a category folder
+   (`<slot>/team/a`) is fine; the category folder itself is not.
+4. The copy plan comes from `assemble_copy_release_plan`, the producer the
+   by-name planner uses, so `needs_confirm` is one answer. It is a report
+   field here: the route still deletes only when `confirm: true`.
+
+The folder must also be the slot name the frontmatter name sanitizes to
+(`sanitize_name`). Two older pinned tests used a differing folder (a legacy-named
+Referrer, npx-era links with another name) as if it were a deletable target; they
+now keep the differing name on the Referrer / Master side and give the target
+folder its skill's name. Pinned by
+`by_path_skill_name_needs_its_own_parsable_skill_md`.
+
+Cost: a skill whose `SKILL.md` no longer parses, or whose folder differs from
+its name, can no longer be deleted by path.
+
+Pinned by: `delete_by_path_refuses_category_folder_and_keeps_every_skill_under_it`,
+`delete_by_path_refuses_skill_subdirectory_and_stray_file`,
+`delete_by_path_symlink_loop_refuses_without_leaking_paths`,
+`delete_by_path_needs_confirm_matches_core_plan_for_shared_slot`
+(`crates/api/src/routes/skills.rs`);
+`by_path_skill_dir_accepts_dir_and_skill_md_refuses_other_files`,
+`by_path_skill_dir_refuses_a_symlink_loop_as_unresolvable`,
+`by_path_skill_name_needs_its_own_parsable_skill_md`
+(`crates/core/src/skills/removal.rs`).
+
 ## keyring read cache
 
 The OS credential store is not a cheap read: on macOS it serializes a process's
@@ -182,8 +233,8 @@ Rule, in two layers:
    and cross-slot `<P>/.cursor/skills/../../.agents/skills/y` all leave a `..`
    in the remainder. The refusal text carries no filesystem path.
 
-Known, same family, NOT handled here: a by-path request naming a category
-folder (`<slot>/<category>`) removes every skill under it in one call.
+The category-folder gap that used to be listed here is closed by
+[delete-by-path target must be a skill root](#delete-by-path-target-must-be-a-skill-root).
 
 Pinned by: `delete_by_path_rejects_trailing_dotdot_project_agents_slot`,
 `delete_by_path_rejects_trailing_dotdot_project_cursor_slot`,

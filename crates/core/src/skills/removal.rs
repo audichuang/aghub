@@ -173,6 +173,83 @@ pub fn assert_strictly_contained(
 	}
 }
 
+/// Why a by-path request cannot name a deletable skill. `Display` carries no
+/// filesystem path: it reaches an API response verbatim.
+/// See docs/history/api.md#delete-by-path-target-must-be-a-skill-root
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByPathRefusal {
+	/// Not a skill directory (a category folder, a subdirectory of a skill, a
+	/// stray file) or its `SKILL.md` does not parse.
+	NotSkillRoot,
+	/// The path could not be resolved (symlink loop, permission, a non-directory
+	/// ancestor): its shape is unknown, so nothing may be derived from it.
+	Unresolvable,
+}
+
+impl std::fmt::Display for ByPathRefusal {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::NotSkillRoot => f.write_str(
+				"Refusing to delete: the target must be a skill directory with \
+				 its own readable SKILL.md, or that SKILL.md itself",
+			),
+			Self::Unresolvable => f.write_str(
+				"Refusing to delete: source_path could not be resolved \
+				 (unreadable, or a symlink loop)",
+			),
+		}
+	}
+}
+
+/// The skill directory a by-path `source_path` names: the path itself when it is
+/// a directory, else the parent of a `SKILL.md`. Any other file is refused
+/// (`<skill>/scripts/run.sh` must not resolve to the skill, nor to `scripts`).
+/// A missing `SKILL.md` still yields its parent so the caller's already-gone
+/// check answers; a missing anything else is refused.
+pub fn by_path_skill_dir(source: &Path) -> Result<PathBuf, ByPathRefusal> {
+	let skill_md_parent = || {
+		source
+			.file_name()
+			.is_some_and(|name| name == "SKILL.md")
+			.then(|| source.parent().map(Path::to_path_buf))
+			.flatten()
+			.ok_or(ByPathRefusal::NotSkillRoot)
+	};
+	match std::fs::metadata(source) {
+		Ok(meta) if meta.is_dir() => Ok(source.to_path_buf()),
+		Ok(_) => skill_md_parent(),
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => skill_md_parent(),
+		Err(_) => Err(ByPathRefusal::Unresolvable),
+	}
+}
+
+/// The frontmatter `name` of the skill rooted at `dir`, which must hold its OWN
+/// parsable `SKILL.md` and sit in the folder that name sanitizes to
+/// (`sanitize_name`, what an install names it). An absent or unparsable
+/// `SKILL.md` used to fall back to the folder name, which made a category
+/// folder (`<slot>/team`) look like a skill named `team`.
+pub fn by_path_skill_name(dir: &Path) -> Result<String, ByPathRefusal> {
+	let skill_md = dir.join("SKILL.md");
+	match std::fs::metadata(&skill_md) {
+		Ok(meta) if meta.is_file() => {}
+		Ok(_) => return Err(ByPathRefusal::NotSkillRoot),
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+			return Err(ByPathRefusal::NotSkillRoot)
+		}
+		Err(_) => return Err(ByPathRefusal::Unresolvable),
+	}
+	let name = skill::parser::parse(&skill_md)
+		.map(|parsed| parsed.name)
+		.map_err(|_| ByPathRefusal::NotSkillRoot)?;
+	// The folder must be the slot name the frontmatter name sanitizes to (the
+	// name an install gives it).
+	let folder = dir.file_name().and_then(|n| n.to_str());
+	if folder != Some(skill::sanitize::sanitize_name(&name).as_str()) {
+		return Err(ByPathRefusal::NotSkillRoot);
+	}
+	Ok(name)
+}
+
 pub fn assert_targets_strictly_contained(
 	targets: &[PathBuf],
 	agent_skill_dirs: &[PathBuf],
@@ -828,7 +905,12 @@ fn plan_copy_removal(
 	}
 }
 
-fn assemble_copy_release_plan(
+/// The plan for releasing a REAL directory the keep rule already let through:
+/// its owned inbound links plus the directory itself, with the
+/// `needs_confirm` contract of a shared-root release. One producer for the
+/// by-name copy planner and the API by-path route, so the two cannot report
+/// different `needs_confirm` for the same directory.
+pub fn assemble_copy_release_plan(
 	root: PathBuf,
 	roots: &[PathBuf],
 	all_agent_dirs: &[PathBuf],
@@ -1594,6 +1676,97 @@ pub fn agent_skill_dirs_in_scope(
 pub(crate) mod tests {
 	use super::*;
 	use tempfile::tempdir;
+
+	fn write_named_skill(dir: &Path, name: &str) {
+		std::fs::create_dir_all(dir).unwrap();
+		std::fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: d\n---\n"),
+		)
+		.unwrap();
+	}
+
+	#[test]
+	fn by_path_skill_dir_accepts_dir_and_skill_md_refuses_other_files() {
+		let tmp = tempdir().unwrap();
+		let skill = tmp.path().join("z");
+		write_named_skill(&skill, "z");
+		std::fs::create_dir_all(skill.join("scripts")).unwrap();
+		std::fs::write(skill.join("scripts/run.sh"), "x").unwrap();
+
+		assert_eq!(by_path_skill_dir(&skill), Ok(skill.clone()));
+		assert_eq!(
+			by_path_skill_dir(&skill.join("SKILL.md")),
+			Ok(skill.clone())
+		);
+		// A missing SKILL.md still names its parent: the caller answers "absent".
+		assert_eq!(
+			by_path_skill_dir(&tmp.path().join("gone/SKILL.md")),
+			Ok(tmp.path().join("gone"))
+		);
+		// Any other file must not resolve to its parent (the skill, or `scripts`).
+		for stray in [skill.join("scripts/run.sh"), skill.join("gone.txt")] {
+			assert_eq!(
+				by_path_skill_dir(&stray),
+				Err(ByPathRefusal::NotSkillRoot),
+				"{}",
+				stray.display()
+			);
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn by_path_skill_dir_refuses_a_symlink_loop_as_unresolvable() {
+		let tmp = tempdir().unwrap();
+		let looped = tmp.path().join("loop");
+		std::os::unix::fs::symlink("loop", &looped).unwrap();
+		for target in [looped.clone(), looped.join("SKILL.md")] {
+			assert_eq!(
+				by_path_skill_dir(&target),
+				Err(ByPathRefusal::Unresolvable)
+			);
+		}
+		assert!(!ByPathRefusal::Unresolvable
+			.to_string()
+			.contains(&tmp.path().display().to_string()));
+	}
+
+	#[test]
+	fn by_path_skill_name_needs_its_own_parsable_skill_md() {
+		let tmp = tempdir().unwrap();
+		// Category folder: skills only underneath, no root SKILL.md.
+		write_named_skill(&tmp.path().join("team/a"), "a");
+		assert_eq!(
+			by_path_skill_name(&tmp.path().join("team")),
+			Err(ByPathRefusal::NotSkillRoot)
+		);
+		// Unparsable SKILL.md does not fall back to the folder name.
+		let broken = tmp.path().join("broken");
+		std::fs::create_dir_all(&broken).unwrap();
+		std::fs::write(broken.join("SKILL.md"), "no frontmatter").unwrap();
+		assert_eq!(
+			by_path_skill_name(&broken),
+			Err(ByPathRefusal::NotSkillRoot)
+		);
+		// The folder must be the name's slot name.
+		write_named_skill(&tmp.path().join("real-name"), "real-name");
+		assert_eq!(
+			by_path_skill_name(&tmp.path().join("real-name")),
+			Ok("real-name".to_string())
+		);
+		write_named_skill(&tmp.path().join("my-skill"), "My Skill");
+		assert_eq!(
+			by_path_skill_name(&tmp.path().join("my-skill")),
+			Ok("My Skill".to_string())
+		);
+		write_named_skill(&tmp.path().join("folder-v2"), "real-name");
+		assert_eq!(
+			by_path_skill_name(&tmp.path().join("folder-v2")),
+			Err(ByPathRefusal::NotSkillRoot),
+			"a folder that is not the name's slot is refused"
+		);
+	}
 
 	/// Shared git-fixture helpers for tests that need a real git index.
 	/// Used by both `removal::tests` and `manager::skill::tests`.
