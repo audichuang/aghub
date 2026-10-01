@@ -1597,6 +1597,7 @@ pub(crate) mod tests {
 
 	/// Shared git-fixture helpers for tests that need a real git index.
 	/// Used by both `removal::tests` and `manager::skill::tests`.
+	#[cfg(unix)]
 	pub(crate) mod git_fixture {
 		use std::path::Path;
 
