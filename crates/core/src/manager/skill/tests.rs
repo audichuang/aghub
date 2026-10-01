@@ -4605,7 +4605,10 @@ fn real_dir_delete_failure_keeps_the_requested_agents_links() {
 
 	let outcome = result.expect("a failed unlink is reported, not an error");
 	assert!(
-		outcome.failed_paths.iter().any(|path| path == &skill_dir),
+		outcome.failed_paths.iter().any(|path| {
+			::skill::lock::resolve_existing(path)
+				== ::skill::lock::resolve_existing(&skill_dir)
+		}),
 		"the directory removal must be the reported failure: {:?}",
 		outcome.failed_paths
 	);
