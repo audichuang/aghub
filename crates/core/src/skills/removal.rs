@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::models::{AgentType, ResourceScope};
 use crate::skills::linker::Linker;
 
 /// The shared skill-store roots for a scope: the `.aghub` Master store plus the
@@ -476,6 +477,42 @@ pub(crate) fn plan_removal_for_agents(
 		Vec::new()
 	};
 
+	// A requested agent with its OWN link into a shared-slot real directory
+	// reaches here through the symlink layout, whose sweep sees the other
+	// requested agents' links as survivors and so made the batch verdict depend
+	// on `-a` order. Ask the one real-directory rule first; on a release plan
+	// the owned links plus the directory exactly like the copy layout, on any
+	// keep fall through to the unchanged symlink planner.
+	// See docs/history/core-removal.md#disabled-agent-blocked-a-single-agent-delete
+	if !all_agents && skill.canonical_path.is_some() {
+		if let Some(canonical) = crate::transfer::skill_root_unchecked(skill) {
+			if !Linker::is_link(&canonical)
+				&& canonical.is_dir()
+				&& is_universal_master(&canonical, project_root)
+				&& !requested_agents.is_empty()
+				&& single_agent_keep_reason(
+					&canonical,
+					all_agent_dirs,
+					&skill.name,
+					project_root,
+					scope,
+					requested_agents,
+				)
+				.is_none()
+			{
+				return assemble_copy_release_plan(
+					canonical,
+					&roots,
+					all_agent_dirs,
+					&skill.name,
+					project_root,
+					scope,
+					requested_agents,
+				);
+			}
+		}
+	}
+
 	if skill.canonical_path.is_some() {
 		let unselected_needs = |dir: &Path, deleting: &[PathBuf]| {
 			unselected_reader_needs_referrer(
@@ -755,32 +792,21 @@ fn plan_copy_removal(
 							skipped.push(root);
 						}
 					}
+					Some(KeepReason::GitTracked) => {
+						shared_master_kept = true;
+						log::warn!("{}", untrack_hint(&root));
+						skipped.push(root);
+					}
 					None => {
-						let start_len = paths.len();
-						push_contained(root, roots, &mut paths, &mut skipped);
-						if paths.len() > start_len {
-							let root_path =
-								paths.pop().expect("root was just pushed");
-							let owned = owned_inbound_links(
-								&root_path,
-								all_agent_dirs,
-								&skill.name,
-								project_root,
-								scope,
-								requested_agents,
-							);
-							for link in owned {
-								if std::fs::symlink_metadata(&link).is_ok()
-									&& !paths.contains(&link) && link
-									.parent()
-									.is_some_and(|p| {
-										assert_contained(p, roots).is_some()
-									}) {
-									paths.push(link);
-								}
-							}
-							paths.push(root_path);
-						}
+						return assemble_copy_release_plan(
+							root,
+							roots,
+							all_agent_dirs,
+							&skill.name,
+							project_root,
+							scope,
+							requested_agents,
+						);
 					}
 				}
 			}
@@ -798,6 +824,44 @@ fn plan_copy_removal(
 			// `paths`.
 			incomplete: false,
 		}
+	}
+}
+
+fn assemble_copy_release_plan(
+	root: PathBuf,
+	roots: &[PathBuf],
+	all_agent_dirs: &[PathBuf],
+	name: &str,
+	project_root: Option<&Path>,
+	scope: crate::models::ResourceScope,
+	requested_agents: &[crate::models::AgentType],
+) -> RemovalPlan {
+	let mut paths = Vec::new();
+	let mut skipped = Vec::new();
+	let start_len = paths.len();
+	push_contained(root, roots, &mut paths, &mut skipped);
+	if paths.len() > start_len {
+		let root_path = paths.pop().expect("root was just pushed");
+		let owned = plan_owned_inbound_links(
+			&root_path,
+			all_agent_dirs,
+			roots,
+			name,
+			project_root,
+			scope,
+			requested_agents,
+		);
+		paths.extend(owned);
+		paths.push(root_path);
+	}
+	RemovalPlan {
+		layout: Layout::Copy,
+		paths,
+		skipped,
+		needs_confirm: false,
+		shared_master_kept: false,
+		still_read_from: Vec::new(),
+		incomplete: false,
 	}
 }
 
@@ -1039,6 +1103,16 @@ fn dir_lists_name(dir: &Path, safe: &str) -> Option<bool> {
 	Some(found)
 }
 
+/// Builds the warning hint message when a single-agent removal is refused
+/// because the skill directory is tracked by git.
+pub fn untrack_hint(path: &Path) -> String {
+	format!(
+		"{} is tracked by git, so deleting it for some agents is refused; keep authoring it there, or untrack it deliberately with `git rm -r --cached {}` (and commit that), then delete again",
+		path.display(),
+		path.display()
+	)
+}
+
 /// Why a SINGLE-agent removal must keep a skill folder instead of deleting it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeepReason {
@@ -1052,13 +1126,16 @@ pub enum KeepReason {
 	/// owned by requested agents (with no unrequested enabled readers) are
 	/// excluded so batch deletions remain order-independent.
 	ExternalReferrer(PathBuf),
+	/// A real directory in a shared slot that is tracked by git. Deleting it
+	/// for only some agents is refused to avoid destroying authored source.
+	GitTracked,
 }
 
 fn link_owned_by_requested(
 	link: &Path,
-	requested: &[crate::models::AgentType],
+	requested: &[AgentType],
 	project_root: Option<&Path>,
-	scope: crate::models::ResourceScope,
+	scope: ResourceScope,
 ) -> bool {
 	if requested.is_empty() {
 		return false;
@@ -1103,13 +1180,13 @@ fn link_owned_by_requested(
 /// Inbound links to `dir` that were ignored by [`dir_has_external_referrer_excluding`]
 /// because they are owned by `requested` agents in their private skills dirs with
 /// no outside enabled readers.
-pub fn owned_inbound_links(
+fn owned_inbound_links(
 	dir: &Path,
 	all_agent_dirs: &[PathBuf],
 	name: &str,
 	project_root: Option<&Path>,
-	scope: crate::models::ResourceScope,
-	requested: &[crate::models::AgentType],
+	scope: ResourceScope,
+	requested: &[AgentType],
 ) -> Vec<PathBuf> {
 	let mut links = Vec::new();
 	let _ = dir_has_external_referrer_excluding(
@@ -1122,6 +1199,42 @@ pub fn owned_inbound_links(
 	links
 }
 
+/// Collect and filter inbound links owned by `requested` agents that should be
+/// deleted alongside a copy-layout directory.
+///
+/// Ensures each link still exists on disk, is not duplicated, and its parent
+/// is contained in the allow-listed roots.
+pub fn plan_owned_inbound_links(
+	dir: &Path,
+	all_agent_dirs: &[PathBuf],
+	roots: &[PathBuf],
+	name: &str,
+	project_root: Option<&Path>,
+	scope: ResourceScope,
+	requested: &[AgentType],
+) -> Vec<PathBuf> {
+	let mut paths = Vec::new();
+	let owned = owned_inbound_links(
+		dir,
+		all_agent_dirs,
+		name,
+		project_root,
+		scope,
+		requested,
+	);
+	for link in owned {
+		if std::fs::symlink_metadata(&link).is_ok()
+			&& !paths.contains(&link)
+			&& link
+				.parent()
+				.is_some_and(|p| assert_contained(p, roots).is_some())
+		{
+			paths.push(link);
+		}
+	}
+	paths
+}
+
 /// The one rule for "may a single-agent / comma-list removal delete a real
 /// directory skill folder?". Evaluated in order:
 /// 1. Inside the `.aghub` store -> [`KeepReason::UniversalMaster`], always.
@@ -1130,10 +1243,12 @@ pub fn owned_inbound_links(
 ///    readers) -> [`KeepReason::ExternalReferrer`].
 /// 3. Inside a shared Referrer root: empty `requested` keeps (fail closed);
 ///    otherwise keep iff an ENABLED reader is outside `requested`.
-/// 4. Otherwise `None` (a private copy).
+/// 4. Inside a shared Referrer root and tracked by git -> [`KeepReason::GitTracked`].
+/// 5. Otherwise `None` (a private copy or untracked shared slot).
 ///
-/// Shared by [`plan_copy_removal`], `ConfigManager::remove_skill` (which passes
-/// no `requested` set, so it stays strict) and the API by-path route; never
+/// Shared by [`plan_copy_removal`], the symlink-row release in
+/// [`plan_removal_for_agents`], `ConfigManager::remove_skill` (which passes no
+/// `requested` set, so it stays strict) and the API by-path route; never
 /// hand-mirror it.
 /// See docs/history/core-removal.md#disabled-agent-blocked-a-single-agent-delete
 pub fn single_agent_keep_reason(
@@ -1141,8 +1256,8 @@ pub fn single_agent_keep_reason(
 	all_agent_dirs: &[PathBuf],
 	name: &str,
 	project_root: Option<&Path>,
-	scope: crate::models::ResourceScope,
-	requested: &[crate::models::AgentType],
+	scope: ResourceScope,
+	requested: &[AgentType],
 ) -> Option<KeepReason> {
 	let master_roots: Vec<PathBuf> = skill_store_roots(project_root)
 		.into_iter()
@@ -1174,6 +1289,17 @@ pub fn single_agent_keep_reason(
 				.is_empty())
 	{
 		return Some(KeepReason::UniversalMaster);
+	}
+	if is_universal_master(dir, project_root) {
+		// Deliberate divergence from repair (which refuses on Undecided):
+		// a single-agent delete treats Undecided (git missing, not a repo, error)
+		// as untracked and continues to None, so git absence or an unreadable repo
+		// does not block deletion.
+		if crate::skills::shape::git_tracked(dir)
+			== crate::skills::shape::GitTracked::Yes
+		{
+			return Some(KeepReason::GitTracked);
+		}
 	}
 	None
 }
@@ -1456,9 +1582,45 @@ pub fn agent_skill_dirs_in_scope(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use super::*;
 	use tempfile::tempdir;
+
+	/// Shared git-fixture helpers for tests that need a real git index.
+	/// Used by both `removal::tests` and `manager::skill::tests`.
+	pub(crate) mod git_fixture {
+		use std::path::Path;
+
+		/// Returns `true` when the `git` binary is on `PATH`.
+		pub(crate) fn has_git() -> bool {
+			std::process::Command::new("git")
+				.arg("--version")
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.status()
+				.map(|s| s.success())
+				.unwrap_or(false)
+		}
+
+		/// Run `git -C <root> <args>` with developer-global config
+		/// isolated out. Panics on failure (call only after
+		/// [`has_git`] returned `true`).
+		pub(crate) fn git(root: &Path, args: &[&str]) {
+			let ok = std::process::Command::new("git")
+				.arg("-C")
+				.arg(root)
+				.args(args)
+				.env("GIT_CONFIG_GLOBAL", "/dev/null")
+				.env("GIT_CONFIG_NOSYSTEM", "1")
+				.env("HOME", root)
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.status()
+				.expect("failed to spawn git")
+				.success();
+			assert!(ok, "git -C {} {} failed", root.display(), args.join(" "));
+		}
+	}
 
 	#[test]
 	fn contained_path_is_accepted() {
@@ -2435,6 +2597,57 @@ mod tests {
 		);
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn single_agent_keep_reason_git_tracked_refuses_untracked_allows() {
+		if !git_fixture::has_git() {
+			eprintln!("skipping test: git binary unavailable");
+			return;
+		}
+
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let tmp = tempdir().unwrap();
+		let root = tmp.path();
+		let scope = crate::models::ResourceScope::ProjectOnly;
+		let slot = root.join(".agents/skills/git-test-skill");
+		write_skill_md(&slot);
+
+		git_fixture::git(root, &["init", "-q"]);
+
+		// When untracked: None (with all agents requested)
+		assert_eq!(
+			single_agent_keep_reason(
+				&slot,
+				&[],
+				"git-test-skill",
+				Some(root),
+				scope,
+				crate::models::AgentType::ALL,
+			),
+			None
+		);
+
+		git_fixture::git(
+			root,
+			&["add", "--", ".agents/skills/git-test-skill/SKILL.md"],
+		);
+
+		// When tracked: Some(KeepReason::GitTracked)
+		assert_eq!(
+			single_agent_keep_reason(
+				&slot,
+				&[],
+				"git-test-skill",
+				Some(root),
+				scope,
+				crate::models::AgentType::ALL,
+			),
+			Some(KeepReason::GitTracked)
+		);
+	}
+
 	// T-PLAN-JUNCTION-REFERRER: a targeted junction referrer is planned for
 	// unlink (not orphaned). windows-latest.
 	#[cfg(windows)]
@@ -2583,6 +2796,86 @@ mod tests {
 		assert!(
 			!plan.paths.contains(&agent_dirs[1].join("foo")),
 			"untargeted cursor symlink must NOT be scheduled",
+		);
+	}
+
+	/// A real directory inside the `.aghub` store has no reader at all, so even
+	/// a request naming EVERY agent must not release it.
+	#[cfg(unix)]
+	#[test]
+	fn single_agent_keep_reason_aghub_store_real_dir_is_kept_when_everyone_is_requested(
+	) {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let tmp = tempdir().unwrap();
+		let root = tmp.path();
+		let master = root.join(".aghub/store-dir");
+		write_skill_md(&master);
+		assert_eq!(
+			single_agent_keep_reason(
+				&master,
+				&[],
+				"store-dir",
+				Some(root),
+				crate::models::ResourceScope::ProjectOnly,
+				crate::models::AgentType::ALL,
+			),
+			Some(KeepReason::UniversalMaster)
+		);
+	}
+
+	/// Empty `requested` with a real dir in a shared slot must fail closed
+	/// (`UniversalMaster`); naming every enabled reader releases it (`None`).
+	#[cfg(unix)]
+	#[test]
+	fn single_agent_keep_reason_empty_request_fails_closed_for_shared_slot_real_dir(
+	) {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let tmp = tempdir().unwrap();
+		let root = tmp.path();
+		let scope = crate::models::ResourceScope::ProjectOnly;
+		let slot = root.join(".agents/skills/closed-test");
+		write_skill_md(&slot);
+
+		// Empty requested => fail closed.
+		assert_eq!(
+			single_agent_keep_reason(
+				&slot,
+				&[],
+				"closed-test",
+				Some(root),
+				scope,
+				&[],
+			),
+			Some(KeepReason::UniversalMaster)
+		);
+
+		// Naming every enabled reader => released (None).
+		let disabled: Vec<&str> = crate::models::AgentType::ALL
+			.iter()
+			.filter(|&&a| {
+				a != crate::models::AgentType::Cursor
+					&& a != crate::models::AgentType::OpenCode
+			})
+			.map(|a| a.as_str())
+			.collect();
+		let _guard = crate::agent_settings::test_override::disable(&disabled);
+		assert_eq!(
+			single_agent_keep_reason(
+				&slot,
+				&[],
+				"closed-test",
+				Some(root),
+				scope,
+				&[
+					crate::models::AgentType::Cursor,
+					crate::models::AgentType::OpenCode,
+				],
+			),
+			None
 		);
 	}
 }

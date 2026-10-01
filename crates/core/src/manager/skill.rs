@@ -642,7 +642,8 @@ impl ConfigManager {
 		if let Some(path) = file_path {
 			if path.exists() {
 				// The plain seam stays strict because it passes no requested
-				// set; the planned seam decides by readers.
+				// set; the planned seam decides by readers, owned links and git
+				// tracking (`single_agent_keep_reason`).
 				// See docs/history/core-manager.md#remove-skill-ate-a-shared-master
 				if !is_link {
 					if let Some(dir) = path.parent() {

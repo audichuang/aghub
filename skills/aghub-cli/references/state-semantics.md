@@ -217,7 +217,9 @@ branch.
   shared-slot refusal names the readers of the same slot that are not in `-a`
   (disabled agents are not named; a refusal caused by npx-era or compat
   leftovers does not name readers); fix is to list them in the same `-a` request or use
-  `--all-agents`. It is not what `--all-agents` does with a survivor
+  `--all-agents`. A real directory that git TRACKS is refused the same way
+  (exit 1, a warning names its path): keep authoring it there, or untrack it
+  with `git rm -r --cached <path>` and delete again. It is not what `--all-agents` does with a survivor
   — that asserts "gone everywhere", so a survivor makes the confirmed run ERROR
   instead. And `removed` does not prove the bytes are gone: a private Referrer
   can be removed while another copy survives, listed in `skipped`.

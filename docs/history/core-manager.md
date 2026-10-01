@@ -79,7 +79,10 @@ Later: `single_agent_keep_reason` now takes `scope` and the requested agents and
 decides a real directory in a shared slot by its ENABLED readers (see
 `core-removal.md#disabled-agent-blocked-a-single-agent-delete`). The planned
 seam passes the batch's agents, so naming every enabled reader deletes; the
-plain `remove_skill` seam passes none, so it stays strict and still refuses.
+plain `remove_skill` seam passes none, so it stays strict and still refuses. The
+same rule also gates a symlink-layout row whose Master is such a real directory
+(`plan_removal_for_agents`), and a git-tracked directory is kept; see
+`core-removal.md#disabled-agent-blocked-a-single-agent-delete`.
 Commit: d7d1ea91.
 
 ## Nested broken link reached commit

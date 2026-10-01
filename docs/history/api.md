@@ -38,14 +38,26 @@ Rule: refuse only a request that names SOME of the location's readers, and let
 a request covering the whole set through. The verdict is owned by core's
 `single_agent_keep_reason` (the route no longer hand-writes the OR of
 `skill_dir_readers_outside` and `dir_has_external_referrer`), so CLI, by-name
-and by-path answer identically; a real directory inside `.aghub` is kept. The kept answer
-goes through the `RemovalView` seam (`outcome: "kept"`); it used to be a
-hand-built `success: true`, and the desktop dialog closed on it as if deleted.
+and by-path answer identically; a real directory inside `.aghub` is kept, and so
+is one git tracks. The kept answer goes through the `RemovalView` seam
+(`outcome: "kept"`); it used to be a hand-built `success: true`, and the desktop
+dialog closed on it as if deleted.
+
+Releasing the directory also unlinks the links the requested agents own in their
+private skills dirs, or a dangling link would stay behind. The route does not
+assemble that list: it calls core's `plan_owned_inbound_links`, the same function
+the planners use (a first version copied the loop and drifted by one condition).
+See `core-removal.md#disabled-agent-blocked-a-single-agent-delete`. The by-path
+`..` rule below still runs first, so a root, `<root>/SKILL.md` or `<child>/..`
+never reaches the keep rule.
 
 Pinned by: `delete_by_path_keeps_shared_slot_read_by_other_agents`,
 `delete_by_path_keeps_shared_slot_referenced_by_another_agent_symlink`,
 `delete_by_path_removes_shared_slot_when_every_reader_is_in_the_request`,
-`delete_by_path_full_group_keeps_shared_slot_with_legacy_named_referrer`
+`delete_by_path_full_group_keeps_shared_slot_with_legacy_named_referrer`,
+`delete_by_path_release_also_unlinks_requested_agents_private_link`,
+`delete_by_path_git_tracked_is_kept_untracked_is_deleted`,
+`delete_by_path_refuses_real_dir_in_aghub_store`
 (`crates/api/src/routes/skills.rs` tests).
 
 Commit: 1b373c2c.
@@ -173,6 +185,9 @@ Pinned by: `delete_by_path_rejects_trailing_dotdot_project_agents_slot`,
 `delete_by_path_rejects_dotdot_before_skills_root_with_no_strippable_prefix`,
 `delete_by_path_rejects_dotdot_before_skills_root_without_trailing_dotdot`,
 `delete_by_path_rejects_skills_root_itself`,
+`delete_by_path_rejects_skill_md_directly_under_the_skills_root`,
+`delete_by_path_rejects_child_then_dotdot`,
+`delete_by_path_rejects_dotdot_into_aghub_store`,
 `delete_by_path_rejects_cross_slot_dotdot`,
 `delete_by_path_accepts_dotdot_in_project_root` (`crates/api/src/routes/skills.rs`);
 `assert_strictly_contained_rejects_inner_root_nested_in_another_root`

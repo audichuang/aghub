@@ -442,12 +442,16 @@ The same rule applies when the shared-slot entry is a real directory (not a
 link): it is deleted once every ENABLED agent reading that slot is in the `-a`
 list (disabled agents never count), and refused, naming the readers left out,
 otherwise. A symlink to it from an agent NOT in the `-a` list also blocks it: the
-delete exits 1 and names that link and agent (for example
-`.claude/skills/<name>` when claude was left out of the request). A symlink from
+delete exits 1 and lists the paths that stay readable, including that link (for
+example `.claude/skills/<name>` when claude was left out of the request); the
+message gives paths, not agent names, and a link from a DISABLED agent's own
+directory blocks the same way. A symlink from
 an agent that IS in the `-a` list does not block it; that agent's own row
 unlinks it, and the verdict is the same in whatever order `-a` lists the agents
 (preview and `--yes` agree). A real directory inside `.aghub` is never deleted by
-a single-agent delete. `reconcile --remove` and the desktop's manage-agents /
+a single-agent delete, and neither is a real directory that git tracks (exit 1;
+untrack it with `git rm -r --cached <path>` first, or keep authoring it there;
+if git cannot answer, the directory counts as untracked). `reconcile --remove` and the desktop's manage-agents /
 bulk dialogs apply this same rule to their removal list. A real directory has no
 `.aghub` Master behind it, so deleting it deletes the content and the lock entry
 is pruned too. Local edits are gone for good; if the skill originally came from a

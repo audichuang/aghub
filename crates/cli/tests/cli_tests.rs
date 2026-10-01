@@ -434,6 +434,35 @@ fn clear_agent_home_overrides(cmd: &mut Command) {
 	}
 }
 
+/// Returns `true` when the `git` binary is on `PATH`.
+fn cli_has_git() -> bool {
+	std::process::Command::new("git")
+		.arg("--version")
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::null())
+		.status()
+		.map(|s| s.success())
+		.unwrap_or(false)
+}
+
+/// Run `git -C <root> <args>` with developer-global config isolated out.
+/// Panics on failure (call only after [`cli_has_git`] returned `true`).
+fn cli_git(root: &std::path::Path, args: &[&str]) {
+	let ok = std::process::Command::new("git")
+		.arg("-C")
+		.arg(root)
+		.args(args)
+		.env("GIT_CONFIG_GLOBAL", "/dev/null")
+		.env("GIT_CONFIG_NOSYSTEM", "1")
+		.env("HOME", root)
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::null())
+		.status()
+		.expect("failed to spawn git")
+		.success();
+	assert!(ok, "git -C {} {} failed", root.display(), args.join(" "));
+}
+
 #[test]
 fn top_level_scope_flags_are_mutually_exclusive() {
 	for flags in [["-g", "-p"], ["-g", "--all"], ["-p", "--all"]] {
@@ -7678,6 +7707,116 @@ fn real_dir_delete_keeps_when_enabled_reader_not_listed() {
 }
 
 #[cfg(unix)]
+#[test]
+fn delete_real_dir_git_tracked_is_refused_untracked_allowed() {
+	if !cli_has_git() {
+		eprintln!("skipping test: git binary unavailable");
+		return;
+	}
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let proj = project.path();
+
+	// Agent marker so project root is recognized
+	std::fs::create_dir_all(proj.join(".claude")).unwrap();
+
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled_set: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| {
+				a != aghub_core::AgentType::Cursor
+					&& a != aghub_core::AgentType::OpenCode
+			})
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+
+	cli_git(proj, &["init", "-q"]);
+
+	// 1. Tracked skill: delete is refused (exit code 1) and dir remains
+	let name = "real-dir-tracked";
+	let skill_dir = proj.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	cli_git(
+		proj,
+		&["add", "--", &format!(".agents/skills/{name}/SKILL.md")],
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(proj)
+		.args([
+			"-p",
+			"-a",
+			"cursor,opencode",
+			"delete",
+			"skills",
+			name,
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		out.status.code(),
+		Some(1),
+		"deletion of git-tracked real dir must exit 1; stdout: {}, stderr: {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(
+		skill_dir.exists(),
+		"the git-tracked real skill directory must still exist"
+	);
+
+	// 2. Untracked skill: delete succeeds (exit code 0) and dir is deleted
+	let untracked_name = "real-dir-untracked";
+	let untracked_dir = proj.join(".agents/skills").join(untracked_name);
+	std::fs::create_dir_all(&untracked_dir).unwrap();
+	std::fs::write(
+		untracked_dir.join("SKILL.md"),
+		format!("---\nname: {untracked_name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	let out_untracked = isolated_cli(home.path(), state.path())
+		.current_dir(proj)
+		.args([
+			"-p",
+			"-a",
+			"cursor,opencode",
+			"delete",
+			"skills",
+			untracked_name,
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		out_untracked.status.code(),
+		Some(0),
+		"deletion of untracked real dir must exit 0; stderr: {}",
+		String::from_utf8_lossy(&out_untracked.stderr)
+	);
+	assert!(
+		!untracked_dir.exists(),
+		"the untracked real skill directory must be deleted"
+	);
+}
+
+#[cfg(unix)]
 fn collect_disk_state(
 	root: &std::path::Path,
 ) -> std::collections::BTreeSet<(PathBuf, String)> {
@@ -7989,6 +8128,322 @@ fn real_dir_npx_layout_refuses_when_link_belongs_to_unrequested_agent() {
 	);
 }
 
+#[cfg(unix)]
+fn seed_real_dir_project_fixture(
+	project: &std::path::Path,
+	name: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+	std::fs::create_dir_all(project.join(".cursor")).unwrap();
+	std::fs::create_dir_all(project.join(".opencode")).unwrap();
+
+	let skill_dir = project.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	let claude_skills = project.join(".claude/skills");
+	std::fs::create_dir_all(&claude_skills).unwrap();
+	let claude_link = claude_skills.join(name);
+	std::os::unix::fs::symlink(&skill_dir, &claude_link).unwrap();
+
+	let cursor_skills = project.join(".cursor/skills");
+	std::fs::create_dir_all(&cursor_skills).unwrap();
+	let cursor_link = cursor_skills.join(name);
+	std::os::unix::fs::symlink(&skill_dir, &cursor_link).unwrap();
+
+	(skill_dir, claude_link, cursor_link)
+}
+
+#[cfg(unix)]
+fn setup_three_enabled_agents(state: &std::path::Path) {
+	let data = state.join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled_set: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| {
+				a != aghub_core::AgentType::Claude
+					&& a != aghub_core::AgentType::Cursor
+					&& a != aghub_core::AgentType::OpenCode
+			})
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled_set)
+		.unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_real_dir_with_own_links_is_order_independent() {
+	let orders = [
+		"claude,cursor,opencode",
+		"claude,opencode,cursor",
+		"cursor,claude,opencode",
+		"cursor,opencode,claude",
+		"opencode,claude,cursor",
+		"opencode,cursor,claude",
+	];
+
+	let name = "x";
+
+	for order in orders {
+		// Preview on fresh fixture
+		let prev_home = tempfile::TempDir::new().unwrap();
+		let prev_state = tempfile::TempDir::new().unwrap();
+		let prev_project = prev_home.path().join("project");
+		seed_real_dir_project_fixture(&prev_project, name);
+		setup_three_enabled_agents(prev_state.path());
+
+		let preview_out = isolated_cli(prev_home.path(), prev_state.path())
+			.current_dir(&prev_project)
+			.args([
+				"-p",
+				"-a",
+				order,
+				"delete",
+				"skills",
+				name,
+				"--json",
+				"--dry-run",
+			])
+			.output()
+			.unwrap();
+
+		assert!(
+			preview_out.status.success(),
+			"preview run for {order} must succeed; stderr: {}",
+			String::from_utf8_lossy(&preview_out.stderr)
+		);
+
+		let preview_json: Value = serde_json::from_slice(&preview_out.stdout)
+			.expect("preview output must be valid JSON");
+		let results = preview_json["results"]
+			.as_array()
+			.expect("preview json must contain results array");
+
+		let mut preview_rel_paths = std::collections::BTreeSet::new();
+		for row in results {
+			assert_eq!(
+				row["ok"], true,
+				"row for agent {} in {order} must be ok: {row}",
+				row["agent"]
+			);
+			if let Some(paths) = row["output"]["paths"].as_array() {
+				for p in paths {
+					if let Some(s) = p.as_str() {
+						let pb = PathBuf::from(s);
+						let rel = pb
+							.strip_prefix(&prev_project)
+							.unwrap_or(&pb)
+							.to_path_buf();
+						preview_rel_paths.insert(rel);
+					}
+				}
+			}
+		}
+
+		// Real run with --yes on fresh fixture
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let project = home.path().join("project");
+		let (skill_dir, claude_link, cursor_link) =
+			seed_real_dir_project_fixture(&project, name);
+		setup_three_enabled_agents(state.path());
+
+		let yes_out = isolated_cli(home.path(), state.path())
+			.current_dir(&project)
+			.args([
+				"-p", "-a", order, "delete", "skills", name, "--yes", "--json",
+			])
+			.output()
+			.unwrap();
+
+		assert_eq!(
+			yes_out.status.code(),
+			Some(0),
+			"order {order} expected exit code 0, got {:?}; stderr: {}, stdout: {}",
+			yes_out.status.code(),
+			String::from_utf8_lossy(&yes_out.stderr),
+			String::from_utf8_lossy(&yes_out.stdout)
+		);
+
+		// Assert: final disk identical (all three gone, no dangling)
+		assert!(
+			!skill_dir.exists(),
+			"order {order}: .agents/skills/x must be gone"
+		);
+		assert!(
+			std::fs::symlink_metadata(&claude_link).is_err(),
+			"order {order}: .claude/skills/x must be gone"
+		);
+		assert!(
+			std::fs::symlink_metadata(&cursor_link).is_err(),
+			"order {order}: .cursor/skills/x must be gone"
+		);
+
+		let yes_json: Value = serde_json::from_slice(&yes_out.stdout)
+			.expect("execution output must be valid JSON");
+		let yes_results = yes_json["results"]
+			.as_array()
+			.expect("execution json must contain results array");
+
+		let mut executed_rel_paths = std::collections::BTreeSet::new();
+		for row in yes_results {
+			assert_eq!(
+				row["ok"], true,
+				"execution row for agent {} in {order} must be ok: {row}",
+				row["agent"]
+			);
+			if let Some(paths) = row["output"]["paths"].as_array() {
+				for p in paths {
+					if let Some(s) = p.as_str() {
+						let pb = PathBuf::from(s);
+						let rel = pb
+							.strip_prefix(&project)
+							.unwrap_or(&pb)
+							.to_path_buf();
+						executed_rel_paths.insert(rel);
+					}
+				}
+			}
+		}
+
+		assert_eq!(
+			preview_rel_paths, executed_rel_paths,
+			"order {order}: preview paths union != executed paths union"
+		);
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn reconcile_skill_remove_real_dir_with_own_links_is_order_independent() {
+	let orders = [
+		["claude", "cursor", "opencode"],
+		["claude", "opencode", "cursor"],
+		["cursor", "claude", "opencode"],
+		["cursor", "opencode", "claude"],
+		["opencode", "claude", "cursor"],
+		["opencode", "cursor", "claude"],
+	];
+
+	let name = "x";
+
+	for order in orders {
+		let order_str = order.join(",");
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let project = home.path().join("project");
+		let (skill_dir, claude_link, cursor_link) =
+			seed_real_dir_project_fixture(&project, name);
+		setup_three_enabled_agents(state.path());
+
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(&project)
+			.args([
+				"-p",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				order[0],
+				"--name",
+				name,
+				"--remove",
+				order[0],
+				"--remove",
+				order[1],
+				"--remove",
+				order[2],
+				"--yes",
+			])
+			.output()
+			.unwrap();
+
+		assert_eq!(
+			out.status.code(),
+			Some(0),
+			"order {order_str} expected exit code 0, got {:?}; stderr: {}, stdout: {}",
+			out.status.code(),
+			String::from_utf8_lossy(&out.stderr),
+			String::from_utf8_lossy(&out.stdout)
+		);
+
+		let json: Value = serde_json::from_slice(&out.stdout)
+			.expect("reconcile output must be valid JSON");
+		assert_eq!(
+			json["failed_count"], 0,
+			"order {order_str} must have 0 failed rows: {json}"
+		);
+
+		// Assert: final disk identical (all three gone, no dangling)
+		assert!(
+			!skill_dir.exists(),
+			"order {order_str}: .agents/skills/x must be gone"
+		);
+		assert!(
+			std::fs::symlink_metadata(&claude_link).is_err(),
+			"order {order_str}: .claude/skills/x must be gone"
+		);
+		assert!(
+			std::fs::symlink_metadata(&cursor_link).is_err(),
+			"order {order_str}: .cursor/skills/x must be gone"
+		);
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_real_dir_with_unrequested_enabled_linker_is_refused_any_order() {
+	let orders = ["claude,opencode", "opencode,claude"];
+	let name = "x";
+
+	for order in orders {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let project = home.path().join("project");
+		let (skill_dir, claude_link, cursor_link) =
+			seed_real_dir_project_fixture(&project, name);
+		setup_three_enabled_agents(state.path());
+
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(&project)
+			.args(["-p", "-a", order, "delete", "skills", name, "--yes"])
+			.output()
+			.unwrap();
+
+		assert_eq!(
+			out.status.code(),
+			Some(1),
+			"order {order} must be refused with exit code 1; stderr: {}, stdout: {}",
+			String::from_utf8_lossy(&out.stderr),
+			String::from_utf8_lossy(&out.stdout)
+		);
+
+		// The directory and the unrequested agent's link must survive. The
+		// requested agent's own link is not asserted: its own row may unlink it
+		// before the refusal (base behaviour, identical in both orders).
+		let _ = &claude_link;
+		assert!(
+			skill_dir.exists(),
+			"order {order}: .agents/skills/x must still exist"
+		);
+		assert!(
+			cursor_link.symlink_metadata().is_ok(),
+			"order {order}: .cursor/skills/x must still exist"
+		);
+		assert!(
+			cursor_link.join("SKILL.md").exists(),
+			"order {order}: .cursor/skills/x must still resolve"
+		);
+	}
+}
+
 #[test]
 fn delete_help_reflects_shared_location_doc() {
 	let out = aghub_cli().args(["delete", "--help"]).output().unwrap();
@@ -8003,6 +8458,11 @@ fn delete_help_reflects_shared_location_doc() {
 	assert!(
 		normalized.contains("location shared with other agents"),
 		"help must contain 'location shared with other agents', got: {stdout}"
+	);
+	assert!(
+		normalized.contains("`--yes` then exits 1")
+			&& normalized.contains("git tracks the directory"),
+		"help must say a refused delete exits 1 and mention git tracking, got: {stdout}"
 	);
 }
 

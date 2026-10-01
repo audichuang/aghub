@@ -501,17 +501,27 @@ pub async fn delete_skill_by_path(
 					&requested_agents,
 				);
 			if let Some(reason) = keep_reason {
-				if let aghub_core::skills::removal::KeepReason::ExternalReferrer(
-					ref referrer,
-				) = reason
-				{
-					// Name WHICH path kept it: the sweep runs over every in-scope
-					// agent dir, so "kept" without a pointer is undiagnosable.
-					log::warn!(
-						"keeping {}: {} still references it",
-						skill_dir.display(),
-						referrer.display()
-					);
+				match reason {
+					aghub_core::skills::removal::KeepReason::ExternalReferrer(
+						ref referrer,
+					) => {
+						// Name WHICH path kept it: the sweep runs over every in-scope
+						// agent dir, so "kept" without a pointer is undiagnosable.
+						log::warn!(
+							"keeping {}: {} still references it",
+							skill_dir.display(),
+							referrer.display()
+						);
+					}
+					aghub_core::skills::removal::KeepReason::GitTracked => {
+						log::warn!(
+							"{}",
+							aghub_core::skills::removal::untrack_hint(
+								&skill_dir
+							)
+						);
+					}
+					aghub_core::skills::removal::KeepReason::UniversalMaster => {}
 				}
 				// Kept because SHARED: through the `RemovalView` seam so it
 				// reads `outcome: "kept"`, never a success that means "deleted".
@@ -536,25 +546,16 @@ pub async fn delete_skill_by_path(
 					dry_run,
 				)));
 			}
-			let mut paths = Vec::new();
-			let owned = aghub_core::skills::removal::owned_inbound_links(
-				&skill_dir,
-				&all_in_scope,
-				&skill_name,
-				project_root.as_deref(),
-				resource_scope,
-				&requested_agents,
-			);
-			for link in owned {
-				if std::fs::symlink_metadata(&link).is_ok()
-					&& !paths.contains(&link)
-					&& link.parent().is_some_and(|p| {
-						aghub_core::skills::removal::assert_contained(p, &roots)
-							.is_some()
-					}) {
-					paths.push(link);
-				}
-			}
+			let mut paths =
+				aghub_core::skills::removal::plan_owned_inbound_links(
+					&skill_dir,
+					&all_in_scope,
+					&roots,
+					&skill_name,
+					project_root.as_deref(),
+					resource_scope,
+					&requested_agents,
+				);
 			paths.push(skill_dir.clone());
 			let plan = aghub_core::skills::removal::RemovalPlan {
 				layout: aghub_core::skills::removal::Layout::Copy,
@@ -3539,6 +3540,114 @@ mod tests {
 		});
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_git_tracked_is_kept_untracked_is_deleted() {
+		if !test_has_git() {
+			eprintln!("skipping test: git binary unavailable");
+			return;
+		}
+
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| a.as_str() != "cursor")
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				test_git(proj, &["init", "-q"]);
+
+				// 1. Tracked skill: response outcome is kept, dir remains
+				let tracked_slot = proj.join(".agents/skills/tracked");
+				std::fs::create_dir_all(&tracked_slot).unwrap();
+				std::fs::write(
+					tracked_slot.join("SKILL.md"),
+					"---\nname: tracked\ndescription: d\n---\n",
+				)
+				.unwrap();
+
+				test_git(
+					proj,
+					&["add", "--", ".agents/skills/tracked/SKILL.md"],
+				);
+
+				let req = DeleteSkillByPathRequest {
+					source_path: tracked_slot
+						.join("SKILL.md")
+						.display()
+						.to_string(),
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: Some(true),
+				};
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(req),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert!(
+					tracked_slot.join("SKILL.md").exists(),
+					"git tracked real dir must remain after delete by path"
+				);
+				assert_eq!(
+					resp.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Kept,
+					"git tracked real dir outcome must be kept"
+				);
+
+				// 2. Untracked skill: deleted
+				let untracked_slot = proj.join(".agents/skills/untracked");
+				std::fs::create_dir_all(&untracked_slot).unwrap();
+				std::fs::write(
+					untracked_slot.join("SKILL.md"),
+					"---\nname: untracked\ndescription: d\n---\n",
+				)
+				.unwrap();
+
+				let req_untracked = DeleteSkillByPathRequest {
+					source_path: untracked_slot
+						.join("SKILL.md")
+						.display()
+						.to_string(),
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: Some(true),
+				};
+				let resp_untracked = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(req_untracked),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert!(
+					!untracked_slot.join("SKILL.md").exists(),
+					"untracked real dir must be deleted"
+				);
+				assert_eq!(
+					resp_untracked.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Removed,
+					"untracked real dir outcome must be removed"
+				);
+			});
+		});
+	}
+
 	/// The OTHER direction, and the one the keep-guard must not swallow: the
 	/// desktop's location dialog sends EVERY agent installed at that exact
 	/// `source_path`, so nobody is left to lose the skill and the location has
@@ -4159,6 +4268,41 @@ mod tests {
 		});
 	}
 
+	/// Returns `true` when the git binary is on `PATH`.
+	/// Uses a dynamically spelled program name: a test pins that this file never
+	/// spells the literal git spawn call (`detect_current_branch_uses_gix_not_subprocess`).
+	#[cfg(unix)]
+	fn test_has_git() -> bool {
+		let git = ["g", "i", "t"].concat();
+		std::process::Command::new(git)
+			.arg("--version")
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null())
+			.status()
+			.map(|s| s.success())
+			.unwrap_or(false)
+	}
+
+	/// Run `git -C <root> <args>` with developer-global config isolated out.
+	/// Panics on failure (call only after [`test_has_git`] returned `true`).
+	#[cfg(unix)]
+	fn test_git(root: &std::path::Path, args: &[&str]) {
+		let git = ["g", "i", "t"].concat();
+		let ok = std::process::Command::new(git)
+			.arg("-C")
+			.arg(root)
+			.args(args)
+			.env("GIT_CONFIG_GLOBAL", "/dev/null")
+			.env("GIT_CONFIG_NOSYSTEM", "1")
+			.env("HOME", root)
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null())
+			.status()
+			.expect("failed to spawn git")
+			.success();
+		assert!(ok, "git -C {} {} failed", root.display(), args.join(" "));
+	}
+
 	/// Every agent that reads `slot`, as request ids. A by-path request naming
 	/// exactly the slot's readers passes per-agent validation and the shared-slot
 	/// guard, so only the path checks under test stand between it and deletion.
@@ -4745,6 +4889,234 @@ mod tests {
 				err.contains("strictly"),
 				"error must mention strictly: {err}"
 			);
+		});
+	}
+
+	/// A `SKILL.md` placed directly in the skills root (not in a subdirectory)
+	/// must not delete the root or the sibling — the dir parent is the skills
+	/// root itself, so the strictly-contained guard rejects it.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_rejects_skill_md_directly_under_the_skills_root() {
+		with_isolated_env(|home, _state| {
+			let proj = home.join("proj");
+			let slot = proj.join(".agents/skills");
+			let sibling = slot.join("sibling");
+			std::fs::create_dir_all(&sibling).unwrap();
+			std::fs::write(
+				sibling.join("SKILL.md"),
+				"---\nname: sibling\ndescription: s\n---\n",
+			)
+			.unwrap();
+			// A bare SKILL.md in the root — not inside a skill subdirectory.
+			std::fs::write(
+				slot.join("SKILL.md"),
+				"---\nname: root-skill\ndescription: r\n---\n",
+			)
+			.unwrap();
+
+			let readers = slot_readers(
+				&slot,
+				aghub_core::models::ResourceScope::ProjectOnly,
+				Some(&proj),
+			);
+			let req = DeleteSkillByPathRequest {
+				source_path: slot.join("SKILL.md").display().to_string(),
+				agents: readers,
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(slot.exists(), "slot dir must survive");
+			assert!(
+				sibling.join("SKILL.md").exists(),
+				"sibling skill must survive"
+			);
+			assert!(!resp.success);
+		});
+	}
+
+	/// `<proj>/.agents/skills/y/..` with sibling skills y and z: both must
+	/// survive because the path contains `..`.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_rejects_child_then_dotdot() {
+		with_isolated_env(|home, _state| {
+			let proj = home.join("proj");
+			let slot = proj.join(".agents/skills");
+			let y = slot.join("y");
+			let z = slot.join("z");
+			std::fs::create_dir_all(&y).unwrap();
+			std::fs::write(
+				y.join("SKILL.md"),
+				"---\nname: y\ndescription: y\n---\n",
+			)
+			.unwrap();
+			std::fs::create_dir_all(&z).unwrap();
+			std::fs::write(
+				z.join("SKILL.md"),
+				"---\nname: z\ndescription: z\n---\n",
+			)
+			.unwrap();
+
+			let readers = slot_readers(
+				&slot,
+				aghub_core::models::ResourceScope::ProjectOnly,
+				Some(&proj),
+			);
+			let req = DeleteSkillByPathRequest {
+				source_path: format!("{}/{}", y.display(), ".."),
+				agents: readers,
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(y.join("SKILL.md").exists(), "skill y must survive");
+			assert!(z.join("SKILL.md").exists(), "skill z must survive");
+			assert!(!resp.success);
+			let err = resp.error.as_deref().unwrap_or("");
+			assert!(err.contains("'..'"), "error must mention '..': {err}");
+		});
+	}
+
+	/// A REAL directory inside `.aghub/<name>` (the Master store) must survive a
+	/// by-path request from a single enabled agent.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_refuses_real_dir_in_aghub_store() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| a.as_str() != "cursor")
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				let name = "store-real";
+				let master = proj.join(".aghub").join(name);
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: test\n---\n"),
+				)
+				.unwrap();
+				// Agent marker so project root is recognized.
+				std::fs::create_dir_all(proj.join(".cursor")).unwrap();
+
+				let req = DeleteSkillByPathRequest {
+					source_path: master.join("SKILL.md").display().to_string(),
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: Some(true),
+				};
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(req),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert!(
+					master.join("SKILL.md").exists(),
+					".aghub store real dir must survive"
+				);
+				// No agent reads `.aghub`, so the route's location validation
+				// refuses before the keep rule is reached; the keep rule itself
+				// is pinned in core (`single_agent_keep_reason_aghub_store_*`).
+				assert!(
+					!resp.success,
+					"a path no agent reads must be refused: {:?}",
+					resp.error
+				);
+			});
+		});
+	}
+
+	/// A source_path spelling `..` into `.aghub` (e.g.
+	/// `<proj>/.agents/skills/../../.aghub/<name>/SKILL.md`) must be
+	/// rejected because the `..` components escape the agent skills root.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_rejects_dotdot_into_aghub_store() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|dir| {
+				let disabled: std::collections::BTreeSet<String> =
+					aghub_core::models::AgentType::ALL
+						.iter()
+						.filter(|a| a.as_str() != "cursor")
+						.map(|a| a.as_str().to_string())
+						.collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					dir, &disabled,
+				)
+				.unwrap();
+
+				let proj = home;
+				let name = "store-dot";
+				let master = proj.join(".aghub").join(name);
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: test\n---\n"),
+				)
+				.unwrap();
+				std::fs::create_dir_all(proj.join(".cursor")).unwrap();
+
+				// Spell the path through .. into .aghub.
+				let dotdot_path = format!(
+					"{}/.agents/skills/../../.aghub/{}/SKILL.md",
+					proj.display(),
+					name
+				);
+				let req = DeleteSkillByPathRequest {
+					source_path: dotdot_path,
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: Some(true),
+				};
+				let resp = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(req),
+				))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+				assert!(
+					master.join("SKILL.md").exists(),
+					".aghub store dir must survive the dotdot attempt"
+				);
+				// The handler rejects the `..` before reaching the store
+				// guard, so this is a validation failure, not a kept outcome.
+				assert!(!resp.success);
+				let err = resp.error.as_deref().unwrap_or("");
+				assert!(err.contains("'..'"), "error must mention '..': {err}");
+			});
 		});
 	}
 

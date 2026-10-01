@@ -1942,13 +1942,14 @@ impl RepairPlan {
 /// Shells out to `git` on purpose (`aghub-core` must not grow a git dependency
 /// for a yes/no question) and reads only the EXIT CODE: stdout would land in a
 /// `repair --json` run and messages are localized.
-enum GitTracked {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitTracked {
 	Yes,
 	No,
 	Undecided,
 }
 
-fn git_tracked(path: &Path) -> GitTracked {
+pub(crate) fn git_tracked(path: &Path) -> GitTracked {
 	let Some(parent) = path.parent() else {
 		return GitTracked::No;
 	};

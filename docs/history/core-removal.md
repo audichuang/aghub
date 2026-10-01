@@ -204,18 +204,20 @@ rather than a link, the CLI/core single-agent delete used to always refuse
 enabled reader, while the API delete-by-path decided by readers. The verdict now
 lives in `single_agent_keep_reason` alone, in this order: (1) inside the
 `.aghub` store -> keep unconditionally (no agent reads it, so "no reader
-outside" would misfire and delete a Master); (2) any symlink resolving to it,
-full roster -> keep; (3) inside a shared Referrer root: empty `requested` keeps
-(fail closed), otherwise keep iff an ENABLED reader is outside `requested`
-(disabled agents are unmanaged and never count); (4) a private copy -> delete.
+outside" would misfire and delete a Master); (2) a symlink resolving to it ->
+keep, EXCEPT a link in a requested agent's own private skills dir that no
+unrequested enabled agent also reads (below); (3) inside a shared Referrer
+root: empty `requested` keeps (fail closed), otherwise keep iff an ENABLED
+reader is outside `requested` (disabled agents are unmanaged and never count),
+and a directory git tracks is kept too (below); (4) a private copy -> delete.
 It is stricter than the link rule: no `slot_reader_count < 2` shortcut and no
 "the other reader has another copy" release, because deleting a real directory
 deletes content. There is no `.aghub` Master behind it, so the lock entry is
 pruned too: local edits cannot come back, though a skill that originally came
 from a source can be reinstalled fresh with `source sync <repo>`. The API
 by-path route, `reconcile` (and so the desktop's manage-agents / bulk dialogs,
-through `requested_removals`) call the same function. `--all-agents` and the
-link (Referrer) layout are unchanged.
+through `requested_removals`) call the same function. `--all-agents` is
+unchanged.
 
 Order independence (the verdict must not depend on `-a` order): step (2) used to
 see only the disk as it is when a row is planned, but a batch executes rows
@@ -226,33 +228,72 @@ row then found no inbound link and deleted the only copy; `-a
 cursor,opencode,claude` kept it. Now a link that lives in a REQUESTED agent's
 private skills dir (and that no unrequested enabled agent also reads) is not an
 external referrer, because that agent's own row removes it; the row that
-releases the directory also plans those links, so no dangling link is left in
-either order and the preview's paths equal what executes (as a set across the
-batch). A link in a shared root, in an unrequested agent's dir, or in a dir that
-belongs to nobody stays an external referrer: the delete exits 1 and names it,
-exactly as base did (base checked "is it a shared root" first and refused; an
-intermediate version of this change reported it as a silent `kept` with exit 0,
-so the planner again treats an inbound link into a shared-root directory as a
-refusal). Residual edge: if a requested agent's own row fails to unlink its link,
-that link dangles after the directory is deleted.
+releases the directory also plans those links (`plan_owned_inbound_links`, the
+one assembly shared by the copy-layout planner, the symlink-layout planner and
+the API by-path route), so no dangling link is left in either order and the
+preview's paths equal what executes (as a set across the batch). A link in a
+shared root, in an unrequested agent's dir, or in an unmanaged dir an enabled
+reader also uses stays an external referrer: the delete exits 1 and names it,
+exactly as base did. A link that lives in a directory no agent owns is outside
+the scan altogether (as in base): it is neither named nor unlinked, and it
+dangles once the directory is deleted.
 
-Known wording gap (reconcile, not changed): the reconcile refusal's "the shared
-master is still read by ..." clause (`ReconcileSkillPlan::keepers`) comes from
-`skill_holders`, which walks the FULL roster because it answers the Master-GC
-question, so it may list a disabled agent and is not limited to the enabled
-reader or link that actually blocked the row; the clause that does name the
-blocking link is "it is still served to this agent from ...".
+The second order-dependence (review finding M-1): a requested agent that has its
+OWN link into the directory (claude and cursor both linking to
+`.agents/skills/x`, only claude/cursor/opencode enabled) takes the
+symlink-layout planner, whose `other_refs` scan saw the other requested agent's
+link and the real directory as survivors and judged that row `blocks`, so 3 of
+the 6 `-a` orders exited 1 and 3 exited 0 over identical final disks
+(`reconcile skill --remove` likewise). `plan_removal_for_agents` now asks
+`single_agent_keep_reason` first for such a row, when the canonical is a real
+directory in a shared slot and the request is non-empty; on release it plans the
+owned links plus the directory exactly like the copy layout, and on any keep it
+falls through to the unchanged symlink planner, so a single-agent delete of
+just that agent's link (another agent still linking) keeps working. Rows that
+run after the directory is gone end as the existing `absent` noop (the CLI's
+`plan_or_noop` maps `ResourceNotFound`), exit 0. A refused batch is not atomic:
+every row is attempted, so a requested agent's own row may already have
+unlinked its link when another row refuses (identical in either order).
 
-Tests: `manager::skill::tests::real_dir_batch_verdict_is_independent_of_order`,
-`manager::skill::tests::real_dir_keeps_and_refuses_when_link_belongs_to_unrequested_agent`,
-`manager::skill::tests::real_dir_empty_request_fails_closed`,
-cli tests `real_dir_npx_layout_*`.
+Git-tracked directories: a real directory git TRACKS is authored source, and
+deleting it for "some agents" would remove it from version control. Like
+`repair` (`GitTrackedSource`, reusing `shape::git_tracked`), the release step
+refuses it (`KeepReason::GitTracked`; the warning prints
+`git rm -r --cached <path>` as the escape). Divergence on purpose: `repair`
+also refuses when tracking cannot be decided (git missing, unusable
+repository); a delete treats that as untracked and goes ahead, because git being
+absent must not make a skill undeletable. Only the shared-slot real-directory
+release is gated; `--all-agents` and the link layout are not.
+
+Known edges: the planner unlinks the requested agents' links BEFORE the
+directory, so if `remove_dir_all` then fails (a read-only parent, mode 555) the
+links are already gone and nothing restores them. The reconcile refusal's "the
+shared master is still read by ..." clause (`ReconcileSkillPlan::keepers`) comes
+from `skill_holders`, which walks the FULL roster because it answers the
+Master-GC question, so it may list a disabled agent and is not limited to the
+enabled reader or link that actually blocked the row; the clause that does name
+the blocking link is "it is still served to this agent from ...". When a link
+from a DISABLED agent's private dir points at the directory, the refusal path
+lists only the path, not the agent. Neither is changed.
 
 Tests:
 `manager::skill::tests::real_dir_shared_slot_single_agent_remove_succeeds_when_other_readers_disabled`,
 `manager::skill::tests::real_dir_shared_slot_kept_when_enabled_reader_not_in_request`,
 `manager::skill::tests::real_dir_shared_slot_removed_when_request_names_every_enabled_reader`,
-cli tests `real_dir_delete_*`, api test
+`manager::skill::tests::real_dir_batch_verdict_is_independent_of_order`,
+`manager::skill::tests::real_dir_batch_with_own_links_is_order_independent`,
+`manager::skill::tests::real_dir_keeps_and_refuses_when_link_belongs_to_unrequested_agent`,
+`manager::skill::tests::real_dir_with_unrequested_enabled_linker_refuses_the_direct_reader_row`,
+`manager::skill::tests::real_dir_empty_request_fails_closed`,
+`manager::skill::tests::real_dir_git_tracked_single_agent_delete_is_refused`,
+`manager::skill::tests::real_dir_untracked_in_git_repo_single_agent_delete_is_allowed`,
+`skills::removal::tests::single_agent_keep_reason_git_tracked_refuses_untracked_allows`,
+`skills::removal::tests::single_agent_keep_reason_aghub_store_real_dir_is_kept_when_everyone_is_requested`,
+cli tests `real_dir_delete_*`, `real_dir_npx_layout_*`,
+`delete_real_dir_with_own_links_is_order_independent`,
+`reconcile_skill_remove_real_dir_with_own_links_is_order_independent`,
+`delete_real_dir_with_unrequested_enabled_linker_is_refused_any_order`,
+`delete_real_dir_git_tracked_is_refused_untracked_allowed`, api test
 `delete_by_name_removes_real_shared_dir_when_request_names_every_enabled_reader`.
 
 Tests:

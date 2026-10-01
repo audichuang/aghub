@@ -4115,3 +4115,477 @@ fn real_dir_empty_request_fails_closed() {
 		"real directory must still exist after failed removal, err: {err}"
 	);
 }
+
+#[cfg(unix)]
+#[test]
+fn real_dir_git_tracked_single_agent_delete_is_refused() {
+	if !crate::skills::removal::tests::git_fixture::has_git() {
+		eprintln!("skipping test: git binary unavailable");
+		return;
+	}
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	std::fs::create_dir_all(root.join(".claude")).unwrap();
+
+	let name = "real-dir-git-tracked";
+	let skill_dir = root.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	crate::skills::removal::tests::git_fixture::git(root, &["init", "-q"]);
+	crate::skills::removal::tests::git_fixture::git(
+		root,
+		&["add", "--", &format!(".agents/skills/{name}/SKILL.md")],
+	);
+
+	// Enabled = cursor and opencode (all other agents disabled)
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor && a != AgentType::OpenCode)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	cursor.load().unwrap();
+
+	let err = cursor
+		.remove_skill_planned_for_agents(
+			name,
+			false,
+			false,
+			true,
+			&[AgentType::Cursor, AgentType::OpenCode],
+		)
+		.expect_err("tracked real directory deletion must be refused");
+
+	assert!(
+		matches!(err, ConfigError::UnsupportedOperation(_)),
+		"expected UnsupportedOperation, got {err:?}"
+	);
+	assert!(
+		skill_dir.exists(),
+		"the git-tracked real skill directory must still exist"
+	);
+	assert!(
+		skill_dir.join("SKILL.md").exists(),
+		"SKILL.md must still exist"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_untracked_in_git_repo_single_agent_delete_is_allowed() {
+	if !crate::skills::removal::tests::git_fixture::has_git() {
+		eprintln!("skipping test: git binary unavailable");
+		return;
+	}
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	std::fs::create_dir_all(root.join(".claude")).unwrap();
+
+	let name = "real-dir-untracked";
+	let skill_dir = root.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	crate::skills::removal::tests::git_fixture::git(root, &["init", "-q"]);
+
+	// Enabled = cursor and opencode (all other agents disabled)
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor && a != AgentType::OpenCode)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	cursor.load().unwrap();
+
+	let outcome = cursor
+		.remove_skill_planned_for_agents(
+			name,
+			false,
+			false,
+			true,
+			&[AgentType::Cursor, AgentType::OpenCode],
+		)
+		.expect("untracked real directory removal must succeed");
+
+	assert!(outcome.executed, "removal must be executed");
+	assert!(
+		!skill_dir.exists(),
+		"the untracked real skill directory must be deleted"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_outside_git_repo_single_agent_delete_is_allowed() {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	std::fs::create_dir_all(root.join(".claude")).unwrap();
+
+	let name = "real-dir-outside-git";
+	let skill_dir = root.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| a != AgentType::Cursor && a != AgentType::OpenCode)
+		.map(|a| a.as_str())
+		.collect();
+	let _guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let mut cursor = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	cursor.load().unwrap();
+
+	let outcome = cursor
+		.remove_skill_planned_for_agents(
+			name,
+			false,
+			false,
+			true,
+			&[AgentType::Cursor, AgentType::OpenCode],
+		)
+		.expect("real directory outside git repo removal must succeed");
+
+	assert!(outcome.executed, "removal must be executed");
+	assert!(
+		!skill_dir.exists(),
+		"the real skill directory outside git repo must be deleted"
+	);
+}
+
+#[cfg(unix)]
+fn setup_real_dir_fixture(
+	root: &std::path::Path,
+	name: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+	std::fs::create_dir_all(root.join(".claude")).unwrap();
+	std::fs::create_dir_all(root.join(".cursor")).unwrap();
+	std::fs::create_dir_all(root.join(".opencode")).unwrap();
+
+	let skill_dir = root.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	let claude_dir = root.join(".claude/skills");
+	std::fs::create_dir_all(&claude_dir).unwrap();
+	let claude_link = claude_dir.join(name);
+	std::os::unix::fs::symlink(&skill_dir, &claude_link).unwrap();
+
+	let cursor_dir = root.join(".cursor/skills");
+	std::fs::create_dir_all(&cursor_dir).unwrap();
+	let cursor_link = cursor_dir.join(name);
+	std::os::unix::fs::symlink(&skill_dir, &cursor_link).unwrap();
+
+	(skill_dir, claude_link, cursor_link)
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_batch_with_own_links_is_order_independent() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	// All 6 permutations of [claude, cursor, opencode].
+	let perms: Vec<Vec<AgentType>> = {
+		let agents =
+			[AgentType::Claude, AgentType::Cursor, AgentType::OpenCode];
+		let mut out = Vec::new();
+		for i in 0..3 {
+			for j in 0..3 {
+				for k in 0..3 {
+					if i != j && j != k && i != k {
+						out.push(vec![agents[i], agents[j], agents[k]]);
+					}
+				}
+			}
+		}
+		out
+	};
+	assert_eq!(perms.len(), 6, "must have 6 permutations");
+
+	let enabled_three =
+		[AgentType::Claude, AgentType::Cursor, AgentType::OpenCode];
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| !enabled_three.contains(&a))
+		.map(|a| a.as_str())
+		.collect();
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let _agent_guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let requested = enabled_three;
+	let name = "x";
+
+	for order in &perms {
+		let order_name = order
+			.iter()
+			.map(|a| a.as_str())
+			.collect::<Vec<_>>()
+			.join(",");
+
+		// Phase 1: dry-run preview on a FRESH fixture
+		let preview_tmp = tempfile::tempdir().unwrap();
+		let preview_root = preview_tmp.path();
+		setup_real_dir_fixture(preview_root, name);
+
+		let mut preview_union = std::collections::BTreeSet::new();
+		for &agent in order {
+			let mut mgr = ConfigManager::new(
+				create_adapter(agent),
+				false,
+				Some(preview_root),
+			);
+			mgr.load().unwrap();
+			let outcome = mgr
+				.remove_skill_planned_for_agents(
+					name, false, true, false, &requested,
+				)
+				.unwrap_or_else(|e| {
+					panic!("{order_name}: preview must succeed for {agent:?}: {e:?}")
+				});
+			for p in &outcome.plan.paths {
+				let rel =
+					p.strip_prefix(preview_root).unwrap_or(p).to_path_buf();
+				preview_union.insert(rel);
+			}
+		}
+
+		// Phase 2: execute rows in that order on a FRESH fixture
+		let exec_tmp = tempfile::tempdir().unwrap();
+		let exec_root = exec_tmp.path();
+		let (skill_dir, claude_link, cursor_link) =
+			setup_real_dir_fixture(exec_root, name);
+
+		let mut executed_union = std::collections::BTreeSet::new();
+		for (idx, &agent) in order.iter().enumerate() {
+			let mut mgr = ConfigManager::new(
+				create_adapter(agent),
+				false,
+				Some(exec_root),
+			);
+			// Mirror the CLI's `plan_or_noop`: a later row finding nothing left
+			// is `ResourceNotFound`, which the surfaces map to a noop outcome.
+			let outcome = match mgr.remove_skill_planned_for_agents(
+				name, false, false, true, &requested,
+			) {
+				Ok(outcome) => outcome,
+				Err(ConfigError::ResourceNotFound { .. }) if idx > 0 => {
+					crate::skills::removal::RemovalOutcome::noop()
+				}
+				Err(e) => panic!(
+					"{order_name}: execution row {idx} ({agent:?}) must succeed: {e:?}"
+				),
+			};
+
+			if idx == 0 {
+				assert!(
+					outcome.executed,
+					"{order_name}: row 0 ({agent:?}) must have executed=true"
+				);
+				assert!(
+					!outcome.absent,
+					"{order_name}: row 0 ({agent:?}) must not have absent=true"
+				);
+				for p in &outcome.plan.paths {
+					let rel =
+						p.strip_prefix(exec_root).unwrap_or(p).to_path_buf();
+					executed_union.insert(rel);
+				}
+			} else {
+				assert!(
+					outcome.absent,
+					"{order_name}: row {idx} ({agent:?}) must end as absent/noop"
+				);
+				assert!(
+					!outcome.executed,
+					"{order_name}: row {idx} ({agent:?}) must not have executed=true"
+				);
+				assert!(
+					outcome.plan.paths.is_empty(),
+					"{order_name}: row {idx} ({agent:?}) noop paths must be empty: {:?}",
+					outcome.plan.paths
+				);
+			}
+		}
+
+		// Assert: all three paths gone on disk
+		assert!(
+			!skill_dir.exists(),
+			"{order_name}: .agents/skills/x must be gone"
+		);
+		assert!(
+			std::fs::symlink_metadata(&claude_link).is_err(),
+			"{order_name}: .claude/skills/x must be gone (including dangling links)"
+		);
+		assert!(
+			std::fs::symlink_metadata(&cursor_link).is_err(),
+			"{order_name}: .cursor/skills/x must be gone (including dangling links)"
+		);
+
+		// Assert: preview union == executed union
+		assert_eq!(
+			preview_union, executed_union,
+			"{order_name}: preview union != executed union"
+		);
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn real_dir_with_unrequested_enabled_linker_refuses_the_direct_reader_row() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+
+	let enabled = [AgentType::Claude, AgentType::Cursor, AgentType::OpenCode];
+	let disabled: Vec<&str> = AgentType::ALL
+		.iter()
+		.filter(|&&a| !enabled.contains(&a))
+		.map(|a| a.as_str())
+		.collect();
+	let _agent_guard = crate::agent_settings::test_override::disable(&disabled);
+
+	let name = "x";
+	let orders = [
+		[AgentType::Claude, AgentType::OpenCode],
+		[AgentType::OpenCode, AgentType::Claude],
+	];
+
+	for requested in &orders {
+		let order_name = requested
+			.iter()
+			.map(|a| a.as_str())
+			.collect::<Vec<_>>()
+			.join(",");
+
+		// Fresh fixture for each order.
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let (skill_dir, claude_link, cursor_link) =
+			setup_real_dir_fixture(root, name);
+
+		// Only the direct reader (opencode) row decides on the real dir. The
+		// claude row has its own link and keeps the base behaviour (unlink its own
+		// link, leave the dir because cursor still links to it).
+		{
+			let agent = AgentType::OpenCode;
+			let mut mgr =
+				ConfigManager::new(create_adapter(agent), false, Some(root));
+			mgr.load().unwrap();
+			let preview = mgr
+				.remove_skill_planned_for_agents(
+					name, false, true, false, requested,
+				)
+				.unwrap_or_else(|e| {
+					panic!("{order_name}: preview must succeed for {agent:?}: {e:?}")
+				});
+			assert!(
+				preview.plan.shared_master_kept,
+				"{order_name}: shared_master_kept must be true in preview for {agent:?}"
+			);
+			assert!(
+				preview.plan.paths.is_empty(),
+				"{order_name}: preview paths must be empty for {agent:?}, got: {:?}",
+				preview.plan.paths
+			);
+		}
+
+		// Execute: cursor link is an unrequested external referrer, so every
+		// requested agent refuses with UnsupportedOperation.
+		{
+			let agent = AgentType::OpenCode;
+			let mut mgr =
+				ConfigManager::new(create_adapter(agent), false, Some(root));
+			mgr.load().unwrap();
+			let err = mgr
+				.remove_skill_planned_for_agents(
+					name, false, false, true, requested,
+				)
+				.expect_err(&format!(
+					"{order_name}: execution must be refused for {agent:?}"
+				));
+			assert!(
+				matches!(err, ConfigError::UnsupportedOperation(_)),
+				"{order_name}: expected UnsupportedOperation for {agent:?}, got {err:?}"
+			);
+			let msg = err.to_string();
+			assert!(
+				msg.contains("cursor"),
+				"{order_name}: refusal message must contain 'cursor': {msg}"
+			);
+		}
+
+		// Disk state: the real dir and the unrequested cursor link stay intact.
+		let _ = &claude_link;
+		assert!(
+			skill_dir.exists(),
+			"{order_name}: .agents/skills/x must still exist"
+		);
+		assert!(
+			cursor_link.symlink_metadata().is_ok(),
+			"{order_name}: .cursor/skills/x must still exist"
+		);
+		assert!(
+			cursor_link.join("SKILL.md").exists(),
+			"{order_name}: .cursor/skills/x must resolve, not dangle"
+		);
+	}
+}

@@ -296,12 +296,16 @@ enum Commands {
 	///
 	/// Read `outcome`, not `dry_run`/`executed`: `preview` | `removed` |
 	/// `absent` | `partial` | `kept`. `kept` means nothing was removed and the
-	/// skill is still there: an agent outside the request still reads it from a
-	/// location shared with other agents (a `.aghub/<name>` master, or a real
-	/// directory in a shared slot such as `.agents/skills`), a symlink from an
-	/// agent outside the request still points at it, or an `--all-agents`
-	/// sweep could not clear everything holding it. `success: true` AND THE
-	/// SKILL IS STILL THERE; the payload's `skipped` names what stayed.
+	/// skill is still there. A PREVIEW shows it for a single-agent delete that
+	/// `--yes` would refuse, and `--yes` then exits 1 and names what stayed:
+	/// an agent outside the request still reads the skill from a location
+	/// shared with other agents (a `.aghub/<name>` master, or a real directory
+	/// in a shared slot such as `.agents/skills`), a symlink from an agent
+	/// outside the request still points at it, or git tracks the directory
+	/// (untrack it first with `git rm -r --cached <path>`). An `--all-agents`
+	/// sweep that could not clear everything holding the skill also reports
+	/// `kept` (`success: true` AND THE SKILL IS STILL THERE); the payload's
+	/// `skipped` names what stayed.
 	Delete {
 		#[arg(value_enum)]
 		resource: ResourceType,
@@ -1166,7 +1170,9 @@ fn render_removal(
 			 directory in a shared slot). Delete it for all agents \
 			 (--all-agents), or name the other agents that read it in the \
 			 same -a list / remove it from the other agents sharing it \
-			 first.\n",
+			 first. A directory that git tracks is also kept; untrack it \
+			 first with `git rm -r --cached <path>` (the warning above \
+			 names the path).\n",
 			resource.singular()
 		);
 	}
