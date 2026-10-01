@@ -1,5 +1,7 @@
+#[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
 pub(super) fn test_has_git() -> bool {
 	std::process::Command::new("git")
 		.arg("--version")
@@ -10,6 +12,7 @@ pub(super) fn test_has_git() -> bool {
 		.unwrap_or(false)
 }
 
+#[cfg(unix)]
 pub(super) fn test_git(root: &Path, args: &[&str]) {
 	let ok = std::process::Command::new("git")
 		.arg("-C")

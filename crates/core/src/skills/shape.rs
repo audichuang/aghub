@@ -898,6 +898,9 @@ mod tests {
 	/// authored source from an install, so the plan has to ask.
 	#[test]
 	fn a_git_tracked_shared_slot_refuses_instead_of_migrating() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
 		let (_tmp, root) = project_fixture();
 		let slot = shared_slot(&root);
 		write_skill(&slot, "---\nname: foo\n---\n");
@@ -928,6 +931,9 @@ mod tests {
 	/// is for. Widen the guard to the repository and this goes red.
 	#[test]
 	fn an_untracked_shared_slot_inside_a_repo_still_migrates() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
 		let (_tmp, root) = project_fixture();
 		let slot = shared_slot(&root);
 		write_skill(&slot, "---\nname: foo\n---\n");
@@ -947,6 +953,9 @@ mod tests {
 	/// half of B6 in place. On the VM this was the arm that actually ran.
 	#[test]
 	fn a_git_tracked_fork_is_not_quarantined() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
 		let (_tmp, root) = project_fixture();
 		write_skill(&root.join(".aghub").join("foo"), "---\nname: foo\n---\n");
 		let fork = root.join(".claude").join("skills").join("foo");
@@ -972,6 +981,9 @@ mod tests {
 	/// refuses — with its OWN reason, because the remedy is different.
 	#[test]
 	fn an_unanswerable_git_probe_refuses_rather_than_migrating() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
 		let (_tmp, root) = project_fixture();
 		let slot = shared_slot(&root);
 		write_skill(&slot, "---\nname: foo\n---\n");

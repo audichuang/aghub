@@ -2709,14 +2709,14 @@ pub(crate) mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn single_agent_keep_reason_git_tracked_refuses_untracked_allows() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		if !git_fixture::has_git() {
 			eprintln!("skipping test: git binary unavailable");
 			return;
 		}
 
-		let _env = crate::skills::prune::test_lock::env_lock()
-			.lock()
-			.unwrap_or_else(|e| e.into_inner());
 		let tmp = tempdir().unwrap();
 		let root = tmp.path();
 		let scope = crate::models::ResourceScope::ProjectOnly;

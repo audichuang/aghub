@@ -435,6 +435,7 @@ fn clear_agent_home_overrides(cmd: &mut Command) {
 }
 
 /// Returns `true` when the `git` binary is on `PATH`.
+#[cfg(unix)]
 fn cli_has_git() -> bool {
 	std::process::Command::new("git")
 		.arg("--version")
@@ -447,6 +448,7 @@ fn cli_has_git() -> bool {
 
 /// Run `git -C <root> <args>` with developer-global config isolated out.
 /// Panics on failure (call only after [`cli_has_git`] returned `true`).
+#[cfg(unix)]
 fn cli_git(root: &std::path::Path, args: &[&str]) {
 	let ok = std::process::Command::new("git")
 		.arg("-C")
@@ -8028,10 +8030,10 @@ fn real_dir_npx_layout_batch_is_order_independent() {
 	let mut runs = Vec::new();
 
 	for order in orders {
-		let home = tempfile::TempDir::new().unwrap();
+		let (_home_target, _home_link_parent, home) = symlinked_tempdir();
 		let state = tempfile::TempDir::new().unwrap();
 		let name = "x";
-		let skill_dir = home.path().join(".agents/skills").join(name);
+		let skill_dir = home.join(".agents/skills").join(name);
 		std::fs::create_dir_all(&skill_dir).unwrap();
 		std::fs::write(
 			skill_dir.join("SKILL.md"),
@@ -8039,7 +8041,7 @@ fn real_dir_npx_layout_batch_is_order_independent() {
 		)
 		.unwrap();
 
-		let claude_skills = home.path().join(".claude/skills");
+		let claude_skills = home.join(".claude/skills");
 		std::fs::create_dir_all(&claude_skills).unwrap();
 		let claude_link = claude_skills.join(name);
 		std::os::unix::fs::symlink(&skill_dir, &claude_link).unwrap();
@@ -8069,7 +8071,7 @@ fn real_dir_npx_layout_batch_is_order_independent() {
 				.collect();
 
 		// (a) preview run: `-a <order> delete skills x --json` (no --yes)
-		let preview_out = isolated_cli(home.path(), state.path())
+		let preview_out = isolated_cli(&home, state.path())
 			.args(["-g", "-a", order, "delete", "skills", name, "--json"])
 			.output()
 			.unwrap();
@@ -8123,7 +8125,7 @@ fn real_dir_npx_layout_batch_is_order_independent() {
 		);
 
 		// (b) then --yes run on the same fixture
-		let yes_out = isolated_cli(home.path(), state.path())
+		let yes_out = isolated_cli(&home, state.path())
 			.args(["-g", "-a", order, "delete", "skills", name, "--yes"])
 			.output()
 			.unwrap();
@@ -8150,13 +8152,18 @@ fn real_dir_npx_layout_batch_is_order_independent() {
 			paths_before_delete
 				.into_iter()
 				.filter(|p| std::fs::symlink_metadata(p).is_err())
+				.map(|path| normalized_path(&path))
 				.collect();
+		let preview_paths: std::collections::HashSet<_> = preview_paths
+			.iter()
+			.map(|path| normalized_path(path))
+			.collect();
 		assert_eq!(
 			preview_paths, disappeared,
 			"removed-paths reported by preview must equal what disappeared from disk for {order}"
 		);
 
-		let disk_state = collect_disk_state(home.path());
+		let disk_state = collect_disk_state(&home);
 		runs.push(OrderRun {
 			order,
 			yes_status: yes_out.status,
@@ -8296,6 +8303,37 @@ fn real_dir_npx_layout_refuses_when_link_belongs_to_unrequested_agent() {
 }
 
 #[cfg(unix)]
+fn symlinked_tempdir(
+) -> (tempfile::TempDir, tempfile::TempDir, std::path::PathBuf) {
+	let target = tempfile::tempdir().unwrap();
+	let link_parent = tempfile::tempdir().unwrap();
+	let root = link_parent.path().join("root");
+	std::os::unix::fs::symlink(target.path(), &root).unwrap();
+	(target, link_parent, root)
+}
+
+#[cfg(unix)]
+fn symlinked_tempdir_pair() -> (
+	tempfile::TempDir,
+	tempfile::TempDir,
+	std::path::PathBuf,
+	std::path::PathBuf,
+) {
+	let target = tempfile::tempdir().unwrap();
+	let link_parent = tempfile::tempdir().unwrap();
+	let first = link_parent.path().join("first");
+	let second = link_parent.path().join("second");
+	std::os::unix::fs::symlink(target.path(), &first).unwrap();
+	std::os::unix::fs::symlink(target.path(), &second).unwrap();
+	(target, link_parent, first, second)
+}
+
+#[cfg(unix)]
+fn normalized_path(path: &std::path::Path) -> std::path::PathBuf {
+	::skill::lock::resolve_existing(path)
+}
+
+#[cfg(unix)]
 fn seed_real_dir_project_fixture(
 	project: &std::path::Path,
 	name: &str,
@@ -8359,15 +8397,22 @@ fn delete_real_dir_with_own_links_is_order_independent() {
 	let name = "x";
 
 	for order in orders {
-		// Preview on fresh fixture
-		let prev_home = tempfile::TempDir::new().unwrap();
-		let prev_state = tempfile::TempDir::new().unwrap();
-		let prev_project = prev_home.path().join("project");
-		seed_real_dir_project_fixture(&prev_project, name);
-		setup_three_enabled_agents(prev_state.path());
+		let (_home_target, _home_link_parent, preview_home, home) =
+			symlinked_tempdir_pair();
+		let state = tempfile::TempDir::new().unwrap();
+		let preview_project = preview_home.join("project");
+		let project = home.join("project");
+		assert_eq!(
+			normalized_path(&preview_project),
+			normalized_path(&project),
+			"the two symlink spellings must identify the same project root"
+		);
+		let (skill_dir, claude_link, cursor_link) =
+			seed_real_dir_project_fixture(&preview_project, name);
+		setup_three_enabled_agents(state.path());
 
-		let preview_out = isolated_cli(prev_home.path(), prev_state.path())
-			.current_dir(&prev_project)
+		let preview_out = isolated_cli(&preview_home, state.path())
+			.current_dir(&preview_project)
 			.args([
 				"-p",
 				"-a",
@@ -8393,7 +8438,7 @@ fn delete_real_dir_with_own_links_is_order_independent() {
 			.as_array()
 			.expect("preview json must contain results array");
 
-		let mut preview_rel_paths = std::collections::BTreeSet::new();
+		let mut preview_paths = std::collections::BTreeSet::new();
 		for row in results {
 			assert_eq!(
 				row["ok"], true,
@@ -8403,26 +8448,13 @@ fn delete_real_dir_with_own_links_is_order_independent() {
 			if let Some(paths) = row["output"]["paths"].as_array() {
 				for p in paths {
 					if let Some(s) = p.as_str() {
-						let pb = PathBuf::from(s);
-						let rel = pb
-							.strip_prefix(&prev_project)
-							.unwrap_or(&pb)
-							.to_path_buf();
-						preview_rel_paths.insert(rel);
+						preview_paths.insert(PathBuf::from(s));
 					}
 				}
 			}
 		}
 
-		// Real run with --yes on fresh fixture
-		let home = tempfile::TempDir::new().unwrap();
-		let state = tempfile::TempDir::new().unwrap();
-		let project = home.path().join("project");
-		let (skill_dir, claude_link, cursor_link) =
-			seed_real_dir_project_fixture(&project, name);
-		setup_three_enabled_agents(state.path());
-
-		let yes_out = isolated_cli(home.path(), state.path())
+		let yes_out = isolated_cli(&home, state.path())
 			.current_dir(&project)
 			.args([
 				"-p", "-a", order, "delete", "skills", name, "--yes", "--json",
@@ -8459,7 +8491,7 @@ fn delete_real_dir_with_own_links_is_order_independent() {
 			.as_array()
 			.expect("execution json must contain results array");
 
-		let mut executed_rel_paths = std::collections::BTreeSet::new();
+		let mut executed_paths = std::collections::BTreeSet::new();
 		for row in yes_results {
 			assert_eq!(
 				row["ok"], true,
@@ -8469,19 +8501,22 @@ fn delete_real_dir_with_own_links_is_order_independent() {
 			if let Some(paths) = row["output"]["paths"].as_array() {
 				for p in paths {
 					if let Some(s) = p.as_str() {
-						let pb = PathBuf::from(s);
-						let rel = pb
-							.strip_prefix(&project)
-							.unwrap_or(&pb)
-							.to_path_buf();
-						executed_rel_paths.insert(rel);
+						executed_paths.insert(PathBuf::from(s));
 					}
 				}
 			}
 		}
 
+		let preview_paths: std::collections::BTreeSet<_> = preview_paths
+			.iter()
+			.map(|path| normalized_path(path))
+			.collect();
+		let executed_paths: std::collections::BTreeSet<_> = executed_paths
+			.iter()
+			.map(|path| normalized_path(path))
+			.collect();
 		assert_eq!(
-			preview_rel_paths, executed_rel_paths,
+			preview_paths, executed_paths,
 			"order {order}: preview paths union != executed paths union"
 		);
 	}

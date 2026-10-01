@@ -8,7 +8,7 @@ pub mod market;
 pub mod mcps;
 pub mod plugins;
 pub mod skills;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod skills_test_git;
 pub mod skills_update;
 pub mod sources;

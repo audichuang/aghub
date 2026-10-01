@@ -4008,12 +4008,11 @@ fn real_dir_batch_verdict_is_independent_of_order() {
 		let _env = crate::skills::prune::test_lock::env_lock()
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
-		let tmp = tempfile::tempdir().unwrap();
-		let home = tmp.path();
+		let (_home_target, _home_link_parent, home) = symlinked_tempdir();
 		let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
 		let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
 			keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
-		std::env::set_var("HOME", home);
+		std::env::set_var("HOME", &home);
 		std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
 		std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
 
@@ -4111,18 +4110,23 @@ fn real_dir_batch_verdict_is_independent_of_order() {
 			previews.iter().zip(executed.iter())
 		{
 			assert_eq!(prev_agent, exec_agent);
+			let normalized_prev_paths: Vec<_> = prev_paths
+				.iter()
+				.map(|path| normalized_path(path))
+				.collect();
 			for p in prev_paths {
-				preview_union.insert(p.clone());
+				preview_union.insert(normalized_path(p));
 			}
 			if let Some(exec_paths) = exec_paths {
 				for p in exec_paths {
+					let normalized = normalized_path(p);
 					assert!(
-						prev_paths.contains(p),
+						normalized_prev_paths.contains(&normalized),
 						"{order_name}: executed path {:?} not in preview paths {:?} for {prev_agent:?}",
 						p,
 						prev_paths
 					);
-					executed_union.insert(p.clone());
+					executed_union.insert(normalized);
 				}
 			}
 		}
@@ -4301,14 +4305,14 @@ fn real_dir_empty_request_fails_closed() {
 #[cfg(unix)]
 #[test]
 fn real_dir_git_tracked_single_agent_delete_is_refused() {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
 	if !crate::skills::removal::tests::git_fixture::has_git() {
 		eprintln!("skipping test: git binary unavailable");
 		return;
 	}
 
-	let _env = crate::skills::prune::test_lock::env_lock()
-		.lock()
-		.unwrap_or_else(|e| e.into_inner());
 	use crate::create_adapter;
 	use crate::models::AgentType;
 
@@ -4380,14 +4384,14 @@ fn real_dir_git_tracked_single_agent_delete_is_refused() {
 #[cfg(unix)]
 #[test]
 fn real_dir_untracked_in_git_repo_single_agent_delete_is_allowed() {
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
 	if !crate::skills::removal::tests::git_fixture::has_git() {
 		eprintln!("skipping test: git binary unavailable");
 		return;
 	}
 
-	let _env = crate::skills::prune::test_lock::env_lock()
-		.lock()
-		.unwrap_or_else(|e| e.into_inner());
 	use crate::create_adapter;
 	use crate::models::AgentType;
 
@@ -4492,6 +4496,31 @@ fn real_dir_outside_git_repo_single_agent_delete_is_allowed() {
 }
 
 #[cfg(unix)]
+fn symlinked_tempdir(
+) -> (tempfile::TempDir, tempfile::TempDir, std::path::PathBuf) {
+	let target = tempfile::tempdir().unwrap();
+	let link_parent = tempfile::tempdir().unwrap();
+	let root = link_parent.path().join("root");
+	std::os::unix::fs::symlink(target.path(), &root).unwrap();
+	(target, link_parent, root)
+}
+
+#[cfg(unix)]
+fn normalized_path(path: &std::path::Path) -> std::path::PathBuf {
+	::skill::lock::resolve_existing(path)
+}
+
+#[cfg(unix)]
+fn normalized_relative_path(
+	path: &std::path::Path,
+	root: &std::path::Path,
+) -> std::path::PathBuf {
+	let path = normalized_path(path);
+	let root = normalized_path(root);
+	path.strip_prefix(&root).unwrap_or(&path).to_path_buf()
+}
+
+#[cfg(unix)]
 fn setup_real_dir_fixture(
 	root: &std::path::Path,
 	name: &str,
@@ -4567,18 +4596,15 @@ fn real_dir_batch_with_own_links_is_order_independent() {
 			.collect::<Vec<_>>()
 			.join(",");
 
-		// Phase 1: dry-run preview on a FRESH fixture
-		let preview_tmp = tempfile::tempdir().unwrap();
-		let preview_root = preview_tmp.path();
-		setup_real_dir_fixture(preview_root, name);
+		let (_target, _link_parent, root) = symlinked_tempdir();
+		let (skill_dir, claude_link, cursor_link) =
+			setup_real_dir_fixture(&root, name);
 
-		let mut preview_union = std::collections::BTreeSet::new();
+		// Phase 1: dry-run preview on the untouched fixture.
+		let mut preview_paths = std::collections::BTreeSet::new();
 		for &agent in order {
-			let mut mgr = ConfigManager::new(
-				create_adapter(agent),
-				false,
-				Some(preview_root),
-			);
+			let mut mgr =
+				ConfigManager::new(create_adapter(agent), false, Some(&root));
 			mgr.load().unwrap();
 			let outcome = mgr
 				.remove_skill_planned_for_agents(
@@ -4588,25 +4614,15 @@ fn real_dir_batch_with_own_links_is_order_independent() {
 					panic!("{order_name}: preview must succeed for {agent:?}: {e:?}")
 				});
 			for p in &outcome.plan.paths {
-				let rel =
-					p.strip_prefix(preview_root).unwrap_or(p).to_path_buf();
-				preview_union.insert(rel);
+				preview_paths.insert(p.clone());
 			}
 		}
 
-		// Phase 2: execute rows in that order on a FRESH fixture
-		let exec_tmp = tempfile::tempdir().unwrap();
-		let exec_root = exec_tmp.path();
-		let (skill_dir, claude_link, cursor_link) =
-			setup_real_dir_fixture(exec_root, name);
-
-		let mut executed_union = std::collections::BTreeSet::new();
+		// Phase 2: execute rows in that order on the same fixture.
+		let mut executed_paths = std::collections::BTreeSet::new();
 		for (idx, &agent) in order.iter().enumerate() {
-			let mut mgr = ConfigManager::new(
-				create_adapter(agent),
-				false,
-				Some(exec_root),
-			);
+			let mut mgr =
+				ConfigManager::new(create_adapter(agent), false, Some(&root));
 			// Mirror the CLI's `plan_or_noop`: a later row finding nothing left
 			// is `ResourceNotFound`, which the surfaces map to a noop outcome.
 			let outcome = match mgr.remove_skill_planned_for_agents(
@@ -4631,9 +4647,7 @@ fn real_dir_batch_with_own_links_is_order_independent() {
 					"{order_name}: row 0 ({agent:?}) must not have absent=true"
 				);
 				for p in &outcome.plan.paths {
-					let rel =
-						p.strip_prefix(exec_root).unwrap_or(p).to_path_buf();
-					executed_union.insert(rel);
+					executed_paths.insert(p.clone());
 				}
 			} else {
 				assert!(
@@ -4667,6 +4681,14 @@ fn real_dir_batch_with_own_links_is_order_independent() {
 		);
 
 		// Assert: preview union == executed union
+		let preview_union: std::collections::BTreeSet<_> = preview_paths
+			.iter()
+			.map(|path| normalized_relative_path(path, &root))
+			.collect();
+		let executed_union: std::collections::BTreeSet<_> = executed_paths
+			.iter()
+			.map(|path| normalized_relative_path(path, &root))
+			.collect();
 		assert_eq!(
 			preview_union, executed_union,
 			"{order_name}: preview union != executed union"
