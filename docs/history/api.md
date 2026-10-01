@@ -138,8 +138,12 @@ the skills ROOT instead of a skill: a path ending in `..` (`Path::file_name()` i
 directly under the root such as `<slot>/SKILL.md` or `<slot>/<missing-name>`
 (its `parent()` is the root). When the request's `agents` were exactly the
 slot's readers (per-agent validation passes, and the shared-slot guard sees no
-outside reader), main really deleted the whole shared slot. `agents = ALL` was
-only safe because per-agent validation rejected it.
+outside reader), main deleted the slot directory itself, or every skill inside
+it, depending on the shape: the root itself, `<slot>/`, `<slot>/SKILL.md`,
+`<slot>/<missing-name>` and `<slot>/%2e%2e` removed the slot directory;
+`<slot>/y/..` removed every skill inside it but left the slot directory in
+place; `<slot>/.` emptied its contents (reported as partial). `agents = ALL`
+was only safe because per-agent validation rejected it.
 
 Rule, in two layers:
 
@@ -164,6 +168,8 @@ Pinned by: `delete_by_path_rejects_trailing_dotdot_project_agents_slot`,
 `delete_by_path_rejects_trailing_dotdot_project_cursor_slot`,
 `delete_by_path_rejects_trailing_dotdot_global_agents_slot`,
 `delete_by_path_rejects_dotdot_in_middle_of_path`,
+`delete_by_path_rejects_dotdot_before_skills_root_with_no_strippable_prefix`,
+`delete_by_path_rejects_dotdot_before_skills_root_without_trailing_dotdot`,
 `delete_by_path_rejects_skills_root_itself`,
 `delete_by_path_rejects_cross_slot_dotdot`,
 `delete_by_path_accepts_dotdot_in_project_root` (`crates/api/src/routes/skills.rs`);

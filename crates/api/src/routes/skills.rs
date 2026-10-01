@@ -4134,6 +4134,128 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn delete_by_path_rejects_dotdot_before_skills_root_with_no_strippable_prefix(
+	) {
+		with_isolated_env(|home, _state| {
+			let proj = home.join("proj");
+			let slot = proj.join(".agents/skills");
+			let y = slot.join("y");
+			let z = slot.join("z");
+			std::fs::create_dir_all(&y).unwrap();
+			std::fs::write(
+				y.join("SKILL.md"),
+				"---\nname: y\ndescription: y\n---\n",
+			)
+			.unwrap();
+			std::fs::create_dir_all(&z).unwrap();
+			std::fs::write(
+				z.join("SKILL.md"),
+				"---\nname: z\ndescription: z\n---\n",
+			)
+			.unwrap();
+			std::fs::create_dir_all(proj.join("foo")).unwrap();
+
+			assert!(slot.exists(), "slot dir must exist before");
+			assert!(y.join("SKILL.md").exists(), "skill y must exist before");
+			assert!(z.join("SKILL.md").exists(), "skill z must exist before");
+
+			let req = DeleteSkillByPathRequest {
+				source_path: format!(
+					"{}/foo/../.agents/skills/y/..",
+					proj.display()
+				),
+				agents: slot_readers(
+					&slot,
+					aghub_core::models::ResourceScope::ProjectOnly,
+					Some(&proj),
+				),
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(slot.exists(), "slot dir must survive");
+			assert!(y.join("SKILL.md").exists(), "skill y must survive");
+			assert!(z.join("SKILL.md").exists(), "skill z must survive");
+			assert!(!resp.success);
+			let err = resp.error.as_deref().unwrap_or("");
+			assert!(err.contains("'..'"), "error must mention '..': {err}");
+			assert!(
+				!err.contains(&proj.display().to_string()),
+				"error must not contain filesystem path: {err}"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_rejects_dotdot_before_skills_root_without_trailing_dotdot(
+	) {
+		with_isolated_env(|home, _state| {
+			let proj = home.join("proj");
+			let slot = proj.join(".agents/skills");
+			let y = slot.join("y");
+			let z = slot.join("z");
+			std::fs::create_dir_all(&y).unwrap();
+			std::fs::write(
+				y.join("SKILL.md"),
+				"---\nname: y\ndescription: y\n---\n",
+			)
+			.unwrap();
+			std::fs::create_dir_all(&z).unwrap();
+			std::fs::write(
+				z.join("SKILL.md"),
+				"---\nname: z\ndescription: z\n---\n",
+			)
+			.unwrap();
+			std::fs::create_dir_all(proj.join("foo")).unwrap();
+
+			assert!(slot.exists(), "slot dir must exist before");
+			assert!(y.join("SKILL.md").exists(), "skill y must exist before");
+			assert!(z.join("SKILL.md").exists(), "skill z must exist before");
+
+			let req = DeleteSkillByPathRequest {
+				source_path: format!(
+					"{}/foo/../.agents/skills/y",
+					proj.display()
+				),
+				agents: slot_readers(
+					&slot,
+					aghub_core::models::ResourceScope::ProjectOnly,
+					Some(&proj),
+				),
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(slot.exists(), "slot dir must survive");
+			assert!(y.join("SKILL.md").exists(), "skill y must survive");
+			assert!(z.join("SKILL.md").exists(), "skill z must survive");
+			assert!(!resp.success);
+			let err = resp.error.as_deref().unwrap_or("");
+			assert!(err.contains("'..'"), "error must mention '..': {err}");
+			assert!(
+				!err.contains(&proj.display().to_string()),
+				"error must not contain filesystem path: {err}"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn delete_by_path_accepts_dotdot_in_project_root() {
 		with_isolated_env(|home, _state| {
 			let x = home.join("x");
