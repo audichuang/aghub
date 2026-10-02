@@ -10563,6 +10563,90 @@ fn reconcile_rejects_empty_target_set_and_validates_source_in_preview() {
 	assert_eq!(json["dry_run"], true, "the preview must say so: {json}");
 }
 
+#[test]
+fn reconcile_skill_dry_run_allows_removal_when_source_is_gone() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	let seeded = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "skills", "--name", "gone-dry", "-d", "d"])
+		.output()
+		.unwrap();
+	assert!(
+		seeded.status.success(),
+		"seeding skill must succeed: {}",
+		String::from_utf8_lossy(&seeded.stderr)
+	);
+
+	let added = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"gone-dry",
+			"--add",
+			"codex",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		added.status.success(),
+		"adding codex must succeed: {}",
+		String::from_utf8_lossy(&added.stderr)
+	);
+
+	let removed = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"gone-dry",
+			"--remove",
+			"claude",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		removed.status.success(),
+		"removing claude must succeed: {}",
+		String::from_utf8_lossy(&removed.stderr)
+	);
+
+	let dry_run = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"gone-dry",
+			"--remove",
+			"codex",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		dry_run.status.success(),
+		"reconcile dry-run must succeed even if from-agent is gone when removal-only: stderr={}",
+		String::from_utf8_lossy(&dry_run.stderr)
+	);
+}
+
 /// `source accept-rename` without `--yes` must emit JSON under `--json`, and
 /// must validate the lock BEFORE reporting a plan.
 ///

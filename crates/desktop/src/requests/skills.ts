@@ -399,8 +399,10 @@ export function reconcileSkillsMutationOptions({
 	return mutationOptions({
 		mutationFn: (body: ReconcileRequest) => api.skills.reconcile(body),
 		onSuccess: async (data) => {
-			await invalidateSkillQueries(queryClient);
 			await onSuccess?.(data);
+		},
+		onSettled: async () => {
+			await invalidateSkillQueries(queryClient);
 		},
 	});
 }

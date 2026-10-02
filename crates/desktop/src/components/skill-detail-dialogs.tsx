@@ -10,6 +10,7 @@ import type { SkillResponse } from "../generated/dto";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import { keptDeleteMessage } from "../lib/skill-delete-message";
+import { failedReconcileRowsMessage } from "../lib/skill-reconcile-errors";
 import { invalidateSkillQueries } from "../requests/skills";
 import type { LocationGroup, SkillGroup } from "./skill-detail-helpers";
 
@@ -264,14 +265,24 @@ export function DeleteSkillDialog({
 			);
 
 			if (totalFailed > 0) {
-				throw new Error(
-					`${totalFailed} of ${totalResults} deletions failed`,
-				);
+				const allRows = results.flatMap((r) => r.results);
+				const message =
+					failedReconcileRowsMessage(allRows, agentName) ??
+					`${totalFailed} of ${totalResults} deletions failed`;
+				throw new Error(message);
 			}
 		},
 		onSettled: async () => {
 			await invalidateSkillQueries(queryClient);
 			onClose();
+		},
+		onError: (error) => {
+			console.error("Skill delete mutation error:", error);
+			toast.danger(
+				error instanceof Error
+					? error.message
+					: t("failedToDeleteSkill"),
+			);
 		},
 	});
 

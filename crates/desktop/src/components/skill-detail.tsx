@@ -17,7 +17,7 @@ import {
 import { Accordion, Button, Card, Chip, toast, Tooltip } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { siGithub } from "simple-icons";
 import { useLocation } from "wouter";
@@ -26,8 +26,10 @@ import { useApi } from "../hooks/use-api";
 import { useGitForwarding } from "../hooks/use-git-forwarding";
 import { useFavorites } from "../hooks/use-favorites";
 import { useCurrentCodeEditor } from "../hooks/use-integrations";
+import { isGoneSkillPath } from "../lib/skill-reconcile-errors";
 import { cn, filterItemsByAgentIds } from "../lib/utils";
 import { openWithEditorMutationOptions } from "../requests/integrations";
+import { queryKeys } from "../requests/keys";
 import {
 	applySkillUpdateMutationOptions,
 	checkSkillUpdatesMutationOptions,
@@ -213,23 +215,41 @@ export function SkillDetail({
 		...projectSkillLockQueryOptions({ api, projectPath }),
 	});
 
-	const { data: skillContent } = useQuery({
+	const { data: skillContent, error: contentError } = useQuery({
 		...skillContentQueryOptions({
 			api,
 			path: skill.source_path ?? undefined,
 			scope: primaryScope,
 			projectRoot: projectPath,
 		}),
+		retry: (count, error) => !isGoneSkillPath(error) && count < 1,
 	});
 
-	const { data: skillTree } = useQuery({
+	const { data: skillTree, error: treeError } = useQuery({
 		...skillTreeQueryOptions({
 			api,
 			path: skill.source_path ?? undefined,
 			scope: primaryScope,
 			projectRoot: projectPath,
 		}),
+		retry: (count, error) => !isGoneSkillPath(error) && count < 1,
 	});
+
+	const handledGonePathsRef = useRef<Set<string>>(new Set());
+
+	useEffect(() => {
+		const path = skill.source_path;
+		if (!path) return;
+		const isGone =
+			isGoneSkillPath(contentError) || isGoneSkillPath(treeError);
+		if (isGone && !handledGonePathsRef.current.has(path)) {
+			handledGonePathsRef.current.add(path);
+			void queryClient.refetchQueries({
+				queryKey: queryKeys.skills.lists(),
+				type: "active",
+			});
+		}
+	}, [skill.source_path, contentError, treeError, queryClient]);
 
 	const currentSkillSource = useMemo(() => {
 		const skillItem = group.items[0];

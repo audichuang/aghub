@@ -29,8 +29,11 @@ opencode` printed a plan and exited 0, and only the `--yes` run reported
 writes — so the preview needs read-only preflights, not a planner call.
 
 Rule: every refusal the commit can raise has a read-only seam the preview calls
-first (`ensure_*_exists`, `ensure_disjoint`, `ensure_*_reconcile_spares`,
-`reconcile_skill_preview`), and preview and commit share one definition.
+first (skill existence is decided by `reconcile_skill_preview`, which shares
+`plan_reconcile_skill` with the commit; `ensure_skill_exists` was removed;
+`ensure_mcp_exists`, `ensure_sub_agent_exists`, `ensure_disjoint`, and
+`ensure_*_reconcile_spares` remain for their respective domains), and preview
+and commit share one definition.
 
 Tests: `reconcile_rejects_empty_target_set_and_validates_source_in_preview`,
 `reconcile_skill_preview_refuses_what_the_commit_refuses`,
@@ -245,3 +248,40 @@ parameters" arm.
 Rule: when every row refused for the same domain reason, keep that variant.
 
 Commit: 1b373c2c.
+
+## Missing source blocked a removal-only reconcile
+
+In the desktop app, after a skill was removed from Claude, subsequent removal
+reconciles retained Claude as the source. `plan_reconcile_skill` called
+`load_source_skill` first, which returned `ResourceNotFound` (HTTP 404),
+blocking the entire batch before any holder scan or planning ran. The remaining
+Referrers and the Master were left behind on disk.
+
+When a reconcile is removal-only (`added` is empty), the source's content is not
+needed for copies. If the source agent no longer holds the skill, the planner
+falls back to loading the skill from the first agent in `removed` that still
+holds it. If the reconcile includes additions or none of the removed agents
+holds the skill, it refuses with `InvalidConfig` listing the agents that still
+hold it, while keeping everything untouched. If no agent holds the skill at all,
+`ResourceNotFound` is returned as before.
+
+The effective source for protected target checks and deletion attribution
+remains the caller's original `source`: fallback only substitutes `plan.skill`
+and `plan.source_root`.
+
+Per-row exhaustiveness (`row_exhaustive`): the plan's `exhaustive` flag says the
+holder scan finished, which lets a removal prove it orphans nothing. That proof
+only covers a row whose agent is actually in `holders`. A stale source that the
+caller also lists in `removed` holds nothing, so it must not inherit the batch's
+`exhaustive` — the row is `exhaustive && holders.contains(row agent)`. Without
+it the stale row either blocks the whole batch or is treated as having removed
+something. With it, that row fails alone ("not found") and the rows that do
+hold the skill still succeed. The preflight, the dry-run and the commit all go
+through `row_exhaustive`, so none can answer differently.
+
+Pinned by `reconcile_skill_stale_source_in_removed_fails_only_its_own_row`.
+
+Tests: `reconcile_skill_removes_remaining_holders_when_source_referrer_is_gone`,
+`reconcile_skill_missing_source_with_adds_refuses_and_names_holders`,
+`reconcile_skill_preview_allows_removal_when_source_is_gone`,
+`reconcile_skill_stale_source_in_removed_fails_only_its_own_row`.

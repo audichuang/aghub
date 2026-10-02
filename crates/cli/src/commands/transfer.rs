@@ -15,11 +15,11 @@
 use aghub_core::models::{AgentType, ResourceScope};
 use aghub_core::transfer::{
 	ensure_disjoint, ensure_mcp_exists, ensure_mcp_reconcile_spares,
-	ensure_skill_exists, ensure_skill_reconcile_spares,
-	ensure_sub_agent_exists, ensure_sub_agent_reconcile_spares, reconcile_mcp,
-	reconcile_skill, reconcile_skill_preview, reconcile_sub_agent,
-	transfer_mcp, transfer_skill, transfer_sub_agent, InstallScope,
-	InstallTarget, OperationBatchResult, OperationBatchView, ResourceLocator,
+	ensure_skill_reconcile_spares, ensure_sub_agent_exists,
+	ensure_sub_agent_reconcile_spares, reconcile_mcp, reconcile_skill,
+	reconcile_skill_preview, reconcile_sub_agent, transfer_mcp, transfer_skill,
+	transfer_sub_agent, InstallScope, InstallTarget, OperationBatchResult,
+	OperationBatchView, ResourceLocator,
 };
 use anyhow::{bail, Result};
 use clap::Subcommand;
@@ -190,7 +190,8 @@ pub fn execute_reconcile(
 		ReconcileAction::Skill(a) => (
 			a,
 			reconcile_skill,
-			ensure_skill_exists,
+			// existence is decided by reconcile_skill_preview (same planner as the commit)
+			|_| Ok(()),
 			ensure_skill_reconcile_spares,
 		),
 		ReconcileAction::Mcp(a) => (

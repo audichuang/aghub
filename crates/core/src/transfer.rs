@@ -330,16 +330,11 @@ fn load_source_skill(source: &ResourceLocator) -> Result<Skill> {
 /// The preview seam: uses the same loaders as the real reconcile so the
 /// existence rule cannot drift.
 /// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
-pub fn ensure_skill_exists(source: &ResourceLocator) -> Result<()> {
-	load_source_skill(source).map(|_| ())
-}
-
-/// See [`ensure_skill_exists`].
 pub fn ensure_mcp_exists(source: &ResourceLocator) -> Result<()> {
 	load_source_mcp(source).map(|_| ())
 }
 
-/// See [`ensure_skill_exists`].
+/// See [`ensure_mcp_exists`].
 pub fn ensure_sub_agent_exists(source: &ResourceLocator) -> Result<()> {
 	load_source_sub_agent(source).map(|_| ())
 }
@@ -1938,6 +1933,7 @@ struct ReconcileSkillPlan {
 	keepers: Vec<&'static str>,
 	/// Agents whose skill dirs could not be listed at all.
 	unreadable: Vec<&'static str>,
+	holders: Vec<AgentType>,
 	copies: Vec<OperationPlan>,
 	deletes: Vec<OperationPlan>,
 	deletion_paths: Vec<(AgentType, Vec<PathBuf>)>,
@@ -1961,12 +1957,72 @@ fn earlier_row_removals(
 		.flat_map(|(_, paths)| paths.iter())
 }
 
+/// Load the skill for reconcile: uses the caller's source if present, or
+/// falls back to the first available holder in `removed` when removal-only.
+/// See docs/history/core-transfer.md#missing-source-blocked-a-removal-only-reconcile
+fn load_reconcile_skill(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<Skill> {
+	match load_source_skill(source) {
+		Ok(skill) => Ok(skill),
+		Err(ConfigError::ResourceNotFound { .. }) => {
+			let (holders, _) = skill_holders(&source.name, source);
+			if holders.is_empty() {
+				return Err(ConfigError::resource_not_found(
+					"skill",
+					&source.name,
+				));
+			}
+			if added.is_empty() {
+				for &agent in removed {
+					if holders.contains(&agent) {
+						let fallback_source = ResourceLocator {
+							agent,
+							scope: source.scope,
+							project_root: source.project_root.clone(),
+							name: source.name.clone(),
+						};
+						if let Ok(skill) = load_source_skill(&fallback_source) {
+							return Ok(skill);
+						}
+					}
+				}
+			}
+			let scope_str = match source.scope {
+				InstallScope::Global => "global",
+				InstallScope::Project => "project",
+			};
+			let managed_holders: Vec<&'static str> = holders
+				.iter()
+				.filter(|h| crate::agent_settings::is_managed(h.as_str()))
+				.map(|h| h.as_str())
+				.collect();
+			let holders_clause = if managed_holders.is_empty() {
+				"only disabled agents still hold it".to_string()
+			} else {
+				format!(
+					"Agents that still hold it: '{}'",
+					managed_holders.join("', '")
+				)
+			};
+			Err(ConfigError::InvalidConfig(format!(
+				"skill '{}' is no longer installed for source agent '{}' ({scope_str}); nothing was changed. {holders_clause}. Refresh the list, or use one of them as the source.",
+				source.name,
+				source.agent.as_str(),
+			)))
+		}
+		Err(other) => Err(other),
+	}
+}
+
 fn plan_reconcile_skill(
 	source: &ResourceLocator,
 	added: &[AgentType],
 	removed: &[AgentType],
 ) -> Result<ReconcileSkillPlan> {
-	let skill = load_source_skill(source)?;
+	let skill = load_reconcile_skill(source, added, removed)?;
 	let source_root = resolve_skill_root(&skill)?;
 
 	// The holder scan walks every agent's whole skill tree, so it runs only
@@ -2037,7 +2093,7 @@ fn plan_reconcile_skill(
 				.and_then(|()| {
 					manager.remove_skill_planned_for_agents(
 						&skill.name,
-						exhaustive,
+						exhaustive && holders.contains(&row.target.agent),
 						true,
 						true,
 						removed,
@@ -2068,6 +2124,7 @@ fn plan_reconcile_skill(
 			.map(|held| held.as_str())
 			.collect(),
 		unreadable,
+		holders,
 		copies,
 		deletes,
 		deletion_paths,
@@ -2075,6 +2132,12 @@ fn plan_reconcile_skill(
 }
 
 impl ReconcileSkillPlan {
+	/// A row proves "removal orphans nothing" only if its agent is a holder.
+	/// See docs/history/core-transfer.md#missing-source-blocked-a-removal-only-reconcile
+	fn row_exhaustive(&self, agent: AgentType) -> bool {
+		self.exhaustive && self.holders.contains(&agent)
+	}
+
 	/// The read-only verdict for ONE row, run before any write in the batch and
 	/// reused verbatim by [`reconcile_skill_preview`].
 	fn preflight(&self, plan: &OperationPlan) -> Result<()> {
@@ -2105,7 +2168,7 @@ impl ReconcileSkillPlan {
 		let (mut shared_master_kept, still_read_from, mut deleting) =
 			match manager.remove_skill_planned_for_agents(
 				&self.skill.name,
-				self.exhaustive,
+				self.row_exhaustive(target.agent),
 				true, // dry_run
 				true,
 				&self.requested_removals,
@@ -2493,7 +2556,7 @@ pub fn reconcile_skill(
 						manager
 							.remove_skill_planned_for_agents(
 								&plan.skill.name,
-								plan.exhaustive,
+								plan.row_exhaustive(row.target.agent),
 								false,
 								true,
 								&plan.requested_removals,
@@ -5893,6 +5956,7 @@ mod tests {
 			exhaustive: false,
 			keepers: vec![],
 			unreadable: vec![],
+			holders: vec![],
 			copies: agents
 				.iter()
 				.map(|agent| OperationPlan {
@@ -5972,5 +6036,247 @@ mod tests {
 			"claude reads ~/.claude/skills only — an amp copy touches neither \
 			 that nor anything claude reads, so this must stay allowed"
 		);
+	}
+
+	#[cfg(unix)]
+	fn private_slot_for(agent: AgentType, root: &Path) -> PathBuf {
+		let dir = create_adapter(agent)
+			.target_skills_dir(
+				Some(root),
+				crate::models::ResourceScope::ProjectOnly,
+			)
+			.unwrap_or_else(|| {
+				panic!("{agent:?} must have a target skills dir")
+			});
+		assert_eq!(
+			crate::skills::removal::slot_reader_count(
+				&dir,
+				crate::models::ResourceScope::ProjectOnly,
+				Some(root),
+			),
+			1,
+			"{agent:?} must have a private slot for this fixture"
+		);
+		dir
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_removes_remaining_holders_when_source_referrer_is_gone()
+	{
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".aghub/gone-src");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: gone-src\ndescription: Test\n---\n\n# Gone Src\n",
+		)
+		.unwrap();
+
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		let cursor_dir = private_slot_for(AgentType::Cursor, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		fs::create_dir_all(&cursor_dir).unwrap();
+		std::os::unix::fs::symlink(&master, codex_dir.join("gone-src"))
+			.unwrap();
+		std::os::unix::fs::symlink(&master, cursor_dir.join("gone-src"))
+			.unwrap();
+
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.clone()),
+			name: "gone-src".to_string(),
+		};
+
+		let res = reconcile_skill(
+			source,
+			vec![],
+			vec![AgentType::Codex, AgentType::Cursor],
+			true,
+		)
+		.unwrap();
+
+		assert_eq!(res.results.len(), 2);
+		assert!(res.results.iter().all(|r| r.success));
+		assert!(codex_dir.join("gone-src").symlink_metadata().is_err());
+		assert!(cursor_dir.join("gone-src").symlink_metadata().is_err());
+		assert!(!master.exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_missing_source_with_adds_refuses_and_names_holders() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".aghub/gone-src");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: gone-src\ndescription: Test\n---\n\n# Gone Src\n",
+		)
+		.unwrap();
+
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		let cursor_dir = private_slot_for(AgentType::Cursor, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		std::os::unix::fs::symlink(&master, codex_dir.join("gone-src"))
+			.unwrap();
+
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.clone()),
+			name: "gone-src".to_string(),
+		};
+
+		let err =
+			reconcile_skill(source, vec![AgentType::Cursor], vec![], true)
+				.unwrap_err();
+
+		let msg = err.to_string();
+		assert!(
+			msg.contains("'claude'"),
+			"message must contain 'claude': {msg}"
+		);
+		assert!(
+			msg.contains("no longer installed"),
+			"message must contain 'no longer installed': {msg}"
+		);
+		assert!(
+			msg.contains("nothing was changed"),
+			"message must contain 'nothing was changed': {msg}"
+		);
+		assert!(
+			msg.contains("'codex'"),
+			"message must contain 'codex': {msg}"
+		);
+		assert!(!cursor_dir.join("gone-src").exists());
+		assert!(codex_dir.join("gone-src").symlink_metadata().is_ok());
+		assert!(master.exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_preview_allows_removal_when_source_is_gone() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".aghub/gone-src");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: gone-src\ndescription: Test\n---\n\n# Gone Src\n",
+		)
+		.unwrap();
+
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		let cursor_dir = private_slot_for(AgentType::Cursor, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		fs::create_dir_all(&cursor_dir).unwrap();
+		std::os::unix::fs::symlink(&master, codex_dir.join("gone-src"))
+			.unwrap();
+		std::os::unix::fs::symlink(&master, cursor_dir.join("gone-src"))
+			.unwrap();
+
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.clone()),
+			name: "gone-src".to_string(),
+		};
+
+		let res = reconcile_skill_preview(
+			&source,
+			&[],
+			&[AgentType::Codex, AgentType::Cursor],
+		);
+
+		assert!(
+			res.is_ok(),
+			"preview must succeed when source is gone: {res:?}"
+		);
+		assert!(codex_dir.join("gone-src").symlink_metadata().is_ok());
+		assert!(cursor_dir.join("gone-src").symlink_metadata().is_ok());
+		assert!(master.exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_stale_source_in_removed_fails_only_its_own_row() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".aghub/gone-src");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: gone-src\ndescription: Test\n---\n\n# Gone Src\n",
+		)
+		.unwrap();
+
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		let cursor_dir = private_slot_for(AgentType::Cursor, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		fs::create_dir_all(&cursor_dir).unwrap();
+		std::os::unix::fs::symlink(&master, codex_dir.join("gone-src"))
+			.unwrap();
+		std::os::unix::fs::symlink(&master, cursor_dir.join("gone-src"))
+			.unwrap();
+
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.clone()),
+			name: "gone-src".to_string(),
+		};
+
+		let batch = reconcile_skill(
+			source,
+			vec![],
+			vec![AgentType::Claude, AgentType::Codex, AgentType::Cursor],
+			true,
+		)
+		.unwrap();
+
+		let claude_row = batch
+			.results
+			.iter()
+			.find(|r| r.target.agent == AgentType::Claude)
+			.expect("claude row must be present");
+		assert!(!claude_row.success, "claude row must fail");
+		assert!(
+			claude_row
+				.error
+				.as_deref()
+				.unwrap_or("")
+				.contains("not found"),
+			"claude row error must mention 'not found': {:?}",
+			claude_row.error
+		);
+
+		let codex_row = batch
+			.results
+			.iter()
+			.find(|r| r.target.agent == AgentType::Codex)
+			.expect("codex row must be present");
+		assert!(codex_row.success, "codex row must succeed");
+
+		let cursor_row = batch
+			.results
+			.iter()
+			.find(|r| r.target.agent == AgentType::Cursor)
+			.expect("cursor row must be present");
+		assert!(cursor_row.success, "cursor row must succeed");
+
+		assert!(codex_dir.join("gone-src").symlink_metadata().is_err());
+		assert!(cursor_dir.join("gone-src").symlink_metadata().is_err());
 	}
 }
