@@ -142,7 +142,11 @@ impl Drop for SlotGuard<'_> {
 /// Structured, serializable error returned to the frontend so the UI can show
 /// an actionable message (e.g. an install hint).
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+	tag = "kind",
+	rename_all = "camelCase",
+	rename_all_fields = "camelCase"
+)]
 pub enum RemoteError {
 	/// SSH transport failed (auth / connectivity / unknown host key).
 	Unreachable { stderr: String },
@@ -1188,6 +1192,55 @@ mod tests {
 				"aarch64".to_string(),
 			))),
 			None
+		);
+	}
+
+	#[test]
+	fn remote_error_preserves_version_in_camel_case_payload() {
+		for version in [Some("2.39.1".to_string()), None] {
+			let json = serde_json::to_value(RemoteError::Incompatible {
+				remote_version: version.clone(),
+			})
+			.expect("RemoteError should serialize");
+			assert_eq!(
+				json,
+				serde_json::json!({
+					"kind": "incompatible",
+					"remoteVersion": version,
+				})
+			);
+		}
+	}
+
+	#[test]
+	fn remote_error_preserves_install_hint_in_camel_case_payload() {
+		let json = serde_json::to_value(RemoteError::RemoteApiMissing {
+			install_hint: "Install aghub-api 2.39.1 on the remote.".to_string(),
+		})
+		.expect("RemoteError should serialize");
+		assert_eq!(
+			json,
+			serde_json::json!({
+				"kind": "remoteApiMissing",
+				"installHint": "Install aghub-api 2.39.1 on the remote.",
+			})
+		);
+	}
+
+	#[test]
+	fn remote_error_preserves_platform_in_camel_case_payload() {
+		let json = serde_json::to_value(RemoteError::CrossPlatformRedeploy {
+			remote_platform: "macos/aarch64".to_string(),
+			hint: "Install the matching remote binary manually.".to_string(),
+		})
+		.expect("RemoteError should serialize");
+		assert_eq!(
+			json,
+			serde_json::json!({
+				"kind": "crossPlatformRedeploy",
+				"remotePlatform": "macos/aarch64",
+				"hint": "Install the matching remote binary manually.",
+			})
 		);
 	}
 

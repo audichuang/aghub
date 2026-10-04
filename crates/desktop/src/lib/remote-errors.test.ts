@@ -1,10 +1,56 @@
 import assert from "node:assert/strict";
-// No FE test runner (no vitest/jest) is installed in this environment, and the
-// task forbids adding dependencies, so this pure-logic test uses Node's
-// built-in runner (`node --test --experimental-strip-types`). The antfu config
-// enforces vitest over node:test, which does not apply here.
 import { test } from "node:test";
-import { remoteErrorMessage, remoteOutputSummary } from "./remote-errors.ts";
+import {
+	asRemotePayload,
+	remoteErrorMessage,
+	remoteOutputSummary,
+} from "./remote-errors.ts";
+
+test("incompatible payload preserves the version for the connection gate and message", () => {
+	const payload = { kind: "incompatible", remoteVersion: "2.39.1" };
+	assert.equal(
+		asRemotePayload(payload)?.remoteVersion ?? "unknown",
+		"2.39.1",
+	);
+	assert.equal(
+		remoteErrorMessage(payload),
+		"Remote aghub-api version 2.39.1 is incompatible.",
+	);
+});
+
+test("incompatible payload with a null version displays unknown", () => {
+	const payload = { kind: "incompatible", remoteVersion: null };
+	assert.equal(asRemotePayload(payload)?.remoteVersion, null);
+	assert.equal(
+		remoteErrorMessage(payload),
+		"Remote aghub-api version unknown is incompatible.",
+	);
+});
+
+test("remoteApiMissing payload preserves the installation hint", () => {
+	const payload = {
+		kind: "remoteApiMissing",
+		installHint: "Install aghub-api 2.39.1 on the remote.",
+	};
+	assert.equal(remoteErrorMessage(payload), payload.installHint);
+});
+
+test("crossPlatformRedeploy payload preserves the platform and deployment hint", () => {
+	const payload = {
+		kind: "crossPlatformRedeploy",
+		remotePlatform: "macos/aarch64",
+		hint: "Install the matching remote binary manually.",
+	};
+	assert.equal(asRemotePayload(payload)?.remotePlatform, "macos/aarch64");
+	assert.equal(remoteErrorMessage(payload), payload.hint);
+	assert.equal(
+		remoteErrorMessage({
+			kind: payload.kind,
+			remotePlatform: payload.remotePlatform,
+		}),
+		"Remote platform macos/aarch64 differs from this desktop; cannot redeploy.",
+	);
+});
 
 test("remoteErrorMessage: remoteDirectoryFailed with message", () => {
 	assert.equal(
