@@ -43,11 +43,20 @@ fn git_command() -> Command {
 /// Never triggers UI: terminal prompts are disabled and `GCM_INTERACTIVE` is
 /// forced off, so a missing credential fails fast instead of opening a dialog.
 pub fn probe_credential(url: &str) -> bool {
+	credential_fill_password(url).is_some()
+}
+
+/// The password/token the system git credential helpers return for `url`,
+/// asked non-interactively (same guards as [`probe_credential`], which is
+/// this function's `is_some`). `None` when git is missing, no helper knows the
+/// host, or the helper has no password. The helper scopes its answer to the
+/// host in `url`, so the secret never reaches another host.
+pub fn credential_fill_password(url: &str) -> Option<String> {
 	// The credential protocol is line-based: a CR/LF/NUL in the URL could
 	// inject extra fields (host=, username=, ...) into the helper request.
 	// A URL with control characters is malformed anyway — treat as no match.
 	if url.contains(|c: char| c.is_control()) {
-		return false;
+		return None;
 	}
 	let mut cmd = git_command();
 	cmd.env("GCM_INTERACTIVE", "Never")
@@ -56,25 +65,22 @@ pub fn probe_credential(url: &str) -> bool {
 		.stdout(Stdio::piped())
 		.stderr(Stdio::null());
 
-	let Ok(mut child) = cmd.spawn() else {
-		return false;
-	};
+	let mut child = cmd.spawn().ok()?;
 	if let Some(mut stdin) = child.stdin.take() {
 		// git parses `url=` into protocol/host/path; with useHttpPath=true
 		// (set in git_command) the path is included in the helper query. The
 		// blank line terminates the request.
 		let _ = write!(stdin, "url={url}\n\n");
 	}
-	match child.wait_with_output() {
-		Ok(output) => {
-			output.status.success()
-				&& String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-					line.strip_prefix("password=")
-						.is_some_and(|v| !v.is_empty())
-				})
-		}
-		Err(_) => false,
+	let output = child.wait_with_output().ok()?;
+	if !output.status.success() {
+		return None;
 	}
+	String::from_utf8_lossy(&output.stdout)
+		.lines()
+		.find_map(|line| line.strip_prefix("password="))
+		.filter(|v| !v.is_empty())
+		.map(str::to_string)
 }
 
 /// Whether a usable `git` binary is available on PATH.
@@ -172,5 +178,54 @@ cafebabe\trefs/heads/develop
 		// `--heads` only emits heads, but be defensive against stray refs.
 		let stdout = "deadbeef\trefs/tags/v1.0\ncafebabe\trefs/heads/main\n";
 		assert_eq!(parse_ls_remote_heads(stdout), vec!["main".to_string()]);
+	}
+
+	/// Run `credential_fill_password` against a throwaway global gitconfig whose
+	/// helper is `helper_body` (a shell script body), so the real `~/.gitconfig` is
+	/// never consulted.
+	fn fill_with_helper(helper_body: &str) -> Option<String> {
+		use std::sync::{Mutex, OnceLock};
+		static ENV: OnceLock<Mutex<()>> = OnceLock::new();
+		let _guard = ENV.get_or_init(Mutex::default).lock().unwrap();
+		let dir = tempfile::tempdir().unwrap();
+		// `;` starts a comment in gitconfig values, so the helper is a script.
+		let script = dir.path().join("helper.sh");
+		std::fs::write(&script, format!("#!/bin/sh\n{helper_body}\n")).unwrap();
+		let cfg = dir.path().join("gitconfig");
+		std::fs::write(
+			&cfg,
+			format!("[credential]\n\thelper = !sh {}\n", script.display()),
+		)
+		.unwrap();
+		std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
+		std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+		let out = credential_fill_password("https://example.test/o/r.git");
+		std::env::remove_var("GIT_CONFIG_GLOBAL");
+		std::env::remove_var("GIT_CONFIG_NOSYSTEM");
+		out
+	}
+
+	#[test]
+	fn fill_returns_helper_password() {
+		if !system_git_available() {
+			return;
+		}
+		assert_eq!(
+			fill_with_helper("echo username=u; echo password=tok"),
+			Some("tok".to_string())
+		);
+	}
+
+	#[test]
+	fn fill_is_none_when_helper_has_no_password() {
+		if !system_git_available() {
+			return;
+		}
+		assert_eq!(fill_with_helper("echo username=u"), None);
+	}
+
+	#[test]
+	fn fill_rejects_control_characters() {
+		assert_eq!(credential_fill_password("https://h/\nhost=evil"), None);
 	}
 }

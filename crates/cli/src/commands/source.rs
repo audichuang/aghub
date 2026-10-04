@@ -48,8 +48,11 @@ fn safe_source(source: &str) -> String {
 /// — the fetch-then-retry-with-token flow would otherwise send the PAT to
 /// an arbitrary host after the first failure. Empty/whitespace env values
 /// count as unset. `GitFetcher` consumes the token as the `x-access-token`
-/// password — there is no username/password basic-auth path. Returns
-/// `NoToken` when nothing applies (one anonymous attempt is made).
+/// password — there is no username/password basic-auth path. When neither env
+/// var applies, the user's own git credential helpers (`gh auth git-credential`,
+/// keychain, GCM…) are asked for an https source, so a private repo works with
+/// whatever `git` already can read. Returns `NoToken` when nothing applies (one
+/// anonymous attempt is made).
 pub(crate) struct EnvTokenResolver;
 impl skill_update::TokenResolver for EnvTokenResolver {
 	fn resolve(&self, source: &str) -> skill_update::TokenResolution {
@@ -60,9 +63,24 @@ impl skill_update::TokenResolver for EnvTokenResolver {
 			host.as_deref(),
 		) {
 			Some(token) => skill_update::TokenResolution::Token(token),
-			None => skill_update::TokenResolution::NoToken,
+			None => match git_helper_token(source) {
+				Some(token) => skill_update::TokenResolution::Token(token),
+				None => skill_update::TokenResolution::NoToken,
+			},
 		}
 	}
+}
+
+/// Ask the system git credential helpers for the source's https clone URL.
+/// The helper keys its answer on that host, so the token cannot cross hosts.
+fn git_helper_token(source: &str) -> Option<String> {
+	let clone_url = aghub_git::resolve_remote_source(source).ok()?.clone_url;
+	let authority = clone_url.strip_prefix("https://")?.split('/').next()?;
+	// An explicit userinfo in the source already is the caller's credential.
+	if authority.contains('@') {
+		return None;
+	}
+	aghub_git::credential_fill_password(&clone_url)
 }
 
 /// Pure token-selection policy behind [`EnvTokenResolver`] (extracted so it
@@ -601,9 +619,9 @@ fn refusal_error(
 			safe_source(source)
 		),
 		O::NeedsCredential { .. } => anyhow::anyhow!(
-			"Could not read this source. Either it needs a credential (set \
-			 GIT_PASSWORD for any host, or GITHUB_TOKEN for github.com, in \
-			 the environment and retry) or the repo/ref does not exist or is \
+			"Could not read this source. Either it needs a credential (log in \
+			 with git — e.g. `gh auth login` — or set GIT_PASSWORD for any \
+			 host, or GITHUB_TOKEN for github.com, in the environment) or the repo/ref does not exist or is \
 			 not visible to the credential already in use."
 		),
 		O::FetchFailed { detail } => anyhow::anyhow!(
@@ -1534,8 +1552,9 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 			anyhow::anyhow!("Credential backend is unavailable; retry later.")
 		}
 		FetchRenameError::Fetch(FetchError::Auth) => anyhow::anyhow!(
-			"This source needs a credential. Set GIT_PASSWORD (any host) \
-			 or GITHUB_TOKEN (github.com) in the environment and retry."
+			"This source needs a credential. Log in with git (e.g. `gh auth \
+			 login`), or set GIT_PASSWORD (any host) or GITHUB_TOKEN \
+			 (github.com) in the environment, and retry."
 		),
 		FetchRenameError::Fetch(FetchError::Network(detail)) => {
 			anyhow::anyhow!(

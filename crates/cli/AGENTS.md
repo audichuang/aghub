@@ -156,7 +156,9 @@ list, or `all`), `-g`/`-p`, `--all`.
   legacy top-level `type` (`McpTransport::kind()`); the table shows type and
   target only, never header/env values
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
-- Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
+- Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only),
+  then the user's git credential helper (`git credential fill`, https only) —
+  never ask an agent to inject a token the helper already holds
 
 ## Two dispatch funnels — keep both halves in step
 

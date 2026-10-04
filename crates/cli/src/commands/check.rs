@@ -186,7 +186,7 @@ enum UncheckableBucket {
 	Failed,
 	/// The source needs credentials this run did not have. EXPECTED under the
 	/// OS schedule: the CLI resolves tokens from `GIT_PASSWORD` /
-	/// `GITHUB_TOKEN`, never from the desktop keyring, so every private source
+	/// `GITHUB_TOKEN` or the git credential helpers, never from the desktop keyring, so every private source
 	/// lands here.
 	NeedsAuth,
 	/// Nothing could have been fetched: a local/ssh/unsupported source, a lock

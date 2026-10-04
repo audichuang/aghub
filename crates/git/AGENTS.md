@@ -17,7 +17,8 @@ fetch backends (`RepoFetchBackend`: gix shallow / GitHub REST).
   PATH. Do **not** collapse that path into pure `gix`.
 - Auth precedence: explicit `CloneOptions::with_credentials` wins; env
   `GIT_USERNAME` / `GIT_PASSWORD` is the fallback. Token resolution lives in
-  the **callers** — cli `source`/`check` map env `GITHUB_TOKEN`; the api
+  the **callers** — cli `source`/`check` map env `GITHUB_TOKEN`, then fall back to
+  `credential_fill_password` (git helpers; github.com included); the api
   resolves per-source tokens from its `credentials/` store (no `GITHUB_TOKEN`
   env). Do not add either mapping here.
 - **Which backend serves a fetch is decided at RUNTIME, and each caches

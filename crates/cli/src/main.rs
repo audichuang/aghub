@@ -522,7 +522,7 @@ pub enum SourceAction {
 	/// ALWAYS fetches over the network — there is no offline mode, unlike
 	/// `check`, which is offline by default. Private repos read GIT_PASSWORD
 	/// (any host) or GITHUB_TOKEN (github.com https-only) from the
-	/// environment. In a sandbox with no egress this fails; that is expected.
+	/// environment, else your git credential helper (e.g. `gh auth login`). In a sandbox with no egress this fails; that is expected.
 	Diff {
 		/// Repo the skills came from: `owner/repo`, an https git URL, or a
 		/// source id from `source list`
@@ -542,7 +542,8 @@ pub enum SourceAction {
 	/// add`. Neither --install-missing nor --update means "report only": both
 	/// preview unless --yes is passed, and --yes with NEITHER is refused.
 	/// Private repos read GIT_PASSWORD (any host) or GITHUB_TOKEN (github.com
-	/// only) from the environment. Runnable examples are at the end of this
+	/// only) from the environment, else your git credential helper (e.g.
+	/// `gh auth login`). Runnable examples are at the end of this
 	/// help.
 	#[command(visible_alias = "install")]
 	#[command(after_long_help = SYNC_EXAMPLES)]

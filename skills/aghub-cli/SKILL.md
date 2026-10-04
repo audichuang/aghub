@@ -113,21 +113,23 @@ git ls-files '*SKILL.md' | xargs -r grep -h '^name:' \
   print it verbatim (`owner/repo` for GitHub, `type:source` for other hosts,
   `—` when there is no lock entry). Take it from `source list --json`.
 
-For a private **HTTPS** source, export the token before step 2. aghub reads the
-ENVIRONMENT, so a working `git push` to that same repo proves nothing — for
-github.com the environment is the only mechanism; other HTTPS hosts have a
-system-`git` fallback that may pick up a credential helper, which is why the
-same failure appears on some hosts and not others. An `ssh://` or `git@host:`
+For a private **HTTPS** source, you normally do nothing. aghub resolves a
+credential in this order: `GIT_PASSWORD` (any host), `GITHUB_TOKEN` (github.com
+only), then the user's own git credential helpers (`gh auth login`, the OS
+keychain, Git Credential Manager) asked non-interactively for that host. So if
+`git clone` of the repo works unattended on this machine, aghub can read it —
+do NOT fetch a token yourself and inject it. Only when no helper is configured
+(headless CI, a fresh box) export a token by hand. An `ssh://` or `git@host:`
 source discards tokens entirely and reports `uncheckable` with `reason: "ssh"` —
 re-pin it to its HTTPS URL instead of hunting for a credential.
 
-`GIT_PASSWORD` is read for ANY HTTPS host and wins over `GITHUB_TOKEN` even on
-github.com. So export `GIT_PASSWORD` for a non-GitHub host, and when a github.com
-fetch fails with `auth` although `GITHUB_TOKEN` is set, look for a stale
-`GIT_PASSWORD` in the environment first.
+`GIT_PASSWORD` wins over everything, even on github.com. When a github.com fetch
+fails with `auth` although you are logged in, look for a stale `GIT_PASSWORD`
+or `GITHUB_TOKEN` in the environment first — an env value shadows the helper.
 
 ```bash
-export GITHUB_TOKEN="$(gh auth token)"   # github.com https sources
+gh auth login                              # once; aghub then reads it via git
+export GITHUB_TOKEN=...                    # only where no git helper exists
 ```
 
 ## 2. Read the current state
@@ -539,8 +541,8 @@ Two results to read rather than retry:
   NOT that this row's fetch was attempted — local, ssh and unsupported-scheme
   sources end in the precheck, and a credential-backend failure stops the row
   later but still before any fetch. Read
-  `reason`: `auth` is a missing or rejected credential (export the token and
-  re-run, do not reinstall), `ssh`/`local` are permanent for that source, as are
+  `reason`: `auth` is a missing or rejected credential (log in with git or export the
+  token, then re-run; do not reinstall), `ssh`/`local` are permanent for that source, as are
   `unsupportedScheme` and `noPath` (the lock has no `skillPath`). `network` with
   `checked: false` means you omitted `--online`; `network`/`timeout` online are
   transient — retry.
