@@ -550,7 +550,7 @@ pub(crate) fn plan_removal_for_agents(
 	// "Every agent" means every MANAGED agent: a dir only disabled agents read
 	// is never swept, and a Referrer found there still keeps the Master.
 	let unmanaged = if all_agents {
-		unmanaged_skill_dirs(all_agent_dirs, project_root)
+		unmanaged_skill_dirs(all_agent_dirs, project_root, requested_agents)
 	} else {
 		Vec::new()
 	};
@@ -1714,11 +1714,18 @@ pub fn execute_removal(
 
 /// The dirs in `dirs` that NO managed agent reads, at either scope.
 ///
+/// A disabled agent the request NAMES counts as managed here: naming it is the
+/// consent a sweep otherwise lacks, and skipping its dir anyway made a request
+/// that listed every holder refuse itself. `--all-agents` alone names only the
+/// initiator, so it still never touches a disabled agent it was not told about.
+/// See docs/history/core-removal.md#naming-a-disabled-agent-was-not-consent
+///
 /// Spelled by the same adapter call as [`agent_skill_dirs_in_scope`], so a
 /// plain `contains` matches. Empty when nothing is disabled.
 pub(crate) fn unmanaged_skill_dirs(
 	dirs: &[PathBuf],
 	project_root: Option<&Path>,
+	requested: &[crate::models::AgentType],
 ) -> Vec<PathBuf> {
 	use crate::models::ResourceScope;
 	let disabled = crate::agent_settings::disabled_agents();
@@ -1726,10 +1733,9 @@ pub(crate) fn unmanaged_skill_dirs(
 		return Vec::new();
 	}
 	let mut managed: Vec<PathBuf> = Vec::new();
-	for agent in crate::models::AgentType::ALL
-		.iter()
-		.filter(|agent| !disabled.contains(agent.as_str()))
-	{
+	for agent in crate::models::AgentType::ALL.iter().filter(|agent| {
+		!disabled.contains(agent.as_str()) || requested.contains(agent)
+	}) {
 		let adapter = crate::create_adapter(*agent);
 		managed
 			.extend(adapter.get_skills_paths(None, ResourceScope::GlobalOnly));
@@ -2190,6 +2196,40 @@ pub(crate) mod tests {
 		assert!(
 			plan.skipped.contains(&canonical),
 			"the disabled agent still reads the Master: {:?}",
+			plan.skipped
+		);
+	}
+
+	/// Naming a disabled agent in the request is consent to touch it: a sweep
+	/// that skipped its dir anyway made a reconcile that listed EVERY holder
+	/// (the disabled ones included) refuse all rows and take nothing.
+	/// See docs/history/core-removal.md#naming-a-disabled-agent-was-not-consent
+	#[cfg(unix)]
+	#[test]
+	fn plan_removal_all_agents_sweeps_a_disabled_agent_the_request_names() {
+		use crate::models::{AgentType, ResourceScope};
+		let tmp = tempdir().unwrap();
+		let (canonical, agent_dirs) = symlink_layout(tmp.path());
+		let skill = symlink_skill(&canonical, &agent_dirs[0]);
+		let _off = crate::agent_settings::test_override::disable(&["cursor"]);
+		let plan = plan_removal_for_agents(
+			&skill,
+			None,
+			&agent_dirs,
+			Some(tmp.path()),
+			ResourceScope::Both,
+			true,
+			&[AgentType::Claude, AgentType::Cursor],
+		);
+		assert!(
+			plan.paths.contains(&agent_dirs[1].join("foo")),
+			"the named disabled agent's Referrer is unlinked: {:?}",
+			plan.paths
+		);
+		assert!(
+			plan.paths.contains(&canonical) && plan.skipped.is_empty(),
+			"no reader is left, so the Master goes too: {:?} / {:?}",
+			plan.paths,
 			plan.skipped
 		);
 	}

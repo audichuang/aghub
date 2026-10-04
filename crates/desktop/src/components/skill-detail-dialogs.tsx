@@ -2,14 +2,24 @@ import {
 	ExclamationTriangleIcon,
 	XCircleIcon,
 } from "@heroicons/react/24/solid";
-import { AlertDialog, Button, Modal, Spinner, toast } from "@heroui/react";
+import {
+	AlertDialog,
+	Button,
+	Checkbox,
+	Modal,
+	Spinner,
+	toast,
+} from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as pathe from "pathe";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { SkillResponse } from "../generated/dto";
+import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import { keptDeleteMessage } from "../lib/skill-delete-message";
+import { splitDeleteTargets } from "../lib/skill-delete-targets";
 import { failedReconcileRowsMessage } from "../lib/skill-reconcile-errors";
 import { invalidateSkillQueries } from "../requests/skills";
 import type { LocationGroup, SkillGroup } from "./skill-detail-helpers";
@@ -206,10 +216,28 @@ export function DeleteSkillDialog({
 	const queryClient = useQueryClient();
 
 	const skill = group.items[0];
+	const { availableAgents } = useAgentAvailability();
+	// Agents the user turned off still read the skill and keep its shared
+	// Master alive, so they are listed apart and only named on request.
+	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
+	const managedAgentIds = useMemo(
+		() =>
+			new Set(
+				availableAgents
+					.filter((agent) => agent.isUsable)
+					.map((agent) => agent.id),
+			),
+		[availableAgents],
+	);
+	const targets = useMemo(
+		() =>
+			splitDeleteTargets(group.items, managedAgentIds, includeUnmanaged),
+		[group.items, managedAgentIds, includeUnmanaged],
+	);
 
 	const deleteMutation = useMutation({
 		mutationFn: async () => {
-			const itemsWithAgent = group.items.filter(
+			const itemsWithAgent = targets.named.filter(
 				(item): item is SkillResponse & { agent: string } =>
 					!!item.agent,
 			);
@@ -272,8 +300,16 @@ export function DeleteSkillDialog({
 				throw new Error(message);
 			}
 		},
+		onSuccess: () => {
+			// The request succeeded, but a link the user did not ask us to touch
+			// still keeps the skill on disk — say so instead of reading as gone.
+			if (targets.unmanaged.length > 0 && !includeUnmanaged) {
+				toast.info(t("deleteSkillKeptForUnmanaged"));
+			}
+		},
 		onSettled: async () => {
 			await invalidateSkillQueries(queryClient);
+			setIncludeUnmanaged(false);
 			onClose();
 		},
 		onError: (error) => {
@@ -286,8 +322,10 @@ export function DeleteSkillDialog({
 		},
 	});
 
-	const globalItems = group.items.filter((item) => item.source === "global");
-	const projectItems = group.items.filter(
+	const globalItems = targets.managed.filter(
+		(item) => item.source === "global",
+	);
+	const projectItems = targets.managed.filter(
 		(item) => item.source === "project",
 	);
 
@@ -306,7 +344,7 @@ export function DeleteSkillDialog({
 					<Modal.Body className="p-2">
 						<p className="mb-4 text-sm text-muted">
 							{t("deleteSkillWarning", {
-								count: group.items.length,
+								count: targets.named.length,
 							})}
 						</p>
 
@@ -377,6 +415,55 @@ export function DeleteSkillDialog({
 								</div>
 							)}
 						</div>
+
+						{targets.unmanaged.length > 0 && (
+							<div className="mt-4 rounded-lg bg-surface-secondary p-3">
+								<h4
+									className="
+										mb-1 text-xs font-medium tracking-wide text-muted
+										uppercase
+									"
+								>
+									{t("deleteSkillUnmanagedTitle")}
+								</h4>
+								<p className="mb-2 text-xs text-muted">
+									{t("deleteSkillUnmanagedHint")}
+								</p>
+								<div className="mb-3 space-y-1">
+									{targets.unmanaged.map((item) => (
+										<div
+											key={`${item.source}:${item.agent}`}
+											className="flex items-center gap-2 text-sm"
+										>
+											<span className="text-foreground">
+												{item.agent
+													? agentName(item.agent)
+													: t("default")}
+											</span>
+											{item.source_path && (
+												<span className="flex-1 truncate text-xs text-muted">
+													{item.source_path}
+												</span>
+											)}
+										</div>
+									))}
+								</div>
+								<Checkbox
+									isSelected={includeUnmanaged}
+									onChange={setIncludeUnmanaged}
+									isDisabled={deleteMutation.isPending}
+								>
+									<Checkbox.Content>
+										<Checkbox.Control>
+											<Checkbox.Indicator />
+										</Checkbox.Control>
+										<span className="text-sm">
+											{t("deleteSkillIncludeUnmanaged")}
+										</span>
+									</Checkbox.Content>
+								</Checkbox>
+							</div>
+						)}
 					</Modal.Body>
 
 					<Modal.Footer>
@@ -391,7 +478,10 @@ export function DeleteSkillDialog({
 						<Button
 							variant="danger"
 							onPress={() => deleteMutation.mutate()}
-							isDisabled={deleteMutation.isPending}
+							isDisabled={
+								deleteMutation.isPending ||
+								targets.named.length === 0
+							}
 						>
 							{deleteMutation.isPending ? (
 								<>

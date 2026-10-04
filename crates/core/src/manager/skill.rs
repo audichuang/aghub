@@ -983,6 +983,7 @@ impl ConfigManager {
 				let unmanaged = removal::unmanaged_skill_dirs(
 					&all_agent_dirs,
 					project_root.as_deref(),
+					requested_agents,
 				);
 				let held_by_disabled = plan
 					.still_read_from

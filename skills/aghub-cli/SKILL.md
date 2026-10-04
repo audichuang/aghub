@@ -428,12 +428,15 @@ you could still have restored with a grant (restore or prune those first).
 
 If that delete refuses with "Read only by disabled agent(s)", those agents were
 disabled after being granted the skill. aghub never sweeps a disabled agent's
-dirs unless that agent is the `-a` target — and `-a` defaults to `claude`, so a
-disabled claude IS swept when you omit `-a` — and its link keeps the Master
-alive. Run `aghub-cli agents list` to see which agents
+dirs unless that agent is NAMED in the request — the `-a` target or list, or a
+`reconcile --remove` row; `-a` defaults to `claude`, so a disabled claude IS swept
+when you omit `-a` — and an unnamed one's link keeps the Master alive. Run `aghub-cli agents list` to see which agents
 are unmanaged and `aghub-cli agents enable <id>` to turn one back on (note that
 `-a all` and `source sync -a all` skip unmanaged agents), or unlink exactly the
 entries the message lists, then retry — do not widen the roster to `-a all`.
+To remove the skill everywhere in one step, name the disabled holders too
+(`reconcile --remove <each holder>`, or the desktop's delete dialog with "also
+remove these agents' links" ticked): naming a disabled agent is the consent.
 
 If a single-agent delete refuses with "Also read there by agents not in this
 request", the skill lives in a shared slot still read by other agents. Only

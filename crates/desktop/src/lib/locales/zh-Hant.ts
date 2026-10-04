@@ -919,6 +919,12 @@ const zhHant: typeof en = {
 	sharedLocation: "共用位置",
 	selectAgentToDelete: "要刪除的 Agent",
 	deleteSkillWarning: "這將刪除 {{count}} 個技能安裝。此操作無法復原。",
+	deleteSkillUnmanagedTitle: "未管理的代理仍在讀取此技能",
+	deleteSkillUnmanagedHint:
+		"這些代理已停用（或未偵測到），aghub 預設不動它們；但只要它們的連結還在，技能就會保留在磁碟上。",
+	deleteSkillIncludeUnmanaged: "一併移除這些代理的連結",
+	deleteSkillKeptForUnmanaged:
+		"已從管理中的代理移除；未管理代理的連結仍保留此技能。",
 	deleteAll: "全部刪除",
 	locations: "位置",
 	globalSkills: "全域技能",

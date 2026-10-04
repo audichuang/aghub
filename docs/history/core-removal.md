@@ -367,6 +367,30 @@ counts the full roster.
 Tests:
 `transfer::tests::reconcile_orders_shared_referrers_first_when_other_agents_disabled`.
 
+## Naming a disabled agent was not consent
+
+A reconcile that removed the skill from EVERY holder, disabled ones included,
+refused all of its rows ("still served ... from .config/opencode/skills") and
+wrote nothing. The batch is `exhaustive`, so each row plans as `--all-agents`,
+and that sweep skipped every dir only disabled agents read (`unmanaged_skill_dirs`)
+even when the request named that agent — so the disabled agent's link survived
+every row's own plan and preflight saw the skill still served. The desktop's
+delete dialog sends every holder, so the user saw this as "delete does nothing".
+
+Rule: a disabled agent the request NAMES counts as managed for that plan
+(`unmanaged_skill_dirs(.., requested)`); `--all-agents` names only its
+initiator, so an unnamed disabled agent still keeps the Master (the preview
+still says `kept`). Preview and commit share the one helper.
+
+Desktop: the delete dialog lists unmanaged holders apart and names them only when
+the user ticks the box (`lib/skill-delete-targets.ts`); unticked, the request is
+the old conservative one and a toast says the skill is kept for them.
+
+Tests:
+`skills::removal::tests::plan_removal_all_agents_sweeps_a_disabled_agent_the_request_names`
+(red before the fix), `plan_removal_all_agents_skips_and_keeps_for_a_disabled_agent`
+(unchanged), desktop `src/lib/skill-delete-targets.test.ts`.
+
 ## Dir delete failure left links unlinked
 
 A real-directory release planned `[owned inbound links..., directory]`, and

@@ -970,6 +970,12 @@ export default {
 	selectAgentToDelete: "Agent to delete",
 	deleteSkillWarning:
 		"This will delete {{count}} skill installation(s). This action cannot be undone.",
+	deleteSkillUnmanagedTitle: "Unmanaged agents still read this skill",
+	deleteSkillUnmanagedHint:
+		"These agents are disabled (or not detected), so aghub leaves them alone by default. While their links remain, the skill stays on disk.",
+	deleteSkillIncludeUnmanaged: "Also remove these agents' links",
+	deleteSkillKeptForUnmanaged:
+		"Removed from managed agents; unmanaged agents still keep the skill.",
 	deleteAll: "Delete All",
 	locations: "Locations",
 	globalSkills: "Global Skills",
