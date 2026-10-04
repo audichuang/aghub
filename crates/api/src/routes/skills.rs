@@ -3415,10 +3415,8 @@ mod tests {
 		});
 	}
 
-	/// Must run inside `with_isolated_env`, which holds the binary's one env
-	/// mutex (`test_env_lock`); that lock is not reentrant, so this helper
-	/// must not take it again.
-	#[cfg(unix)]
+	/// Caller must hold `test_env_lock`; this helper does not reacquire the
+	/// binary's non-reentrant environment mutex.
 	fn with_pinned_data_dir<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
 		let data = tempdir().unwrap();
 		let old = std::env::var_os("AGHUB_DATA_DIR");
@@ -9291,20 +9289,22 @@ mod tests {
 			root: &Path,
 			dry_run: bool,
 		) -> (Status, serde_json::Value) {
-			let response = client
-				.post("/api/v1/skills/repair")
-				.json(&serde_json::json!({
-					"scope": "project",
-					"project_root": root.to_str().unwrap(),
-					"dry_run": dry_run,
-				}))
-				.dispatch();
-			let status = response.status();
-			let body: serde_json::Value = serde_json::from_str(
-				&response.into_string().expect("response body"),
-			)
-			.expect("json body");
-			(status, body)
+			with_pinned_data_dir(|_| {
+				let response = client
+					.post("/api/v1/skills/repair")
+					.json(&serde_json::json!({
+						"scope": "project",
+						"project_root": root.to_str().unwrap(),
+						"dry_run": dry_run,
+					}))
+					.dispatch();
+				let status = response.status();
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json body");
+				(status, body)
+			})
 		}
 
 		/// `#[cfg(unix)]` on the HELPER too, not just on its caller: Windows
