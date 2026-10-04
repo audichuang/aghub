@@ -194,7 +194,11 @@ cafebabe\trefs/heads/develop
 		let cfg = dir.path().join("gitconfig");
 		std::fs::write(
 			&cfg,
-			format!("[credential]\n\thelper = !sh {}\n", script.display()),
+			// Backslashes are escapes in gitconfig values (Windows paths).
+			format!(
+				"[credential]\n\thelper = !sh \"{}\"\n",
+				script.display().to_string().replace('\\', "/")
+			),
 		)
 		.unwrap();
 		std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
