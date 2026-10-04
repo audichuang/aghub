@@ -15,6 +15,24 @@ server whose forward was in fact working. Rule: `build_tunnel_args` passes
 `ControlPath=none` and `ControlMaster=no`; one-shot commands may still reuse
 the user's master. Commit `e163f941`.
 
+## macOS local network privacy
+
+The macOS desktop reported `No route to host` while Terminal SSH to the same
+host succeeded. Persisted aghub rules allowed access, but `nehelper` repeatedly
+rebuilt its UUID cache. This does not establish that the user denied access,
+or that a particular old rule caused the failure.
+
+[Apple's local network privacy guidance](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+explains that Terminal/SSH tools are automatically allowed, while an app owns
+its helper's access. Ad-hoc signatures and multiple app copies can complicate
+identity tracking. A usage description explains access; it does not grant it
+or guarantee a prompt.
+
+The connection screen and test panel preserve the SSH error and offer a
+conditional, localized recovery hint. `remote-errors.test.ts` exercises socket
+failures and excludes authentication, DNS, timeout, and remote-command errors.
+The macOS release gate also checks the built app's usage description.
+
 ## Remote install hardening
 
 v2.7.3 hardening of remote install (commit `5f7b0cc6`):

@@ -39,7 +39,12 @@ import {
 	isFormValid,
 	validateConnectionForm,
 } from "../lib/connection-form";
-import { remoteOutputSummary, stringifyUnknown } from "../lib/remote-errors";
+import { isMacOS } from "../lib/platform";
+import {
+	remoteOutputSummary,
+	sshConnectionErrorMessage,
+	stringifyUnknown,
+} from "../lib/remote-errors";
 import type { Connection } from "../lib/store";
 import { cn } from "../lib/utils";
 
@@ -231,7 +236,11 @@ function buildTestSteps(
 			label: t("connTestStepSsh"),
 			detail: result.reachable
 				? t("connTestStepSshOk")
-				: remoteOutputSummary(result.message),
+				: sshConnectionErrorMessage(
+						remoteOutputSummary(result.message),
+						isMacOS(),
+						t("connMacLocalNetworkHint"),
+					),
 			status: result.reachable ? "ok" : "error",
 		},
 		{
@@ -302,7 +311,7 @@ function TestResultPanel({
 							<p className="text-sm font-medium text-foreground">
 								{step.label}
 							</p>
-							<p className="break-words text-xs text-muted">
+							<p className="whitespace-pre-line break-words text-xs text-muted">
 								{step.detail}
 							</p>
 						</div>

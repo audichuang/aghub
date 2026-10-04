@@ -19,7 +19,12 @@ import {
 	mergeConnections,
 	projectStatus,
 } from "../lib/connection-logic";
-import { asRemotePayload, remoteErrorMessage } from "../lib/remote-errors";
+import { isMacOS } from "../lib/platform";
+import {
+	asRemotePayload,
+	remoteErrorMessage,
+	sshConnectionErrorMessage,
+} from "../lib/remote-errors";
 import type { Connection } from "../lib/store";
 import {
 	addConnection as addConnectionToStore,
@@ -227,6 +232,11 @@ export function ConnectionErrorScreen({
 	const { t } = useTranslation();
 	const isLocal = connection.id === LOCAL_CONNECTION.id;
 	const displayLabel = isLocal ? t("connLocal") : connection.label;
+	const displayMessage = sshConnectionErrorMessage(
+		message,
+		!isLocal && isMacOS(),
+		t("connMacLocalNetworkHint"),
+	);
 
 	return (
 		<div className="flex h-full items-center justify-center bg-background px-6">
@@ -237,8 +247,8 @@ export function ConnectionErrorScreen({
 				<h1 className="mt-1 text-lg font-semibold text-foreground">
 					{t("connErrorTitle", { label: displayLabel })}
 				</h1>
-				<p className="mt-2 break-words text-sm leading-6 text-muted">
-					{message}
+				<p className="mt-2 whitespace-pre-line break-words text-sm leading-6 text-muted">
+					{displayMessage}
 				</p>
 				<div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-border pt-4">
 					{!isLocal && (

@@ -1133,6 +1133,8 @@ const zhHans: typeof en = {
 	connPendingLongWait:
 		"已等待 {{seconds}} 秒。通常代表远程正在编译或下载；如果超过 5 分钟仍没有变化，可以先切回本地再重试。",
 	connErrorTitle: "无法连接到 {{label}}",
+	connMacLocalNetworkHint:
+		"如果 Terminal 能通过 SSH 连接，请检查「系统设置 → 隐私与安全性 → 本地网络」中的 aghub。如果已经允许，请重新打开 aghub 后重试；如果仍然失败，可以尝试重新启动 Mac。",
 	connRetry: "重试",
 	connUseLocal: "切回本地",
 	connManageTitle: "管理连接",

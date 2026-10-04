@@ -4,6 +4,7 @@ import {
 	asRemotePayload,
 	remoteErrorMessage,
 	remoteOutputSummary,
+	sshConnectionErrorMessage,
 } from "./remote-errors.ts";
 
 test("incompatible payload preserves the version for the connection gate and message", () => {
@@ -78,6 +79,56 @@ test("remoteOutputSummary: returns last non-empty line from plain multiline stri
 		remoteOutputSummary("Host key failed\nBatchMode is set"),
 		"BatchMode is set",
 	);
+});
+
+const LOCAL_NETWORK_HINT =
+	"If SSH works in Terminal, check aghub's Local Network access in System Settings.";
+
+for (const reason of [
+	"No route to host",
+	"Network is unreachable",
+	"Operation not permitted",
+]) {
+	test(`macOS SSH ${reason} preserves the error and adds recovery guidance`, () => {
+		const stderr = `ssh: connect to host 192.168.31.65 port 22: ${reason}`;
+		assert.equal(
+			sshConnectionErrorMessage(stderr, true, LOCAL_NETWORK_HINT),
+			`${stderr}\n\n${LOCAL_NETWORK_HINT}`,
+		);
+	});
+}
+
+test("macOS recovery guidance preserves multiline SSH stderr", () => {
+	const stderr =
+		"Warning: previous connection failed\nssh: connect to host ubuntu port 2222: No route to host\n";
+	assert.equal(
+		sshConnectionErrorMessage(stderr, true, LOCAL_NETWORK_HINT),
+		`${stderr}\n\n${LOCAL_NETWORK_HINT}`,
+	);
+});
+
+test("SSH failures on other platforms do not receive macOS instructions", () => {
+	const stderr =
+		"ssh: connect to host 192.168.31.65 port 22: No route to host";
+	assert.equal(
+		sshConnectionErrorMessage(stderr, false, LOCAL_NETWORK_HINT),
+		stderr,
+	);
+});
+
+test("authentication, DNS, timeout and remote command errors stay unchanged", () => {
+	for (const stderr of [
+		"audichuang@ubuntu: Permission denied (publickey).",
+		"ssh: Could not resolve hostname ubuntu: nodename nor servname provided, or not known",
+		"ssh: connect to host ubuntu port 22: Connection timed out",
+		"curl: No route to host",
+		"No route to host",
+	]) {
+		assert.equal(
+			sshConnectionErrorMessage(stderr, true, LOCAL_NETWORK_HINT),
+			stderr,
+		);
+	}
 });
 
 // ---------------------------------------------------------------------------

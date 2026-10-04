@@ -1194,6 +1194,8 @@ export default {
 	connPendingLongWait:
 		"Waited {{seconds}}s. This usually means the remote is compiling or downloading. If it stays unchanged for more than 5 minutes, switch back to Local and retry.",
 	connErrorTitle: "Failed to connect to {{label}}",
+	connMacLocalNetworkHint:
+		"If SSH works in Terminal, check aghub in System Settings → Privacy & Security → Local Network. If access is already allowed, reopen aghub and retry; if it still fails, try restarting your Mac.",
 	connRetry: "Retry",
 	connUseLocal: "Use Local",
 	connManageTitle: "Manage connections",

@@ -64,6 +64,27 @@ export function remoteErrorMessage(error: unknown): string {
 	}
 }
 
+/**
+ * Keep SSH stderr and offer a conditional macOS recovery hint.
+ * See docs/history/remote.md#macos-local-network-privacy.
+ */
+export function sshConnectionErrorMessage(
+	message: string,
+	macOS: boolean,
+	localNetworkHint: string,
+): string {
+	if (
+		macOS &&
+		localNetworkHint &&
+		/^ssh: connect to host .+ port \d+: (?:No route to host|Network is unreachable|Operation not permitted)\s*$/m.test(
+			message,
+		)
+	) {
+		return `${message}\n\n${localNetworkHint}`;
+	}
+	return message;
+}
+
 /** JSON for an unrecognised error payload, never throwing. */
 export function stringifyUnknown(error: unknown): string {
 	try {
