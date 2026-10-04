@@ -7,5 +7,7 @@
 		<string>en</string>
 		<string>zh-Hans</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>aghub connects to your computers over SSH to manage their AI coding agent configurations.</string>
 </dict>
 </plist>
