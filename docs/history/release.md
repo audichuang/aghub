@@ -23,6 +23,14 @@ the app as unidentified on a clean Mac. It only makes the bundle internally
 consistent, so tampering after download invalidates it instead of going
 unnoticed.
 
+**Local network identity.** Ad-hoc signing also makes identity tracking less
+reliable for macOS local network privacy. Apple recommends an Apple-issued
+signing identity; a self-signed certificate is not an equivalent guarantee.
+See [the SSH incident](remote.md#macos-local-network-privacy). For distribution
+outside the App Store, use `Developer ID Application` and notarization as
+described in [Tauri's signing guide](https://v2.tauri.app/distribute/sign/macos/).
+The updater signing key is separate from this macOS identity.
+
 **No cert import happens.** tauri only calls `security import` when
 `APPLE_CERTIFICATE` _and_ `APPLE_CERTIFICATE_PASSWORD` are both set
 (tauri-bundler `macos/sign.rs::keychain`). With only an identity it takes the

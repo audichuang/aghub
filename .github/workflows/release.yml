@@ -311,7 +311,7 @@ jobs:
                   includeUpdaterJson: true
                   projectPath: crates/desktop
 
-            - name: Verify macOS bundle signature
+            - name: Verify macOS bundle signature and network usage description
               if: runner.os == 'macOS'
               shell: bash
               run: |
@@ -331,6 +331,12 @@ jobs:
                   echo "verifying $found"
                   codesign --verify --deep --strict --verbose=2 "$found"
                   codesign --display --verbose=2 "$found" 2>&1 | sed 's/^/  /'
+                  # Check the built artifact, not just the source Info.plist.
+                  usage=$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$found/Contents/Info.plist")
+                  if [ -z "$usage" ]; then
+                      echo "bundled app has no local network usage description" >&2
+                      exit 1
+                  fi
 
             - name: Prepare Generic Artifact
               shell: bash
