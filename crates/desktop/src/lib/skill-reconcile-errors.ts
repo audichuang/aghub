@@ -20,3 +20,14 @@ export function failedReconcileRowsMessage(
 		.map((row) => `${agentName(row.agent)}: ${row.error ?? "failed"}`)
 		.join("\n");
 }
+
+/**
+ * The server refused the whole reconcile before writing anything — the
+ * preflight verdict (core `transfer.rs`: "... preflight failed; nothing was
+ * written"), as opposed to a row that failed at runtime.
+ */
+export function isWholeBatchRefusal(error: unknown): boolean {
+	return (
+		error instanceof Error && error.message.includes("nothing was written")
+	);
+}

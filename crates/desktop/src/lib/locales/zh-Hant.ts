@@ -924,6 +924,8 @@ const zhHant: typeof en = {
 	deleteSkillUnmanagedHint:
 		"這些代理已停用（或未偵測到），aghub 預設不動它們；但只要它們的連結還在，技能就會保留在磁碟上。",
 	deleteSkillIncludeUnmanaged: "一併移除這些代理的連結",
+	deleteSkillRetryWithUnmanaged:
+		"沒有刪除任何東西：未管理的代理仍持有選取代理所讀取的連結。請勾選「一併移除這些代理的連結」後再試一次。",
 	deleteSkillKeptForUnmanaged:
 		"已從管理中的代理移除；未管理代理的連結仍保留此技能。",
 	deleteAll: "全部刪除",

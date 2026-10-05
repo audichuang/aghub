@@ -975,6 +975,8 @@ export default {
 	deleteSkillUnmanagedHint:
 		"These agents are disabled (or not detected), so aghub leaves them alone by default. While their links remain, the skill stays on disk.",
 	deleteSkillIncludeUnmanaged: "Also remove these agents' links",
+	deleteSkillRetryWithUnmanaged:
+		'Nothing was deleted. Agents aghub does not manage still hold links the selected agents read through. Tick "Also remove these agents\' links" and try again.',
 	deleteSkillKeptForUnmanaged:
 		"Removed from managed agents; unmanaged agents still keep the skill.",
 	deleteAll: "Delete All",

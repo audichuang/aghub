@@ -925,6 +925,8 @@ const zhHans: typeof en = {
 	deleteSkillUnmanagedHint:
 		"这些代理已停用（或未检测到），aghub 默认不动它们；但只要它们的链接还在，技能就会保留在磁盘上。",
 	deleteSkillIncludeUnmanaged: "一并移除这些代理的链接",
+	deleteSkillRetryWithUnmanaged:
+		"没有删除任何东西：未管理的代理仍持有所选代理读取的链接。请勾选“一并移除这些代理的链接”后再试一次。",
 	deleteSkillKeptForUnmanaged:
 		"已从管理中的代理移除；未管理代理的链接仍保留此技能。",
 	deleteAll: "全部删除",

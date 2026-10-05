@@ -148,3 +148,29 @@ bulk call".
 (update-all, background-check, layout-migration). They collapsed into one
 status strip where each true fact gets one row and the container hides itself
 via `:empty` when nothing is left.
+
+## Delete skill dialog could not finish a shared-slot delete
+
+Three faults in `DeleteSkillDialog` (`skill-detail-dialogs.tsx`), all reproduced
+headless against a real api:
+
+- **"Managed" disagreed with core.** The dialog split holders by `isUsable`
+  (`is_available && !isDisabled`), so an enabled agent that was merely
+  undetected was listed as unmanaged and left out of the request, while core
+  (`agent_settings::is_managed`, not disabled) counts it as a reader. It now
+  uses `!isDisabled`, the same rule `ManageSkillAgentsDialog` applies to holders.
+- **A refusal closed the dialog.** When unticked unmanaged holders keep links
+  in a slot the named agents read, the server refuses the whole batch
+  (`... preflight failed; nothing was written`). `onSettled` closed the dialog
+  and reset the checkbox, and the toast was a kilobyte of per-row English that
+  never mentioned the checkbox. Now only success closes it; a whole-batch
+  refusal (`isWholeBatchRefusal`) with unticked unmanaged holders shows
+  `deleteSkillRetryWithUnmanaged`, and the dialog stays open to tick and retry.
+- **"Kept for unmanaged agents" was a guess.** The info toast fired whenever
+  unmanaged holders were left unticked, but a disabled agent's link in a shared
+  slot is removed once every enabled reader of it is named, and the Master with
+  it. The dialog now re-reads the list and says "kept" only if an unmanaged
+  agent still holds the skill.
+
+Test: `lib/skill-reconcile-errors.test.ts` (`isWholeBatchRefusal`); the dialog
+wiring is verified headless only (no component test harness).

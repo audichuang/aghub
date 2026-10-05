@@ -20,7 +20,10 @@ import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import { keptDeleteMessage } from "../lib/skill-delete-message";
 import { splitDeleteTargets } from "../lib/skill-delete-targets";
-import { failedReconcileRowsMessage } from "../lib/skill-reconcile-errors";
+import {
+	failedReconcileRowsMessage,
+	isWholeBatchRefusal,
+} from "../lib/skill-reconcile-errors";
 import { invalidateSkillQueries } from "../requests/skills";
 import type { LocationGroup, SkillGroup } from "./skill-detail-helpers";
 
@@ -219,12 +222,15 @@ export function DeleteSkillDialog({
 	const { availableAgents } = useAgentAvailability();
 	// Agents the user turned off still read the skill and keep its shared
 	// Master alive, so they are listed apart and only named on request.
+	// "Managed" is core's `agent_settings::is_managed` (not disabled), NOT
+	// `isUsable`: an enabled agent that is merely undetected is still a reader
+	// the server counts, and leaving it unnamed made the request refuse itself.
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
 	const managedAgentIds = useMemo(
 		() =>
 			new Set(
 				availableAgents
-					.filter((agent) => agent.isUsable)
+					.filter((agent) => !agent.isDisabled)
 					.map((agent) => agent.id),
 			),
 		[availableAgents],
@@ -300,25 +306,60 @@ export function DeleteSkillDialog({
 				throw new Error(message);
 			}
 		},
-		onSuccess: () => {
-			// The request succeeded, but a link the user did not ask us to touch
-			// still keeps the skill on disk — say so instead of reading as gone.
+		onSuccess: async () => {
+			// A link the user did not ask us to touch may still keep the skill on
+			// disk — but it may not: a disabled agent's link in a shared slot goes
+			// once every enabled reader of that slot is named. Ask disk, not the
+			// request, before claiming the skill was kept.
 			if (targets.unmanaged.length > 0 && !includeUnmanaged) {
-				toast.info(t("deleteSkillKeptForUnmanaged"));
+				const unmanaged = new Set(
+					targets.unmanaged.map((item) => item.agent),
+				);
+				const scopes = new Set(
+					targets.unmanaged.map((item) => item.source),
+				);
+				try {
+					const lists = await Promise.all(
+						[...scopes].map((scope) =>
+							scope === "project"
+								? api.skills.listAll("project", projectPath)
+								: api.skills.listAll("global"),
+						),
+					);
+					if (
+						lists
+							.flat()
+							.some(
+								(item) =>
+									item.name === skill.name &&
+									unmanaged.has(item.agent),
+							)
+					) {
+						toast.info(t("deleteSkillKeptForUnmanaged"));
+					}
+				} catch {
+					// Cannot tell; say nothing rather than guess.
+				}
 			}
-		},
-		onSettled: async () => {
 			await invalidateSkillQueries(queryClient);
 			setIncludeUnmanaged(false);
 			onClose();
 		},
-		onError: (error) => {
+		onError: async (error) => {
 			console.error("Skill delete mutation error:", error);
+			// An unticked unmanaged holder whose link sits in a slot the named
+			// agents read makes the server refuse the whole batch; the only way
+			// forward is the checkbox, so say that and keep the dialog open.
 			toast.danger(
-				error instanceof Error
-					? error.message
-					: t("failedToDeleteSkill"),
+				isWholeBatchRefusal(error) &&
+					targets.unmanaged.length > 0 &&
+					!includeUnmanaged
+					? t("deleteSkillRetryWithUnmanaged")
+					: error instanceof Error
+						? error.message
+						: t("failedToDeleteSkill"),
 			);
+			await invalidateSkillQueries(queryClient);
 		},
 	});
 

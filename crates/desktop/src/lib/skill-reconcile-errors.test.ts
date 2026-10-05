@@ -4,6 +4,7 @@ import { HTTPError } from "ky";
 import {
 	failedReconcileRowsMessage,
 	isGoneSkillPath,
+	isWholeBatchRefusal,
 } from "./skill-reconcile-errors.ts";
 
 test("isGoneSkillPath returns true only for 404 HTTP errors", () => {
@@ -55,4 +56,23 @@ test("failedReconcileRowsMessage formats only failed rows", () => {
 	assert.equal(failedReconcileRowsMessage(allSuccess, agentName), null);
 
 	assert.equal(failedReconcileRowsMessage([], agentName), null);
+});
+
+test("isWholeBatchRefusal matches only the preflight refusal", () => {
+	assert.equal(
+		isWholeBatchRefusal(
+			new Error(
+				"skill reconcile preflight failed; nothing was written: delete codex (global): ...",
+			),
+		),
+		true,
+	);
+	assert.equal(
+		isWholeBatchRefusal(
+			new Error("Cursor: 1 path(s) could not be deleted: /x/demo"),
+		),
+		false,
+	);
+	assert.equal(isWholeBatchRefusal("nothing was written"), false);
+	assert.equal(isWholeBatchRefusal(null), false);
 });
