@@ -5110,3 +5110,156 @@ fn real_dir_git_undecided_refuses_single_agent_and_all_agents_delete() {
 		assert!(skill_dir.exists(), "all_agents={all_agents}: still there");
 	}
 }
+
+/// A project-scope delete must never reach a path outside the project: a
+/// project Referrer that points into the GLOBAL store or the global shared slot
+/// is unlinked, and what it points at stays for the global readers.
+/// See docs/history/core-removal.md#project-delete-reached-the-global-store
+#[cfg(unix)]
+fn assert_project_delete_stays_in_project(
+	global_master: bool,
+	all_agents: bool,
+) {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path().join("home");
+	let proj = tmp.path().join("proj");
+	std::fs::create_dir_all(&home).unwrap();
+	let keys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+	let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+		keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+	std::env::set_var("HOME", &home);
+	std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+	std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+	struct Guard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+	impl Drop for Guard {
+		fn drop(&mut self) {
+			for (k, v) in &self.0 {
+				match v {
+					Some(val) => std::env::set_var(k, val),
+					None => std::env::remove_var(k),
+				}
+			}
+		}
+	}
+	let _restore = Guard(prev);
+
+	// The global content: a Master granted to global claude, or a real
+	// directory in the global shared slot (an npx-era layout).
+	let content = if global_master {
+		home.join(".aghub/g")
+	} else {
+		home.join(".agents/skills/g")
+	};
+	std::fs::create_dir_all(&content).unwrap();
+	std::fs::write(
+		content.join("SKILL.md"),
+		"---\nname: g\ndescription: d\n---\n",
+	)
+	.unwrap();
+	let global_link = home.join(".claude/skills/g");
+	if global_master {
+		std::fs::create_dir_all(global_link.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&content, &global_link).unwrap();
+	}
+	let project_link = proj.join(".claude/skills/g");
+	std::fs::create_dir_all(project_link.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(&content, &project_link).unwrap();
+
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(&proj),
+	);
+	manager.load().unwrap();
+	let outcome = manager.remove_skill_planned("g", all_agents, false, true);
+
+	let case = format!("global_master={global_master} all_agents={all_agents}");
+	assert!(
+		content.join("SKILL.md").exists(),
+		"{case}: the global content must survive a project delete: {outcome:?}"
+	);
+	if global_master {
+		assert!(
+			std::fs::metadata(&global_link).is_ok(),
+			"{case}: global claude's grant must still resolve"
+		);
+	}
+	if let Ok(outcome) = outcome {
+		assert!(
+			outcome.plan.paths.iter().all(|p| p.starts_with(&proj)),
+			"{case}: a project delete planned paths outside the project: {:?}",
+			outcome.plan.paths
+		);
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn project_delete_never_takes_the_global_master() {
+	assert_project_delete_stays_in_project(true, false);
+	assert_project_delete_stays_in_project(true, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn project_delete_never_takes_a_global_shared_slot_dir() {
+	assert_project_delete_stays_in_project(false, false);
+	assert_project_delete_stays_in_project(false, true);
+}
+
+/// claude reads the skill THROUGH cursor's link (a hand-made chain). Deleting
+/// cursor's link would silently cut claude off, so it must be kept, not
+/// counted as "claude still has it" because the chain resolves to the Master.
+/// See docs/history/core-removal.md#a-chained-reader-was-cut-off
+#[cfg(unix)]
+#[test]
+fn deleting_a_link_another_reader_chains_through_keeps_it() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path().to_path_buf();
+	let master = root.join(".aghub/x2");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: x2\ndescription: d\n---\n",
+	)
+	.unwrap();
+	let cursor_link = root.join(".cursor/skills/x2");
+	std::fs::create_dir_all(cursor_link.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(&master, &cursor_link).unwrap();
+	let claude_link = root.join(".claude/skills/x2");
+	std::fs::create_dir_all(claude_link.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(&cursor_link, &claude_link).unwrap();
+
+	let mut cursor = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(&root),
+	);
+	cursor.load().unwrap();
+	let outcome = cursor.remove_skill_planned("x2", false, false, true);
+
+	assert!(
+		std::fs::metadata(&claude_link).is_ok(),
+		"claude's chained grant must still resolve: {outcome:?}"
+	);
+	if let Ok(outcome) = &outcome {
+		assert!(
+			!outcome.plan.paths.contains(&cursor_link),
+			"cursor's link carries claude's read and must not be planned: {:?}",
+			outcome.plan.paths
+		);
+	}
+	assert!(master.join("SKILL.md").exists());
+}

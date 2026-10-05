@@ -534,6 +534,24 @@ pub fn plan_removal(
 	)
 }
 
+/// Narrow `roots` to the ones a delete at `scope` may reach. A project delete
+/// sees only the project's agent dirs, so it cannot tell whether a global
+/// path it would take is still read globally: never let it take one.
+/// See docs/history/core-removal.md#project-delete-reached-the-global-store
+fn scope_roots(
+	roots: Vec<PathBuf>,
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<PathBuf> {
+	match (scope, project_root.and_then(|r| r.canonicalize().ok())) {
+		(crate::models::ResourceScope::ProjectOnly, Some(project)) => roots
+			.into_iter()
+			.filter(|root| root.starts_with(&project))
+			.collect(),
+		_ => roots,
+	}
+}
+
 /// The planner with the complete set of agents authorized by one batch.
 /// A shared Referrer may go only when no reader outside that set uses it.
 pub(crate) fn plan_removal_for_agents(
@@ -545,7 +563,11 @@ pub(crate) fn plan_removal_for_agents(
 	all_agents: bool,
 	requested_agents: &[crate::models::AgentType],
 ) -> RemovalPlan {
-	let roots = allowed_skill_roots(all_agent_dirs, project_root);
+	let roots = scope_roots(
+		allowed_skill_roots(all_agent_dirs, project_root),
+		scope,
+		project_root,
+	);
 	let safe = skill::sanitize::sanitize_name(&skill.name);
 	// "Every agent" means every MANAGED agent: a dir only disabled agents read
 	// is never swept, and a Referrer found there still keeps the Master.
@@ -653,6 +675,8 @@ fn plan_symlink_removal(
 	let mut incomplete_scan = false;
 	let mut shared_referrer_kept = false;
 	let mut targeted_entries: Vec<(PathBuf, PathBuf)> = Vec::new();
+	// Entries that keep the canonical alive without being removed here.
+	let mut untargeted_holders: Vec<PathBuf> = Vec::new();
 
 	for dir in all_agent_dirs {
 		// TWO lists, and the split is load-bearing: the wide `entries` is
@@ -710,6 +734,7 @@ fn plan_symlink_removal(
 							targeted_anything = true;
 						} else {
 							other_refs = true;
+							untargeted_holders.push(entry.clone());
 						}
 					}
 					// Resolves to a DIFFERENT target => a same-named but unrelated
@@ -734,6 +759,22 @@ fn plan_symlink_removal(
 					unresolvable |=
 						error.kind() != std::io::ErrorKind::NotFound;
 				}
+			}
+		}
+	}
+
+	// A holder that reaches the canonical THROUGH a link planned here would be
+	// cut off by it, yet it resolves to the canonical and so looks unaffected.
+	// Keep every link, like any other reader that still needs one.
+	// See docs/history/core-removal.md#a-chained-reader-was-cut-off
+	if untargeted_holders
+		.iter()
+		.any(|holder| chain_passes_through(holder, &paths))
+	{
+		shared_referrer_kept = true;
+		for path in paths.drain(..) {
+			if !skipped.contains(&path) {
+				skipped.push(path);
 			}
 		}
 	}
@@ -788,6 +829,32 @@ fn plan_symlink_removal(
 		still_read_from: Vec::new(),
 		incomplete: incomplete_scan,
 	}
+}
+
+/// Does following `link`'s symlink chain step on any of `links`? Hops are
+/// compared by [`entry_identity`] (parent resolved, leaf kept), so a link and
+/// the path that names it match however either was spelled.
+fn chain_passes_through(link: &Path, links: &[PathBuf]) -> bool {
+	if links.is_empty() {
+		return false;
+	}
+	let wanted: Vec<PathBuf> =
+		links.iter().map(|l| entry_identity(l)).collect();
+	let mut hop = link.to_path_buf();
+	// ELOOP-sized bound: a cycle cannot resolve to the canonical anyway.
+	for _ in 0..40 {
+		let Ok(target) = std::fs::read_link(&hop) else {
+			return false;
+		};
+		hop = match hop.parent() {
+			Some(parent) if target.is_relative() => parent.join(target),
+			_ => target,
+		};
+		if wanted.contains(&entry_identity(&hop)) {
+			return true;
+		}
+	}
+	false
 }
 
 /// Copy layout (no `canonical_path`): default removes only the targeted agent's

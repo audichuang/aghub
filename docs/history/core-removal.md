@@ -448,3 +448,35 @@ Tests:
 `manager::skill::tests::own_link_unlink_failure_keeps_the_master`,
 `manager::skill::tests::all_agents_sibling_unlink_failure_keeps_the_master`,
 `transfer::tests::reconcile_skill_keeps_master_when_a_sibling_link_cannot_be_unlinked`.
+
+## Project delete reached the global store
+
+`allowed_skill_roots` always included the GLOBAL store roots (`~/.aghub`,
+`~/.agents/skills`, the XDG `agents/skills`), whatever the scope. A project
+delete sweeps only the project's agent dirs, so when a project Referrer pointed
+into the global store (a hand-made link, or an npx-era project link into the
+global shared slot) the planner saw no other holder and took the target: the
+global Master went and global agents' grants dangled, or a global shared-slot
+directory that ten agents read was `remove_dir_all`ed with no Master behind it.
+
+`plan_removal_for_agents` now narrows the roots with `scope_roots`: at
+`ProjectOnly` only roots inside the project survive, so a global target is
+`skipped` and only the project link is unlinked. The opposite direction is NOT
+guarded: a global delete cannot see which projects link into `~/.aghub`, and
+scanning every project is not something aghub can do; such a project link is
+left dangling.
+
+Tests: `manager::skill::tests::project_delete_never_takes_the_global_master`,
+`manager::skill::tests::project_delete_never_takes_a_global_shared_slot_dir`.
+
+## A chained reader was cut off
+
+A hand-made chain (`.claude/skills/x -> .cursor/skills/x -> Master`) resolves
+to the Master, so the sweep counted claude's entry as an untouched holder: it
+kept the Master and unlinked cursor's link, which was the very hop claude read
+through. Nothing was reported. `plan_symlink_removal` now follows each
+untargeted holder's link chain (`chain_passes_through`, hops compared by
+`entry_identity`) and, if it steps on a link planned for removal, keeps every
+planned link as for any other reader that still needs one (`kept`).
+
+Test: `manager::skill::tests::deleting_a_link_another_reader_chains_through_keeps_it`.
