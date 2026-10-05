@@ -535,21 +535,27 @@ pub fn plan_removal(
 }
 
 /// Narrow `roots` to the ones a delete at `scope` may reach. A project delete
-/// sees only the project's agent dirs, so it cannot tell whether a global
-/// path it would take is still read globally: never let it take one.
+/// sees only the project's agent dirs, so it cannot tell whether a GLOBAL
+/// store path it would take is still read globally: drop every global store
+/// root. Matched by identity, not "is it under the project", because a project
+/// root can be HOME itself (`~/.claude/` is a marker), and the project's own
+/// agent dirs stay allowed wherever they resolve.
 /// See docs/history/core-removal.md#project-delete-reached-the-global-store
 fn scope_roots(
 	roots: Vec<PathBuf>,
 	scope: crate::models::ResourceScope,
-	project_root: Option<&Path>,
 ) -> Vec<PathBuf> {
-	match (scope, project_root.and_then(|r| r.canonicalize().ok())) {
-		(crate::models::ResourceScope::ProjectOnly, Some(project)) => roots
-			.into_iter()
-			.filter(|root| root.starts_with(&project))
-			.collect(),
-		_ => roots,
+	if scope != crate::models::ResourceScope::ProjectOnly {
+		return roots;
 	}
+	let global: Vec<PathBuf> = skill_store_roots(None)
+		.iter()
+		.filter_map(|root| root.canonicalize().ok())
+		.collect();
+	roots
+		.into_iter()
+		.filter(|root| !global.contains(root))
+		.collect()
 }
 
 /// The planner with the complete set of agents authorized by one batch.
@@ -563,11 +569,8 @@ pub(crate) fn plan_removal_for_agents(
 	all_agents: bool,
 	requested_agents: &[crate::models::AgentType],
 ) -> RemovalPlan {
-	let roots = scope_roots(
-		allowed_skill_roots(all_agent_dirs, project_root),
-		scope,
-		project_root,
-	);
+	let roots =
+		scope_roots(allowed_skill_roots(all_agent_dirs, project_root), scope);
 	let safe = skill::sanitize::sanitize_name(&skill.name);
 	// "Every agent" means every MANAGED agent: a dir only disabled agents read
 	// is never swept, and a Referrer found there still keeps the Master.
@@ -589,6 +592,9 @@ pub(crate) fn plan_removal_for_agents(
 			if !Linker::is_link(&canonical)
 				&& canonical.is_dir()
 				&& is_universal_master(&canonical, project_root)
+				// Out of this scope's reach (a global dir seen from a project):
+				// the symlink planner unlinks the link and keeps the target.
+				&& assert_contained(&canonical, &roots).is_some()
 				&& !requested_agents.is_empty()
 				&& single_agent_keep_reason(
 					&canonical,
@@ -831,7 +837,7 @@ fn plan_symlink_removal(
 	}
 }
 
-/// Does following `link`'s symlink chain step on any of `links`? Hops are
+/// Does `link`, or following its symlink chain, step on any of `links`? Hops are
 /// compared by [`entry_identity`] (parent resolved, leaf kept), so a link and
 /// the path that names it match however either was spelled.
 fn chain_passes_through(link: &Path, links: &[PathBuf]) -> bool {
@@ -840,6 +846,11 @@ fn chain_passes_through(link: &Path, links: &[PathBuf]) -> bool {
 	}
 	let wanted: Vec<PathBuf> =
 		links.iter().map(|l| entry_identity(l)).collect();
+	// Zero hops: the holder's own entry IS a planned path, seen through an
+	// agent dir that aliases another (a symlinked skills dir).
+	if wanted.contains(&entry_identity(link)) {
+		return true;
+	}
 	let mut hop = link.to_path_buf();
 	// ELOOP-sized bound: a cycle cannot resolve to the canonical anyway.
 	for _ in 0..40 {

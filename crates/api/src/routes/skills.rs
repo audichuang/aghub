@@ -4120,7 +4120,10 @@ mod tests {
 				)
 				.unwrap();
 
-				let proj = home;
+				// A real project, not HOME: at HOME the project slot IS the
+				// global shared slot, which a project delete must not take.
+				// See docs/history/core-removal.md#project-delete-reached-the-global-store
+				let proj = home.join("proj");
 				let slot = proj.join(".agents/skills/shared");
 				std::fs::create_dir_all(&slot).unwrap();
 				std::fs::write(

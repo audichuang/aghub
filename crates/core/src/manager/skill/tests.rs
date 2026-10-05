@@ -5190,13 +5190,16 @@ fn assert_project_delete_stays_in_project(
 			"{case}: global claude's grant must still resolve"
 		);
 	}
-	if let Ok(outcome) = outcome {
-		assert!(
-			outcome.plan.paths.iter().all(|p| p.starts_with(&proj)),
-			"{case}: a project delete planned paths outside the project: {:?}",
-			outcome.plan.paths
-		);
-	}
+	let outcome = outcome.unwrap_or_else(|e| panic!("{case}: {e}"));
+	assert!(
+		outcome.plan.paths.iter().all(|p| p.starts_with(&proj)),
+		"{case}: a project delete planned paths outside the project: {:?}",
+		outcome.plan.paths
+	);
+	assert!(
+		std::fs::symlink_metadata(&project_link).is_err(),
+		"{case}: the project's own link must still be unlinked: {outcome:?}"
+	);
 }
 
 #[cfg(unix)]
@@ -5261,5 +5264,172 @@ fn deleting_a_link_another_reader_chains_through_keeps_it() {
 			outcome.plan.paths
 		);
 	}
+	assert!(master.join("SKILL.md").exists());
+}
+
+/// Isolate HOME / XDG for one test; restores on drop.
+#[cfg(unix)]
+struct HomeEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+#[cfg(unix)]
+impl HomeEnv {
+	fn set(home: &std::path::Path) -> Self {
+		let keys =
+			["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"];
+		let prev = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+		std::env::set_var("HOME", home);
+		std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+		std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+		std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
+		Self(prev)
+	}
+}
+
+#[cfg(unix)]
+impl Drop for HomeEnv {
+	fn drop(&mut self) {
+		for (k, v) in &self.0 {
+			match v {
+				Some(val) => std::env::set_var(k, val),
+				None => std::env::remove_var(k),
+			}
+		}
+	}
+}
+
+/// `~/.claude/` is a project marker, so a project delete run anywhere under
+/// HOME without a closer marker resolves the project root to HOME itself.
+/// Every global store root then sits "under the project"; the global Master
+/// that global opencode still reads must survive anyway.
+#[cfg(unix)]
+#[test]
+fn project_delete_at_home_never_takes_the_global_master() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path().join("home");
+	let _home = HomeEnv::set(&home);
+	let master = home.join(".aghub/g");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: g\ndescription: d\n---\n",
+	)
+	.unwrap();
+	for dir in [".claude/skills", ".config/opencode/skills"] {
+		let slot = home.join(dir);
+		std::fs::create_dir_all(&slot).unwrap();
+		std::os::unix::fs::symlink(&master, slot.join("g")).unwrap();
+	}
+
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(&home),
+	);
+	manager.load().unwrap();
+	let outcome = manager.remove_skill_planned("g", false, false, true);
+
+	assert!(
+		master.join("SKILL.md").exists(),
+		"the global Master must survive: {outcome:?}"
+	);
+	assert!(
+		std::fs::metadata(home.join(".config/opencode/skills/g")).is_ok(),
+		"global opencode's grant must still resolve"
+	);
+}
+
+/// A project's own agent skills dir may resolve outside the project (a shared
+/// team dir linked in). Its copies are still that project's to delete.
+#[cfg(unix)]
+#[test]
+fn project_delete_reaches_its_own_agent_dir_that_resolves_elsewhere() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let tmp = tempfile::tempdir().unwrap();
+	let _home = HomeEnv::set(&tmp.path().join("home"));
+	let proj = tmp.path().join("proj");
+	let team = tmp.path().join("team-skills");
+	let copy = team.join("t");
+	std::fs::create_dir_all(&copy).unwrap();
+	std::fs::write(
+		copy.join("SKILL.md"),
+		"---\nname: t\ndescription: d\n---\n",
+	)
+	.unwrap();
+	std::fs::create_dir_all(proj.join(".claude")).unwrap();
+	std::os::unix::fs::symlink(&team, proj.join(".claude/skills")).unwrap();
+
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(&proj),
+	);
+	manager.load().unwrap();
+	let outcome = manager
+		.remove_skill_planned("t", false, false, true)
+		.expect("a private copy in the project's own dir is deletable");
+
+	assert!(
+		!copy.exists(),
+		"the copy in claude's own (linked) dir must be removed: {outcome:?}"
+	);
+}
+
+/// codex's skills dir IS cursor's (a symlinked dir), so cursor's link is the
+/// very entry disabled codex reads — zero hops. Sweeping it would cut codex
+/// off; it must be kept.
+#[cfg(unix)]
+#[test]
+fn all_agents_delete_keeps_an_entry_an_aliased_dir_reads() {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let _off = crate::agent_settings::test_override::disable(&["codex"]);
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path().to_path_buf();
+	let master = root.join(".aghub/x4");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: x4\ndescription: d\n---\n",
+	)
+	.unwrap();
+	let cursor_dir = root.join(".cursor/skills");
+	std::fs::create_dir_all(&cursor_dir).unwrap();
+	std::os::unix::fs::symlink(&master, cursor_dir.join("x4")).unwrap();
+	let codex_parent = crate::create_adapter(AgentType::Codex)
+		.target_skills_dir(
+			Some(&root),
+			crate::models::ResourceScope::ProjectOnly,
+		)
+		.expect("codex has a project skills dir");
+	std::fs::create_dir_all(codex_parent.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(&cursor_dir, &codex_parent).unwrap();
+
+	let mut cursor = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(&root),
+	);
+	cursor.load().unwrap();
+	let outcome = cursor.remove_skill_planned("x4", true, false, true);
+
+	assert!(
+		std::fs::metadata(codex_parent.join("x4")).is_ok(),
+		"codex's view of the skill must still resolve: {outcome:?}"
+	);
 	assert!(master.join("SKILL.md").exists());
 }

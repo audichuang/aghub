@@ -434,8 +434,12 @@ wrong agent. Every delete surface (CLI `delete` single agent, `-a` list,
 
 `execute_removal` now records the resolved target of each failed unlink and
 skips (reports in `skipped`) any directory that target lies under. It relies on
-the planner's order, links before the Master, which both layouts' producers
-keep. Links already unlinked are not restored, for the reason given above; the
+links being listed before the directory, which `plan_symlink_removal` keeps (the
+canonical is pushed last). Two producers list the directory first and so get
+no protection from it: `plan_dir_release_paths` on purpose (the
+`failed_dirs` rule above covers that order), and the copy layout's
+`--all-agents` sweep, whose content is meant to go anyway (a stuck link there
+is left dangling but reported in `failed`). Links already unlinked are not restored, for the reason given above; the
 Master and the stuck grant survive, and a re-run after fixing the permission
 finishes the job.
 
@@ -460,14 +464,22 @@ global Master went and global agents' grants dangled, or a global shared-slot
 directory that ten agents read was `remove_dir_all`ed with no Master behind it.
 
 `plan_removal_for_agents` now narrows the roots with `scope_roots`: at
-`ProjectOnly` only roots inside the project survive, so a global target is
-`skipped` and only the project link is unlinked. The opposite direction is NOT
+`ProjectOnly` every GLOBAL store root is dropped, matched by identity. Not "is
+it under the project": a project root can be HOME itself (`~/.claude/` is a
+marker), which put every global root under it, and the project's own agent
+dirs must stay allowed even when they resolve outside the project (a linked
+team dir). The real-directory release path also requires its target inside
+those roots; otherwise the symlink planner runs, so in both single-agent and
+`--all-agents` mode the global target is `skipped` and the project link is
+unlinked. The opposite direction is NOT
 guarded: a global delete cannot see which projects link into `~/.aghub`, and
 scanning every project is not something aghub can do; such a project link is
 left dangling.
 
 Tests: `manager::skill::tests::project_delete_never_takes_the_global_master`,
-`manager::skill::tests::project_delete_never_takes_a_global_shared_slot_dir`.
+`manager::skill::tests::project_delete_never_takes_a_global_shared_slot_dir`,
+`manager::skill::tests::project_delete_at_home_never_takes_the_global_master`,
+`manager::skill::tests::project_delete_reaches_its_own_agent_dir_that_resolves_elsewhere`.
 
 ## A chained reader was cut off
 
@@ -477,6 +489,9 @@ kept the Master and unlinked cursor's link, which was the very hop claude read
 through. Nothing was reported. `plan_symlink_removal` now follows each
 untargeted holder's link chain (`chain_passes_through`, hops compared by
 `entry_identity`) and, if it steps on a link planned for removal, keeps every
-planned link as for any other reader that still needs one (`kept`).
+planned link as for any other reader that still needs one (`kept`). Zero hops
+counts too: an agent dir that is itself a symlink to another agent's dir sees
+the very entry being swept.
 
-Test: `manager::skill::tests::deleting_a_link_another_reader_chains_through_keeps_it`.
+Tests: `manager::skill::tests::deleting_a_link_another_reader_chains_through_keeps_it`,
+`manager::skill::tests::all_agents_delete_keeps_an_entry_an_aliased_dir_reads`.
