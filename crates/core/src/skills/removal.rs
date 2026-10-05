@@ -1663,6 +1663,11 @@ pub fn execute_removal(
 	let mut report = RemovalReport::default();
 	// Directories whose removal failed, resolved while they still exist.
 	let mut failed_dirs: Vec<PathBuf> = Vec::new();
+	// Targets of links we failed to unlink: deleting one would leave that
+	// surviving Referrer dangling. The planner lists links before the Master,
+	// so a stuck link is known by the time its target comes up.
+	// See docs/history/core-removal.md#link-unlink-failure-deleted-the-master
+	let mut failed_link_targets: Vec<PathBuf> = Vec::new();
 	for path in &plan.paths {
 		let meta = match std::fs::symlink_metadata(path) {
 			Ok(m) => m,
@@ -1686,9 +1691,18 @@ pub fn execute_removal(
 			}
 			match Linker::unlink(path) {
 				Ok(()) => report.removed.push(path.clone()),
-				Err(e) => report.failed.push((path.clone(), e)),
+				Err(e) => {
+					failed_link_targets
+						.push(::skill::lock::resolve_existing(path));
+					report.failed.push((path.clone(), e));
+				}
 			}
 		} else if ft.is_dir() {
+			let resolved = ::skill::lock::resolve_existing(path);
+			if failed_link_targets.iter().any(|t| t.starts_with(&resolved)) {
+				report.skipped.push(path.clone());
+				continue;
+			}
 			// Re-assert STRICT containment immediately before remove_dir_all: the
 			// root itself must never be deleted.
 			if assert_strictly_contained(path, roots).is_some() {

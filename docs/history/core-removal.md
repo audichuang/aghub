@@ -419,3 +419,32 @@ readers, so the message must not name them. The refusal VERDICT is untouched
 Tests:
 `manager::skill::tests::real_dir_delete_failure_keeps_the_requested_agents_links`,
 `transfer::tests::reconcile_refusal_does_not_name_a_disabled_agent_as_a_reader`.
+
+## Link unlink failure deleted the Master
+
+The reverse of the above, for the Master layout. `plan_symlink_removal` lists
+`[links..., Master]`, and `execute_removal` ran every entry regardless of what
+failed before it. A link that could not be unlinked (its parent read-only)
+still pointed at the Master, yet the Master was `remove_dir_all`ed next: the
+content was gone, the surviving Referrer dangled, and the row reported a
+failure for a delete that had in fact happened. In a reconcile the next row
+then found nothing to load and answered `Resource not found`, blaming the
+wrong agent. Every delete surface (CLI `delete` single agent, `-a` list,
+`--all-agents`, `reconcile`, the API and the desktop dialogs) reaches it.
+
+`execute_removal` now records the resolved target of each failed unlink and
+skips (reports in `skipped`) any directory that target lies under. It relies on
+the planner's order, links before the Master, which both layouts' producers
+keep. Links already unlinked are not restored, for the reason given above; the
+Master and the stuck grant survive, and a re-run after fixing the permission
+finishes the job.
+
+Residual (deliberately not fixed): when the Master itself cannot be removed,
+links listed before it are already gone, so the Master is left with fewer
+Referrers. Content is kept and the Master is reported in `failed`; probing
+deletability ahead of time is a heuristic that can lie.
+
+Tests:
+`manager::skill::tests::own_link_unlink_failure_keeps_the_master`,
+`manager::skill::tests::all_agents_sibling_unlink_failure_keeps_the_master`,
+`transfer::tests::reconcile_skill_keeps_master_when_a_sibling_link_cannot_be_unlinked`.

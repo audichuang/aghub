@@ -6285,10 +6285,10 @@ mod tests {
 		assert!(cursor_dir.join("gone-src").symlink_metadata().is_err());
 	}
 
-	/// A gone source with `holders` linked to the project Master. Returns
+	/// A project Master `gone-src` linked from each of `holders`. Returns
 	/// `(root, master, slots)`; `slots[i]` holds `holders[i]`'s link.
 	#[cfg(unix)]
-	fn gone_source_fixture(
+	fn linked_master_fixture(
 		temp: &Path,
 		holders: &[AgentType],
 	) -> (PathBuf, PathBuf, Vec<PathBuf>) {
@@ -6314,7 +6314,7 @@ mod tests {
 	}
 
 	#[cfg(unix)]
-	fn gone_claude_source(root: &Path) -> ResourceLocator {
+	fn claude_source(root: &Path) -> ResourceLocator {
 		ResourceLocator {
 			agent: AgentType::Claude,
 			scope: InstallScope::Project,
@@ -6331,10 +6331,10 @@ mod tests {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let (root, master, slots) =
-			gone_source_fixture(temp.path(), &[AgentType::Codex]);
+			linked_master_fixture(temp.path(), &[AgentType::Codex]);
 
 		let err = reconcile_skill(
-			gone_claude_source(&root),
+			claude_source(&root),
 			vec![],
 			vec![AgentType::Cursor],
 			true,
@@ -6361,12 +6361,12 @@ mod tests {
 		let _off = crate::agent_settings::test_override::disable(&["codex"]);
 		let temp = tempdir().unwrap();
 		let (root, master, slots) =
-			gone_source_fixture(temp.path(), &[AgentType::Codex]);
+			linked_master_fixture(temp.path(), &[AgentType::Codex]);
 		let cursor_link =
 			private_slot_for(AgentType::Cursor, &root).join("gone-src");
 
 		let msg = reconcile_skill(
-			gone_claude_source(&root),
+			claude_source(&root),
 			vec![AgentType::Cursor],
 			vec![],
 			true,
@@ -6397,13 +6397,13 @@ mod tests {
 		for disabled in [&[][..], &["cursor"][..]] {
 			let _off = crate::agent_settings::test_override::disable(disabled);
 			let temp = tempdir().unwrap();
-			let (root, master, slots) = gone_source_fixture(
+			let (root, master, slots) = linked_master_fixture(
 				temp.path(),
 				&[AgentType::Codex, AgentType::Cursor],
 			);
 
 			let batch = reconcile_skill(
-				gone_claude_source(&root),
+				claude_source(&root),
 				vec![],
 				vec![AgentType::Codex],
 				true,
@@ -6425,5 +6425,52 @@ mod tests {
 				"disabled={disabled:?}: cursor still holds the Master"
 			);
 		}
+	}
+
+	// The reconcile face of docs/history/core-removal.md
+	// #link-unlink-failure-deleted-the-master: the first (exhaustive) row plans
+	// cursor's link and the Master; cursor's unlink fails, so the Master stays
+	// and both rows say so instead of one reading "not found".
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_keeps_master_when_a_sibling_link_cannot_be_unlinked() {
+		use std::os::unix::fs::PermissionsExt;
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let (root, master, slots) = linked_master_fixture(
+			temp.path(),
+			&[AgentType::Claude, AgentType::Cursor],
+		);
+		let cursor_dir = slots[1].parent().unwrap().to_path_buf();
+		fs::set_permissions(&cursor_dir, fs::Permissions::from_mode(0o555))
+			.unwrap();
+		let writable_anyway = fs::write(cursor_dir.join(".probe"), b"").is_ok();
+		let result = reconcile_skill(
+			claude_source(&root),
+			vec![],
+			vec![AgentType::Claude, AgentType::Cursor],
+			true,
+		);
+		fs::set_permissions(&cursor_dir, fs::Permissions::from_mode(0o755))
+			.unwrap();
+		if writable_anyway {
+			return;
+		}
+
+		let batch = result.unwrap();
+		assert!(master.join("SKILL.md").exists(), "Master must survive");
+		assert!(
+			fs::metadata(&slots[1]).is_ok(),
+			"cursor's link must still resolve"
+		);
+		assert!(
+			batch.results.iter().all(|r| !r
+				.error
+				.as_deref()
+				.unwrap_or("")
+				.contains("not found")),
+			"no row may claim the skill is gone: {:?}",
+			batch.results
+		);
 	}
 }

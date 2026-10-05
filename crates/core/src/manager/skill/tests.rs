@@ -4622,6 +4622,80 @@ fn real_dir_delete_failure_keeps_the_requested_agents_links() {
 	);
 }
 
+/// The reverse of the test above: a link that cannot be unlinked still
+/// points at the Master, so the Master must stay. Deleting it anyway left
+/// that Referrer dangling and the content gone, with nothing to roll back to.
+/// See docs/history/core-removal.md#link-unlink-failure-deleted-the-master
+#[cfg(unix)]
+fn assert_unlink_failure_keeps_master(all_agents: bool, locked: &str) {
+	use crate::create_adapter;
+	use crate::models::AgentType;
+	use std::os::unix::fs::PermissionsExt;
+
+	let _env = crate::skills::prune::test_lock::env_lock()
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path().to_path_buf();
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(&root),
+	);
+	manager.load().unwrap();
+	manager.add_skill(Skill::new("demo")).unwrap();
+	let master = root.join(".aghub/demo");
+	assert!(master.join("SKILL.md").exists(), "fixture: Master written");
+	// Single-agent: claude is the last holder, so its own link and the Master
+	// are both planned. All-agents: cursor's link joins the sweep too.
+	if all_agents {
+		let cursor_dir = root.join(".cursor/skills");
+		std::fs::create_dir_all(&cursor_dir).unwrap();
+		std::os::unix::fs::symlink(&master, cursor_dir.join("demo")).unwrap();
+		manager.load().unwrap();
+	}
+
+	let slot = root.join(locked);
+	let link = slot.join("demo");
+	std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o555))
+		.unwrap();
+	// Root ignores the mode bits, so the failure this test needs cannot happen.
+	let writable_anyway = std::fs::write(slot.join(".probe"), b"").is_ok();
+	let result = manager.remove_skill_planned("demo", all_agents, false, true);
+	std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o755))
+		.unwrap();
+	if writable_anyway {
+		return;
+	}
+
+	let outcome = result.expect("a failed unlink is reported, not an error");
+	assert!(
+		outcome.failed_paths.contains(&link),
+		"the stuck link must be the reported failure: {:?}",
+		outcome.failed_paths
+	);
+	assert!(
+		master.join("SKILL.md").exists(),
+		"the Master must survive while {locked}/demo still points at it"
+	);
+	assert!(
+		std::fs::metadata(&link).is_ok(),
+		"{locked}/demo must still resolve, not dangle"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn own_link_unlink_failure_keeps_the_master() {
+	assert_unlink_failure_keeps_master(false, ".claude/skills");
+}
+
+#[cfg(unix)]
+#[test]
+fn all_agents_sibling_unlink_failure_keeps_the_master() {
+	assert_unlink_failure_keeps_master(true, ".cursor/skills");
+}
+
 #[cfg(unix)]
 #[test]
 fn real_dir_batch_with_own_links_is_order_independent() {
