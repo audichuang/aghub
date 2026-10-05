@@ -14,9 +14,12 @@ fn note_shared_slot(manager: &ConfigManager) {
 	let shared = manager.skill_target_shares_with();
 	if !shared.is_empty() {
 		eprintln!(
-			"note: agent '{}' shares its skills directory with {}; they can \
-			 read this skill too, and removing it from one removes it from all \
-			 of them (their own agents provide no separate directory)",
+			// `shared_with` names the agents that WRITE this directory; more may
+			// read it, so "including". Removing it from one alone is refused.
+			"note: agent '{}' writes this skill into a directory other agents \
+			 read too (including {}); they get it as well, and it cannot be \
+			 removed from just one of them — name them together in one -a \
+			 list, or use --all-agents",
 			manager.agent_name(),
 			shared.join(", ")
 		);

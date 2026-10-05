@@ -290,7 +290,7 @@ fn failed_report(name: &str, dry_run: bool, e: &ConfigError) -> RepairReport {
 			reason: e.to_string(),
 			fix: format!(
 				"fix the cause above (most often a permission on the skill \
-				 directory), then re-run `aghub skills repair {name}` — repair \
+				 directory), then re-run `aghub-cli repair {name}` — repair \
 				 is idempotent, so a partly-applied skill is picked up where it \
 				 stands"
 			),
@@ -371,7 +371,7 @@ pub fn execute_repair(
 						"both copies are preserved; aghub will not choose which one \
 							to discard. Compare them first: `diff -r {} {}`. If you \
 							choose to consolidate them, move the copy you do not want \
-							aside and re-run `aghub skills repair {}`",
+							aside and re-run `aghub-cli repair {}`",
 						fork.display(),
 						plan.master.display(),
 						plan.name
@@ -389,7 +389,7 @@ pub fn execute_repair(
 					),
 					fix: format!(
 						"make it readable, or move it aside yourself (`mv {} \
-						 {}.bak`) and re-run `aghub skills repair {}`",
+						 {}.bak`) and re-run `aghub-cli repair {}`",
 						fork.display(),
 						fork.display(),
 						plan.name
@@ -644,27 +644,28 @@ fn fix_for(reason: &RefuseReason, at: &Path, name: &str) -> String {
 		),
 		RefuseReason::MasterIsLink | RefuseReason::MasterIsNotADir => format!(
 			"replace the store entry with a real directory, then re-run \
-			 `aghub skills repair {name}`"
+			 `aghub-cli repair {name}`"
 		),
 		RefuseReason::ReferrerIsNotADir => format!(
-			"move {} aside yourself, then re-run `aghub skills repair {name}`",
+			"move {} aside yourself, then re-run `aghub-cli repair {name}`",
 			at.display()
 		),
 		RefuseReason::MasterMissing => format!(
-			"nothing to repair from — install it again with `aghub skills add \
-			 <source> -a <agent>`, or delete the dead referrer at {}",
+			"nothing to repair from — install it again with `aghub-cli \
+			 source sync <owner/repo> -a <agent>` (or `aghub-cli -a <agent> \
+			 add skill --from <dir>`), or delete the dead referrer at {}",
 			at.display()
 		),
 		RefuseReason::UnreadableCompatDir { path } => format!(
 			"fix the permission on {} (or one of its parent directories), or \
 			 move it aside if it is not yours to change or its mount is \
 			 unreachable — repair proceeds once the path is readable or gone; \
-			 then re-run `aghub skills repair {name}`",
+			 then re-run `aghub-cli repair {name}`",
 			path.display()
 		),
 		RefuseReason::GitTrackedSource { paths } => format!(
 			"keep authoring it there, or migrate it deliberately: `git rm -r \
-			 --cached {}` (and commit that), then re-run `aghub skills repair \
+			 --cached {}` (and commit that), then re-run `aghub-cli repair \
 			 {name}`",
 			paths
 				.iter()
@@ -674,7 +675,7 @@ fn fix_for(reason: &RefuseReason, at: &Path, name: &str) -> String {
 		),
 		RefuseReason::GitTrackingUndecided { path } => format!(
 			"make `git ls-files --error-unmatch {}` answer — install `git`, or \
-			 repair the repository above it — then re-run `aghub skills repair \
+			 repair the repository above it — then re-run `aghub-cli repair \
 			 {name}`",
 			path.display()
 		),

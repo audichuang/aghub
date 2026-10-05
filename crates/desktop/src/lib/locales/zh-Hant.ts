@@ -583,6 +583,8 @@ const zhHant: typeof en = {
 	bulkDeleteMixedConfirm:
 		"確定要從目前專案中刪除這 {{count}} 個被選中的資源嗎？",
 	bulkDeleteFailed: "批次刪除失敗",
+	bulkDeleteKept: "已保留：其他代理仍在讀取",
+	bulkDeletePartial: "只刪除了一部分",
 	bulkDeleteFailedItems: "{{count}} 項刪除失敗: {{items}}",
 	favoriteSaveError: "無法更新你的收藏",
 	starSkill: "收藏技能",

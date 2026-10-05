@@ -2688,7 +2688,7 @@ pub fn verify_shape(
 	};
 	Err(crate::errors::ConfigError::UnsupportedOperation(format!(
 		"Cannot remove skill '{name}': {} at {}{writers} — {detail}. Run \
-		 `aghub skills repair {name}` first; deleting now could destroy content \
+		 `aghub-cli repair {name}` first; deleting now could destroy content \
 		 aghub cannot recover.",
 		blocker.shape_label(),
 		blocker.path.display(),

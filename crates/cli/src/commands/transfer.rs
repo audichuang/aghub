@@ -73,11 +73,11 @@ pub struct ReconcileArgs {
 	/// Name of the resource to reconcile.
 	#[arg(long)]
 	name: String,
-	/// Agent (repeatable) to copy the resource into.
-	#[arg(long = "add", value_parser = parse_agent)]
+	/// Agent to copy the resource into: repeatable, or a comma-separated list (like `-a`).
+	#[arg(long = "add", value_parser = parse_agent, value_delimiter = ',')]
 	add: Vec<AgentType>,
-	/// Agent (repeatable) to remove the resource from.
-	#[arg(long = "remove", value_parser = parse_agent)]
+	/// Agent to remove the resource from: repeatable, or a comma-separated list (like `-a`).
+	#[arg(long = "remove", value_parser = parse_agent, value_delimiter = ',')]
 	remove: Vec<AgentType>,
 	/// Only list what would change (this is the default when --remove is
 	/// given).

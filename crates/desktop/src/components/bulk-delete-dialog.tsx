@@ -93,7 +93,23 @@ export function BulkDeleteDialog({
 									false,
 									agents,
 								)
-								.then(() => undefined),
+								.then((result) => {
+									// HTTP 200 is not "deleted": `kept` removed
+									// nothing and `partial` left paths behind.
+									// See docs/history/desktop-frontend.md#bulk-delete-counted-kept-as-deleted
+									if (
+										result.outcome === "kept" ||
+										result.outcome === "partial"
+									) {
+										throw new Error(
+											t(
+												result.outcome === "kept"
+													? "bulkDeleteKept"
+													: "bulkDeletePartial",
+											),
+										);
+									}
+								}),
 						);
 					}
 					deleteInfo.push({
@@ -117,7 +133,11 @@ export function BulkDeleteDialog({
 					failures,
 				);
 				throw new BulkOperationError(
-					failures.map(({ name, agent }) => ({ name, agent })),
+					failures.map(({ name, agent, reason }) => ({
+						name,
+						agent,
+						error: reason instanceof Error ? reason.message : null,
+					})),
 				);
 			}
 			return { deleted: promises.length };

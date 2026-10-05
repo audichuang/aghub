@@ -230,7 +230,10 @@ branch.
   can be removed while another copy survives, listed in `skipped`.
 - Read `outcome` (`preview` | `removed` | `absent` | `partial` | `kept`), never
   `dry_run` / `executed` — and for `preview` and `kept`, exit zero is not
-  completion.
+  completion. A `-a` list's text tally counts `kept` rows apart
+  (`N ok, M kept (nothing removed), K failed`). A Master listed under
+  `kept (shared with other agents)` is still read by another agent: never `rm`
+  it; name every holder in one `-a` list or use `--all-agents`.
 - `check` is offline unless `--online`, and its scope spans global + project
   unless narrowed (as do `doctor`, `source list` and `source diff`). Most
   mutating commands default to global, but `source sync` is not one of them —

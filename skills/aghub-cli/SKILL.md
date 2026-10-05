@@ -435,7 +435,7 @@ are unmanaged and `aghub-cli agents enable <id>` to turn one back on (note that
 `-a all` and `source sync -a all` skip unmanaged agents), or unlink exactly the
 entries the message lists, then retry — do not widen the roster to `-a all`.
 To remove the skill everywhere in one step, name the disabled holders too
-(`reconcile --remove <each holder>`, or the desktop's delete dialog with "also
+(`reconcile --remove <each holder>` — repeat the flag or pass a comma list, or the desktop's delete dialog with "also
 remove these agents' links" ticked): naming a disabled agent is the consent.
 
 If a single-agent delete refuses with "Also read there by agents not in this

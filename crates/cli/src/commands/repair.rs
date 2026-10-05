@@ -111,7 +111,10 @@ fn render(reports: &[RepairReport], dry_run: bool) {
 		if let Some(q) = &r.quarantined {
 			println!("            kept:  {}", q.display());
 		}
-		if !r.fused.is_empty() {
+		// A refusal changed nothing, so "still shared" describes no outcome and
+		// read as if those agents were involved in the refused row.
+		let refused = matches!(r.outcome, RepairOutcome::Refused { .. });
+		if !r.fused.is_empty() && !refused {
 			// Say it plainly: these agents did NOT become individually
 			// revocable, which is the thing the migration is sold on.
 			println!(

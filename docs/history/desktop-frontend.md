@@ -174,3 +174,16 @@ headless against a real api:
 
 Test: `lib/skill-reconcile-errors.test.ts` (`isWholeBatchRefusal`); the dialog
 wiring is verified headless only (no component test harness).
+
+## Bulk delete counted kept as deleted
+
+`BulkDeleteDialog` sent one by-name delete per agent and dropped each response
+body (`.then(() => undefined)`), so a `kept` row (nothing removed: another agent
+still reads it) or a `partial` row resolved like a delete: the dialog closed and
+cleared the selection while the skill was still on disk, and a rejection's
+reason went only to `console.error`. It now reads `outcome` the way
+`DeleteSkillLocationDialog` already did, turns `kept` / `partial` into a failure
+with localized text (`bulkDeleteKept` / `bulkDeletePartial`, never the English
+`result.error`), and carries each failure's reason into the toast
+(`BulkFailedItem.error`). Verified by typecheck and the `bulk-errors` label
+tests only; the dialog wiring has no component test.

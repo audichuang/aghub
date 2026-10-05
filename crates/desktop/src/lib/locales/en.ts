@@ -623,6 +623,8 @@ export default {
 	bulkDeleteMixedConfirm:
 		"Are you sure you want to delete the {{count}} selected resources from this project?",
 	bulkDeleteFailed: "Bulk delete failed",
+	bulkDeleteKept: "kept: another agent still reads it",
+	bulkDeletePartial: "only partly removed",
 	bulkDeleteFailedItems: "{{count}} item(s) failed to delete: {{items}}",
 	favoriteSaveError: "Failed to update your favourites",
 	starSkill: "Favorite",

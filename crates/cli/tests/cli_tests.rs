@@ -16334,3 +16334,119 @@ fn get_sub_agents_agent_all_tags_agent() {
 		"expected row with agent==claude and name==rev in {json}"
 	);
 }
+
+/// A `kept` delete row removed nothing, so the batch tally must not count it
+/// as "ok" — "2 ok, 0 failed" read as done with the disk untouched.
+#[cfg(unix)]
+#[test]
+fn batch_delete_tally_counts_kept_rows_apart() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let name = "x";
+	let skill_dir = home.path().join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+	let claude_skills = home.path().join(".claude/skills");
+	std::fs::create_dir_all(&claude_skills).unwrap();
+	std::os::unix::fs::symlink(&skill_dir, claude_skills.join(name)).unwrap();
+	let data = state.path().join("data");
+	std::fs::create_dir_all(&data).unwrap();
+	let disabled: std::collections::BTreeSet<String> =
+		aghub_core::AgentType::ALL
+			.iter()
+			.copied()
+			.filter(|&a| {
+				a != aghub_core::AgentType::Claude
+					&& a != aghub_core::AgentType::Cursor
+					&& a != aghub_core::AgentType::OpenCode
+			})
+			.map(|a| aghub_core::registry::get(a).id.to_string())
+			.collect();
+	aghub_core::agent_settings::write_disabled_agents_in(&data, &disabled)
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cursor,opencode", "delete", "skills", name])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		text.contains("0 ok, 2 kept (nothing removed), 0 failed"),
+		"tally must count kept rows apart: {text}"
+	);
+}
+
+/// A Master kept for other holders must never come with "delete it by hand":
+/// another agent still links to it, so a manual rm cuts that agent off.
+#[cfg(unix)]
+#[test]
+fn delete_kept_master_note_never_says_delete_by_hand() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let name = "demo";
+	let master = home.path().join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+	for dir in [".claude/skills", ".cursor/skills"] {
+		let slot = home.path().join(dir);
+		std::fs::create_dir_all(&slot).unwrap();
+		std::os::unix::fs::symlink(&master, slot.join(name)).unwrap();
+	}
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "delete", "skills", name])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&out.stdout);
+	assert!(text.contains("kept (shared with other agents)"), "{text}");
+	assert!(!text.contains("so delete it by hand"), "{text}");
+	assert!(text.contains("Do not delete it by hand"), "{text}");
+}
+
+/// `--add` / `--remove` take a comma list like `-a`; it used to fail with
+/// "Unknown agent type: opencode,cursor" (exit 2).
+#[test]
+fn reconcile_add_accepts_a_comma_list() {
+	let project = transfer_project("repo-helper");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--add",
+			"opencode,cursor",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let agents: Vec<&str> = json["results"]
+		.as_array()
+		.expect("reconcile --json has results")
+		.iter()
+		.filter_map(|r| r["agent"].as_str())
+		.collect();
+	assert!(
+		agents.contains(&"opencode") && agents.contains(&"cursor"),
+		"both listed agents must get a row: {agents:?}"
+	);
+}

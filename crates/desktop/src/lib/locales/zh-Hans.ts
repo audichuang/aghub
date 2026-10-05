@@ -584,6 +584,8 @@ const zhHans: typeof en = {
 	bulkDeleteMixedConfirm:
 		"确定要从当前项目中删除这 {{count}} 个被选中的资源吗？",
 	bulkDeleteFailed: "批量删除失败",
+	bulkDeleteKept: "已保留：其他代理仍在读取",
+	bulkDeletePartial: "只删除了一部分",
 	bulkDeleteFailedItems: "{{count}} 项删除失败: {{items}}",
 	favoriteSaveError: "无法更新你的收藏",
 	starSkill: "收藏技能",

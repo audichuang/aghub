@@ -305,9 +305,10 @@ enum Commands {
 	/// outside the request still points at it, or git tracks the real directory in the shared slot
 	/// (untrack it first with `git rm -r --cached <path>`; `--all-agents`
 	/// refuses it too, and so does a directory git cannot be asked about). An `--all-agents`
-	/// sweep that could not clear everything holding the skill also reports
-	/// `kept` (`success: true` AND THE SKILL IS STILL THERE); the payload's
-	/// `skipped` names what stayed.
+	/// sweep that could not clear everything holding the skill previews
+	/// `kept` (`success: true` AND THE SKILL IS STILL THERE; `skipped` names
+	/// what stays) and its `--yes` refuses with exit 1 — e.g. while a disabled
+	/// agent's link still holds the Master (name that agent in `-a` to consent).
 	Delete {
 		#[arg(value_enum)]
 		resource: ResourceType,
@@ -1246,10 +1247,14 @@ fn render_removal(
 			out.push_str(&format!("  {p}\n"));
 		}
 		out.push_str(
-			// No directory named: the path is printed just above.
-			"note: the Master listed above is NOT removed. `source sync` \
-			 refuses to overwrite an existing Master, so delete it by hand \
-			 before reinstalling this skill from git.\n",
+			// Never "delete it by hand": these are kept BECAUSE another agent
+			// still reads them, so a manual rm cuts that agent off.
+			"note: the Master listed above is NOT removed: another agent still \
+			 reads it. It goes with its last holder — name every holder in one \
+			 -a list, or use --all-agents (also the way to reinstall a fresh \
+			 copy, since `source sync` will not overwrite an existing Master). \
+			 Do not delete it by hand; `doctor --verify-links` names who still \
+			 holds the skill.\n",
 		);
 	}
 	if let Some(err) = payload.get("prune_error").and_then(|v| v.as_str()) {
@@ -2160,10 +2165,32 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 						);
 					}
 				}
-				println!(
-					"{} ok, {} failed",
-					view.success_count, view.failed_count
-				);
+				// A `kept` delete row is a success that removed nothing; counting
+				// it as "ok" read as done when the disk was untouched.
+				let kept =
+					view.results
+						.iter()
+						.filter(|row| {
+							row.ok
+								&& row
+									.output
+									.as_ref()
+									.and_then(|o| o.get("outcome"))
+									.and_then(|o| o.as_str()) == Some("kept")
+						})
+						.count();
+				if kept > 0 {
+					println!(
+						"{} ok, {kept} kept (nothing removed), {} failed",
+						view.success_count - kept,
+						view.failed_count
+					);
+				} else {
+					println!(
+						"{} ok, {} failed",
+						view.success_count, view.failed_count
+					);
+				}
 			}
 			if view.failed_count > 0 {
 				// The envelope above already carries every per-agent verdict.
