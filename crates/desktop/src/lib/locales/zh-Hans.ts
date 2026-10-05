@@ -34,6 +34,7 @@ const zhHans: typeof en = {
 	deleteSubAgentConfirm: '确定要删除"{{name}}"吗？此操作无法撤销。',
 	updateSubAgentError: "更新子代理失败",
 	deleteSubAgentError: "删除子代理失败",
+	failedToDeleteSkill: "删除技能失败",
 	subAgentNamePlaceholder: "例如：code-reviewer",
 	subAgentDescriptionPlaceholder: "这个子代理的作用是什么？",
 	subAgentInstructionPlaceholder: "子代理的系统提示词/指令...",

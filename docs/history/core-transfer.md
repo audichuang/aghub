@@ -265,6 +265,17 @@ holds the skill, it refuses with `InvalidConfig` listing the agents that still
 hold it, while keeping everything untouched. If no agent holds the skill at all,
 `ResourceNotFound` is returned as before.
 
+When only disabled agents still hold it, the refusal used to say "only disabled
+agents still hold it … Refresh the list, or use one of them as the source"
+without naming them — but the desktop list hides disabled agents, so neither
+step was possible. It now names them as holders (never as readers; `keepers`
+still leaves them out) and says what works: include them in the removal, or use
+one as the source. Pinned by
+`reconcile_skill_refusal_when_only_disabled_agents_hold_it`; the no-holder
+removal case by `reconcile_skill_removal_naming_no_holder_refuses_and_names_holders`,
+and Master retention through the fallback by
+`reconcile_skill_fallback_keeps_master_while_an_unremoved_holder_remains`.
+
 The effective source for protected target checks and deletion attribution
 remains the caller's original `source`: fallback only substitutes `plan.skill`
 and `plan.source_root`.

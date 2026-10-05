@@ -1994,21 +1994,26 @@ fn load_reconcile_skill(
 				InstallScope::Global => "global",
 				InstallScope::Project => "project",
 			};
-			let managed_holders: Vec<&'static str> = holders
+			let (managed_holders, disabled_holders): (Vec<_>, Vec<_>) = holders
 				.iter()
-				.filter(|h| crate::agent_settings::is_managed(h.as_str()))
 				.map(|h| h.as_str())
-				.collect();
-			let holders_clause = if managed_holders.is_empty() {
-				"only disabled agents still hold it".to_string()
+				.partition(|h| crate::agent_settings::is_managed(h));
+			// Named as holders, never as readers (see `keepers`): the user
+			// needs the ids to act, and "refresh the list" cannot surface a
+			// disabled agent.
+			let hint = if managed_holders.is_empty() {
+				format!(
+					"Only agents disabled in aghub's settings still hold it: '{}'. To delete it, include them in the removal; to add it elsewhere, use one of them as the source.",
+					disabled_holders.join("', '")
+				)
 			} else {
 				format!(
-					"Agents that still hold it: '{}'",
+					"Agents that still hold it: '{}'. Refresh the list, or use one of them as the source.",
 					managed_holders.join("', '")
 				)
 			};
 			Err(ConfigError::InvalidConfig(format!(
-				"skill '{}' is no longer installed for source agent '{}' ({scope_str}); nothing was changed. {holders_clause}. Refresh the list, or use one of them as the source.",
+				"skill '{}' is no longer installed for source agent '{}' ({scope_str}); nothing was changed. {hint}",
 				source.name,
 				source.agent.as_str(),
 			)))
@@ -6278,5 +6283,147 @@ mod tests {
 
 		assert!(codex_dir.join("gone-src").symlink_metadata().is_err());
 		assert!(cursor_dir.join("gone-src").symlink_metadata().is_err());
+	}
+
+	/// A gone source with `holders` linked to the project Master. Returns
+	/// `(root, master, slots)`; `slots[i]` holds `holders[i]`'s link.
+	#[cfg(unix)]
+	fn gone_source_fixture(
+		temp: &Path,
+		holders: &[AgentType],
+	) -> (PathBuf, PathBuf, Vec<PathBuf>) {
+		let root = temp.join("project");
+		let master = root.join(".aghub/gone-src");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: gone-src\ndescription: Test\n---\n\n# Gone Src\n",
+		)
+		.unwrap();
+		let slots = holders
+			.iter()
+			.map(|&agent| {
+				let dir = private_slot_for(agent, &root);
+				fs::create_dir_all(&dir).unwrap();
+				std::os::unix::fs::symlink(&master, dir.join("gone-src"))
+					.unwrap();
+				dir.join("gone-src")
+			})
+			.collect();
+		(root, master, slots)
+	}
+
+	#[cfg(unix)]
+	fn gone_claude_source(root: &Path) -> ResourceLocator {
+		ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "gone-src".to_string(),
+		}
+	}
+
+	// Removal-only, but nothing in `removed` holds it: there is no copy to
+	// fall back to, so refuse and name who does hold it.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_removal_naming_no_holder_refuses_and_names_holders() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let (root, master, slots) =
+			gone_source_fixture(temp.path(), &[AgentType::Codex]);
+
+		let err = reconcile_skill(
+			gone_claude_source(&root),
+			vec![],
+			vec![AgentType::Cursor],
+			true,
+		)
+		.unwrap_err();
+
+		assert!(
+			matches!(err, ConfigError::InvalidConfig(_)),
+			"must refuse as InvalidConfig, not 404: {err:?}"
+		);
+		let msg = err.to_string();
+		assert!(msg.contains("nothing was changed"), "{msg}");
+		assert!(msg.contains("Agents that still hold it: 'codex'"), "{msg}");
+		assert!(slots[0].symlink_metadata().is_ok());
+		assert!(master.exists());
+	}
+
+	// A disabled holder is hidden from the desktop list, so "refresh the
+	// list" cannot help; the hint must name it and say what does.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_refusal_when_only_disabled_agents_hold_it() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let _off = crate::agent_settings::test_override::disable(&["codex"]);
+		let temp = tempdir().unwrap();
+		let (root, master, slots) =
+			gone_source_fixture(temp.path(), &[AgentType::Codex]);
+		let cursor_link =
+			private_slot_for(AgentType::Cursor, &root).join("gone-src");
+
+		let msg = reconcile_skill(
+			gone_claude_source(&root),
+			vec![AgentType::Cursor],
+			vec![],
+			true,
+		)
+		.unwrap_err()
+		.to_string();
+
+		assert!(
+			msg.contains(
+				"Only agents disabled in aghub's settings still hold it: 'codex'"
+			),
+			"{msg}"
+		);
+		assert!(msg.contains("include them in the removal"), "{msg}");
+		assert!(!msg.contains("Refresh the list"), "{msg}");
+		assert!(cursor_link.symlink_metadata().is_err());
+		assert!(slots[0].symlink_metadata().is_ok());
+		assert!(master.exists());
+	}
+
+	// The fallback swaps only the content source: a holder left out of
+	// `removed` still keeps the Master, enabled or disabled.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_fallback_keeps_master_while_an_unremoved_holder_remains()
+	{
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		for disabled in [&[][..], &["cursor"][..]] {
+			let _off = crate::agent_settings::test_override::disable(disabled);
+			let temp = tempdir().unwrap();
+			let (root, master, slots) = gone_source_fixture(
+				temp.path(),
+				&[AgentType::Codex, AgentType::Cursor],
+			);
+
+			let batch = reconcile_skill(
+				gone_claude_source(&root),
+				vec![],
+				vec![AgentType::Codex],
+				true,
+			)
+			.unwrap();
+
+			assert!(
+				batch.results.len() == 1 && batch.results[0].success,
+				"disabled={disabled:?}: {:?}",
+				batch.results
+			);
+			assert!(slots[0].symlink_metadata().is_err(), "codex unlinked");
+			assert!(
+				slots[1].symlink_metadata().is_ok(),
+				"disabled={disabled:?}: cursor's link must survive"
+			);
+			assert!(
+				master.join("SKILL.md").exists(),
+				"disabled={disabled:?}: cursor still holds the Master"
+			);
+		}
 	}
 }

@@ -32,6 +32,7 @@ export default {
 	deleteSubAgentConfirm: 'Delete "{{name}}"? This can\'t be undone.',
 	updateSubAgentError: "Failed to update sub-agent",
 	deleteSubAgentError: "Failed to delete sub-agent",
+	failedToDeleteSkill: "Failed to delete skill",
 	subAgentNamePlaceholder: "e.g. code-reviewer",
 	subAgentDescriptionPlaceholder: "What does this sub-agent do?",
 	subAgentInstructionPlaceholder:

@@ -102,7 +102,7 @@ export function DeleteSkillLocationDialog({
 			if (result.outcome !== "removed" && result.outcome !== "absent") {
 				// `absent` is a success for a delete: the post-condition
 				// ("the skill is gone") already holds.
-				throw new Error(result.error || "Failed to delete skill");
+				throw new Error(result.error || t("failedToDeleteSkill"));
 			}
 		},
 		onSuccess: async () => {

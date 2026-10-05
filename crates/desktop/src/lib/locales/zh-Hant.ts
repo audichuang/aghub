@@ -34,6 +34,7 @@ const zhHant: typeof en = {
 	deleteSubAgentConfirm: "確定要刪除「{{name}}」嗎？此操作無法復原。",
 	updateSubAgentError: "更新子代理失敗",
 	deleteSubAgentError: "刪除子代理失敗",
+	failedToDeleteSkill: "刪除技能失敗",
 	subAgentNamePlaceholder: "例如：code-reviewer",
 	subAgentDescriptionPlaceholder: "這個子代理的作用是什麼？",
 	subAgentInstructionPlaceholder: "子代理的系統提示詞/指令...",
