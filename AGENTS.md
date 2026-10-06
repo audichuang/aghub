@@ -372,8 +372,9 @@ Walk up for agent markers (`.claude/`, `.opencode/`, `.cursor/`, `.mcp.json`,
 
 ## Agent workflows
 
-- **Issues**: local markdown at `.scratch/<feature>/issues/<NN>-<slug>.md` (spec
-  at `.scratch/<feature>/spec.md`), triage in a `Status:` line —
-  `docs/agents/issue-tracker.md`
+- **Issues**: GitHub Issues on the fork — ALWAYS `gh … -R audichuang/aghub`
+  (a bare `gh` can resolve to upstream `origin`) — `docs/agents/issue-tracker.md`;
+  triage labels in `docs/agents/triage-labels.md`. Pre-switch specs stay under
+  `.scratch/<feature>/`
 - **Domain docs**: single-context, one root `CONTEXT.md` + `docs/adr/` —
   `docs/agents/domain.md`
