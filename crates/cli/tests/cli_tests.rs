@@ -16450,3 +16450,107 @@ fn reconcile_add_accepts_a_comma_list() {
 		"both listed agents must get a row: {agents:?}"
 	);
 }
+
+/// `doctor` must not misreport skills with unsanitized frontmatter names (e.g. `PDF Tools`).
+///
+/// Lock key is the raw frontmatter name (`PDF Tools`), but the Master folder and Referrer links
+/// are `sanitize_name(name)` (`pdf-tools`). Doctor must report `health: ok`, `master: dir`,
+/// and with `--verify-links` report `linked` (not `orphan-lock`, `invalid-skill`, or `missing`).
+/// For untracked skills with unsanitized names, it must report `health: untracked` under its
+/// frontmatter name, not `invalid-skill`.
+#[cfg(unix)]
+#[test]
+fn doctor_reports_unsanitized_name_skill_as_healthy_and_linked() {
+	use std::os::unix::fs::symlink;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// 1. A tracked skill whose frontmatter name is not sanitized ("PDF Tools").
+	// Installed master is in `.aghub/pdf-tools` (sanitized folder name).
+	let master = home.path().join(".aghub/pdf-tools");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: PDF Tools\ndescription: PDF manipulation\n---\n",
+	)
+	.unwrap();
+
+	// Referrer in claude's skills dir is also named `pdf-tools`.
+	let claude_skills = home.path().join(".claude/skills");
+	std::fs::create_dir_all(&claude_skills).unwrap();
+	symlink(&master, claude_skills.join("pdf-tools")).unwrap();
+
+	// Lock file records the skill under its frontmatter name "PDF Tools".
+	let lock_dir = state.path().join("skills");
+	std::fs::create_dir_all(&lock_dir).unwrap();
+	std::fs::write(
+		lock_dir.join(".skill-lock.json"),
+		r#"{"version":3,"skills":{"PDF Tools":{"source":"owner/pdf-tools","sourceType":"github","sourceUrl":"https://github.com/owner/pdf-tools","skillPath":"SKILL.md","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}"#,
+	)
+	.unwrap();
+
+	// 2. An untracked skill whose frontmatter name is not sanitized ("Untracked Tools").
+	let untracked_master = home.path().join(".aghub/untracked-tools");
+	std::fs::create_dir_all(&untracked_master).unwrap();
+	std::fs::write(
+		untracked_master.join("SKILL.md"),
+		"---\nname: Untracked Tools\ndescription: Extra utilities\n---\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "doctor", "--verify-links", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let rows: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = rows.as_array().expect("rows is array");
+	assert_eq!(
+		arr.len(),
+		2,
+		"expected exactly 2 skills reported, got: {arr:?}"
+	);
+
+	// Tracked skill: "PDF Tools"
+	let pdf_row = arr
+		.iter()
+		.find(|r| r["skill"] == "PDF Tools")
+		.expect("PDF Tools must be reported by its frontmatter name");
+	assert_eq!(
+		pdf_row["health"], "ok",
+		"tracked skill must be healthy, not orphan-lock or invalid-skill"
+	);
+	assert_eq!(pdf_row["master"], "dir");
+	assert_eq!(pdf_row["linkAudit"]["state"], "verified");
+	let claude_audit = &pdf_row["linkAudit"]["agents"][0];
+	assert_eq!(claude_audit["agent"], "claude");
+	assert_eq!(
+		claude_audit["state"], "linked",
+		"referrer must be linked, not missing"
+	);
+	assert!(
+		claude_audit["path"]
+			.as_str()
+			.unwrap()
+			.ends_with("pdf-tools"),
+		"referrer path must point to sanitized slot: {:?}",
+		claude_audit["path"]
+	);
+
+	// Untracked skill: "Untracked Tools"
+	let untracked_row = arr
+		.iter()
+		.find(|r| r["skill"] == "Untracked Tools")
+		.expect("Untracked Tools must be reported by its frontmatter name");
+	assert_eq!(
+		untracked_row["health"], "untracked",
+		"untracked skill must be untracked, not invalid-skill"
+	);
+	assert_eq!(untracked_row["master"], "dir");
+}

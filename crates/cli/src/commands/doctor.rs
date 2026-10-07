@@ -16,6 +16,7 @@ use aghub_core::{
 			classify::{agent_link_need, LinkNeed},
 			is_store_bookkeeping, master_store_dir, Linker,
 		},
+		load_master_skills,
 		shape::{classify_shape, SkillShape, ViolationKind},
 	},
 };
@@ -260,6 +261,20 @@ struct LockedSkill {
 	skill_path: Option<String>,
 }
 
+/// Resolve an entry path under `dir` preferring the sanitized name, falling
+/// back to the raw name if present, and defaulting to the sanitized path.
+fn resolve_entry(dir: &Path, name: &str) -> PathBuf {
+	let safe = dir.join(skill::sanitize_name(name));
+	if std::fs::symlink_metadata(&safe).is_ok() {
+		return safe;
+	}
+	let raw = dir.join(name);
+	if std::fs::symlink_metadata(&raw).is_ok() {
+		return raw;
+	}
+	safe
+}
+
 /// Inspect one NeedsLink agent slot without mutating it or following a foreign
 /// occupant. The master argument is the canonical skill directory, not the
 /// universal-master parent.
@@ -271,7 +286,7 @@ fn inspect_agent_link(
 	agent_skills_dir: &Path,
 	skill_name: &str,
 ) -> AgentLinkState {
-	let slot = agent_skills_dir.join(skill_name);
+	let slot = resolve_entry(agent_skills_dir, skill_name);
 	// The one question core does not answer: `classify_shape` folds an
 	// unreadable slot into "absent", and a permission-denied dir must not be
 	// reported as a missing link.
@@ -373,7 +388,7 @@ fn audit_agent_links(
 	agents: &[AgentType],
 	tracked: bool,
 ) -> LinkAudit {
-	let master_skill = master.join(skill_name);
+	let master_skill = resolve_entry(master, skill_name);
 	let agents = agents
 		.iter()
 		.map(|agent| {
@@ -423,15 +438,9 @@ fn audit_agent_links(
 							AgentLinkState::OrphanMaster
 						};
 					}
-					(
-						state,
-						Some(
-							agent_skills_dir
-								.join(skill_name)
-								.to_string_lossy()
-								.into_owned(),
-						),
-					)
+					let reported_slot =
+						resolve_entry(&agent_skills_dir, skill_name);
+					(state, Some(reported_slot.to_string_lossy().into_owned()))
 				}
 			};
 			AgentLinkAudit {
@@ -525,11 +534,26 @@ fn build_rows(
 	locked: &BTreeMap<String, LockedSkill>,
 ) -> Vec<DoctorRow> {
 	let mut rows = Vec::new();
+	let mut seen_master_dirs = std::collections::BTreeSet::new();
+
 	for (name, locked_skill) in locked {
-		let state = master_state(&master.join(name));
+		let master_skill = resolve_entry(master, name);
+		let state = master_state(&master_skill);
+		if state != MasterState::Missing {
+			if let Some(dir) = master_skill.file_name().and_then(|n| n.to_str())
+			{
+				seen_master_dirs.insert(dir.to_string());
+			}
+			seen_master_dirs.insert(skill::sanitize_name(name));
+		}
 		let valid_skill = matches!(state, MasterState::Dir)
-			&& skill::parser::parse(&master.join(name).join("SKILL.md"))
-				.is_ok_and(|parsed| parsed.name == *name);
+			&& skill::parser::parse(&master_skill.join("SKILL.md")).is_ok_and(
+				|parsed| {
+					parsed.name == *name
+						|| skill::sanitize_name(&parsed.name)
+							== skill::sanitize_name(name)
+				},
+			);
 		let (label, fetchable) =
 			source_display(&locked_skill.source, &locked_skill.source_type);
 		let updatable =
@@ -545,16 +569,52 @@ fn build_rows(
 			link_audit: LinkAudit::NotRequested,
 		});
 	}
-	for name in master_skills_on_disk(master) {
-		if !locked.contains_key(&name) {
-			let state = master_state(&master.join(&name));
-			let valid_skill = matches!(state, MasterState::Dir)
-				&& skill::parser::parse(&master.join(&name).join("SKILL.md"))
-					.is_ok_and(|parsed| parsed.name == name);
+
+	if let Ok(master_skills) = load_master_skills(master) {
+		for skill in master_skills {
+			let master_skill = resolve_entry(master, &skill.name);
+			if let Some(dir) = master_skill.file_name().and_then(|n| n.to_str())
+			{
+				seen_master_dirs.insert(dir.to_string());
+			}
+			if let Some(dir) = skill
+				.source_path
+				.as_deref()
+				.and_then(|s| Path::new(s).parent()?.file_name()?.to_str())
+			{
+				seen_master_dirs.insert(dir.to_string());
+			}
+			seen_master_dirs.insert(skill::sanitize_name(&skill.name));
+
+			let is_locked = locked.contains_key(&skill.name)
+				|| locked.keys().any(|k| {
+					skill::sanitize_name(k) == skill::sanitize_name(&skill.name)
+				});
+			if !is_locked {
+				let state = master_state(&master_skill);
+				let health = health_of(false, &state, true);
+				rows.push(DoctorRow {
+					scope,
+					skill: skill.name,
+					source: "—".to_string(),
+					updatable: false,
+					master: state,
+					health,
+					link_audit: LinkAudit::NotRequested,
+				});
+			}
+		}
+	}
+
+	for dir_name in master_skills_on_disk(master) {
+		if !seen_master_dirs.contains(&dir_name) {
+			let path = master.join(&dir_name);
+			let state = master_state(&path);
+			let valid_skill = false;
 			let health = health_of(false, &state, valid_skill);
 			rows.push(DoctorRow {
 				scope,
-				skill: name,
+				skill: dir_name,
 				source: "—".to_string(),
 				updatable: false,
 				master: state,
@@ -563,6 +623,7 @@ fn build_rows(
 			});
 		}
 	}
+
 	rows.sort_by(|a, b| a.skill.cmp(&b.skill));
 	rows
 }
@@ -1339,6 +1400,72 @@ mod tests {
 		assert_eq!(
 			doctor, registry,
 			"doctor's -a all roster must match registry order exactly"
+		);
+	}
+
+	#[test]
+	fn build_rows_handles_unsanitized_skill_name_in_lock() {
+		let tmp = tempfile::tempdir().unwrap();
+		let master = tmp.path();
+		let skill_dir = master.join("pdf-tools");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: PDF Tools\ndescription: valid\n---\n",
+		)
+		.unwrap();
+
+		let locked = BTreeMap::from([(
+			"PDF Tools".to_string(),
+			LockedSkill {
+				source: "owner/repo".to_string(),
+				source_type: "github".to_string(),
+				skill_path: Some("pdf-tools/SKILL.md".to_string()),
+			},
+		)]);
+		let rows = build_rows("global", master, &locked);
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].skill, "PDF Tools");
+		assert_eq!(rows[0].health, "ok");
+		assert_eq!(rows[0].master, MasterState::Dir);
+		assert!(rows[0].updatable);
+	}
+
+	#[test]
+	fn build_rows_marks_untracked_unsanitized_skill_name() {
+		let tmp = tempfile::tempdir().unwrap();
+		let master = tmp.path();
+		let skill_dir = master.join("pdf-tools");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: PDF Tools\ndescription: valid\n---\n",
+		)
+		.unwrap();
+
+		let rows = build_rows("global", master, &BTreeMap::new());
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].skill, "PDF Tools");
+		assert_eq!(rows[0].health, "untracked");
+		assert_eq!(rows[0].master, MasterState::Dir);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn inspect_agent_link_resolves_unsanitized_skill_name() {
+		use std::os::unix::fs::symlink;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let master = tmp.path().join("master/pdf-tools");
+		write_skill(&master, "PDF Tools");
+
+		let agent_dir = tmp.path().join("agent-skills");
+		std::fs::create_dir_all(&agent_dir).unwrap();
+		symlink(&master, agent_dir.join("pdf-tools")).unwrap();
+
+		assert_eq!(
+			inspect_agent_link(&master, &agent_dir, "PDF Tools"),
+			AgentLinkState::Linked
 		);
 	}
 }
