@@ -5,7 +5,6 @@ import {
 } from "@tanstack/react-query";
 import type {
 	CreateSkillRequest,
-	DeleteSkillByPathRequest,
 	ApplySkillUpdateRequest,
 	ApplySkillUpdateResponse,
 	ApplySkillUpdatesRequest,
@@ -342,48 +341,6 @@ export function installSkillMutationOptions({
 	});
 }
 
-interface DeleteSkillByPathMutationParams {
-	api: ApiClient;
-	queryClient: QueryClient;
-	onSuccess?: () => void | Promise<void>;
-}
-
-export function deleteSkillByPathMutationOptions({
-	api,
-	queryClient,
-	onSuccess,
-}: DeleteSkillByPathMutationParams) {
-	return mutationOptions({
-		mutationFn: async (body: DeleteSkillByPathRequest) => {
-			const result = await api.skills.deleteByPath(body);
-
-			// Same rule as `skill-detail-dialogs.tsx`: read `outcome`, not
-			// `success`. `kept` means the shared `.agents/skills` master is
-			// still read by another agent and NOTHING was removed — `success`
-			// is true there, which is what made the delete dialog close on a
-			// skill that is still installed.
-			//
-			// No i18n here: this factory has no translation context, and it
-			// currently has no call sites. A caller that adopts it should
-			// surface `outcome === "kept"` with its own localized message,
-			// the way `skill-detail-dialogs.tsx` does.
-			if (result.outcome === "kept") {
-				throw new Error(
-					"The skill was not removed: another agent still reads the shared .aghub master.",
-				);
-			}
-			if (result.outcome !== "removed" && result.outcome !== "absent") {
-				throw new Error(result.error || "Failed to delete skill");
-			}
-
-			return result;
-		},
-		onSuccess: async () => {
-			await invalidateSkillQueries(queryClient);
-			await onSuccess?.();
-		},
-	});
-}
 
 interface ReconcileSkillsMutationParams {
 	api: ApiClient;

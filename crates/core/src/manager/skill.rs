@@ -115,6 +115,8 @@ fn resolve_source_path(sp: &str) -> PathBuf {
 ///
 /// Universal skills leave the Master intact (other agents or `npx skills` may
 /// reference it); removing it goes via [`ConfigManager::remove_skill_planned`].
+// Kept only for its containment tests until the by-path entry (A6) takes over.
+#[cfg_attr(not(test), allow(dead_code))]
 fn remove_skill_path(
 	path: &Path,
 	safe_name: &str,
@@ -585,105 +587,6 @@ impl SkillPatch {
 }
 
 impl ConfigManager {
-	pub fn remove_skill(&mut self, name: &str) -> Result<()> {
-		// Recorded before the re-read: afterwards "another process removed it"
-		// (goal met) and "no such skill" (not-found) look identical.
-		let was_in_callers_view = self
-			.config
-			.as_ref()
-			.is_some_and(|c| c.skills.iter().any(|s| s.name == name));
-
-		// Unlinks a Referrer or deletes a private copy; it may NOT take a shared
-		// Master (`remove_skill_planned` can). Re-reads under the lock because the
-		// PATHS it deletes come from the entry.
-		let _mutation_guard =
-			self.guard_and_reload("remove skill", self.scope)?;
-
-		let target_dir = self.target_skills_dir();
-		let agent_name = self.adapter.name().to_string();
-		// Allow-listed roots for the containment guard, plus the agent dirs the
-		// referrer guard sweeps. Both computed before the mutable borrow below.
-		let scope = self.scope;
-		let project_root = self.project_root.clone();
-		let all_agent_dirs = crate::skills::removal::agent_skill_dirs_in_scope(
-			scope,
-			project_root.as_deref(),
-		);
-		let roots = crate::skills::removal::allowed_skill_roots(
-			&all_agent_dirs,
-			project_root.as_deref(),
-		);
-		let config = self.config.as_ref().ok_or_else(|| {
-			ConfigError::InvalidConfig("No configuration loaded".to_string())
-		})?;
-		let Some(index) = config.skills.iter().position(|s| s.name == name)
-		else {
-			// Absent under the lock; skills live on disk only, so nothing to write.
-			return if was_in_callers_view {
-				Ok(())
-			} else {
-				Err(ConfigError::resource_not_found("skill", name))
-			};
-		};
-		let existing_skill = config.skills[index].clone();
-
-		let config = self.config_mut()?;
-		info!("removing skill '{}' for agent '{}'", name, agent_name);
-		let safe_name = sanitize_name(name);
-		let file_path = if let Some(sp) = &existing_skill.source_path {
-			Some(resolve_source_path(sp))
-		} else {
-			target_dir
-				.as_ref()
-				.map(|dir| dir.join(&safe_name).join("SKILL.md"))
-		};
-		let is_link = existing_skill.canonical_path.is_some();
-
-		if let Some(path) = file_path {
-			if path.exists() {
-				// The plain seam stays strict because it passes no requested
-				// set; the planned seam decides by readers (including a private
-				// dir co-read through a dotfiles symlink), owned links and git
-				// tracking (`single_agent_keep_reason`).
-				// See docs/history/core-manager.md#remove-skill-ate-a-shared-master
-				if !is_link {
-					if let Some(dir) = path.parent() {
-						if crate::skills::removal::single_agent_keep_reason(
-							dir,
-							&all_agent_dirs,
-							name,
-							project_root.as_deref(),
-							scope,
-							&[],
-						)
-						.is_some()
-						{
-							return Err(ConfigError::unsupported_operation(
-								"remove for this agent alone",
-								"shared universal master (or a folder another \
-								 agent's link still points at) — use \
-								 remove_skill_planned",
-								&agent_name,
-							));
-						}
-					}
-				}
-				remove_skill_path(
-					&path,
-					&safe_name,
-					is_link,
-					target_dir.as_deref(),
-					&roots,
-				)?;
-			}
-		}
-
-		config.skills.remove(index);
-		// Not `save_current()` — it only serializes MCPs, so it cannot persist
-		// a skill and rewrites `.mcp.json` as a side effect. See `add_skill`.
-		Ok(())
-	}
-
 	/// Layout-aware skill removal with a default dry-run.
 	///
 	/// Builds a [`RemovalPlan`](crate::skills::removal::RemovalPlan) (symlink

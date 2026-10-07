@@ -1471,16 +1471,15 @@ pub fn plan_dir_release_paths(
 /// 3. Non-empty `requested` and an ENABLED reader outside `requested` still
 ///    reads the dir (private or shared) ->
 ///    [`KeepReason::UniversalMaster`]. Empty `requested` fails closed
-///    ONLY for shared Referrer roots (so the plain `ConfigManager::remove_skill`
-///    seam, which passes no requested set, keeps deleting private copies).
+///    ONLY for shared Referrer roots (so rename's keep checks or callers
+///    passing no requested set keep deleting private copies).
 /// 4. Inside a shared Referrer root and tracked by git -> [`KeepReason::GitTracked`];
 ///    git unable to answer -> [`KeepReason::GitUndecided`] (see [`shared_slot_git_keep`]).
 /// 5. Otherwise `None` (a private copy or untracked shared slot).
 ///
 /// Shared by [`plan_copy_removal`], the symlink-row release in
-/// [`plan_removal_for_agents`], `ConfigManager::remove_skill` (which passes no
-/// `requested` set, so it stays strict) and the API by-path route; never
-/// hand-mirror it.
+/// [`plan_removal_for_agents`], rename preflight, and the API by-path route;
+/// never hand-mirror it.
 /// See docs/history/core-removal.md#disabled-agent-blocked-a-single-agent-delete
 pub fn single_agent_keep_reason(
 	dir: &Path,

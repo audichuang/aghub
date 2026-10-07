@@ -92,7 +92,7 @@ fn save_mcps(
 // another agent's private dir, because doing so makes it discover skills it does
 // not own and plan destructive removals against them.
 // Write dir FIRST in each list (`load_skills_from_dirs` is first-dir-wins and the
-// winner becomes `source_path`, the path `remove_skill` deletes).
+// winner becomes `source_path`, the path `remove_skill_planned` deletes).
 fn global_skills_paths() -> Vec<PathBuf> {
 	let Some(home) = home_dir() else {
 		return Vec::new();

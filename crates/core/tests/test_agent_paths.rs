@@ -470,7 +470,9 @@ fn test_delete_skill_with_slash_removes_sanitized_directory() {
 		"Should discover skill with slash in name"
 	);
 
-	manager.remove_skill("owner/repo").unwrap();
+	manager
+		.remove_skill_planned("owner/repo", false, false, true)
+		.unwrap();
 
 	assert!(
 		!skill_dir.exists(),

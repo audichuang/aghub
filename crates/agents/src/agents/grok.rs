@@ -69,7 +69,7 @@ fn save_mcps(
 // `~/.cursor/skills` is deliberately NOT modelled: decision #11 in
 // `docs/specs/2026-08-30-skills-hub-borrow-path.md` — an agent never reads
 // another agent's private dir. Own dir stays FIRST (first-dir-wins decides
-// `source_path`, i.e. what `remove_skill` deletes).
+// `source_path`, i.e. what `remove_skill_planned` deletes).
 fn global_skills_paths() -> Vec<PathBuf> {
 	let (Some(grok), Some(home)) = (grok_home(), home_dir()) else {
 		return grok_home()

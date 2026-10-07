@@ -108,7 +108,7 @@ chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
   LIVE variant (no `#[deprecated]`) — whether a given agent can write one is
   decided by its `vocab.sse`, and the roundtrip test exercises SSE for every
   agent
-- **Descriptors are macro-built — until they can't be**: path mappings come from `define_mcp_paths!`/`define_skill_paths!` in `macros.rs` — read those before hand-writing a path fn. `define_skill_paths!` expresses exactly ONE dir per scope, so every agent that also reads the shared `.agents/skills` slot, a vendor alias or a legacy dir hand-writes the fns instead. **When you hand-write them the WRITE dir goes FIRST**: `load_skills_from_dirs` is first-dir-wins and the winner becomes `source_path` — the path `remove_skill` deletes and `check` hashes
+- **Descriptors are macro-built — until they can't be**: path mappings come from `define_mcp_paths!`/`define_skill_paths!` in `macros.rs` — read those before hand-writing a path fn. `define_skill_paths!` expresses exactly ONE dir per scope, so every agent that also reads the shared `.agents/skills` slot, a vendor alias or a legacy dir hand-writes the fns instead. **When you hand-write them the WRITE dir goes FIRST**: `load_skills_from_dirs` is first-dir-wins and the winner becomes `source_path` — the path `remove_skill_planned` deletes and `check` hashes
 
 ## ADDING AN AGENT
 

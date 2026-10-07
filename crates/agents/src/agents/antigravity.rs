@@ -186,7 +186,7 @@ mod tests {
 
 	// The write move is only safe because the legacy dirs stay readable, and
 	// only correct because the NEW dir wins a name clash — first-dir-wins is
-	// what decides `source_path`, i.e. the path `remove_skill` deletes and
+	// what decides `source_path`, i.e. the path `remove_skill_planned` deletes and
 	// `check` hashes. Asserting the resolved ORDER, not a count.
 	#[test]
 	fn antigravity_reads_the_legacy_dirs_but_prefers_the_vendor_one() {

@@ -463,12 +463,12 @@ fn test_format_skill_quotes_numeric_values() {
 }
 
 // -----------------------------------------------------------------------
-// remove_skill in universal mode must actually remove
+// remove_skill_planned in universal mode must actually remove
 // -----------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
-fn remove_skill_unlinks_agent_symlink_but_preserves_canonical() {
+fn remove_skill_planned_unlinks_symlink_and_gcs_last_master() {
 	use crate::create_adapter;
 	use crate::models::AgentType;
 
@@ -495,12 +495,13 @@ fn remove_skill_unlinks_agent_symlink_but_preserves_canonical() {
 		.is_symlink());
 
 	// Remove the skill
-	mgr.remove_skill("rm-test").unwrap();
+	mgr.remove_skill_planned("rm-test", false, false, true)
+		.unwrap();
 
 	// Agent symlink should be gone
 	assert!(!link.exists());
-	// Canonical should still be there (single-agent removal keeps it)
-	assert!(canonical.exists());
+	// Canonical should be reclaimed (single-agent removal of the last referrer reclaims the master)
+	assert!(!canonical.exists());
 	// Config entry should be removed
 	assert!(mgr.config.as_ref().unwrap().skills.is_empty());
 }
@@ -524,14 +525,20 @@ fn remove_skill_universal_idempotent_when_symlink_already_gone() {
 	skill.description = Some("test".to_string());
 	mgr.add_skill_universal(skill).unwrap();
 
-	// Manually remove the symlink before calling remove_skill
+	let canonical = root.join(".aghub/rm-idem/SKILL.md");
+	// Manually remove the symlink before calling remove_skill_planned
 	let link = root.join(".claude/skills/rm-idem");
 	assert!(link.exists());
 	std::fs::remove_file(&link).unwrap();
 	assert!(!link.exists());
 
-	// Should not error even though the symlink is already gone
-	mgr.remove_skill("rm-idem").unwrap();
+	let err = mgr
+		.remove_skill_planned("rm-idem", false, false, true)
+		.expect_err(
+			"absent referrer cannot be planned for single-agent removal",
+		);
+	assert!(matches!(err, ConfigError::ResourceNotFound { .. }));
+	assert!(canonical.exists());
 }
 
 #[cfg(unix)]
@@ -552,11 +559,9 @@ fn remove_skill_preserves_canonical_for_multi_agent_ref() {
 	mgr.load().unwrap();
 	let mut skill = Skill::new("multi-ref");
 	skill.description = Some("test".to_string());
-	mgr.add_skill_universal(skill).unwrap();
+	mgr.add_skill_universal(skill.clone()).unwrap();
 
-	// Cursor must NOT see it. Installing for Claude used to hand the skill
-	// to Cursor too, because both read `.agents/skills` and that directory
-	// held the Master. This assertion pinned that leak as a feature.
+	// Cursor must NOT see it before it is granted.
 	let mut mgr2 = ConfigManager::new(
 		create_adapter(AgentType::Cursor),
 		false,
@@ -574,19 +579,30 @@ fn remove_skill_preserves_canonical_for_multi_agent_ref() {
 		"Cursor was never granted multi-ref and must not see it"
 	);
 
+	// Now grant the skill to Cursor as well so both hold a private Referrer symlink
+	mgr2.add_skill_universal(skill).unwrap();
+
 	let canonical = root.join(".aghub/multi-ref/SKILL.md");
+	let claude_link = root.join(".claude/skills/multi-ref");
+	let cursor_link = root.join(".cursor/skills/multi-ref");
 	assert!(canonical.exists());
+	assert!(claude_link.exists());
+	assert!(cursor_link.exists());
 
 	// Remove from Claude only
-	mgr.remove_skill("multi-ref").unwrap();
+	mgr.remove_skill_planned("multi-ref", false, false, true)
+		.unwrap();
 
-	// Claude symlink gone, canonical preserved
-	assert!(!root.join(".claude/skills/multi-ref").exists());
-	assert!(canonical.exists());
+	// Claude symlink gone, Cursor symlink intact, canonical preserved
+	assert!(!claude_link.exists(), "Claude symlink must be removed");
+	assert!(cursor_link.exists(), "Cursor symlink must remain intact");
+	assert!(
+		canonical.exists(),
+		"Master must be preserved while Cursor holds a referrer"
+	);
+	assert!(mgr.config.as_ref().unwrap().skills.is_empty());
 
-	// Cursor still cannot see it — it never could, and the Master surviving
-	// is about the STORE keeping the bytes, not about another agent
-	// silently inheriting them.
+	// Cursor still sees it through its own retained grant
 	let mut mgr3 = ConfigManager::new(
 		create_adapter(AgentType::Cursor),
 		false,
@@ -594,18 +610,17 @@ fn remove_skill_preserves_canonical_for_multi_agent_ref() {
 	);
 	mgr3.load().unwrap();
 	assert!(
-		!mgr3
-			.config
+		mgr3.config
 			.as_ref()
 			.unwrap()
 			.skills
 			.iter()
 			.any(|s| s.name == "multi-ref"),
-		"removing Claude's grant must not hand the skill to Cursor"
+		"Cursor retained its own grant and must still see it"
 	);
 }
 
-// The `remove_skill` seam's own guard: an agent reading a real directory in
+// The planned removal guard: an agent reading a real directory in
 // the shared `.agents/skills` slot (so its discovered entry has
 // `canonical_path = None`) must not `remove_dir_all` content another
 // agent's symlink still resolves to. Before the guard this returned Ok,
@@ -670,7 +685,7 @@ fn remove_skill_refuses_master_another_agent_links_to() {
 	);
 
 	let err = cursor
-		.remove_skill("shared-master")
+		.remove_skill_planned("shared-master", false, false, true)
 		.expect_err("must refuse: other slot readers would lose it");
 	assert!(
 		matches!(err, ConfigError::UnsupportedOperation(_)),
@@ -736,7 +751,7 @@ fn remove_skill_refuses_a_shared_slot_other_agents_read() {
 	);
 	cursor.load().unwrap();
 	let err = cursor
-		.remove_skill("native-shared")
+		.remove_skill_planned("native-shared", false, false, true)
 		.expect_err("a shared universal master is not this seam's to take");
 	assert!(
 		matches!(err, ConfigError::UnsupportedOperation(_)),
@@ -1631,7 +1646,9 @@ fn remove_skill_still_deletes_private_copy() {
 	claude.load().unwrap();
 	assert!(claude.get_skill("private-copy").is_some());
 
-	claude.remove_skill("private-copy").unwrap();
+	claude
+		.remove_skill_planned("private-copy", false, false, true)
+		.unwrap();
 
 	assert!(!copy.exists(), "a private copy must stay deletable");
 }
@@ -4293,8 +4310,15 @@ fn real_dir_empty_request_fails_closed() {
 	cursor.load().unwrap();
 
 	let err = cursor
-		.remove_skill(name)
-		.expect_err("remove_skill with empty requested must fail closed");
+		.remove_skill_planned_for_agents(name, false, false, true, &[])
+		.expect_err(
+			"remove_skill_planned with empty requested must fail closed",
+		);
+
+	assert!(
+		matches!(err, ConfigError::InvalidConfig(_)),
+		"expected InvalidConfig, got {err:?}"
+	);
 
 	assert!(
 		skill_dir.exists(),

@@ -28,7 +28,7 @@ define_mcp_paths! {
 // Skills: own dir plus the universal `.agents/skills` Master, at BOTH scopes —
 // omp walks `[".agent", ".agents"]` from cwd to the repo root and at the user
 // level. Own dir FIRST (first-dir-wins decides `source_path`, i.e. the path
-// `remove_skill` deletes). The singular `.agent/skills` slot and omp's
+// `remove_skill_planned` deletes). The singular `.agent/skills` slot and omp's
 // first-run import of `.claude` / `.cursor` / `.codex` / … are deliberately not
 // modelled — decision #11: never read another agent's private dir.
 fn global_skills_paths() -> Vec<PathBuf> {
