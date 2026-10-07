@@ -1841,6 +1841,7 @@ fn plan_reconcile_skill(
 		source.project_root.clone(),
 	);
 	// Output rows follow request order; the entry sorts only internally.
+	// See docs/history/core-transfer.md#reconcile-delete-rows-preserve-request-order
 
 	let (keepers, unreadable, dry_run_delete_response) = if !deletes.is_empty()
 	{
@@ -1886,6 +1887,39 @@ fn plan_reconcile_skill(
 	})
 }
 
+fn clone_reconcile_error(err: &ConfigError) -> ConfigError {
+	match err {
+		ConfigError::UnsupportedOperation(s) => {
+			ConfigError::UnsupportedOperation(s.clone())
+		}
+		ConfigError::ResourceNotFound {
+			resource_type,
+			name,
+		} => ConfigError::ResourceNotFound {
+			resource_type: resource_type.clone(),
+			name: name.clone(),
+		},
+		ConfigError::InvalidConfig(s) => ConfigError::InvalidConfig(s.clone()),
+		ConfigError::ValidationFailed(s) => {
+			ConfigError::ValidationFailed(s.clone())
+		}
+		ConfigError::ResourceExists {
+			resource_type,
+			name,
+		} => ConfigError::ResourceExists {
+			resource_type: resource_type.clone(),
+			name: name.clone(),
+		},
+		ConfigError::NotFound { path } => {
+			ConfigError::NotFound { path: path.clone() }
+		}
+		ConfigError::Io(e) => {
+			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
+		}
+		ConfigError::Json(e) => ConfigError::InvalidConfig(e.to_string()),
+	}
+}
+
 impl ReconcileSkillPlan {
 	/// The read-only verdict for ONE row, run before any write in the batch and
 	/// reused verbatim by [`reconcile_skill_preview`].
@@ -1917,7 +1951,7 @@ impl ReconcileSkillPlan {
 			// Only unsupported scope and planner errors pre-refuse before write.
 			if !r.is_load_error {
 				if let Some(ref err) = r.typed_error {
-					return Err(err.clone());
+					return Err(clone_reconcile_error(err));
 				}
 				if let Some(ref err_str) = r.error {
 					return Err(ConfigError::InvalidConfig(err_str.clone()));
@@ -2280,13 +2314,13 @@ pub fn reconcile_skill(
 					}
 					let resp = match delete_batch_result.as_ref().unwrap() {
 						Ok(resp) => resp,
-						Err(err) => return Err(err.clone()),
+						Err(err) => return Err(clone_reconcile_error(err)),
 					};
 					if let Some(r) =
 						resp.rows.iter().find(|r| r.agent == row.target.agent)
 					{
 						if let Some(ref err) = r.typed_error {
-							return Err(err.clone());
+							return Err(clone_reconcile_error(err));
 						}
 						if let Some(ref err) = r.error {
 							return Err(ConfigError::InvalidConfig(
@@ -3407,6 +3441,58 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn reconcile_skill_never_holder_with_lock_entry_fails_its_own_row() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		// A PRIVATE copy under claude's own dir: windsurf is a genuine never-holder.
+		let private = root.join(".claude/skills/never");
+		fs::create_dir_all(&private).unwrap();
+		fs::write(
+			private.join("SKILL.md"),
+			"---\nname: never\ndescription: Private\n---\n\n# Never\n",
+		)
+		.unwrap();
+
+		// Seed a valid skills-lock.json entry for "never" in project scope.
+		let lock_path = root.join("skills-lock.json");
+		let lock_content = r#"{"version":1,"skills":{"never":{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}"#;
+		fs::write(&lock_path, lock_content).unwrap();
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "never".to_string(),
+			},
+			vec![],
+			vec![AgentType::Windsurf],
+			true, // confirm
+		)
+		.expect("a never-holder row must not abort the batch");
+
+		assert_eq!(result.results.len(), 1);
+		assert!(
+			!result.results[0].success,
+			"a never-holder removal must not report a deletion even when lock entry exists"
+		);
+		assert!(
+			result.results[0]
+				.error
+				.as_deref()
+				.unwrap_or_default()
+				.contains("not found"),
+			"the row must say the skill was not found, got: {:?}",
+			result.results[0].error
+		);
+		assert!(
+			private.join("SKILL.md").exists(),
+			"claude's own copy must not be touched"
+		);
+	}
+
 	// A delete row whose backing SURVIVED is not a deletion, and it vouches for
 	// nobody. `RemovalOutcome::executed` is true for the whole execute branch
 	// even when every `remove_dir_all` returned `EACCES` — its own doc says so
@@ -3573,6 +3659,64 @@ mod tests {
 		}
 		assert_eq!(fs::read(master.join("SKILL.md")).unwrap(), original);
 		assert!(root.join(".claude/skills/notebooklm/SKILL.md").is_file());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_delete_results_follow_request_order() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		master_with_claude_referrer(root, "notebooklm");
+		let master = root.join(".aghub/notebooklm");
+		for dir in [".opencode", ".cursor", ".pi", ".grok", ".omp"] {
+			let slot = root.join(dir).join("skills");
+			fs::create_dir_all(&slot).unwrap();
+			std::os::unix::fs::symlink(&master, slot.join("notebooklm"))
+				.unwrap();
+		}
+
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "notebooklm".into(),
+		};
+
+		// Request order puts private readers before shared-slot readers.
+		// A shared-first sort would have reordered them (shared-slot readers before private readers).
+		let removed = vec![
+			AgentType::OpenCode,
+			AgentType::Cursor,
+			AgentType::Pi,
+			AgentType::Grok,
+			AgentType::Omp,
+			AgentType::Codex,
+			AgentType::Antigravity,
+			AgentType::Gemini,
+			AgentType::Cline,
+			AgentType::Copilot,
+			AgentType::Kimi,
+			AgentType::Amp,
+			AgentType::Warp,
+			AgentType::ZCode,
+			AgentType::Dsh,
+		];
+		let result =
+			reconcile_skill(source, vec![], removed.clone(), true).unwrap();
+
+		assert_eq!(result.results.len(), 15);
+		let result_order: Vec<AgentType> =
+			result.results.iter().map(|r| r.target.agent).collect();
+		assert_eq!(
+			result_order, removed,
+			"delete result rows must follow request order exactly"
+		);
+		assert!(
+			result.results.iter().all(|r| r.success),
+			"all removals must succeed: {:?}",
+			result.results
+		);
 	}
 
 	#[cfg(unix)]

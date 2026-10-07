@@ -210,6 +210,17 @@ Test: `reconcile_removes_shared_referrers_before_private_fallback_readers`.
 
 Commit: d6151c23.
 
+## Reconcile delete rows preserve request order
+
+`plan_reconcile_skill` used to sort delete rows shared-first, causing output rows
+to diverge from the caller's request order. Delete rows now retain request order
+so per-target attribution directly maps back to caller input. Shared-first
+execution is handled internally by `remove_skill_batch`.
+
+Rule: preserve request order for delete rows in reconcile plans.
+
+Test: `reconcile_skill_delete_results_follow_request_order`.
+
 ## Paired copy undoes the removal
 
 Preflight runs every row before any copy, so it sees a disk where this

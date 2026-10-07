@@ -4,6 +4,7 @@
 //! sibling credit, lock-free preview vs locked commit, Master GC, and lock pruning.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::batch::{Backing, RemovalCredits};
 use crate::errors::{ConfigError, Result};
@@ -43,7 +44,7 @@ pub struct SkillRemovalRow {
 	pub agent: AgentType,
 	pub verdict: Verdict,
 	pub error: Option<String>,
-	pub typed_error: Option<ConfigError>,
+	pub typed_error: Option<Arc<ConfigError>>,
 	pub is_load_error: bool,
 	pub still_read_from: Vec<PathBuf>,
 }
@@ -236,8 +237,9 @@ pub fn remove_skill_batch(
 	};
 	let mut preflight_verdicts: Vec<(AgentType, Verdict, Vec<PathBuf>)> =
 		Vec::new();
-	let mut preflight_failures: Vec<(AgentType, ConfigError)> = Vec::new();
-	let mut preflight_load_failures: Vec<(AgentType, ConfigError)> = Vec::new();
+	let mut preflight_failures: Vec<(AgentType, Arc<ConfigError>)> = Vec::new();
+	let mut preflight_load_failures: Vec<(AgentType, Arc<ConfigError>)> =
+		Vec::new();
 
 	for &agent in &execution_order {
 		let descriptor = registry::get(agent);
@@ -246,11 +248,11 @@ pub fn remove_skill_batch(
 			let reason = format!("no {} skill config", scope_word);
 			preflight_failures.push((
 				agent,
-				ConfigError::unsupported_operation(
+				Arc::new(ConfigError::unsupported_operation(
 					"remove for this agent alone",
 					&reason,
 					agent.as_str(),
-				),
+				)),
 			));
 			continue;
 		}
@@ -261,7 +263,7 @@ pub fn remove_skill_batch(
 			request.project_root.as_deref(),
 		);
 		if let Err(e) = manager.load() {
-			preflight_load_failures.push((agent, e));
+			preflight_load_failures.push((agent, Arc::new(e)));
 			continue;
 		}
 
@@ -290,11 +292,11 @@ pub fn remove_skill_batch(
 						};
 						preflight_failures.push((
 							agent,
-							ConfigError::unsupported_operation(
+							Arc::new(ConfigError::unsupported_operation(
 								op,
 								reason,
 								agent.as_str(),
-							),
+							)),
 						));
 					}
 				} else if can_credit_prior {
@@ -311,7 +313,7 @@ pub fn remove_skill_batch(
 				));
 			}
 			Err(err) => {
-				preflight_failures.push((agent, err));
+				preflight_failures.push((agent, Arc::new(err)));
 			}
 		}
 	}
@@ -336,7 +338,7 @@ pub fn remove_skill_batch(
 					preflight_failures.iter().find(|(a, _)| *a == *agent);
 				let err_entry = load_err.or(plan_err);
 				let is_load_error = load_err.is_some();
-				let typed_error = err_entry.map(|(_, err)| err.clone());
+				let typed_error = err_entry.map(|(_, err)| Arc::clone(err));
 				let error = err_entry.map(|(_, err)| {
 					format!("delete {} ({scope_str}): {err}", agent.as_str())
 				});
@@ -362,7 +364,7 @@ pub fn remove_skill_batch(
 	// Commit path: if predictable failures occurred, reject the WHOLE batch before any write!
 	if !preflight_failures.is_empty() {
 		let all_unsupported = preflight_failures.iter().all(|(_, err)| {
-			matches!(err, ConfigError::UnsupportedOperation(_))
+			matches!(**err, ConfigError::UnsupportedOperation(_))
 		});
 		let scope_str = scope_to_word(request.scope);
 		let failures_str = preflight_failures
@@ -413,6 +415,12 @@ pub fn remove_skill_batch(
 		request.agents.clone()
 	};
 
+	let execution_order = shared_first_order(
+		&in_lock_target_agents,
+		request.scope,
+		request.project_root.as_deref(),
+	);
+
 	let is_exhaustive = !request.keeps_master
 		&& (request.all_agents
 			|| (!holders.is_empty()
@@ -458,7 +466,7 @@ pub fn remove_skill_batch(
 				agent,
 				verdict: Verdict::Absent,
 				error: Some(e.to_string()),
-				typed_error: Some(e),
+				typed_error: Some(Arc::new(e)),
 				is_load_error: true,
 				still_read_from: Vec::new(),
 			});
@@ -539,7 +547,9 @@ pub fn remove_skill_batch(
 						agent,
 						verdict: Verdict::Partial,
 						error: Some(err.clone()),
-						typed_error: Some(ConfigError::InvalidConfig(err)),
+						typed_error: Some(Arc::new(
+							ConfigError::InvalidConfig(err),
+						)),
 						is_load_error: false,
 						still_read_from: outcome.plan.still_read_from,
 					});
@@ -557,13 +567,13 @@ pub fn remove_skill_batch(
 					still_read_from: Vec::new(),
 				});
 			}
-			Err(ConfigError::ResourceNotFound { .. }) => {
+			Err(err @ ConfigError::ResourceNotFound { .. }) => {
 				let outcome = manager.skill_noop_outcome(name);
 				execution_results.push(SkillRemovalRow {
 					agent,
 					verdict: outcome.verdict,
-					error: None,
-					typed_error: None,
+					error: Some(err.to_string()),
+					typed_error: Some(Arc::new(err)),
 					is_load_error: false,
 					still_read_from: outcome.plan.still_read_from,
 				});
@@ -573,7 +583,7 @@ pub fn remove_skill_batch(
 					agent,
 					verdict: Verdict::Absent,
 					error: Some(err.to_string()),
-					typed_error: Some(err),
+					typed_error: Some(Arc::new(err)),
 					is_load_error: false,
 					still_read_from: Vec::new(),
 				});
@@ -581,7 +591,7 @@ pub fn remove_skill_batch(
 		}
 	}
 
-	let rows = target_agents
+	let rows = in_lock_target_agents
 		.iter()
 		.map(|agent| {
 			execution_results
@@ -658,6 +668,18 @@ mod tests {
 			)
 			.unwrap();
 		}
+		let other_master = root.join(".aghub/other-skill");
+		fs::create_dir_all(&other_master).unwrap();
+		fs::write(
+			other_master.join("SKILL.md"),
+			"---\nname: other-skill\ndescription: unremoved\n---\n\n# other-skill\n",
+		)
+		.unwrap();
+		let lock_path = root.join("skills-lock.json");
+		let lock_content = format!(
+			r#"{{"version":1,"skills":{{"{name}":{{"source":"test","sourceType":"node_modules","computedHash":"abc123"}},"other-skill":{{"source":"test2","sourceType":"node_modules","computedHash":"def456"}}}}}}"#
+		);
+		fs::write(lock_path, lock_content).unwrap();
 	}
 
 	#[cfg(unix)]
@@ -702,7 +724,7 @@ mod tests {
 	fn test_removal_ordering_independence() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 
-		// Shared slot readers first
+		// Shared slot readers first, private readers second
 		let order_shared_first = vec![
 			AgentType::Codex,
 			AgentType::Antigravity,
@@ -719,10 +741,12 @@ mod tests {
 			AgentType::Pi,
 			AgentType::Grok,
 			AgentType::Omp,
+			AgentType::Claude,
 		];
 
-		// Private readers first
+		// Private readers first, shared slot readers second
 		let order_private_first = vec![
+			AgentType::Claude,
 			AgentType::OpenCode,
 			AgentType::Cursor,
 			AgentType::Pi,
@@ -780,8 +804,8 @@ mod tests {
 				.expect("order_private_first batch should succeed")
 		};
 
-		assert_eq!(res_a.rows.len(), 15);
-		assert_eq!(res_b.rows.len(), 15);
+		assert_eq!(res_a.rows.len(), 16);
+		assert_eq!(res_b.rows.len(), 16);
 		for row in &res_a.rows {
 			assert_eq!(row.verdict, Verdict::Removed, "agent {:?}", row.agent);
 			assert!(row.error.is_none());
@@ -811,6 +835,23 @@ mod tests {
 			"root_a and root_b disk and lock state must be identical"
 		);
 		assert!(!tree_a.is_empty(), "tree must not be empty");
+
+		let lock_a =
+			fs::read_to_string(root_a.join("skills-lock.json")).unwrap();
+		let lock_b =
+			fs::read_to_string(root_b.join("skills-lock.json")).unwrap();
+		assert_eq!(
+			lock_a, lock_b,
+			"skills-lock.json contents must match across both orderings"
+		);
+		assert!(
+			!lock_a.contains("notebooklm"),
+			"lock entry for notebooklm must have been pruned by removal"
+		);
+		assert!(
+			lock_a.contains("other-skill"),
+			"lock entry for unremoved other-skill must be preserved"
+		);
 
 		for &agent in &order_shared_first {
 			let dirs_a = crate::create_adapter(agent)
@@ -1494,7 +1535,7 @@ mod tests {
 			"unexpected error message: {err}"
 		);
 		assert!(matches!(
-			res.rows[0].typed_error,
+			res.rows[0].typed_error.as_deref(),
 			Some(ConfigError::UnsupportedOperation(_))
 		));
 	}
@@ -1580,5 +1621,97 @@ mod tests {
 			.expect("keeps_master skips unreadable scan refusal");
 		assert!(!res.exhaustive);
 		assert!(res.unreadable.is_empty());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_in_lock_replan_holder_appearing_with_all_agents() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		crate::testing::master_with_claude_referrer(&root, "notebooklm");
+		fs::remove_file(root.join(".agents/skills/notebooklm")).unwrap();
+
+		let (hook_tx, hook_rx) = std::sync::mpsc::channel();
+		*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = Some(hook_tx);
+
+		struct HookReset;
+		impl Drop for HookReset {
+			fn drop(&mut self) {
+				*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = None;
+			}
+		}
+		let _hook_reset = HookReset;
+
+		// Test thread acquires the mutation write lock first.
+		let test_lock = crate::skills::lock::mutation_guard(
+			"test competing lock",
+			ResourceScope::ProjectOnly,
+			Some(&root),
+		)
+		.expect("test thread acquires mutation lock");
+
+		let req_commit = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: Vec::new(),
+			dry_run: false,
+			all_agents: true,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+
+		let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+		let req_commit_clone = req_commit.clone();
+		let commit_thread = std::thread::spawn(move || {
+			let res = remove_skill_batch(&req_commit_clone);
+			let _ = commit_tx.send(res);
+		});
+
+		// Wait on hook: commit thread has completed preflight and will block on mutation lock.
+		hook_rx
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.expect("commit thread must signal hook after unlocked preflight");
+
+		// While commit thread is blocked, add Cursor as a holder:
+		let cursor_dir = root.join(".cursor/skills");
+		fs::create_dir_all(&cursor_dir).unwrap();
+		std::os::unix::fs::symlink(
+			root.join(".aghub/notebooklm"),
+			cursor_dir.join("notebooklm"),
+		)
+		.unwrap();
+
+		// Release lock so commit thread proceeds:
+		drop(test_lock);
+
+		let res_commit = commit_rx
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.expect("commit thread should complete after lock release")
+			.expect("commit should succeed");
+		commit_thread.join().unwrap();
+
+		assert!(
+			res_commit.rows.iter().any(|r| r.agent == AgentType::Cursor
+				&& r.verdict == Verdict::Removed),
+			"Cursor must be in execution results and removed: {:?}",
+			res_commit.rows
+		);
+		assert!(
+			!root.join(".cursor/skills/notebooklm").exists(),
+			"Cursor referrer must be removed"
+		);
+		assert!(
+			!root.join(".claude/skills/notebooklm").exists(),
+			"Claude referrer must be removed"
+		);
+		assert!(
+			!root.join(".aghub/notebooklm").exists(),
+			"Master must be GC'd when both holders are removed"
+		);
 	}
 }
