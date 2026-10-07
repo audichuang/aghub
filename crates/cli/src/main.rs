@@ -1171,9 +1171,8 @@ fn render_removal(
 			// went stale once the Master moved to `.aghub`.
 			"{} '{name}' was NOT removed: this agent still reads it from a \
 			 location shared with other agents (a .aghub master, or a real \
-			 directory in a shared slot). Name the other agents that read it \
-			 in the same -a list / remove it from the other agents sharing it \
-			 first. A real directory in a shared slot that git tracks (or cannot be asked about) is also kept; untrack it \
+			 directory in a shared slot). Name every holder in one -a list, \
+			 or use --all-agents. A real directory in a shared slot that git tracks (or cannot be asked about) is also kept; untrack it \
 			 first with `git rm -r --cached <path>` (--all-agents refuses it too).\n",
 			resource.singular()
 		);

@@ -286,7 +286,7 @@ writers in `-a`, the private readers saw the shared slot still populated and kep
 their links, leaving partial removals (issue #21).
 
 CLI `delete skills -a` now routes directly through `skills::removal::remove_skill_batch`,
-the same shared core entry used by the API and `reconcile skill --remove`. Whole-batch
+the same shared core entry used by `reconcile skill --remove` (API follows in A5). Whole-batch
 preflight checks all targets atomically (exiting 1 with nothing written on refusal),
 internal shared-first execution handles prior-row credit regardless of `-a` order,
 and results are projected in original request order. `--json` rows carry unified

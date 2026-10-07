@@ -50,6 +50,8 @@ pub struct SkillRemovalRow {
 	pub still_read_from: Vec<PathBuf>,
 	pub paths: Vec<PathBuf>,
 	pub skipped: Vec<PathBuf>,
+	pub executed: bool,
+	pub needs_confirm: bool,
 }
 
 impl SkillRemovalRow {
@@ -98,6 +100,7 @@ pub struct SkillRemovalResponse {
 	pub exhaustive: bool,
 	pub keepers: Vec<AgentType>,
 	pub unreadable: Vec<&'static str>,
+	pub master_reclaimed: bool,
 }
 
 impl SkillRemovalResponse {
@@ -112,11 +115,26 @@ impl SkillRemovalResponse {
 		let mut failed_count = 0;
 
 		for row in &self.rows {
+			let is_absent_noop = row.verdict == Verdict::Absent
+				&& matches!(
+					row.typed_error.as_deref(),
+					Some(ConfigError::ResourceNotFound { .. })
+				);
 			let outcome_str = row.outcome_str();
-			let wire_code = row.wire_code();
-			let ok = row.error.is_none()
-				&& row.typed_error.is_none()
-				&& row.verdict != Verdict::Partial;
+			let wire_code = if is_absent_noop {
+				None
+			} else {
+				row.wire_code()
+			};
+			let error = if is_absent_noop {
+				None
+			} else {
+				row.error.clone()
+			};
+			let ok = is_absent_noop
+				|| (row.error.is_none()
+					&& row.typed_error.is_none()
+					&& row.verdict != Verdict::Partial);
 
 			if ok {
 				success_count += 1;
@@ -124,23 +142,31 @@ impl SkillRemovalResponse {
 				failed_count += 1;
 			}
 
-			let mut payload = serde_json::json!({
-				"type": "skill",
-				"name": skill_name,
-				"success": ok,
-				"dry_run": dry_run,
-				"executed": !dry_run && matches!(row.verdict, Verdict::Removed | Verdict::Partial),
-				"needs_confirm": false,
-				"paths": row.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-				"skipped": row.skipped.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-				"deleted_path": if !dry_run {
-					row.paths.first().map(|p| p.display().to_string())
-				} else {
-					None
-				},
-				"outcome": outcome_str,
-				"code": wire_code,
-			});
+			let view = crate::dto::RemovalView {
+				success: ok,
+				dry_run,
+				executed: row.executed,
+				needs_confirm: row.needs_confirm,
+				paths: row
+					.paths
+					.iter()
+					.map(|p| p.display().to_string())
+					.collect(),
+				skipped: row
+					.skipped
+					.iter()
+					.map(|p| p.display().to_string())
+					.collect(),
+				deleted_path: row
+					.executed
+					.then(|| row.paths.first().map(|p| p.display().to_string()))
+					.flatten(),
+				outcome: row.outcome,
+			};
+			let mut payload = serde_json::to_value(&view).unwrap();
+			payload["type"] = serde_json::json!("skill");
+			payload["name"] = serde_json::json!(skill_name);
+			payload["code"] = serde_json::json!(wire_code);
 
 			if !row.still_read_from.is_empty() {
 				payload["still_read_from"] = serde_json::json!(row
@@ -158,7 +184,15 @@ impl SkillRemovalResponse {
 					.collect::<Vec<_>>());
 			}
 
-			payload["master_reclaimed"] = serde_json::json!(self.exhaustive);
+			if dry_run {
+				payload["master_reclaimed"] = serde_json::json!(false);
+				if self.exhaustive {
+					payload["would_reclaim_master"] = serde_json::json!(true);
+				}
+			} else {
+				payload["master_reclaimed"] =
+					serde_json::json!(self.master_reclaimed);
+			}
 			apply_prune_fields(&mut payload, &self.prune);
 
 			results.push(crate::batch::AgentOpResultView {
@@ -167,7 +201,7 @@ impl SkillRemovalResponse {
 				outcome: Some(outcome_str.to_string()),
 				code: wire_code.map(|c| c.to_string()),
 				output: Some(payload),
-				error: row.error.clone(),
+				error,
 			});
 		}
 
@@ -299,6 +333,7 @@ struct PreflightVerdict {
 	paths: Vec<PathBuf>,
 	skipped: Vec<PathBuf>,
 	outcome: crate::dto::RemovalKind,
+	needs_confirm: bool,
 }
 
 /// Single core entry point for skill deletion by name across multiple agents.
@@ -347,6 +382,7 @@ pub fn remove_skill_batch(
 			exhaustive: is_exhaustive,
 			keepers,
 			unreadable,
+			master_reclaimed: false,
 		});
 	}
 
@@ -429,6 +465,7 @@ pub fn remove_skill_batch(
 					paths: outcome.plan.paths.clone(),
 					skipped: outcome.plan.skipped.clone(),
 					outcome: kind,
+					needs_confirm: outcome.plan.needs_confirm,
 				});
 				if let Verdict::Refused { ref reason } = outcome.verdict {
 					if !request.dry_run {
@@ -475,6 +512,7 @@ pub fn remove_skill_batch(
 					paths: outcome.plan.paths,
 					skipped: outcome.plan.skipped,
 					outcome: kind,
+					needs_confirm: outcome.plan.needs_confirm,
 				});
 			}
 			Err(err) => {
@@ -505,6 +543,8 @@ pub fn remove_skill_batch(
 				let kind = verdict_entry
 					.map(|e| e.outcome)
 					.unwrap_or(crate::dto::RemovalKind::Absent);
+				let needs_confirm =
+					verdict_entry.map(|e| e.needs_confirm).unwrap_or(false);
 				let load_err =
 					preflight_load_failures.iter().find(|(a, _)| *a == *agent);
 				let plan_err =
@@ -525,6 +565,8 @@ pub fn remove_skill_batch(
 					still_read_from,
 					paths,
 					skipped,
+					executed: false,
+					needs_confirm,
 				}
 			})
 			.collect();
@@ -534,6 +576,7 @@ pub fn remove_skill_batch(
 			exhaustive: is_exhaustive,
 			keepers,
 			unreadable,
+			master_reclaimed: false,
 		});
 	}
 
@@ -572,6 +615,13 @@ pub fn remove_skill_batch(
 		request.project_root.as_deref(),
 	)
 	.map_err(ConfigError::Io)?;
+
+	let master_p = crate::skills::shape::master_path(
+		request.scope,
+		request.project_root.as_deref(),
+		name,
+	);
+	let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
 
 	let (holders, unreadable) = if request.keeps_master {
 		(Vec::new(), Vec::new())
@@ -648,6 +698,8 @@ pub fn remove_skill_batch(
 				still_read_from: Vec::new(),
 				paths: Vec::new(),
 				skipped: Vec::new(),
+				executed: false,
+				needs_confirm: false,
 			});
 			continue;
 		}
@@ -726,6 +778,8 @@ pub fn remove_skill_batch(
 						still_read_from,
 						paths: outcome.plan.paths,
 						skipped: outcome.plan.skipped,
+						executed: outcome.executed,
+						needs_confirm: outcome.plan.needs_confirm,
 					});
 				} else {
 					let err = format!(
@@ -752,6 +806,8 @@ pub fn remove_skill_batch(
 						still_read_from,
 						paths: outcome.plan.paths,
 						skipped: outcome.plan.skipped,
+						executed: outcome.executed,
+						needs_confirm: outcome.plan.needs_confirm,
 					});
 				}
 			}
@@ -768,6 +824,8 @@ pub fn remove_skill_batch(
 					still_read_from: Vec::new(),
 					paths: Vec::new(),
 					skipped: Vec::new(),
+					executed: false,
+					needs_confirm: false,
 				});
 			}
 			Err(err @ ConfigError::ResourceNotFound { .. }) => {
@@ -797,6 +855,8 @@ pub fn remove_skill_batch(
 					still_read_from,
 					paths: outcome.plan.paths,
 					skipped: outcome.plan.skipped,
+					executed: false,
+					needs_confirm: false,
 				});
 			}
 			Err(err) => {
@@ -810,6 +870,8 @@ pub fn remove_skill_batch(
 					still_read_from: Vec::new(),
 					paths: Vec::new(),
 					skipped: Vec::new(),
+					executed: false,
+					needs_confirm: false,
 				});
 			}
 		}
@@ -832,9 +894,18 @@ pub fn remove_skill_batch(
 					still_read_from: Vec::new(),
 					paths: Vec::new(),
 					skipped: Vec::new(),
+					executed: false,
+					needs_confirm: false,
 				})
 		})
 		.collect();
+
+	let master_reclaimed = is_exhaustive
+		&& had_master
+		&& master_p.as_ref().map(|p| !p.exists()).unwrap_or(false)
+		&& execution_results
+			.iter()
+			.all(|r| r.verdict != Verdict::Partial);
 
 	Ok(SkillRemovalResponse {
 		rows,
@@ -842,6 +913,7 @@ pub fn remove_skill_batch(
 		exhaustive: is_exhaustive,
 		keepers,
 		unreadable,
+		master_reclaimed,
 	})
 }
 
@@ -2087,5 +2159,104 @@ mod tests {
 			assert_eq!(row_kind, expected_kind);
 			assert_eq!(row_kind, view_kind);
 		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_master_reclaimed_preview_commit_and_surviving_master() {
+		let dir = tempdir().unwrap();
+		let root = dir.path().to_path_buf();
+		let claude_skills = root.join(".claude/skills");
+		let cursor_skills = root.join(".cursor/skills");
+		fs::create_dir_all(&claude_skills).unwrap();
+		fs::create_dir_all(&cursor_skills).unwrap();
+
+		let master = root.join(".aghub/reclaim-test");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: reclaim-test\ndescription: test\n---\n",
+		)
+		.unwrap();
+
+		std::os::unix::fs::symlink(&master, claude_skills.join("reclaim-test"))
+			.unwrap();
+		std::os::unix::fs::symlink(&master, cursor_skills.join("reclaim-test"))
+			.unwrap();
+
+		// 1. Exhaustive preview: both holders named in dry_run mode.
+		// Master is NOT reclaimed (nothing written), but would_reclaim_master is reported in batch view.
+		let req_preview = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("reclaim-test".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::Claude, AgentType::Cursor],
+			dry_run: true,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let resp_preview = remove_skill_batch(&req_preview).unwrap();
+		assert!(resp_preview.exhaustive);
+		assert!(!resp_preview.master_reclaimed);
+		let view_preview = resp_preview.to_batch_view("reclaim-test", true);
+		for r in &view_preview.results {
+			let output = r.output.as_ref().unwrap();
+			assert_eq!(output["master_reclaimed"], false);
+			assert_eq!(output["would_reclaim_master"], true);
+		}
+		assert!(master.exists(), "master must survive preview");
+
+		// 2. Non-exhaustive commit: only one of the two holders named.
+		// Master survives because Claude still holds it.
+		let req_non_exhaustive = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("reclaim-test".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::Cursor],
+			dry_run: false,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let resp_non_exhaustive =
+			remove_skill_batch(&req_non_exhaustive).unwrap();
+		assert!(!resp_non_exhaustive.exhaustive);
+		assert!(!resp_non_exhaustive.master_reclaimed);
+		let view_non_exhaustive =
+			resp_non_exhaustive.to_batch_view("reclaim-test", false);
+		for r in &view_non_exhaustive.results {
+			let output = r.output.as_ref().unwrap();
+			assert_eq!(output["master_reclaimed"], false);
+			assert!(output.get("would_reclaim_master").is_none());
+		}
+		assert!(
+			master.exists(),
+			"master must survive when Claude still reads it"
+		);
+
+		// 3. Exhaustive commit: remaining holder named.
+		// Master is reclaimed on disk, master_reclaimed is true.
+		let req_exhaustive = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("reclaim-test".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::Claude],
+			dry_run: false,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let resp_exhaustive = remove_skill_batch(&req_exhaustive).unwrap();
+		assert!(resp_exhaustive.exhaustive);
+		assert!(resp_exhaustive.master_reclaimed);
+		let view_exhaustive =
+			resp_exhaustive.to_batch_view("reclaim-test", false);
+		for r in &view_exhaustive.results {
+			let output = r.output.as_ref().unwrap();
+			assert_eq!(output["master_reclaimed"], true);
+			assert!(output.get("would_reclaim_master").is_none());
+		}
+		assert!(!master.exists(), "master must be gone on disk");
 	}
 }

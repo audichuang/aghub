@@ -238,9 +238,11 @@ branch.
   first or re-run. Whole-batch preflight failure exits 1, states that nothing was
   written, and lists every refused target. In `--json`, every row in `results[]`
   carries `outcome`, wire `code` (e.g. `UNSUPPORTED_OPERATION`, `INVALID_CONFIG`,
-  `RESOURCE_NOT_FOUND`, or null), `still_read_from` (paths still reading the
-  skill if kept), `still_read_by` (agents), `master_reclaimed`, and independent
-  lock prune fields (`pruned_lock_entries`, `would_prune_lock_entries`,
+  or null; missing skills report no-op success `outcome: "absent"` and exit 0 without an error code),
+  `still_read_from` (paths still reading the
+  skill if kept), batch-level `still_read_by` (unrequested holders that keep the master, copied onto every row),
+  `master_reclaimed` (on commit, whether Master was removed on disk; in preview `master_reclaimed: false` and, if exhaustive, `would_reclaim_master: true`),
+  and independent lock prune fields (`pruned_lock_entries`, `would_prune_lock_entries`,
   `prune_error`). Rows preserve the caller's request order. A Master listed under
   `kept (shared with other agents)` is still read by another agent: never `rm`
   it; name every holder in one `-a` list or use `--all-agents`.

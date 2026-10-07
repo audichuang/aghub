@@ -463,9 +463,9 @@ exits 1, states that nothing was written, and names each refused target with its
 reason; disk and lock remain byte-identical.
 In `--json`, each row in `results` carries the unified `outcome`
 (`preview` | `removed` | `absent` | `partial` | `kept`), wire `code`
-(`UNSUPPORTED_OPERATION`, `INVALID_CONFIG`, `RESOURCE_NOT_FOUND`, or null),
-`still_read_from` (surviving paths when kept/refused), `still_read_by` (keepers),
-and `master_reclaimed` (whether Master was removed). Prune status is reported
+(`UNSUPPORTED_OPERATION`, `INVALID_CONFIG`, or null; missing skills report no-op success with `outcome: "absent"` and exit 0 without an error code),
+`still_read_from` (surviving paths when kept/refused), batch-level `still_read_by` (unrequested holders that keep the master, copied onto every row),
+and `master_reclaimed` (on commit, whether Master was removed on disk; in preview `master_reclaimed: false` and, if exhaustive, `would_reclaim_master: true`). Prune status is reported
 independently (`pruned_lock_entries` / `would_prune_lock_entries` / `prune_error`).
 Rows are returned in the exact request order of `-a`. A real directory inside `.aghub` is never deleted by
 a single-agent delete, and neither is a real directory in a shared slot that git tracks (exit 1;
