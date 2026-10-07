@@ -238,13 +238,15 @@ pub fn repair_all(
 				.into_keys(),
 		);
 	}
-	if let Some(root) = project_root {
-		in_lock.extend(
-			skill::lock::local::read_local_lock_checked(Some(root))
-				.map_err(|e| io_err("read the project skill lock", e))?
-				.skills
-				.into_keys(),
-		);
+	if matches!(scope, crate::models::ResourceScope::ProjectOnly) {
+		if let Some(root) = project_root {
+			in_lock.extend(
+				skill::lock::local::read_local_lock_checked(Some(root))
+					.map_err(|e| io_err("read the project skill lock", e))?
+					.skills
+					.into_keys(),
+			);
+		}
 	}
 
 	// A named skill is repaired even if unlocked: the lock only decides ADOPTION.
@@ -1693,6 +1695,115 @@ mod tests {
 			master,
 			"a stale referrer must be repointed AT THE MASTER, not left as a \
 			 chain through the slot"
+		);
+	}
+
+	/// BUG #18: repair with scope GlobalOnly and a project_root given must not
+	/// merge the project lock into `in_lock`. A skill listed only in the
+	/// project lock must not be adopted as a global Master.
+	#[test]
+	fn global_repair_with_project_root_does_not_adopt_project_skill() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+
+		let fake_home_tmp = tempfile::tempdir().unwrap();
+		let fake_home = fake_home_tmp.path().canonicalize().unwrap();
+		let project_tmp = tempfile::tempdir().unwrap();
+		let project_root = project_tmp.path().canonicalize().unwrap();
+
+		let keys = [
+			"HOME",
+			"XDG_CONFIG_HOME",
+			"XDG_STATE_HOME",
+			"AGHUB_DATA_DIR",
+		];
+		let prev: Vec<(&'static str, Option<std::ffi::OsString>)> =
+			keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+
+		std::env::set_var("HOME", &fake_home);
+		std::env::set_var("XDG_CONFIG_HOME", fake_home.join(".config"));
+		std::env::set_var("XDG_STATE_HOME", fake_home.join(".local/state"));
+		std::env::set_var(
+			"AGHUB_DATA_DIR",
+			fake_home.join(".local/share/aghub"),
+		);
+
+		struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+		impl Drop for EnvGuard {
+			fn drop(&mut self) {
+				for (k, v) in &self.0 {
+					match v {
+						Some(val) => std::env::set_var(k, val),
+						None => std::env::remove_var(k),
+					}
+				}
+			}
+		}
+		let _guard = EnvGuard(prev);
+
+		fs::create_dir_all(project_root.join(".claude")).unwrap();
+
+		let name = "proj-only-skill";
+		seed_project_lock(&project_root, &[name]);
+
+		let global_slot = fake_home.join(".agents").join("skills").join(name);
+		write_skill(&global_slot, name, "legacy-global-slot");
+
+		let global_master = fake_home.join(".aghub").join(name);
+		assert!(!global_master.exists());
+
+		let reports = repair_all(
+			ResourceScope::GlobalOnly,
+			Some(&project_root),
+			None,
+			false,
+		)
+		.unwrap();
+
+		assert!(
+			!global_master.exists(),
+			"project skill must not be adopted as a global Master in ~/.aghub"
+		);
+		assert!(
+			!Linker::is_link(&global_slot),
+			"global shared slot must not be converted to a referrer link"
+		);
+		assert!(
+			global_slot.is_dir(),
+			"global shared slot must remain an untouched directory"
+		);
+		assert!(
+			reports.is_empty(),
+			"bulk global repair must not report any repair for project-only \
+			 lock entry, got {reports:?}"
+		);
+
+		let named_reports = repair_all(
+			ResourceScope::GlobalOnly,
+			Some(&project_root),
+			Some(name),
+			false,
+		)
+		.unwrap();
+
+		assert!(
+			!global_master.exists(),
+			"named global repair must still not adopt project skill as a \
+			 global Master"
+		);
+		assert!(
+			!Linker::is_link(&global_slot),
+			"global shared slot must remain an untouched directory after \
+			 named repair"
+		);
+		assert!(global_slot.is_dir());
+		assert!(
+			!named_reports
+				.iter()
+				.any(|r| r.outcome == RepairOutcome::Migrated),
+			"named repair must not migrate project-only skill into global \
+			 master: {named_reports:?}"
 		);
 	}
 }
