@@ -34,13 +34,13 @@ use crate::{
 		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
 		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
 		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
-		SkillUsageResponse, UpdateSkillRequest, ValidationError,
+		SkillUsageResponse, UpdateSkillRequest,
 	},
 	dto::transfer::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
 	},
 	error::{ApiCreated, ApiError, ApiResult},
-	extractors::{AgentParam, ResolvedScope, ScopeParams, TrustedLocalOrigin},
+	extractors::{AgentParam, ScopeParams, TrustedLocalOrigin},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope,
@@ -221,431 +221,88 @@ pub async fn delete_skill_by_path(
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let req = body.into_inner();
 
-	let skill_path = expand_tilde_path(&req.source_path);
-	// Provisional, for the per-agent path validation below; the authoritative
-	// shape check (`by_path_skill_dir`) follows it.
-	let skill_dir = if skill_path.is_dir() {
-		skill_path.clone()
-	} else {
-		skill_path
-			.parent()
-			.map(|p| p.to_path_buf())
-			.unwrap_or_else(|| skill_path.clone())
-	};
-
 	let resource_scope = match req.scope.as_str() {
-		"global" => aghub_core::models::ResourceScope::GlobalOnly,
-		"project" => aghub_core::models::ResourceScope::ProjectOnly,
-		_ => {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: false,
-				error: Some(format!("Invalid scope: {}", req.scope)),
-				..Default::default()
-			}));
+		"global" => ResourceScope::GlobalOnly,
+		"project" => ResourceScope::ProjectOnly,
+		other => {
+			return Err(ApiError::new(
+				Status::BadRequest,
+				format!("Invalid scope: {other}"),
+				"INVALID_PARAM",
+			));
 		}
 	};
-
-	if resource_scope == aghub_core::models::ResourceScope::ProjectOnly
-		&& req.project_root.is_none()
-	{
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: false,
-			error: Some(
-				"project_root is required when scope is 'project'".to_string(),
-			),
-			..Default::default()
-		}));
-	}
 
 	let project_root = req
 		.project_root
 		.as_ref()
 		.map(|r| crate::extractors::absolutize_root(r));
 
-	// See docs/history/api.md#delete-by-path-parent-dir-rule
-	if skill_path
-		.components()
-		.any(|c| c == std::path::Component::ParentDir)
-	{
-		let allowed_roots: Vec<std::path::PathBuf> = req
-			.agents
-			.iter()
-			.filter_map(|agent_str| agent_str.parse::<AgentType>().ok())
-			.flat_map(|agent| {
-				aghub_core::create_adapter(agent)
-					.get_skills_paths(project_root.as_deref(), resource_scope)
+	let requested_agents: Vec<AgentType> = req
+		.agents
+		.iter()
+		.map(|a| {
+			a.parse::<AgentType>().map_err(|_| {
+				ApiError::new(
+					Status::BadRequest,
+					format!("Unknown agent '{a}'"),
+					"INVALID_PARAM",
+				)
 			})
-			.collect();
+		})
+		.collect::<Result<Vec<AgentType>, _>>()?;
 
-		let safe = allowed_roots.iter().any(|root| {
-			skill_path.strip_prefix(root).is_ok_and(|rest| {
-				!rest
-					.components()
-					.any(|c| c == std::path::Component::ParentDir)
-			})
-		});
+	let source_path = expand_tilde_path(&req.source_path);
+	let plugin_owner = detect_plugin_for_path(&source_path).await;
 
-		if !safe {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: false,
-				error: Some(
-					"Refusing to delete: source_path must not contain '..' under the agent skills directories"
-						.to_string(),
-				),
-				..Default::default()
-			}));
-		}
-	}
+	let confirm = req.confirm.unwrap_or(false);
+	let dry_run = !confirm;
+	let all_agents = req.all_agents.unwrap_or(false);
 
-	let mut validation_errors = Vec::new();
-
-	for agent_str in &req.agents {
-		let agent: AgentType = match agent_str.parse() {
-			Ok(a) => a,
-			Err(_) => {
-				validation_errors.push(ValidationError {
-					agent: agent_str.clone(),
-					reason: format!("Unknown agent: {agent_str}"),
-				});
-				continue;
-			}
-		};
-
-		let adapter = aghub_core::create_adapter(agent);
-		let skills_paths =
-			adapter.get_skills_paths(project_root.as_deref(), resource_scope);
-
-		let is_valid = skills_paths
-			.iter()
-			.any(|sp| skill_dir.starts_with(sp) || skill_dir == *sp);
-
-		if !is_valid {
-			let valid_paths: Vec<String> = skills_paths
-				.iter()
-				.map(|p| p.display().to_string())
-				.collect();
-			validation_errors.push(ValidationError {
-				agent: agent_str.clone(),
-				reason: format!(
-					"Path '{}' is not in agent's skills directories: {}",
-					skill_dir.display(),
-					valid_paths.join(", ")
-				),
-			});
-		}
-	}
-
-	if !validation_errors.is_empty() {
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: false,
-			error: Some("Validation failed for one or more agents".to_string()),
-			validation_errors: Some(validation_errors),
-			..Default::default()
-		}));
-	}
-
-	// The target must be a skill directory or its SKILL.md, and resolvable.
-	// See docs/history/api.md#delete-by-path-target-must-be-a-skill-root
-	let skill_dir =
-		match aghub_core::skills::removal::by_path_skill_dir(&skill_path) {
-			Ok(dir) => dir,
-			Err(refusal) => {
-				return Ok(Json(DeleteSkillByPathResponse {
-					success: false,
-					error: Some(refusal.to_string()),
-					..Default::default()
-				}));
-			}
-		};
-
-	if !skill_dir.exists() {
-		// Idempotent: nothing on disk to remove. Answer through the shared
-		// no-op seam (`outcome: "absent"`), never a hand-built body.
-		// See docs/history/api.md#delete-by-path-absent-body
-		return Ok(Json(super::noop_removal_response(
-			vec![],
-			vec![],
-			!req.confirm.unwrap_or(false),
-		)));
-	}
-
-	if let Some(plugin_name) = detect_plugin_for_path(&skill_dir).await {
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: false,
-			error: Some(format!(
-				"Cannot delete plugin-managed skill from plugin '{plugin_name}'"
-			)),
-			..Default::default()
-		}));
-	}
-
-	// Lock here: after the last `.await` (`MutationGuard` is `!Send`) and before
-	// every read that decides WHAT gets deleted (containment resolve, SKILL.md
-	// name, manager load, referrer sweep) — a read outside the lock can be
-	// invalidated by another aghub process and we would delete its work. The two
-	// reads above are safe outside: the existence probe only answers "already
-	// gone", the plugin check only refuses. Dry-run takes no lock. Synchronous
-	// from here, so it runs on the blocking pool.
 	in_mutation_pool(move || {
-		let _mutation_guard = if req.confirm.unwrap_or(false) {
-			match aghub_core::skills::lock::mutation_guard(
-				"delete skill by path",
-				resource_scope,
-				project_root.as_deref(),
-			) {
-				Ok(guard) => Some(guard),
-				// A real HTTP status, not `200 + success:false`: contention is
-				// retryable and the caller has to be able to tell that apart from a
-				// request it should fix. Same projection as every other surface.
-				Err(error) => {
-					return Err(ApiError::from(aghub_core::ConfigError::Io(
-						error,
-					)));
-				}
-			}
-		} else {
-			None
-		};
-
-		// Containment guard (canonicalize-escape protection): the resolved dir must
-		// stay strictly inside an allow-listed skills root, even if `skill_dir` is
-		// a symlink. The root itself is refused too (`..`/root equality is the
-		// file_name()-is-None trap).
-		let agent_dirs: Vec<std::path::PathBuf> = req
-			.agents
-			.iter()
-			.filter_map(|a| a.parse::<AgentType>().ok())
-			.flat_map(|a| {
-				aghub_core::create_adapter(a)
-					.get_skills_paths(project_root.as_deref(), resource_scope)
-			})
-			.collect();
-		let roots = aghub_core::skills::removal::allowed_skill_roots(
-			&agent_dirs,
-			project_root.as_deref(),
-		);
-		if aghub_core::skills::removal::assert_strictly_contained(
-			&skill_dir, &roots,
-		)
-		.is_none()
-		{
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: false,
-				error: Some(
-					"Refusing to delete: resolved path is not strictly inside \
-					 an allow-listed skills root"
-						.to_string(),
-				),
-				skipped: vec![skill_dir.display().to_string()],
-				..Default::default()
-			}));
-		}
-
-		let confirm = req.confirm.unwrap_or(false);
-		let dry_run = !confirm;
-		let skill_name =
-			match aghub_core::skills::removal::by_path_skill_name(&skill_dir) {
-				Ok(name) => name,
-				Err(refusal) => {
-					return Ok(Json(DeleteSkillByPathResponse {
-						success: false,
-						error: Some(refusal.to_string()),
-						..Default::default()
-					}));
-				}
-			};
-		let Some(first_agent) =
-			req.agents.iter().find_map(|a| a.parse::<AgentType>().ok())
-		else {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: false,
-				error: Some("No valid agent was provided".to_string()),
-				..Default::default()
-			}));
-		};
-		let resolved = match resource_scope {
-			ResourceScope::GlobalOnly => ResolvedScope::Global,
-			ResourceScope::ProjectOnly => ResolvedScope::Project {
-				root: project_root.clone().expect("validated project root"),
-			},
-			ResourceScope::Both => {
-				return Ok(Json(DeleteSkillByPathResponse {
-					success: false,
-					error: Some("scope 'all' is not writable".to_string()),
-					..Default::default()
-				}));
-			}
-		};
-		let mut manager =
-			build_manager_from_resolved(&AgentParam(first_agent), &resolved)?;
-		if let Err(error) = manager.load() {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: false,
-				error: Some(format!("Failed to load agent skills: {error}")),
-				..Default::default()
-			}));
-		}
-		let path_is_link =
-			aghub_core::skills::linker::Linker::is_link(&skill_dir);
-		let canonical_layout = manager
-			.get_skill(&skill_name)
-			.and_then(|skill| skill.canonical_path.as_ref())
-			.is_some()
-			|| path_is_link;
-		let requested_agents: Vec<AgentType> = req
-			.agents
-			.iter()
-			.filter_map(|a| a.parse::<AgentType>().ok())
-			.collect();
-
-		if !canonical_layout {
-			// This non-link branch bypasses `plan_removal`, so ask core's ONE
-			// single-agent rule whether the real directory may go; never
-			// restate it here.
-			// See docs/history/api.md#delete-by-path-shared-slot-guard
-			let all_in_scope =
-				aghub_core::skills::removal::agent_skill_dirs_in_scope(
-					resource_scope,
-					project_root.as_deref(),
-				);
-			let keep_reason =
-				aghub_core::skills::removal::single_agent_keep_reason(
-					&skill_dir,
-					&all_in_scope,
-					&skill_name,
-					project_root.as_deref(),
-					resource_scope,
-					&requested_agents,
-				);
-			if let Some(reason) = keep_reason {
-				let error = aghub_core::skills::removal::git_keep_hint(
-					&reason, &skill_dir,
-				);
-				match reason {
-					aghub_core::skills::removal::KeepReason::ExternalReferrer(
-						ref referrer,
-					) => {
-						// Name WHICH path kept it: the sweep runs over every in-scope
-						// agent dir, so "kept" without a pointer is undiagnosable.
-						log::warn!(
-							"keeping {}: {} still references it",
-							skill_dir.display(),
-							referrer.display()
-						);
-					}
-					aghub_core::skills::removal::KeepReason::GitTracked
-					| aghub_core::skills::removal::KeepReason::GitUndecided => {
-						if let Some(hint) = &error {
-							log::warn!("{hint}");
-						}
-					}
-					aghub_core::skills::removal::KeepReason::UniversalMaster => {}
-				}
-				// Kept because SHARED: through the `RemovalView` seam so it
-				// reads `outcome: "kept"`, never a success that means "deleted".
-				// `shared_master_kept: true` is this route's OWN judgement
-				// (core sets the same flag in `plan_copy_removal`).
-				let verdict =
-					aghub_core::skills::removal::Verdict::kept_managed(
-						skill_dir.clone(),
-					);
-				let mut response = super::removal_response(
-					aghub_core::skills::removal::RemovalOutcome {
-						plan: aghub_core::skills::removal::RemovalPlan {
-							layout: aghub_core::skills::removal::Layout::Copy,
-							paths: vec![],
-							skipped: vec![skill_dir.clone()],
-							needs_confirm: false,
-							shared_master_kept: verdict.shared_master_kept(),
-							still_read_from: Vec::new(),
-							incomplete: false,
-						},
-						executed: false,
-						prune: aghub_core::skills::removal::PruneStatus::NotRun,
-						failed_paths: vec![],
-						absent: false,
-						// TODO(#30/A4): by-path sink-down
-						verdict,
-					},
-					dry_run,
-				);
-				response.error = error;
-				return Ok(Json(response));
-			}
-			// The same producer the by-name copy planner uses, so the two report
-			// one `needs_confirm` for one directory.
-			let plan = aghub_core::skills::removal::assemble_copy_release_plan(
-				skill_dir.clone(),
-				&roots,
-				&all_in_scope,
-				&skill_name,
-				project_root.as_deref(),
-				resource_scope,
-				&requested_agents,
-			);
-			// Preview and commit both go through the core-owned producers; a
-			// hand-built `RemovalOutcome` drifts from the manager's.
-			// See docs/history/api.md#delete-by-path-hand-built-outcome
-			if dry_run {
-				let preview =
-					match aghub_core::skills::removal::RemovalOutcome::preview(
-						plan,
-						// Reaching here means the guard above did not block.
-						aghub_core::skills::removal::Verdict::Removed,
-						resource_scope,
-						project_root.as_deref(),
-						&skill_name,
-					) {
-						Ok(preview) => preview,
-						// An ambiguous shape is refused by the PREVIEW too, or
-						// the dialog offers a delete the commit then rejects.
-						Err(e) => {
-							return Ok(Json(DeleteSkillByPathResponse {
-								success: false,
-								error: Some(format!("Failed to delete: {e}")),
-								..Default::default()
-							}));
-						}
-					};
-				return Ok(Json(super::removal_response(preview, dry_run)));
-			}
-			let outcome =
-				match aghub_core::skills::removal::RemovalOutcome::commit(
-					plan,
-					&roots,
-					resource_scope,
-					project_root.as_deref(),
-					&skill_name,
-				) {
-					Ok(outcome) => outcome,
-					Err(e) => {
-						return Ok(Json(DeleteSkillByPathResponse {
-							success: false,
-							error: Some(format!("Failed to delete: {e}")),
-							..Default::default()
-						}));
-					}
-				};
-			return Ok(Json(super::removal_response(outcome, dry_run)));
-		}
-
-		match manager.remove_skill_planned_at_dir_for_agents(
-			&skill_name,
-			&skill_dir,
-			false,
+		let request = aghub_core::skills::removal::SkillRemovalRequest {
+			target: aghub_core::skills::removal::SkillRemovalTarget::ByPath(
+				source_path,
+			),
+			scope: resource_scope,
+			project_root,
+			agents: requested_agents,
 			dry_run,
-			confirm,
-			&requested_agents,
-		) {
-			// `remove_skill_planned` already prunes the lock (core-owned seam) and
-			// records the status in `outcome.prune`; no route-level re-prune.
-			Ok(outcome) => Ok(Json(super::removal_response(outcome, dry_run))),
-			Err(e) => Ok(Json(DeleteSkillByPathResponse {
-				success: false,
-				error: Some(format!("Failed to delete: {e}")),
-				..Default::default()
-			})),
-		}
+			all_agents,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+			plugin_owner,
+		};
+		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
+			.map_err(ApiError::from)?;
+
+		let single = resp.to_single_view(dry_run).map_err(ApiError::from)?;
+
+		let (pruned_lock_entries, would_prune_lock_entries, prune_error) =
+			super::project_prune_status(single.prune);
+
+		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
+			single.holders.to_options();
+
+		Ok(Json(DeleteSkillByPathResponse {
+			success: single.removal_view.success,
+			dry_run: single.removal_view.dry_run,
+			executed: single.removal_view.executed,
+			needs_confirm: single.removal_view.needs_confirm,
+			paths: single.removal_view.paths,
+			skipped: single.removal_view.skipped,
+			deleted_path: single.removal_view.deleted_path,
+			pruned_lock_entries,
+			would_prune_lock_entries,
+			prune_error,
+			outcome: single.removal_view.outcome.into(),
+			error: None,
+			validation_errors: None,
+			still_read_by,
+			still_read_by_managed,
+			still_read_by_unmanaged,
+			code: single.code.map(|s| s.to_string()),
+		}))
 	})
 	.await
 }
@@ -1390,6 +1047,7 @@ pub async fn delete_skill(
 			all_agents,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
+			plugin_owner: None,
 		};
 		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
 			.map_err(ApiError::from)?;
@@ -1419,6 +1077,7 @@ pub async fn delete_skill(
 			still_read_by,
 			still_read_by_managed,
 			still_read_by_unmanaged,
+			code: single.code.map(|s| s.to_string()),
 		}))
 	})
 	.await
@@ -3266,6 +2925,18 @@ mod tests {
 		}
 	}
 
+	/// A by-path request the entry refuses: since A6 that is an HTTP error
+	/// (status + wire code), never `200` with `success: false`.
+	#[cfg(unix)]
+	fn by_path_refused(req: DeleteSkillByPathRequest) -> ApiError {
+		match block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req))) {
+			Ok(resp) => {
+				panic!("by-path must be refused, got {:?}", resp.into_inner())
+			}
+			Err(error) => error,
+		}
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn delete_by_path_dry_run_default_lists_paths_and_keeps_dir() {
@@ -3317,17 +2988,9 @@ mod tests {
 			let link = skills.join("evil");
 			std::os::unix::fs::symlink(&outside, &link).unwrap();
 
-			let resp = block_on(delete_skill_by_path(
-				TrustedLocalOrigin,
-				Json(by_path_req(&link, Some(true))),
-			))
-			.ok()
-			.expect("handler returned ok")
-			.into_inner();
-			assert!(
-				!resp.success,
-				"out-of-tree symlink target must be refused"
-			);
+			let refusal = by_path_refused(by_path_req(&link, Some(true)));
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
 			assert!(outside.exists(), "out-of-tree dir must survive");
 		});
 	}
@@ -3366,11 +3029,12 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
+			assert_eq!(
+				refusal.status,
+				rocket::http::Status::UnprocessableEntity
+			);
+			assert_eq!(refusal.body.code, "UNSUPPORTED_OPERATION");
 
 			assert!(
 				slot.join("SKILL.md").exists(),
@@ -3379,11 +3043,6 @@ mod tests {
 			assert!(
 				claude.join("shared").join("SKILL.md").exists(),
 				"the other agent's symlink must still resolve into the slot"
-			);
-			assert!(
-				resp.skipped.iter().any(|p| p.contains("shared")),
-				"the kept slot should be reported as skipped, got {:?}",
-				resp.skipped
 			);
 		});
 	}
@@ -3421,23 +3080,65 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
+
+			let by_name = match block_on(delete_skill(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cursor),
+				"shared",
+				DeleteSkillParams {
+					scope: Some("project".to_string()),
+					project_root: Some(proj.display().to_string()),
+					confirm: Some(true),
+					all_agents: None,
+					agents: Some("cursor".to_string()),
+				},
+			)) {
+				Ok(resp) => panic!(
+					"by-name must refuse the same slot, got {:?}",
+					resp.into_inner()
+				),
+				Err(error) => error,
+			};
+			assert_eq!(
+				refusal.status,
+				rocket::http::Status::UnprocessableEntity
+			);
+			assert_eq!(refusal.body.code, "UNSUPPORTED_OPERATION");
+			assert_eq!(
+				(refusal.status, refusal.body.code),
+				(by_name.status, by_name.body.code),
+				"by-path and by-name must answer one slot with one status and code"
+			);
 
 			assert!(
 				slot.join("SKILL.md").exists(),
 				"a single-agent by-path delete may not take the shared slot \
 				 — nine other project agents read it from there"
 			);
+
+			// A preview of the same request is not an error: the entity is
+			// still there, so the answer is `kept`, not `removed` (the desktop
+			// closes its dialog on `removed`).
+			let preview = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(DeleteSkillByPathRequest {
+					source_path: slot.join("SKILL.md").display().to_string(),
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: None,
+				}),
+			))
+			.ok()
+			.expect("a preview returns ok")
+			.into_inner();
 			assert_eq!(
-				resp.outcome,
-				crate::dto::skill::RemovalOutcomeKind::Kept,
-				"the entity is still there, so the answer is `kept`, not \
-				 `removed`: the desktop closes its dialog on `removed`"
+				preview.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Kept
 			);
+			assert_eq!(preview.code.as_deref(), Some("UNSUPPORTED_OPERATION"));
 			// The reader that would have lost it, asked directly.
 			let mut other = aghub_core::manager::ConfigManager::new(
 				aghub_core::create_adapter(
@@ -3566,28 +3267,34 @@ mod tests {
 						error.body.error
 					);
 
-					for confirm in [None, Some(true)] {
-						let response = block_on(delete_skill_by_path(
-							TrustedLocalOrigin,
-							Json(DeleteSkillByPathRequest {
-								source_path: source.display().to_string(),
-								agents: vec![id.to_string()],
-								scope: "project".to_string(),
-								project_root: Some(home.display().to_string()),
-								all_agents: None,
-								confirm,
-							}),
-						))
-						.ok()
-						.expect("by-path delete must report kept")
-						.into_inner();
-						assert_eq!(
-							response.outcome,
-							crate::dto::skill::RemovalOutcomeKind::Kept
-						);
-						assert!(!response.executed);
-						assert!(response.paths.is_empty());
-					}
+					let by_path_request = |confirm| DeleteSkillByPathRequest {
+						source_path: source.display().to_string(),
+						agents: vec![id.to_string()],
+						scope: "project".to_string(),
+						project_root: Some(home.display().to_string()),
+						all_agents: None,
+						confirm,
+					};
+					let response = block_on(delete_skill_by_path(
+						TrustedLocalOrigin,
+						Json(by_path_request(None)),
+					))
+					.ok()
+					.expect("by-path preview must report kept")
+					.into_inner();
+					assert_eq!(
+						response.outcome,
+						crate::dto::skill::RemovalOutcomeKind::Kept
+					);
+					assert!(!response.executed);
+					assert!(response.paths.is_empty());
+
+					let refusal = by_path_refused(by_path_request(Some(true)));
+					assert_eq!(
+						(refusal.status, refusal.body.code),
+						(error.status, error.body.code),
+						"confirmed by-path must refuse like by-name"
+					);
 
 					assert!(real_dir.join("SKILL.md").is_file());
 					assert!(std::fs::symlink_metadata(&cursor_skills)
@@ -3695,13 +3402,7 @@ mod tests {
 					all_agents: None,
 					confirm: Some(true),
 				};
-				let resp = block_on(delete_skill_by_path(
-					TrustedLocalOrigin,
-					Json(req),
-				))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
+				let refusal = by_path_refused(req);
 
 				assert!(
 					slot.join("SKILL.md").exists(),
@@ -3709,9 +3410,10 @@ mod tests {
 					 when another reader is enabled"
 				);
 				assert_eq!(
-					resp.outcome,
-					crate::dto::skill::RemovalOutcomeKind::Kept,
+					refusal.status,
+					rocket::http::Status::UnprocessableEntity
 				);
+				assert_eq!(refusal.body.code, "UNSUPPORTED_OPERATION");
 			});
 		});
 	}
@@ -3765,27 +3467,18 @@ mod tests {
 					all_agents: None,
 					confirm: Some(true),
 				};
-				let resp = block_on(delete_skill_by_path(
-					TrustedLocalOrigin,
-					Json(req),
-				))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
+				let refusal = by_path_refused(req);
 
 				assert!(
 					tracked_slot.join("SKILL.md").exists(),
 					"git tracked real dir must remain after delete by path"
 				);
 				assert_eq!(
-					resp.outcome,
-					crate::dto::skill::RemovalOutcomeKind::Kept,
-					"git tracked real dir outcome must be kept"
+					refusal.status,
+					rocket::http::Status::UnprocessableEntity
 				);
-				let error = resp
-					.error
-					.as_deref()
-					.expect("GitTracked keep must carry an actionable error");
+				assert_eq!(refusal.body.code, "UNSUPPORTED_OPERATION");
+				let error = refusal.body.error.as_str();
 				assert!(
 					error.contains("tracked by git")
 						&& error.contains("git rm -r --cached")
@@ -4381,28 +4074,18 @@ mod tests {
 					&[],
 				);
 			assert!(readers.contains(&"cline"));
-			let response = block_on(delete_skill_by_path(
-				TrustedLocalOrigin,
-				Json(DeleteSkillByPathRequest {
-					source_path: target.join("SKILL.md").display().to_string(),
-					agents: readers.iter().map(|id| id.to_string()).collect(),
-					scope: "global".to_string(),
-					project_root: None,
-					all_agents: None,
-					confirm: Some(true),
-				}),
-			))
-			.ok()
-			.expect("handler returned ok")
-			.into_inner();
+			let refusal = by_path_refused(DeleteSkillByPathRequest {
+				source_path: target.join("SKILL.md").display().to_string(),
+				agents: readers.iter().map(|id| id.to_string()).collect(),
+				scope: "global".to_string(),
+				project_root: None,
+				all_agents: None,
+				confirm: Some(true),
+			});
 			assert!(
-				!response.success,
-				"ambiguous request deleted a Master: selected={selected} target={} {response:?}",
-				target.display(),
-			);
-			assert!(
-				response.error.as_deref().unwrap_or_default().contains("requested skill location"),
-				"request must fail at exact-location identity check: {response:?}",
+				refusal.body.error.contains("requested skill location"),
+				"request must fail at exact-location identity check: {}",
+				refusal.body.error
 			);
 			for (entry, master) in entries {
 				assert!(
@@ -4446,11 +4129,7 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(
 				slot.join("SKILL.md").exists(),
@@ -4461,10 +4140,11 @@ mod tests {
 				"the Referrer must not be left dangling"
 			);
 			assert_eq!(
-				resp.outcome,
-				crate::dto::skill::RemovalOutcomeKind::Kept,
+				refusal.status,
+				rocket::http::Status::UnprocessableEntity,
 				"a real reader outside the request makes this a kept location"
 			);
+			assert_eq!(refusal.body.code, "UNSUPPORTED_OPERATION");
 		});
 	}
 
@@ -4583,17 +4263,14 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "slot dir must survive");
 			assert!(y.join("SKILL.md").exists(), "skill y must survive");
 			assert!(z.join("SKILL.md").exists(), "skill z must survive");
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
 		});
 	}
@@ -4631,17 +4308,14 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "cursor slot dir must survive");
 			assert!(y.join("SKILL.md").exists(), "skill y must survive");
 			assert!(z.join("SKILL.md").exists(), "skill z must survive");
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
 		});
 	}
@@ -4678,17 +4352,14 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "global slot dir must survive");
 			assert!(y.join("SKILL.md").exists(), "skill y must survive");
 			assert!(z.join("SKILL.md").exists(), "skill z must survive");
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
 		});
 	}
@@ -4726,17 +4397,14 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "slot dir must survive");
 			assert!(y.join("SKILL.md").exists(), "skill y must survive");
 			assert!(z.join("SKILL.md").exists(), "skill z must survive");
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
 		});
 	}
@@ -4783,17 +4451,14 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "slot dir must survive");
 			assert!(y.join("SKILL.md").exists(), "skill y must survive");
 			assert!(z.join("SKILL.md").exists(), "skill z must survive");
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
 			assert!(
 				!err.contains(&proj.display().to_string()),
@@ -4844,17 +4509,14 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "slot dir must survive");
 			assert!(y.join("SKILL.md").exists(), "skill y must survive");
 			assert!(z.join("SKILL.md").exists(), "skill z must survive");
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
 			assert!(
 				!err.contains(&proj.display().to_string()),
@@ -4968,14 +4630,11 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
 			assert!(cursor_slot.exists(), "cursor slot dir must survive");
 			assert!(agents_slot.exists(), "agents slot dir must survive");
@@ -5019,19 +4678,16 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "slot dir must survive");
 			assert!(
 				sibling.join("SKILL.md").exists(),
 				"sibling skill must survive"
 			);
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(
 				err.contains("strictly"),
 				"error must mention strictly: {err}"
@@ -5046,19 +4702,16 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "slot dir must survive");
 			assert!(
 				sibling.join("SKILL.md").exists(),
 				"sibling skill must survive"
 			);
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(
 				err.contains("strictly"),
 				"error must mention strictly: {err}"
@@ -5097,19 +4750,16 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(global_slot.exists(), "global slot dir must survive");
 			assert!(
 				global_sibling.join("SKILL.md").exists(),
 				"global sibling skill must survive"
 			);
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(
 				err.contains("strictly"),
 				"error must mention strictly: {err}"
@@ -5153,18 +4803,15 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(slot.exists(), "slot dir must survive");
 			assert!(
 				sibling.join("SKILL.md").exists(),
 				"sibling skill must survive"
 			);
-			assert!(!resp.success);
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
 		});
 	}
 
@@ -5204,16 +4851,13 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp =
-				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let refusal = by_path_refused(req);
 
 			assert!(y.join("SKILL.md").exists(), "skill y must survive");
 			assert!(z.join("SKILL.md").exists(), "skill z must survive");
-			assert!(!resp.success);
-			let err = resp.error.as_deref().unwrap_or("");
+			assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+			assert_eq!(refusal.body.code, "INVALID_CONFIG");
+			let err = refusal.body.error.as_str();
 			assert!(err.contains("'..'"), "error must mention '..': {err}");
 		});
 	}
@@ -5252,17 +4896,10 @@ mod tests {
 			}
 
 			for confirm in [false, true] {
-				let resp = block_on(delete_skill_by_path(
-					TrustedLocalOrigin,
-					Json(claude_by_path(&team, confirm)),
-				))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
-				assert!(!resp.success, "category folder must be refused");
-				assert!(!resp.executed);
-				assert!(resp.paths.is_empty(), "nothing may be planned");
-				let err = resp.error.as_deref().unwrap_or_default();
+				let refusal = by_path_refused(claude_by_path(&team, confirm));
+				assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+				assert_eq!(refusal.body.code, "INVALID_CONFIG");
+				let err = refusal.body.error.as_str();
 				assert!(
 					err.contains("SKILL.md"),
 					"the refusal must say what a target needs: {err}"
@@ -5298,18 +4935,9 @@ mod tests {
 				z.join("scripts/run.sh"),
 				z.join("gone.txt"),
 			] {
-				let resp = block_on(delete_skill_by_path(
-					TrustedLocalOrigin,
-					Json(claude_by_path(&target, true)),
-				))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
-				assert!(
-					!resp.success && !resp.executed,
-					"{} must be refused",
-					target.display()
-				);
+				let refusal = by_path_refused(claude_by_path(&target, true));
+				assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+				assert_eq!(refusal.body.code, "INVALID_CONFIG");
 				assert!(z.join("SKILL.md").exists(), "the skill must survive");
 				assert!(z.join("scripts/run.sh").exists());
 			}
@@ -5448,16 +5076,11 @@ mod tests {
 			std::os::unix::fs::symlink("loop", &looped).unwrap();
 
 			for target in [looped.clone(), looped.join("SKILL.md")] {
-				let resp = block_on(delete_skill_by_path(
-					TrustedLocalOrigin,
-					Json(claude_by_path(&target, true)),
-				))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
-				let json = serde_json::to_string(&resp).unwrap();
+				let refusal = by_path_refused(claude_by_path(&target, true));
+				assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+				assert_eq!(refusal.body.code, "INVALID_CONFIG");
+				let json = serde_json::to_string(&refusal.body).unwrap();
 				eprintln!("ELOOP {} => {json}", target.display());
-				assert!(!resp.success, "a loop must be refused: {json}");
 				assert!(
 					!json.contains(&home.display().to_string()),
 					"no internal path may reach the response: {json}"
@@ -5508,13 +5131,7 @@ mod tests {
 					all_agents: None,
 					confirm: Some(true),
 				};
-				let resp = block_on(delete_skill_by_path(
-					TrustedLocalOrigin,
-					Json(req),
-				))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
+				let refusal = by_path_refused(req);
 
 				assert!(
 					master.join("SKILL.md").exists(),
@@ -5523,11 +5140,8 @@ mod tests {
 				// No agent reads `.aghub`, so the route's location validation
 				// refuses before the keep rule is reached; the keep rule itself
 				// is pinned in core (`single_agent_keep_reason_aghub_store_*`).
-				assert!(
-					!resp.success,
-					"a path no agent reads must be refused: {:?}",
-					resp.error
-				);
+				assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+				assert_eq!(refusal.body.code, "INVALID_CONFIG");
 			});
 		});
 	}
@@ -5576,13 +5190,7 @@ mod tests {
 					all_agents: None,
 					confirm: Some(true),
 				};
-				let resp = block_on(delete_skill_by_path(
-					TrustedLocalOrigin,
-					Json(req),
-				))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
+				let refusal = by_path_refused(req);
 
 				assert!(
 					master.join("SKILL.md").exists(),
@@ -5590,8 +5198,9 @@ mod tests {
 				);
 				// The handler rejects the `..` before reaching the store
 				// guard, so this is a validation failure, not a kept outcome.
-				assert!(!resp.success);
-				let err = resp.error.as_deref().unwrap_or("");
+				assert_eq!(refusal.status, rocket::http::Status::BadRequest);
+				assert_eq!(refusal.body.code, "INVALID_CONFIG");
+				let err = refusal.body.error.as_str();
 				assert!(err.contains("'..'"), "error must mention '..': {err}");
 			});
 		});

@@ -1,3 +1,6 @@
+import { isHTTPError } from "ky";
+import { getApiErrorCode } from "./api.ts";
+
 /**
  * The localized text for a `kept` delete answer.
  *
@@ -25,6 +28,30 @@ export function keptDeleteMessage(
 	const path = answer.skipped[0];
 	if (answer.error && path) {
 		return t("deleteSkillKeptGit", { name, path });
+	}
+	return t("deleteSkillKeptSharedMaster", { name });
+}
+
+export function isSharedMasterRefusal(error: unknown): boolean {
+	return (
+		isHTTPError(error) &&
+		error.response.status === 422 &&
+		getApiErrorCode(error) === "UNSUPPORTED_OPERATION"
+	);
+}
+
+export function keptDeleteMessageFromError(
+	error: unknown,
+	name: string,
+	sourcePath: string | undefined,
+	t: KeptDeleteTranslate,
+): string | null {
+	if (!isSharedMasterRefusal(error)) {
+		return null;
+	}
+	const message = error instanceof Error ? error.message : "";
+	if (message.includes("tracked by git") && sourcePath) {
+		return t("deleteSkillKeptGit", { name, path: sourcePath });
 	}
 	return t("deleteSkillKeptSharedMaster", { name });
 }

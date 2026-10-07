@@ -6,17 +6,24 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::{
+	agent_skill_dirs_in_scope, allowed_skill_roots, assemble_copy_release_plan,
+	assert_strictly_contained, by_path_skill_dir, by_path_skill_name,
+	expand_tilde_path, git_keep_hint, single_agent_keep_reason, KeepReason,
+	PruneStatus, RemovalOutcome, Verdict,
+};
 use crate::batch::{Backing, RemovalCredits};
 use crate::errors::{ConfigError, Result};
+use crate::manager::skill::PlannedRemovalOptions;
 use crate::models::{AgentType, ResourceScope};
 use crate::registry;
-use crate::skills::removal::{PruneStatus, Verdict};
 use crate::ConfigManager;
 
 /// Target for a batch skill removal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillRemovalTarget {
 	ByName(String),
+	ByPath(PathBuf),
 }
 
 /// Request for a batch skill removal.
@@ -36,6 +43,7 @@ pub struct SkillRemovalRequest {
 	/// A copy in this batch keeps the Master alive; skips the exhaustiveness
 	/// preflight holder scan (surviving holders are still computed for outcome rows).
 	pub keeps_master: bool,
+	pub plugin_owner: Option<String>,
 }
 
 /// Outcome row for a single agent in a batch skill removal.
@@ -202,6 +210,7 @@ pub struct SingleSkillRemovalView {
 	pub removal_view: crate::dto::RemovalView,
 	pub holders: SkillHoldersView,
 	pub prune: PruneStatus,
+	pub code: Option<&'static str>,
 }
 
 pub fn clone_config_error(err: &ConfigError) -> ConfigError {
@@ -501,10 +510,21 @@ impl SkillRemovalResponse {
 			outcome,
 		};
 
+		let code = self.rows.iter().find_map(|r| {
+			if let Some(ref err) = r.typed_error {
+				return Some(crate::error_codes::wire_code(err));
+			}
+			if matches!(r.verdict, Verdict::Refused { .. }) {
+				return Some("UNSUPPORTED_OPERATION");
+			}
+			None
+		});
+
 		Ok(SingleSkillRemovalView {
 			removal_view,
 			holders: self.holders_view(),
 			prune: self.prune.clone(),
+			code,
 		})
 	}
 }
@@ -724,13 +744,376 @@ impl PreflightVerdict {
 	}
 }
 
-/// Single core entry point for skill deletion by name across multiple agents.
+/// Single core entry point for skill deletion across multiple agents.
 pub fn remove_skill_batch(
 	request: &SkillRemovalRequest,
 ) -> Result<SkillRemovalResponse> {
-	let name = match &request.target {
-		SkillRemovalTarget::ByName(name) => name.as_str(),
+	if let Some(ref plugin_name) = request.plugin_owner {
+		return Err(ConfigError::InvalidConfig(format!(
+			"Cannot delete plugin-managed skill from plugin '{plugin_name}'"
+		)));
+	}
+
+	match &request.target {
+		SkillRemovalTarget::ByPath(raw_path) => {
+			remove_skill_by_path(request, raw_path)
+		}
+		SkillRemovalTarget::ByName(name) => remove_skill_by_name(request, name),
+	}
+}
+
+fn remove_skill_by_path(
+	request: &SkillRemovalRequest,
+	raw_path: &Path,
+) -> Result<SkillRemovalResponse> {
+	let skill_path = expand_tilde_path(raw_path);
+
+	let agent_dirs: Vec<PathBuf> = if !request.agents.is_empty() {
+		request
+			.agents
+			.iter()
+			.flat_map(|agent| {
+				crate::create_adapter(*agent).get_skills_paths(
+					request.project_root.as_deref(),
+					request.scope,
+				)
+			})
+			.collect()
+	} else {
+		agent_skill_dirs_in_scope(
+			request.scope,
+			request.project_root.as_deref(),
+		)
 	};
+
+	// See docs/history/api.md#delete-by-path-parent-dir-rule
+	if skill_path
+		.components()
+		.any(|c| c == std::path::Component::ParentDir)
+	{
+		let safe = agent_dirs.iter().any(|dir| {
+			skill_path.strip_prefix(dir).is_ok_and(|rest| {
+				!rest
+					.components()
+					.any(|c| c == std::path::Component::ParentDir)
+			})
+		});
+		if !safe {
+			return Err(ConfigError::InvalidConfig(
+				"Refusing to delete: source_path must not contain '..' under the agent skills directories"
+					.to_string(),
+			));
+		}
+	}
+
+	let skill_dir = by_path_skill_dir(&skill_path)
+		.map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
+
+	let roots =
+		allowed_skill_roots(&agent_dirs, request.project_root.as_deref());
+
+	if assert_strictly_contained(&skill_dir, &roots).is_none() {
+		return Err(ConfigError::InvalidConfig(
+			"Refusing to delete: resolved path is not strictly inside an allow-listed skills root"
+				.to_string(),
+		));
+	}
+
+	let target_agents: Vec<AgentType> = if !request.agents.is_empty() {
+		request.agents.clone()
+	} else {
+		crate::AgentType::ALL
+			.iter()
+			.filter(|&&agent| {
+				let paths = crate::create_adapter(agent).get_skills_paths(
+					request.project_root.as_deref(),
+					request.scope,
+				);
+				paths
+					.iter()
+					.any(|sp| skill_dir.starts_with(sp) || &skill_dir == sp)
+			})
+			.copied()
+			.collect()
+	};
+
+	if !skill_dir.exists() {
+		let rows = target_agents
+			.into_iter()
+			.map(SkillRemovalRow::absent)
+			.collect();
+		return Ok(SkillRemovalResponse {
+			rows,
+			prune: PruneStatus::NotRun,
+			keepers: Vec::new(),
+			unreadable: Vec::new(),
+			master_reclaimed: false,
+			would_reclaim_master: false,
+		});
+	}
+
+	for agent in &target_agents {
+		let adapter = crate::create_adapter(*agent);
+		let skills_paths = adapter
+			.get_skills_paths(request.project_root.as_deref(), request.scope);
+		let is_valid = skills_paths
+			.iter()
+			.any(|sp| skill_dir.starts_with(sp) || &skill_dir == sp);
+		if !is_valid {
+			let valid_paths: Vec<String> = skills_paths
+				.iter()
+				.map(|p| p.display().to_string())
+				.collect();
+			return Err(ConfigError::InvalidConfig(format!(
+				"Path '{}' is not in agent's skills directories: {}",
+				skill_dir.display(),
+				valid_paths.join(", ")
+			)));
+		}
+	}
+
+	let _mutation_guard = if !request.dry_run {
+		Some(
+			crate::skills::lock::mutation_guard(
+				"delete skill by path",
+				request.scope,
+				request.project_root.as_deref(),
+			)
+			.map_err(ConfigError::Io)?,
+		)
+	} else {
+		None
+	};
+
+	// Re-check containment under the lock
+	if assert_strictly_contained(&skill_dir, &roots).is_none() {
+		return Err(ConfigError::InvalidConfig(
+			"Refusing to delete: resolved path is not strictly inside an allow-listed skills root"
+				.to_string(),
+		));
+	}
+
+	let skill_name = by_path_skill_name(&skill_dir)
+		.map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
+
+	let Some(first_agent) = target_agents.first().copied() else {
+		return Err(ConfigError::InvalidConfig(
+			"No valid agent was provided".to_string(),
+		));
+	};
+
+	let mut manager = create_manager(
+		first_agent,
+		request.scope,
+		request.project_root.as_deref(),
+	);
+	if let Err(error) = manager.load() {
+		return Err(ConfigError::InvalidConfig(format!(
+			"Failed to load agent skills: {error}"
+		)));
+	}
+
+	let path_is_link = crate::skills::linker::Linker::is_link(&skill_dir);
+	let canonical_layout = manager
+		.get_skill(&skill_name)
+		.and_then(|skill| skill.canonical_path.as_ref())
+		.is_some()
+		|| path_is_link;
+
+	if !canonical_layout {
+		let all_in_scope = agent_skill_dirs_in_scope(
+			request.scope,
+			request.project_root.as_deref(),
+		);
+		let keep_reason = single_agent_keep_reason(
+			&skill_dir,
+			&all_in_scope,
+			&skill_name,
+			request.project_root.as_deref(),
+			request.scope,
+			&target_agents,
+		);
+
+		if let Some(reason) = keep_reason {
+			let error = git_keep_hint(&reason, &skill_dir);
+			match reason {
+				KeepReason::ExternalReferrer(ref referrer) => {
+					log::warn!(
+						"keeping {}: {} still references it",
+						skill_dir.display(),
+						referrer.display()
+					);
+				}
+				KeepReason::GitTracked | KeepReason::GitUndecided => {
+					if let Some(hint) = &error {
+						log::warn!("{hint}");
+					}
+				}
+				KeepReason::UniversalMaster => {}
+			}
+
+			let reason_str = match &reason {
+				KeepReason::GitTracked => error
+					.clone()
+					.unwrap_or_else(|| "tracked by git".to_string()),
+				KeepReason::GitUndecided => {
+					error.clone().unwrap_or_else(|| "git undecided".to_string())
+				}
+				KeepReason::ExternalReferrer(ref p) => {
+					format!("external referrer {}", p.display())
+				}
+				KeepReason::UniversalMaster => {
+					let readers =
+						crate::skills::removal::skill_dir_readers_outside(
+							&skill_dir,
+							request.scope,
+							request.project_root.as_deref(),
+							&target_agents,
+						);
+					let where_ = skill_dir.display().to_string();
+					let mut r = format!(
+						"skill it reads from a location shared with other agents; it is still served to this agent from: {where_}"
+					);
+					if !readers.is_empty() {
+						let formatted = readers.join(", ");
+						r.push_str(&format!(
+							". Also read there by agents not in this request: {formatted}. Include them in the same request, or delete for every agent (--all-agents, which also unlinks it for them)"
+						));
+					}
+					r
+				}
+			};
+
+			if !request.dry_run {
+				let op = if request.all_agents {
+					"remove from every agent"
+				} else {
+					"remove for this agent alone"
+				};
+				return Err(ConfigError::unsupported_operation(
+					op,
+					&reason_str,
+					first_agent.as_str(),
+				));
+			}
+
+			let verdict = Verdict::Refused { reason: reason_str };
+			let rows = target_agents
+				.into_iter()
+				.map(|agent| {
+					let mut row = SkillRemovalRow::noop(
+						agent,
+						verdict.clone(),
+						crate::dto::RemovalKind::Kept,
+					);
+					row.skipped = vec![skill_dir.clone()];
+					row.error = error.clone();
+					row
+				})
+				.collect();
+
+			return Ok(SkillRemovalResponse {
+				rows,
+				prune: PruneStatus::NotRun,
+				keepers: Vec::new(),
+				unreadable: Vec::new(),
+				master_reclaimed: false,
+				would_reclaim_master: false,
+			});
+		}
+
+		let plan = assemble_copy_release_plan(
+			skill_dir,
+			&roots,
+			&all_in_scope,
+			&skill_name,
+			request.project_root.as_deref(),
+			request.scope,
+			&target_agents,
+		);
+
+		let outcome = if request.dry_run {
+			RemovalOutcome::preview(
+				plan,
+				Verdict::Removed,
+				request.scope,
+				request.project_root.as_deref(),
+				&skill_name,
+			)?
+		} else {
+			RemovalOutcome::commit(
+				plan,
+				&roots,
+				request.scope,
+				request.project_root.as_deref(),
+				&skill_name,
+			)?
+		};
+
+		let rows = target_agents
+			.into_iter()
+			.map(|agent| {
+				SkillRemovalRow::from_outcome(agent, &outcome, request.dry_run)
+			})
+			.collect();
+
+		return Ok(SkillRemovalResponse {
+			rows,
+			prune: outcome.prune,
+			keepers: Vec::new(),
+			unreadable: Vec::new(),
+			master_reclaimed: false,
+			would_reclaim_master: false,
+		});
+	}
+
+	let outcome = manager.remove_skill_planned_at_dir_for_agents(
+		&skill_name,
+		&skill_dir,
+		request.all_agents,
+		request.dry_run,
+		!request.dry_run,
+		&target_agents,
+	)?;
+
+	if !request.dry_run {
+		if let Verdict::Refused { ref reason } = outcome.verdict {
+			let op = if request.all_agents {
+				"remove from every agent"
+			} else {
+				"remove for this agent alone"
+			};
+			return Err(ConfigError::unsupported_operation(
+				op,
+				reason,
+				first_agent.as_str(),
+			));
+		}
+	}
+
+	let rows = target_agents
+		.into_iter()
+		.map(|agent| {
+			SkillRemovalRow::from_outcome(agent, &outcome, request.dry_run)
+		})
+		.collect();
+
+	Ok(SkillRemovalResponse {
+		rows,
+		prune: outcome.prune,
+		keepers: Vec::new(),
+		unreadable: Vec::new(),
+		master_reclaimed: false,
+		would_reclaim_master: false,
+	})
+}
+
+fn remove_skill_by_name(
+	request: &SkillRemovalRequest,
+	name: &str,
+) -> Result<SkillRemovalResponse> {
+	let target_entry: Option<&Path> = None;
+	let target_agents = request.agents.clone();
 
 	let (holders, unreadable) = if request.keeps_master {
 		(Vec::new(), Vec::new())
@@ -747,7 +1130,7 @@ pub fn remove_skill_batch(
 			.copied()
 			.collect()
 	} else {
-		request.agents.clone()
+		target_agents
 	};
 
 	let is_exhaustive = !request.keeps_master
@@ -826,8 +1209,11 @@ pub fn remove_skill_batch(
 			is_agent_exhaustive || request.all_agents,
 			true, // dry_run
 			true, // confirm
-			&target_agents,
-			&accumulated_deletions,
+			PlannedRemovalOptions {
+				target_entry,
+				requested_agents: &target_agents,
+				prior_deletions: &accumulated_deletions,
+			},
 		);
 
 		match plan_result {
@@ -845,8 +1231,11 @@ pub fn remove_skill_batch(
 								request.all_agents,
 								true, // dry_run
 								true, // confirm
-								&target_agents,
-								&accumulated_deletions,
+								PlannedRemovalOptions {
+									target_entry,
+									requested_agents: &target_agents,
+									prior_deletions: &accumulated_deletions,
+								},
 							)
 							.map(|o| o.plan.needs_confirm)
 							.unwrap_or(outcome.plan.needs_confirm)
@@ -1049,7 +1438,7 @@ pub fn remove_skill_batch(
 			.copied()
 			.collect()
 	} else {
-		request.agents.clone()
+		target_agents
 	};
 
 	let execution_order = shared_first_order(
@@ -1112,8 +1501,11 @@ pub fn remove_skill_batch(
 					request.all_agents,
 					true, // dry_run
 					true, // confirm
-					&in_lock_target_agents,
-					&[],
+					PlannedRemovalOptions {
+						target_entry,
+						requested_agents: &in_lock_target_agents,
+						prior_deletions: &[],
+					},
 				)
 				.map(|o| o.plan.needs_confirm)
 				.ok()
@@ -1125,8 +1517,11 @@ pub fn remove_skill_batch(
 			is_agent_exhaustive || request.all_agents,
 			false, // dry_run
 			true,  // confirm
-			&in_lock_target_agents,
-			&[],
+			PlannedRemovalOptions {
+				target_entry,
+				requested_agents: &in_lock_target_agents,
+				prior_deletions: &[],
+			},
 		);
 
 		match res {

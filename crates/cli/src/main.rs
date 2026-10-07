@@ -2157,6 +2157,7 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 						all_agents,
 						prior_removed_paths: Vec::new(),
 						keeps_master: false,
+						plugin_owner: None,
 					};
 				// Skill delete goes through core's batch removal entry to ensure
 				// order-independent removal across shared and private readers.

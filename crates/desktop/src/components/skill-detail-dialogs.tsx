@@ -18,7 +18,10 @@ import type { SkillResponse } from "../generated/dto";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
-import { keptDeleteMessage } from "../lib/skill-delete-message";
+import {
+	keptDeleteMessage,
+	keptDeleteMessageFromError,
+} from "../lib/skill-delete-message";
 import { splitDeleteTargets } from "../lib/skill-delete-targets";
 import {
 	failedReconcileRowsMessage,
@@ -81,31 +84,49 @@ export function DeleteSkillLocationDialog({
 				return;
 			}
 
-			const result = await api.skills.deleteByPath(deleteRequest);
+			try {
+				const result = await api.skills.deleteByPath(deleteRequest);
 
-			if (result.outcome === "kept") {
-				// The `.agents/skills` master is shared and another agent still
-				// reads it, so NOTHING was removed. `success` is true here (the
-				// request was understood), and reading only that closed this
-				// dialog and refreshed the list as if the skill were gone —
-				// while it was still installed and still visible.
-				//
-				// Never `result.error ||` here: that is English, set only by a
-				// git refusal, and it overrode the localized text.
-				throw new Error(keptDeleteMessage(result, skillName, t));
-			}
-			if (result.outcome === "partial") {
-				// Some paths went, some did not. Still an error for the user —
-				// the skill is not gone — but the list MUST be refreshed,
-				// because part of it really was removed. Throwing without
-				// invalidating would leave stale entries on screen.
-				await invalidateSkillQueries(queryClient);
-				throw new Error(t("deleteSkillPartial", { name: skillName }));
-			}
-			if (result.outcome !== "removed" && result.outcome !== "absent") {
-				// `absent` is a success for a delete: the post-condition
-				// ("the skill is gone") already holds.
-				throw new Error(result.error || t("failedToDeleteSkill"));
+				if (result.outcome === "kept") {
+					// The `.agents/skills` master is shared and another agent still
+					// reads it, so NOTHING was removed. `success` is true here (the
+					// request was understood), and reading only that closed this
+					// dialog and refreshed the list as if the skill were gone —
+					// while it was still installed and still visible.
+					//
+					// Never `result.error ||` here: that is English, set only by a
+					// git refusal, and it overrode the localized text.
+					throw new Error(keptDeleteMessage(result, skillName, t));
+				}
+				if (result.outcome === "partial") {
+					// Some paths went, some did not. Still an error for the user —
+					// the skill is not gone — but the list MUST be refreshed,
+					// because part of it really was removed. Throwing without
+					// invalidating would leave stale entries on screen.
+					await invalidateSkillQueries(queryClient);
+					throw new Error(
+						t("deleteSkillPartial", { name: skillName }),
+					);
+				}
+				if (
+					result.outcome !== "removed" &&
+					result.outcome !== "absent"
+				) {
+					// `absent` is a success for a delete: the post-condition
+					// ("the skill is gone") already holds.
+					throw new Error(result.error || t("failedToDeleteSkill"));
+				}
+			} catch (error) {
+				const keptMsg = keptDeleteMessageFromError(
+					error,
+					skillName,
+					deleteRequest.source_path,
+					t,
+				);
+				if (keptMsg) {
+					throw new Error(keptMsg);
+				}
+				throw error;
 			}
 		},
 		onSuccess: async () => {

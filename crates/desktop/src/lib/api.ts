@@ -98,9 +98,17 @@ export function bulkApplyTimeoutMs(count: number): number {
 	return Math.min(120_000 + count * 30_000, 900_000);
 }
 
-interface ApiErrorBody {
+export interface ApiErrorBody {
 	error?: string;
 	code?: string;
+}
+
+export function getApiErrorCode(error: unknown): string | undefined {
+	if (isHTTPError(error) && error.data && typeof error.data === "object") {
+		const body = error.data as ApiErrorBody;
+		return body.code;
+	}
+	return undefined;
 }
 
 /**

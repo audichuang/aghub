@@ -105,90 +105,6 @@ fn resolve_source_path(sp: &str) -> PathBuf {
 	}
 }
 
-/// Remove a skill's file or directory from disk.
-///
-/// `path` is the SKILL.md location resolved from `source_path`:
-/// - Copy layout: `path` is `<target_dir>/<safe_name>/SKILL.md` (a real file).
-/// - Universal layout: `path` is the canonical's SKILL.md (e.g.
-///   `<project>/.aghub/<safe_name>/SKILL.md`); the per-agent symlink
-///   that needs to be unlinked lives at `<target_dir>/<safe_name>`.
-///
-/// Universal skills leave the Master intact (other agents or `npx skills` may
-/// reference it); removing it goes via [`ConfigManager::remove_skill_planned`].
-// Kept only for its containment tests until the by-path entry (A6) takes over.
-#[cfg_attr(not(test), allow(dead_code))]
-fn remove_skill_path(
-	path: &Path,
-	safe_name: &str,
-	is_link: bool,
-	target_dir: Option<&Path>,
-	roots: &[PathBuf],
-) -> Result<()> {
-	if is_link {
-		// Universal layout: the symlink at `<target_dir>/<safe_name>` is what
-		// should disappear. `path.parent()` is the canonical dir (a real
-		// directory), not a link, so unlink via the target_dir-resolved path.
-		if let Some(target) = target_dir {
-			let link = target.join(safe_name);
-			let needs_unlink = Linker::is_link(&link);
-			if needs_unlink {
-				Linker::unlink(&link).map_err(|e| {
-					ConfigError::Io(std::io::Error::new(
-						e.kind(),
-						format!(
-							"Failed to remove link '{}': {}",
-							link.display(),
-							e
-						),
-					))
-				})?;
-			}
-		}
-		// Idempotent: if the link is already gone (or was never created),
-		// symlink_metadata returns NotFound and we leave the canonical alone.
-		return Ok(());
-	}
-
-	let Some(parent) = path.parent() else {
-		return std::fs::remove_file(path).map_err(|e| e.into());
-	};
-
-	let is_named_dir =
-		parent.file_name().and_then(|n| n.to_str()) == Some(safe_name);
-	if is_named_dir {
-		// Containment guard: never `remove_dir_all` a directory that escapes the
-		// allow-listed skill roots (canonicalize-escape protection), mirroring
-		// the planned-removal path.
-		if crate::skills::removal::assert_contained(parent, roots).is_none() {
-			return Err(ConfigError::Io(std::io::Error::new(
-				std::io::ErrorKind::PermissionDenied,
-				format!(
-					"Refusing to remove '{}': outside allow-listed skill roots",
-					parent.display()
-				),
-			)));
-		}
-		std::fs::remove_dir_all(parent).map_err(|e| {
-			ConfigError::Io(std::io::Error::new(
-				e.kind(),
-				format!(
-					"Failed to remove directory '{}': {}",
-					parent.display(),
-					e
-				),
-			))
-		})?;
-	} else {
-		std::fs::remove_file(path).map_err(|e| {
-			ConfigError::Io(std::io::Error::new(
-				e.kind(),
-				format!("Failed to remove file '{}': {}", path.display(), e),
-			))
-		})?;
-	}
-	Ok(())
-}
-
 impl ConfigManager {
 	/// Take the interprocess mutation lock for `scope` AND re-read this manager's
 	/// config under it — the two are one step on purpose.
@@ -588,10 +504,10 @@ impl SkillPatch {
 
 /// Parameter bundle for [`ConfigManager::remove_skill_planned_inner`].
 #[derive(Clone, Copy)]
-struct PlannedRemovalOptions<'a> {
-	target_entry: Option<&'a std::path::Path>,
-	requested_agents: &'a [crate::models::AgentType],
-	prior_deletions: &'a [std::path::PathBuf],
+pub(crate) struct PlannedRemovalOptions<'a> {
+	pub(crate) target_entry: Option<&'a std::path::Path>,
+	pub(crate) requested_agents: &'a [crate::models::AgentType],
+	pub(crate) prior_deletions: &'a [std::path::PathBuf],
 }
 
 impl ConfigManager {
@@ -652,19 +568,10 @@ impl ConfigManager {
 		all_agents: bool,
 		dry_run: bool,
 		confirm: bool,
-		requested_agents: &[crate::models::AgentType],
-		prior_deletions: &[std::path::PathBuf],
+		options: PlannedRemovalOptions<'_>,
 	) -> Result<crate::skills::removal::RemovalOutcome> {
 		self.remove_skill_planned_inner(
-			name,
-			all_agents,
-			dry_run,
-			confirm,
-			PlannedRemovalOptions {
-				target_entry: None,
-				requested_agents,
-				prior_deletions,
-			},
+			name, all_agents, dry_run, confirm, options,
 		)
 	}
 
@@ -680,7 +587,7 @@ impl ConfigManager {
 		confirm: bool,
 		requested_agents: &[crate::models::AgentType],
 	) -> Result<crate::skills::removal::RemovalOutcome> {
-		self.remove_skill_planned_inner(
+		self.remove_skill_planned_for_agents_with_prior(
 			name,
 			all_agents,
 			dry_run,

@@ -166,6 +166,7 @@ fn test_removal_ordering_independence() {
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
+			plugin_owner: None,
 		};
 		remove_skill_batch(&req_a)
 			.expect("order_shared_first batch should succeed")
@@ -186,6 +187,7 @@ fn test_removal_ordering_independence() {
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
+			plugin_owner: None,
 		};
 		remove_skill_batch(&req_b)
 			.expect("order_private_first batch should succeed")
@@ -279,6 +281,7 @@ fn test_prior_row_credit_turns_refused_into_removed() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_without = remove_skill_batch(&req_without_credit).unwrap();
 	assert!(
@@ -296,6 +299,7 @@ fn test_prior_row_credit_turns_refused_into_removed() {
 		all_agents: false,
 		prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_with = remove_skill_batch(&req_with_credit).unwrap();
 	assert_eq!(
@@ -333,6 +337,7 @@ fn test_internal_accumulation_credits_later_row() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_alone = remove_skill_batch(&req_alone).unwrap();
 	assert!(
@@ -353,6 +358,7 @@ fn test_internal_accumulation_credits_later_row() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_batch = remove_skill_batch(&req_batch).unwrap();
 	let amp_row = res_batch
@@ -398,6 +404,7 @@ fn test_whole_batch_preflight_rejection_writes_nothing() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 
 	let err = remove_skill_batch(&req).unwrap_err();
@@ -452,6 +459,7 @@ fn test_disabled_agent_removal_behavior() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_unnamed = remove_skill_batch(&req_unnamed).unwrap();
 	assert_eq!(res_unnamed.rows[0].verdict, Verdict::Removed);
@@ -471,6 +479,7 @@ fn test_disabled_agent_removal_behavior() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_disabled = remove_skill_batch(&req_all_disabled).unwrap();
 	assert!(res_disabled.rows.is_empty());
@@ -492,6 +501,7 @@ fn test_disabled_agent_removal_behavior() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_named = remove_skill_batch(&req_named).unwrap();
 	assert_eq!(res_named.rows[0].verdict, Verdict::Removed);
@@ -513,6 +523,7 @@ fn test_disabled_agent_removal_behavior() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_enabled = remove_skill_batch(&req_all_enabled).unwrap();
 	assert_eq!(res_enabled.rows.len(), 1);
@@ -548,6 +559,7 @@ fn test_master_gc_and_prune_failure_reported_independently() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res1 = remove_skill_batch(&req1).unwrap();
 	assert_eq!(res1.rows[0].verdict, Verdict::Removed);
@@ -570,6 +582,7 @@ fn test_master_gc_and_prune_failure_reported_independently() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res2 = remove_skill_batch(&req2).unwrap();
 	assert_eq!(res2.rows[0].verdict, Verdict::Removed);
@@ -623,6 +636,7 @@ fn test_preview_does_not_take_write_lock() {
 		all_agents: false,
 		prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
 		keeps_master: false,
+		plugin_owner: None,
 	};
 
 	let (preview_tx, preview_rx) = std::sync::mpsc::channel();
@@ -651,6 +665,7 @@ fn test_preview_does_not_take_write_lock() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_commit =
 		remove_skill_batch(&req_commit).expect("commit should succeed");
@@ -698,6 +713,7 @@ fn test_commit_follows_replan_after_disk_state_changes() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 
 	// Spawn commit thread.
@@ -790,6 +806,7 @@ fn test_in_lock_replan_refuses_when_holder_becomes_unreadable() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 
 	let (commit_tx, commit_rx) = std::sync::mpsc::channel();
@@ -853,6 +870,7 @@ fn test_dry_run_reports_preflight_failure_in_row_error() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 
 	let res = remove_skill_batch(&req).unwrap();
@@ -896,6 +914,7 @@ fn test_commit_mode_ignores_prior_removed_paths() {
 		all_agents: false,
 		prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	// In commit mode, prior_removed_paths is ignored so preflight fails because .agents/skills/notebooklm actually exists on disk.
 	let err = remove_skill_batch(&req).unwrap_err();
@@ -930,6 +949,7 @@ fn test_keeps_master_skips_unreadable_holder_scan_refusal() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	assert!(remove_skill_batch(&req_false).is_err());
 
@@ -943,6 +963,7 @@ fn test_keeps_master_skips_unreadable_holder_scan_refusal() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: true,
+		plugin_owner: None,
 	};
 	let res = remove_skill_batch(&req_true)
 		.expect("keeps_master skips unreadable scan refusal");
@@ -989,6 +1010,7 @@ fn test_in_lock_replan_holder_appearing_with_all_agents() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 
 	let (commit_tx, commit_rx) = std::sync::mpsc::channel();
@@ -1218,6 +1240,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let resp_preview = remove_skill_batch(&req_preview).unwrap();
 	assert!(resp_preview.would_reclaim_master);
@@ -1241,6 +1264,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let resp_non_exhaustive = remove_skill_batch(&req_non_exhaustive).unwrap();
 	assert!(!resp_non_exhaustive.would_reclaim_master);
@@ -1268,6 +1292,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let resp_exhaustive = remove_skill_batch(&req_exhaustive).unwrap();
 	assert!(!resp_exhaustive.would_reclaim_master);
@@ -1326,6 +1351,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_without = remove_skill_batch(&req_without).unwrap();
 	assert!(
@@ -1344,6 +1370,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_preview = remove_skill_batch(&req_preview).unwrap();
 	assert_eq!(
@@ -1367,6 +1394,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
+		plugin_owner: None,
 	};
 	let res_with = remove_skill_batch(&req_with).unwrap();
 	assert_eq!(
@@ -1446,4 +1474,263 @@ fn test_to_single_view_dry_run_propagates_plan_error() {
 		.to_single_view(true)
 		.expect_err("dry run must propagate plan error");
 	assert!(matches!(err, ConfigError::UnsupportedOperation { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_by_path_matches_by_name_verdict_on_shared_slot() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+
+	let slot = root.join(".agents/skills/shared");
+	fs::create_dir_all(&slot).unwrap();
+	fs::write(
+		slot.join("SKILL.md"),
+		"---\nname: shared\ndescription: shared skill\n---\n",
+	)
+	.unwrap();
+
+	// Cursor and OpenCode both read .agents/skills in project scope.
+	let req_name = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName("shared".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Cursor],
+		dry_run: true,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let res_name = remove_skill_batch(&req_name).unwrap();
+
+	let req_path = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(slot.join("SKILL.md")),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Cursor],
+		dry_run: true,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let res_path = remove_skill_batch(&req_path).unwrap();
+
+	assert_eq!(res_name.rows.len(), 1);
+	assert_eq!(res_path.rows.len(), 1);
+	assert_eq!(res_name.rows[0].verdict, res_path.rows[0].verdict);
+	assert!(
+		matches!(res_path.rows[0].verdict, Verdict::Refused { .. }),
+		"verdict must be Refused, got {:?}",
+		res_path.rows[0].verdict
+	);
+	assert!(res_path.rows[0].verdict.shared_master_kept());
+	assert!(slot.join("SKILL.md").exists(), "dry run must not delete");
+
+	// Both must fail on commit with unsupported operation
+	let mut commit_name = req_name.clone();
+	commit_name.dry_run = false;
+	let err_name = remove_skill_batch(&commit_name).unwrap_err();
+
+	let mut commit_path = req_path.clone();
+	commit_path.dry_run = false;
+	let err_path = remove_skill_batch(&commit_path).unwrap_err();
+
+	assert!(matches!(err_name, ConfigError::UnsupportedOperation { .. }));
+	assert!(matches!(err_path, ConfigError::UnsupportedOperation { .. }));
+}
+
+#[test]
+fn test_by_path_refuses_dir_outside_allowed_roots() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let outside = temp.path().join("outside/foo");
+	fs::create_dir_all(&outside).unwrap();
+	fs::write(outside.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(outside.join("SKILL.md")),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let res = remove_skill_batch(&req);
+	assert!(res.is_err(), "must refuse to remove a dir outside roots");
+	assert!(outside.exists(), "out-of-root dir must survive");
+}
+
+#[test]
+fn test_by_path_removes_contained_dir() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let skills = root.join(".claude/skills");
+	let foo = skills.join("foo");
+	fs::create_dir_all(&foo).unwrap();
+	fs::write(
+		foo.join("SKILL.md"),
+		"---\nname: foo\ndescription: f\n---\n",
+	)
+	.unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(foo.join("SKILL.md")),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let res = remove_skill_batch(&req);
+	assert!(
+		res.is_ok(),
+		"contained skill dir should be removed: {:?}",
+		res
+	);
+	assert!(!foo.exists(), "a contained skill dir is removed normally");
+}
+
+#[cfg(windows)]
+#[test]
+fn test_by_path_unlinks_junction_keeps_master() {
+	use crate::skills::linker::create_junction;
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let master = root.join(".aghub/foo");
+	fs::create_dir_all(&master).unwrap();
+	fs::write(master.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+
+	let claude = root.join(".claude/skills");
+	fs::create_dir_all(&claude).unwrap();
+	let claude_link = claude.join("foo");
+	let abs_master = master.canonicalize().unwrap();
+	create_junction(&abs_master, &claude_link).unwrap();
+
+	// A second reader (cursor) keeps the Master alive
+	let cursor = root.join(".cursor/skills");
+	fs::create_dir_all(&cursor).unwrap();
+	let cursor_link = cursor.join("foo");
+	create_junction(&abs_master, &cursor_link).unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(claude_link.join("SKILL.md")),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	remove_skill_batch(&req).unwrap();
+
+	assert!(
+		fs::symlink_metadata(&claude_link).is_err(),
+		"junction must be unlinked"
+	);
+	assert!(
+		master.join("SKILL.md").exists(),
+		"shared Master must survive (remove_dir, not remove_dir_all)"
+	);
+}
+
+#[test]
+fn test_by_path_refuses_dotdot_escape() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let skills = root.join(".claude/skills");
+	fs::create_dir_all(&skills).unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(skills.join("../outside/foo")),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: true,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let res = remove_skill_batch(&req);
+	assert!(res.is_err(), "must refuse .. escaping roots");
+}
+
+#[test]
+fn test_by_path_refuses_skills_root_itself() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let skills = root.join(".claude/skills");
+	fs::create_dir_all(&skills).unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(skills.clone()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: true,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let res = remove_skill_batch(&req);
+	assert!(res.is_err(), "must refuse skills root itself");
+	assert!(skills.exists(), "skills root must survive");
+}
+
+#[test]
+fn test_by_path_refuses_plugin_owned_skill_leaving_disk_unchanged() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let skills = root.join(".claude/skills");
+	let plugin_skill = skills.join("my-plugin-skill");
+	fs::create_dir_all(&plugin_skill).unwrap();
+	fs::write(
+		plugin_skill.join("SKILL.md"),
+		"---\nname: my-plugin-skill\n---\n",
+	)
+	.unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(plugin_skill.join("SKILL.md")),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: Some("claude-official-plugin".to_string()),
+	};
+	let res = remove_skill_batch(&req);
+	assert!(res.is_err(), "must refuse plugin-owned skill");
+	assert!(
+		plugin_skill.join("SKILL.md").exists(),
+		"disk must remain unchanged"
+	);
 }

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 // No FE test runner (no vitest/jest) is installed here; use Node's built-in
 // runner (`node --test --experimental-strip-types`), same as the sibling tests.
 import { test } from "node:test";
-import { bulkApplyTimeoutMs, createApi } from "./api.ts";
+import { HTTPError } from "ky";
+import { bulkApplyTimeoutMs, createApi, getApiErrorCode } from "./api.ts";
 
 // Regression guard for the v2.4.0 desktop P0: the delete endpoints gate on
 // `?confirm=true` (the backend does `confirm.unwrap_or(false)` => dry-run).
@@ -193,4 +194,75 @@ test("the bulk apply timeout scales with the batch and stays finite", () => {
 	// unsettling request leaves the UI unable to report anything at all.
 	assert.equal(bulkApplyTimeoutMs(26), 900_000);
 	assert.equal(bulkApplyTimeoutMs(500), 900_000);
+});
+
+test("skills.deleteByPath sends body to /skills/by-path", async () => {
+	const original = globalThis.fetch;
+	const calls: Array<{
+		url: URL;
+		method: string;
+		body: unknown;
+	}> = [];
+	globalThis.fetch = (async (
+		input: RequestInfo | URL,
+		init?: RequestInit,
+	) => {
+		const request =
+			input instanceof Request ? input : new Request(input, init);
+		calls.push({
+			url: new URL(request.url),
+			method: request.method,
+			body: await request.clone().json(),
+		});
+		return new Response(
+			JSON.stringify({ outcome: "removed", success: true }),
+			{
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+	}) as typeof fetch;
+	try {
+		const response = await createApi(
+			"http://api.test/",
+		).skills.deleteByPath({
+			source_path: "/project/.claude/skills/demo",
+			agents: ["claude"],
+			scope: "project",
+			project_root: null,
+			confirm: true,
+		});
+		assert.equal(response.outcome, "removed");
+	} finally {
+		globalThis.fetch = original;
+	}
+
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].url.pathname, "/skills/by-path");
+	assert.equal(calls[0].method, "DELETE");
+	assert.deepEqual(calls[0].body, {
+		source_path: "/project/.claude/skills/demo",
+		agents: ["claude"],
+		scope: "project",
+		project_root: null,
+		confirm: true,
+	});
+});
+
+test("getApiErrorCode extracts wire code from HTTPError data", () => {
+	const err = new HTTPError(
+		new Response(null, { status: 422 }),
+		new Request("http://x"),
+		{} as any,
+	);
+	err.data = { code: "UNSUPPORTED_OPERATION", error: "preflight failed" };
+	assert.equal(getApiErrorCode(err), "UNSUPPORTED_OPERATION");
+
+	const errNoData = new HTTPError(
+		new Response(null, { status: 500 }),
+		new Request("http://x"),
+		{} as any,
+	);
+	assert.equal(getApiErrorCode(errNoData), undefined);
+	assert.equal(getApiErrorCode(new Error("oops")), undefined);
 });
