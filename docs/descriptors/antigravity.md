@@ -9,7 +9,7 @@ Antigravity's vendor docs moved the global customization root to
 `~/.gemini/config/` — skills live at `~/.gemini/config/skills/<name>/SKILL.md`,
 and that dir is shared by Antigravity 2.0, the IDE and the CLI. It is the WRITE
 dir and goes FIRST: `load_skills_from_dirs` dedups first-dir-wins and the
-winner becomes `source_path`, i.e. the path `remove_skill` deletes and `check`
+winner becomes `source_path`, i.e. the path `remove_skill_planned` deletes and `check`
 hashes.
 
 Two older dirs stay READ-ONLY so nothing a shipped aghub installed is stranded:

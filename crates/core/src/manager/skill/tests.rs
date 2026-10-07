@@ -508,7 +508,7 @@ fn remove_skill_planned_unlinks_symlink_and_gcs_last_master() {
 
 #[cfg(unix)]
 #[test]
-fn remove_skill_universal_idempotent_when_symlink_already_gone() {
+fn remove_skill_planned_reports_not_found_when_symlink_already_gone() {
 	use crate::create_adapter;
 	use crate::models::AgentType;
 
@@ -532,6 +532,9 @@ fn remove_skill_universal_idempotent_when_symlink_already_gone() {
 	std::fs::remove_file(&link).unwrap();
 	assert!(!link.exists());
 
+	// When the caller's symlink is already gone, planned removal discovers
+	// no skill entry for the target agent and reports ResourceNotFound.
+	// The Master in .aghub remains untouched.
 	let err = mgr
 		.remove_skill_planned("rm-idem", false, false, true)
 		.expect_err(
@@ -617,6 +620,23 @@ fn remove_skill_preserves_canonical_for_multi_agent_ref() {
 			.iter()
 			.any(|s| s.name == "multi-ref"),
 		"Cursor retained its own grant and must still see it"
+	);
+
+	// An agent that was NEVER granted the skill (Kiro reads only .kiro/skills,
+	// not .agents/skills or the Master) still does not see it — the Master
+	// surviving is about the store retaining bytes, not silent inheritance.
+	let mut mgr4 =
+		ConfigManager::new(create_adapter(AgentType::Kiro), false, Some(root));
+	mgr4.load().unwrap();
+	assert!(
+		!mgr4
+			.config
+			.as_ref()
+			.unwrap()
+			.skills
+			.iter()
+			.any(|s| s.name == "multi-ref"),
+		"an agent never granted multi-ref must not see it"
 	);
 }
 
@@ -4277,7 +4297,7 @@ fn real_dir_keeps_and_refuses_when_link_belongs_to_unrequested_agent() {
 
 #[cfg(unix)]
 #[test]
-fn real_dir_empty_request_fails_closed() {
+fn planned_removal_rejects_request_omitting_target_agent() {
 	let _env = crate::skills::prune::test_lock::env_lock()
 		.lock()
 		.unwrap_or_else(|e| e.into_inner());
@@ -4286,21 +4306,15 @@ fn real_dir_empty_request_fails_closed() {
 
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
-	std::fs::create_dir_all(root.join(".claude")).unwrap();
 
 	let name = "x";
-	let skill_dir = root.join(".agents/skills").join(name);
+	let skill_dir = root.join(".cursor/skills").join(name);
 	std::fs::create_dir_all(&skill_dir).unwrap();
 	std::fs::write(
 		skill_dir.join("SKILL.md"),
 		"---\nname: x\ndescription: test\n---\n",
 	)
 	.unwrap();
-
-	// Disable ALL agents
-	let disabled: Vec<&str> =
-		AgentType::ALL.iter().map(|a| a.as_str()).collect();
-	let _agent_guard = crate::agent_settings::test_override::disable(&disabled);
 
 	let mut cursor = ConfigManager::new(
 		create_adapter(AgentType::Cursor),
@@ -4309,10 +4323,14 @@ fn real_dir_empty_request_fails_closed() {
 	);
 	cursor.load().unwrap();
 
+	// Direct unit tests for the empty-requested branch in single_agent_keep_reason
+	// (shared-root fail-closed behavior) live in crates/core/src/skills/removal.rs
+	// (~L2866, L2951). At the ConfigManager layer, a request that omits the target
+	// agent is rejected immediately by the guard in remove_skill_planned_inner.
 	let err = cursor
 		.remove_skill_planned_for_agents(name, false, false, true, &[])
 		.expect_err(
-			"remove_skill_planned with empty requested must fail closed",
+			"planned removal must reject a request that omits the target agent",
 		);
 
 	assert!(
@@ -4322,7 +4340,7 @@ fn real_dir_empty_request_fails_closed() {
 
 	assert!(
 		skill_dir.exists(),
-		"real directory must still exist after failed removal, err: {err}"
+		"skill directory must still exist after rejected request, err: {err}"
 	);
 }
 

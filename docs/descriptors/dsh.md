@@ -20,7 +20,7 @@ From the upstream README's table. Lower rank wins a duplicate name:
 The PRIVATE `.dsh` slot outranks the shared `.agents` one at BOTH scopes, so a
 grant written there wins discovery. That is also aghub's own convention
 (`load_skills_from_dirs` is first-dir-wins and the winner becomes
-`source_path`, the path `remove_skill` deletes and `check` hashes), so the
+`source_path`, the path `remove_skill_planned` deletes and `check` hashes), so the
 write dir goes first in every read list.
 
 ## Why `universal: false`
