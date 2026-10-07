@@ -1072,7 +1072,7 @@ pub async fn delete_skill(
 			still_read_by,
 			still_read_by_managed,
 			still_read_by_unmanaged,
-			code: single.code.map(|s| s.to_string()),
+			code: None,
 		}))
 	})
 	.await
@@ -3148,6 +3148,87 @@ mod tests {
 				"opencode must not lose a skill because cursor asked to drop \
 				 that location"
 			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_absent_has_no_code_and_by_path_refused_preview_has_code()
+	{
+		with_isolated_env(|home, _state| {
+			let proj = home;
+			let slot = proj.join(".agents/skills/shared");
+			std::fs::create_dir_all(&slot).unwrap();
+			std::fs::write(
+				slot.join("SKILL.md"),
+				"---\nname: shared\ndescription: d\n---\n",
+			)
+			.unwrap();
+
+			// 1. By-name idempotent-absent delete answers outcome Absent and code None.
+			let absent = block_on(delete_skill(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cursor),
+				"does-not-exist",
+				DeleteSkillParams {
+					scope: Some("project".to_string()),
+					project_root: Some(proj.display().to_string()),
+					confirm: Some(true),
+					all_agents: None,
+					agents: Some("cursor".to_string()),
+				},
+			))
+			.ok()
+			.expect("by-name absent delete must succeed idempotently")
+			.into_inner();
+			assert_eq!(
+				absent.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Absent
+			);
+			assert_eq!(absent.code, None);
+
+			// 2. By-name refused preview answers outcome Kept and code None.
+			let by_name_preview = block_on(delete_skill(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cursor),
+				"shared",
+				DeleteSkillParams {
+					scope: Some("project".to_string()),
+					project_root: Some(proj.display().to_string()),
+					confirm: None,
+					all_agents: None,
+					agents: Some("cursor".to_string()),
+				},
+			))
+			.ok()
+			.expect("by-name preview returns ok")
+			.into_inner();
+			assert_eq!(
+				by_name_preview.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Kept
+			);
+			assert_eq!(by_name_preview.code, None);
+
+			// 3. By-path refused preview answers outcome Kept and code UNSUPPORTED_OPERATION.
+			let preview = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(DeleteSkillByPathRequest {
+					source_path: slot.join("SKILL.md").display().to_string(),
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: None,
+				}),
+			))
+			.ok()
+			.expect("by-path preview returns ok")
+			.into_inner();
+			assert_eq!(
+				preview.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Kept
+			);
+			assert_eq!(preview.code.as_deref(), Some("UNSUPPORTED_OPERATION"));
 		});
 	}
 

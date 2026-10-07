@@ -510,18 +510,16 @@ impl SkillRemovalResponse {
 		};
 
 		let code = self.rows.iter().find_map(|r| {
-			if let Some(ref err) = r.typed_error {
-				return Some(crate::error_codes::wire_code(err));
-			}
-			if matches!(r.verdict, Verdict::Refused { .. }) {
-				return Some(crate::error_codes::wire_code(
+			if dry_run && matches!(r.verdict, Verdict::Refused { .. }) {
+				Some(crate::error_codes::wire_code(
 					&ConfigError::UnsupportedOperation {
 						message: String::new(),
 						rejected_targets: None,
 					},
-				));
+				))
+			} else {
+				None
 			}
-			None
 		});
 
 		Ok(SingleSkillRemovalView {

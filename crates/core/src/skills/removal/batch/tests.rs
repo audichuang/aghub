@@ -1443,6 +1443,7 @@ fn test_to_single_view_on_partial_row_projects_success_false() {
 		crate::dto::RemovalKind::Partial
 	);
 	assert_eq!(single.removal_view.paths, vec!["/a/b".to_string()]);
+	assert_eq!(single.code, None);
 }
 
 #[test]
@@ -1565,8 +1566,17 @@ fn test_by_path_refuses_dir_outside_allowed_roots() {
 		keeps_master: false,
 		plugin_owner: None,
 	};
-	let res = remove_skill_batch(&req);
-	assert!(res.is_err(), "must refuse to remove a dir outside roots");
+	let err = remove_skill_batch(&req)
+		.expect_err("must refuse to remove a dir outside roots");
+	match err {
+		ConfigError::InvalidConfig(msg) => {
+			assert!(
+				msg.contains("not strictly inside an allow-listed skills root"),
+				"unexpected error message: {msg}"
+			);
+		}
+		other => panic!("expected InvalidConfig, got {other:?}"),
+	}
 	assert!(outside.exists(), "out-of-root dir must survive");
 }
 
@@ -1660,20 +1670,42 @@ fn test_by_path_refuses_dotdot_escape() {
 	let root = temp.path().join("project");
 	let skills = root.join(".claude/skills");
 	fs::create_dir_all(&skills).unwrap();
+	let outside = temp.path().join("outside/foo");
+	fs::create_dir_all(&outside).unwrap();
+	fs::write(
+		outside.join("SKILL.md"),
+		"---\nname: foo\ndescription: f\n---\n",
+	)
+	.unwrap();
 
 	let req = SkillRemovalRequest {
-		target: SkillRemovalTarget::ByPath(skills.join("../outside/foo")),
+		target: SkillRemovalTarget::ByPath(
+			skills.join("../../../outside/foo/SKILL.md"),
+		),
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(root.clone()),
 		agents: vec![AgentType::Claude],
-		dry_run: true,
+		dry_run: false,
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
 		plugin_owner: None,
 	};
-	let res = remove_skill_batch(&req);
-	assert!(res.is_err(), "must refuse .. escaping roots");
+	let err =
+		remove_skill_batch(&req).expect_err("must refuse .. escaping roots");
+	match err {
+		ConfigError::InvalidConfig(msg) => {
+			assert!(
+				msg.contains("must not contain '..'"),
+				"expected 'must not contain ..' error, got {msg}"
+			);
+		}
+		other => panic!("expected InvalidConfig, got {other:?}"),
+	}
+	assert!(
+		outside.join("SKILL.md").exists(),
+		"outside skill must survive"
+	);
 }
 
 #[test]
@@ -1701,15 +1733,30 @@ fn test_by_path_refuses_skills_root_itself() {
 		keeps_master: false,
 		plugin_owner: None,
 	};
-	let preview_res = remove_skill_batch(&req);
-	assert!(
-		preview_res.is_err(),
-		"must refuse skills root itself in dry-run"
-	);
+	let preview_err = remove_skill_batch(&req)
+		.expect_err("must refuse skills root itself in dry-run");
+	match preview_err {
+		ConfigError::InvalidConfig(msg) => {
+			assert!(
+				msg.contains("not strictly inside an allow-listed skills root"),
+				"unexpected error message: {msg}"
+			);
+		}
+		other => panic!("expected InvalidConfig, got {other:?}"),
+	}
 
 	req.dry_run = false;
-	let res = remove_skill_batch(&req);
-	assert!(res.is_err(), "must refuse skills root itself in commit");
+	let res = remove_skill_batch(&req)
+		.expect_err("must refuse skills root itself in commit");
+	match res {
+		ConfigError::InvalidConfig(msg) => {
+			assert!(
+				msg.contains("not strictly inside an allow-listed skills root"),
+				"unexpected error message: {msg}"
+			);
+		}
+		other => panic!("expected InvalidConfig, got {other:?}"),
+	}
 	assert!(skills.exists(), "skills root must survive");
 	assert!(
 		skills.join("SKILL.md").exists(),
