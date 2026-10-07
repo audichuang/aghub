@@ -913,17 +913,14 @@ impl ConfigManager {
 		);
 		// Execute + fold the real result back into the plan + reconcile the
 		// per-scope lock, through the ONE producer both surfaces use.
-		let mut outcome = removal::RemovalOutcome::commit(
+		let outcome = removal::RemovalOutcome::commit(
 			plan,
 			&roots,
 			scope,
 			project_root.as_deref(),
 			name,
 		)?;
-
-		if outcome.failed_paths.is_empty() {
-			outcome.verdict = verdict;
-		}
+		debug_assert_eq!(verdict, removal::verdict::Verdict::Removed);
 
 		// Skills are disk-derived; drop the in-memory view (save_current persists
 		// MCPs, not skills, so this is a best-effort cache update).

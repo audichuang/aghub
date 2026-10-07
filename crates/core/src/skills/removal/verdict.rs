@@ -664,6 +664,7 @@ mod tests {
 			.remove_skill_planned("kept-skill", true, false, true)
 			.unwrap();
 		assert_eq!(preview.verdict, commit.verdict);
+		assert!(!commit.executed, "commit executed must be false when kept");
 		assert!(
 			aghub_dir.exists(),
 			"commit must not delete kept shared skill"
@@ -727,15 +728,15 @@ mod tests {
 	/// disabled agents) cause `--all-agents` removal to be refused.
 	///
 	/// Note on `Holder.managed == false`:
-	/// On a real filesystem through `remove_skill_planned`, an unmanaged holder
-	/// can never produce `Verdict::Kept`. In `--all-agents`, any unmanaged holder
+	/// The unmanaged (`managed == false`) classification is pinned only by the
+	/// synthetic Row 3 of `test_verdict_table`, and on a real filesystem it is
+	/// structurally unreachable for Kept. In `--all-agents`, any unmanaged holder
 	/// survives and triggers `blocks = true`, resulting in `Verdict::Refused`
 	/// (which carries a string `reason` rather than structured `Holder` items).
 	/// In single-agent removal, an unmanaged peer holder triggers a keep reason
 	/// with `initial_shared_master_kept = true`, which also forces `blocks = true`
 	/// and `Verdict::Refused`. Thus, `Verdict::Kept` containing a holder with
-	/// `managed == false` is structurally unreachable on a real filesystem and is
-	/// exclusively verified by the synthetic table test (`test_verdict_table` Row 3).
+	/// `managed == false` cannot be produced on a real filesystem.
 	#[cfg(unix)]
 	#[test]
 	fn test_remove_skill_planned_refused_disabled_agent() {
@@ -871,6 +872,27 @@ mod tests {
 		assert!(
 			!outcome.verdict.shared_master_kept(),
 			"partial is not shared_master_kept"
+		);
+		// The directory itself remains on disk because rmdir failed (parent was 0o555),
+		// but remove_dir_all already unlinked SKILL.md inside it. Consequently, the
+		// post-removal prune scan does not recognize the gutted directory as a valid skill
+		// (top_level_skill_dirs requires SKILL.md), treating the lock entry as orphaned.
+		assert!(
+			!claude_dir.join("SKILL.md").exists(),
+			"remove_dir_all unlinked contents before rmdir failed"
+		);
+		assert_eq!(
+			outcome.prune,
+			crate::skills::removal::PruneStatus::Pruned(vec![
+				"partial-skill".to_string()
+			]),
+			"prune dropped lock entry because SKILL.md was deleted before rmdir failed"
+		);
+		assert!(
+			!skill::read_skill_lock()
+				.skills
+				.contains_key("partial-skill"),
+			"lock entry is pruned because surviving dir without SKILL.md is not recognized as a skill"
 		);
 	}
 
