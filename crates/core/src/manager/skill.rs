@@ -861,20 +861,14 @@ impl ConfigManager {
 			effect: &effect,
 			all_agents,
 			unmanaged_dirs: &unmanaged_dirs,
-			has_lock_entry: self.skill_has_lock_entry(name),
 			git_refusal: &git_refusal_fn,
 			readers_outside: &readers_outside_fn,
 		});
 
 		plan.shared_master_kept = verdict.shared_master_kept();
 		if matches!(verdict, removal::Verdict::Refused { .. }) {
-			let mut still: Vec<std::path::PathBuf> = Vec::new();
-			for path in effect.survivors.iter().chain(plan.skipped.iter()) {
-				if !still.contains(path) {
-					still.push(path.clone());
-				}
-			}
-			plan.still_read_from = still;
+			plan.still_read_from =
+				removal::still_read_from(&effect.survivors, &plan.skipped);
 		}
 
 		if executed {

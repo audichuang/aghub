@@ -27,7 +27,7 @@ pub struct Holder {
 ///   or taking nothing away while Master continues serving). Carries `reason`.
 /// - `Partial`: some paths were removed, but others failed to delete. Downgraded
 ///   exclusively by `RemovalOutcome::commit`.
-/// - `LockOnly`: the skill had no files on disk, but was pruned from the lock.
+/// - `LockOnly`: no files on disk, an in-scope lock entry remains (not pruned).
 /// - `Absent`: the skill had no files on disk and no lock entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -39,6 +39,20 @@ pub enum Verdict {
 	Absent,
 }
 
+/// Order-preserving union of survivors and skipped paths.
+pub fn still_read_from(
+	survivors: &[PathBuf],
+	skipped: &[PathBuf],
+) -> Vec<PathBuf> {
+	let mut still: Vec<PathBuf> = Vec::new();
+	for path in survivors.iter().chain(skipped.iter()) {
+		if !still.contains(path) {
+			still.push(path.clone());
+		}
+	}
+	still
+}
+
 /// Borrowed inputs for computing a [`Verdict`].
 pub struct VerdictInputs<'a> {
 	pub plan_paths: &'a [PathBuf],
@@ -47,7 +61,6 @@ pub struct VerdictInputs<'a> {
 	pub effect: &'a crate::skills::removal::ReadEffect,
 	pub all_agents: bool,
 	pub unmanaged_dirs: &'a [PathBuf],
-	pub has_lock_entry: bool,
 	pub git_refusal: &'a dyn Fn() -> Option<String>,
 	pub readers_outside: &'a dyn Fn() -> Vec<&'static str>,
 }
@@ -72,19 +85,10 @@ impl Verdict {
 	/// Pure constructor for `Verdict`.
 	///
 	/// Computes the verdict from the plan facts, `read_effect_after` result,
-	/// scope options, and lock/disk status.
+	/// scope options, and disk status.
 	pub fn compute(inputs: VerdictInputs<'_>) -> Self {
-		let mut still: Vec<PathBuf> = Vec::new();
-		for path in inputs
-			.effect
-			.survivors
-			.iter()
-			.chain(inputs.plan_skipped.iter())
-		{
-			if !still.contains(path) {
-				still.push(path.clone());
-			}
-		}
+		let still =
+			still_read_from(&inputs.effect.survivors, inputs.plan_skipped);
 		let still_holders: Vec<Holder> = still
 			.iter()
 			.map(|p| {
@@ -133,6 +137,9 @@ impl Verdict {
 				.collect::<Vec<_>>()
 				.join(", ");
 
+			// Note: git_refusal and readers_outside closures run eagerly on blocked
+			// preview so preview and commit yield identical Verdict. Dry-run and
+			// transfer preflight pay this probe cost deliberately.
 			let git_refusal = (inputs.git_refusal)();
 			let reason = if inputs.all_agents {
 				let held_by_disabled = still
@@ -207,14 +214,6 @@ impl Verdict {
 			return Verdict::Kept {
 				still_read_from: still_holders,
 			};
-		}
-
-		if inputs.plan_paths.is_empty() && inputs.effect.survivors.is_empty() {
-			if inputs.has_lock_entry {
-				return Verdict::LockOnly;
-			} else {
-				return Verdict::Absent;
-			}
 		}
 
 		Verdict::Removed
@@ -320,7 +319,6 @@ mod tests {
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &[],
-				has_lock_entry: false,
 				git_refusal: no_refusal,
 				readers_outside: no_readers,
 			});
@@ -343,7 +341,6 @@ mod tests {
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &[],
-				has_lock_entry: true,
 				git_refusal: no_refusal,
 				readers_outside: no_readers,
 			});
@@ -368,7 +365,6 @@ mod tests {
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &unmanaged_dirs,
-				has_lock_entry: true,
 				git_refusal: no_refusal,
 				readers_outside: no_readers,
 			});
@@ -405,7 +401,6 @@ mod tests {
 				effect: &effect,
 				all_agents: true,
 				unmanaged_dirs: &[],
-				has_lock_entry: true,
 				git_refusal: no_refusal,
 				readers_outside: no_readers,
 			});
@@ -433,14 +428,13 @@ mod tests {
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &[],
-				has_lock_entry: true,
 				git_refusal: no_refusal,
 				readers_outside: no_readers,
 			});
 			assert!(matches!(verdict, Verdict::Kept { .. }));
 		}
 
-		// Row 6: LockOnly (skill not on disk, in lock)
+		// Row 6: Removed (empty plan and no survivors falls through to Removed)
 		{
 			let effect = crate::skills::removal::ReadEffect {
 				survivors: vec![],
@@ -454,32 +448,22 @@ mod tests {
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &[],
-				has_lock_entry: true,
 				git_refusal: no_refusal,
 				readers_outside: no_readers,
 			});
-			assert_eq!(verdict, Verdict::LockOnly);
+			assert_eq!(verdict, Verdict::Removed);
 		}
 
-		// Row 7: Absent (skill not on disk, not in lock)
+		// Row 7: LockOnly and Absent are exclusive to no-op outcomes
 		{
-			let effect = crate::skills::removal::ReadEffect {
-				survivors: vec![],
-				changed: false,
-				incomplete: false,
-			};
-			let verdict = Verdict::compute(VerdictInputs {
-				plan_paths: &[],
-				plan_skipped: &[],
-				initial_shared_master_kept: false,
-				effect: &effect,
-				all_agents: false,
-				unmanaged_dirs: &[],
-				has_lock_entry: false,
-				git_refusal: no_refusal,
-				readers_outside: no_readers,
-			});
-			assert_eq!(verdict, Verdict::Absent);
+			assert_eq!(
+				crate::skills::removal::RemovalOutcome::noop(true).verdict,
+				Verdict::LockOnly
+			);
+			assert_eq!(
+				crate::skills::removal::RemovalOutcome::noop(false).verdict,
+				Verdict::Absent
+			);
 		}
 	}
 
@@ -506,7 +490,6 @@ mod tests {
 			effect: &effect,
 			all_agents: true,
 			unmanaged_dirs: &[],
-			has_lock_entry: false,
 			git_refusal: &|| None,
 			readers_outside: &|| Vec::new(),
 		});
@@ -740,6 +723,19 @@ mod tests {
 		);
 	}
 
+	/// Real-fs test verifying that survivors in unmanaged directories (held by
+	/// disabled agents) cause `--all-agents` removal to be refused.
+	///
+	/// Note on `Holder.managed == false`:
+	/// On a real filesystem through `remove_skill_planned`, an unmanaged holder
+	/// can never produce `Verdict::Kept`. In `--all-agents`, any unmanaged holder
+	/// survives and triggers `blocks = true`, resulting in `Verdict::Refused`
+	/// (which carries a string `reason` rather than structured `Holder` items).
+	/// In single-agent removal, an unmanaged peer holder triggers a keep reason
+	/// with `initial_shared_master_kept = true`, which also forces `blocks = true`
+	/// and `Verdict::Refused`. Thus, `Verdict::Kept` containing a holder with
+	/// `managed == false` is structurally unreachable on a real filesystem and is
+	/// exclusively verified by the synthetic table test (`test_verdict_table` Row 3).
 	#[cfg(unix)]
 	#[test]
 	fn test_remove_skill_planned_refused_disabled_agent() {

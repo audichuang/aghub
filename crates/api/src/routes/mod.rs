@@ -119,7 +119,7 @@ pub(crate) fn requested_delete_agents(
 pub(crate) fn removal_or_noop(
 	outcome: aghub_core::errors::Result<RemovalOutcome>,
 	requested_dry_run: bool,
-	noop: RemovalOutcome,
+	noop: impl FnOnce() -> RemovalOutcome,
 ) -> Result<rocket::serde::json::Json<DeleteSkillByPathResponse>, ApiError> {
 	use aghub_core::errors::ConfigError;
 	match outcome {
@@ -129,7 +129,7 @@ pub(crate) fn removal_or_noop(
 		))),
 		Err(ConfigError::ResourceNotFound { .. }) => {
 			Ok(rocket::serde::json::Json(removal_response(
-				noop,
+				noop(),
 				requested_dry_run,
 			)))
 		}
@@ -228,11 +228,9 @@ mod removal_or_noop_tests {
 
 	#[test]
 	fn ok_outcome_passes_through() {
-		let resp = removal_or_noop(
-			Ok(outcome(true)),
-			false,
-			RemovalOutcome::noop(false),
-		)
+		let resp = removal_or_noop(Ok(outcome(true)), false, || {
+			RemovalOutcome::noop(false)
+		})
 		.ok()
 		.expect("ok")
 		.into_inner();
@@ -251,7 +249,7 @@ mod removal_or_noop_tests {
 			// CONFIRMED: the caller asked for a real delete and the resource
 			// was already gone. That is `absent`, not a dry-run.
 			false,
-			RemovalOutcome::noop(false),
+			|| RemovalOutcome::noop(false),
 		)
 		.ok()
 		.expect("missing resource must be a success no-op")
@@ -281,7 +279,7 @@ mod removal_or_noop_tests {
 		// instead of being swallowed as a success no-op.
 		let io = ConfigError::Io(std::io::Error::other("disk full"));
 		assert!(
-			removal_or_noop(Err(io), false, RemovalOutcome::noop(false))
+			removal_or_noop(Err(io), false, || RemovalOutcome::noop(false))
 				.is_err(),
 			"a non-ResourceNotFound error must propagate, not be swallowed"
 		);

@@ -414,7 +414,7 @@ fn delete_mcp_inner(
 			name, dry_run, confirm, &requested,
 		),
 		dry_run,
-		aghub_core::skills::removal::RemovalOutcome::noop(false),
+		|| aghub_core::skills::removal::RemovalOutcome::noop(false),
 	)
 }
 

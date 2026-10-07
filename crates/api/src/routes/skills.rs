@@ -1379,13 +1379,12 @@ pub async fn delete_skill(
 	in_mutation_pool(move || {
 		// `remove_skill_planned` already prunes the lock (`outcome.prune`); the
 		// idempotent-delete contract is owned ONCE in `routes::removal_or_noop`.
-		let noop = manager.skill_noop_outcome(&name);
 		super::removal_or_noop(
 			manager.remove_skill_planned_for_agents(
 				&name, all_agents, dry_run, confirm, &requested,
 			),
 			dry_run,
-			noop,
+			|| manager.skill_noop_outcome(&name),
 		)
 	})
 	.await
