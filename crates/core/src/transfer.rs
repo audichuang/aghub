@@ -1301,7 +1301,10 @@ fn batch_preflight_error(
 			rejected_targets: Some(rejected_targets),
 		}
 	} else {
-		ConfigError::InvalidConfig(message)
+		ConfigError::InvalidConfigWithTargets {
+			message,
+			rejected_targets: Some(rejected_targets),
+		}
 	}
 }
 

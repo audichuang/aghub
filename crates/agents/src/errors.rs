@@ -38,6 +38,12 @@ pub enum ConfigError {
 
 	#[error("Invalid configuration: {0}")]
 	InvalidConfig(String),
+
+	#[error("Invalid configuration: {message}")]
+	InvalidConfigWithTargets {
+		message: String,
+		rejected_targets: Option<Vec<RejectedTarget>>,
+	},
 }
 
 impl ConfigError {
@@ -85,6 +91,28 @@ impl ConfigError {
 		Self::UnsupportedOperation {
 			message: message.into(),
 			rejected_targets: None,
+		}
+	}
+
+	pub fn invalid_config_with_targets(
+		message: impl Into<String>,
+		rejected_targets: Option<Vec<RejectedTarget>>,
+	) -> Self {
+		Self::InvalidConfigWithTargets {
+			message: message.into(),
+			rejected_targets,
+		}
+	}
+
+	pub fn rejected_targets(&self) -> Option<&[RejectedTarget]> {
+		match self {
+			Self::UnsupportedOperation {
+				rejected_targets, ..
+			}
+			| Self::InvalidConfigWithTargets {
+				rejected_targets, ..
+			} => rejected_targets.as_deref(),
+			_ => None,
 		}
 	}
 }

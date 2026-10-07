@@ -129,6 +129,15 @@ impl ApiError {
 			ConfigError::InvalidConfig(msg) => {
 				ApiError::new(Status::BadRequest, msg.clone(), code)
 			}
+			ConfigError::InvalidConfigWithTargets {
+				message,
+				rejected_targets,
+			} => ApiError::with_rejected_targets(
+				Status::BadRequest,
+				message.clone(),
+				code,
+				rejected_targets.clone(),
+			),
 			ConfigError::Json(e) => {
 				ApiError::new(Status::BadRequest, e.to_string(), code)
 			}

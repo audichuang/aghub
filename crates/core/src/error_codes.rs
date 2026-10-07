@@ -17,7 +17,8 @@ pub fn wire_code(error: &ConfigError) -> &'static str {
 		ConfigError::NotFound { .. } => "CONFIG_NOT_FOUND",
 		ConfigError::UnsupportedOperation { .. } => "UNSUPPORTED_OPERATION",
 		ConfigError::ValidationFailed(_) => "VALIDATION_FAILED",
-		ConfigError::InvalidConfig(_) => "INVALID_CONFIG",
+		ConfigError::InvalidConfig(_)
+		| ConfigError::InvalidConfigWithTargets { .. } => "INVALID_CONFIG",
 		ConfigError::Json(_) => "JSON_PARSE_ERROR",
 		// Mutation-lock contention arrives as `Io(WouldBlock)` — `skill::lock::
 		// guard` is its only producer. It is a RETRYABLE conflict, not a fault:

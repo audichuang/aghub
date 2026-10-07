@@ -9870,8 +9870,40 @@ mod tests {
 					"master must be kept since shared slot survives"
 				);
 
-				// 3. Commit with all_agents=true: remaining holders removed, keepers empty
+				// 3. Preview with all_agents=true while disabled opencode holds skill in private slot
 				std::os::unix::fs::symlink(&master, &claude_slot).unwrap();
+				let opencode_slot =
+					project.join(".opencode/skills/by-name-skill");
+				std::fs::create_dir_all(opencode_slot.parent().unwrap())
+					.unwrap();
+				std::os::unix::fs::symlink(&master, &opencode_slot).unwrap();
+
+				let all_preview_resp = client
+					.delete(format!(
+						"/api/v1/agents/claude/skills/by-name-skill?scope=project&project_root={}&all_agents=true",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(all_preview_resp.status(), rocket::http::Status::Ok);
+				let all_preview_body: serde_json::Value = serde_json::from_str(
+					&all_preview_resp.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				let preview_unmanaged = all_preview_body
+					["still_read_by_unmanaged"]
+					.as_array()
+					.expect("still_read_by_unmanaged array");
+				assert!(
+					preview_unmanaged.contains(&serde_json::json!("opencode")),
+					"disabled agent with private slot must appear in still_read_by_unmanaged: {all_preview_body}"
+				);
+
+				// Remove disabled agent's private slot so all_agents commit can clean up the shared slot
+				std::fs::remove_file(&opencode_slot).unwrap();
+
+				// 4. Commit with all_agents=true: remaining holders removed, keepers empty
 				let all_resp = client
 					.delete(format!(
 						"/api/v1/agents/claude/skills/by-name-skill?scope=project&project_root={}&confirm=true&all_agents=true",
@@ -10107,6 +10139,73 @@ mod tests {
 				assert!(
 					reason.contains("no project skill config"),
 					"reason must contain refusal detail, got: {reason}"
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_preflight_rejection_on_planner_error_carries_rejected_targets(
+	) {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let project = home.join("proj");
+				let master = project.join(".aghub/dup-skill");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: dup-skill\ndescription: test\n---\n",
+				)
+				.unwrap();
+
+				// Second store folder with duplicate skill name -> planner error
+				let dup_master = project.join(".aghub/dup-skill-second");
+				std::fs::create_dir_all(&dup_master).unwrap();
+				std::fs::write(
+					dup_master.join("SKILL.md"),
+					"---\nname: dup-skill\ndescription: dup\n---\n",
+				)
+				.unwrap();
+
+				let claude_slot = project.join(".claude/skills/dup-skill");
+				std::fs::create_dir_all(claude_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &claude_slot).unwrap();
+
+				let response = client
+					.delete(format!(
+						"/api/v1/agents/claude/skills/dup-skill?scope=project&project_root={}&confirm=true",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(response.status(), rocket::http::Status::BadRequest);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				assert_eq!(body["code"], "INVALID_CONFIG");
+				let rejected = body["rejected_targets"]
+					.as_array()
+					.expect("rejected_targets array");
+				assert_eq!(rejected.len(), 1);
+				assert_eq!(rejected[0]["agent"], "claude");
+				assert!(
+					rejected[0]["reason"]
+						.as_str()
+						.unwrap()
+						.contains("two Masters"),
+					"reason must contain planner error detail: {}",
+					rejected[0]["reason"]
 				);
 			});
 		});

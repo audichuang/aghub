@@ -374,7 +374,9 @@ pub(crate) fn entry_identity(path: &Path) -> PathBuf {
 /// [`skill_root`] answers the other question (`canonical_path` first) and is
 /// the wrong one here: a removal plan lists ENTRIES, so entries are what a plan
 /// can be checked against.
-fn discovered_entry_dir(skill: &crate::models::Skill) -> Option<PathBuf> {
+pub(crate) fn discovered_entry_dir(
+	skill: &crate::models::Skill,
+) -> Option<PathBuf> {
 	let raw = skill.source_path.as_deref()?;
 	let path = match raw.strip_prefix("~/") {
 		Some(rest) => dirs::home_dir()?.join(rest),

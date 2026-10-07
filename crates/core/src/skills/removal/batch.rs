@@ -234,6 +234,13 @@ pub fn clone_config_error(err: &ConfigError) -> ConfigError {
 			ConfigError::ValidationFailed(s.clone())
 		}
 		ConfigError::InvalidConfig(s) => ConfigError::InvalidConfig(s.clone()),
+		ConfigError::InvalidConfigWithTargets {
+			message,
+			rejected_targets,
+		} => ConfigError::InvalidConfigWithTargets {
+			message: message.clone(),
+			rejected_targets: rejected_targets.clone(),
+		},
 		ConfigError::Io(e) => {
 			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
 		}
@@ -518,6 +525,21 @@ pub fn find_skill_holders(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> (Vec<AgentType>, Vec<&'static str>) {
+	find_skill_holders_crediting(name, scope, project_root, &[])
+}
+
+/// Scan every agent in the roster to discover which agents hold `name` in the
+/// given scope, crediting planned or executed deletions.
+pub fn find_skill_holders_crediting(
+	name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	deleting: &[PathBuf],
+) -> (Vec<AgentType>, Vec<&'static str>) {
+	let doomed: Vec<PathBuf> = deleting
+		.iter()
+		.map(|path| crate::skills::removal::entry_identity(path))
+		.collect();
 	let mut holders = Vec::new();
 	let mut unreadable = Vec::new();
 	for descriptor in registry::iter_all() {
@@ -531,7 +553,28 @@ pub fn find_skill_holders(
 			crate::create_adapter(agent).get_skills_paths(project_root, scope);
 		match crate::skills::discovery::load_skills_from_dirs(&dirs) {
 			Ok(skills) => {
-				if skills.iter().any(|s| s.name == name) {
+				let is_holder = if deleting.is_empty() {
+					skills.iter().any(|s| s.name == name)
+				} else {
+					skills.iter().filter(|s| s.name == name).any(|skill| {
+						if let Some(entry) =
+							crate::skills::removal::discovered_entry_dir(skill)
+						{
+							let id =
+								crate::skills::removal::entry_identity(&entry);
+							let resolved =
+								crate::skills::linker::classify::canonicalize_lenient(
+									&entry,
+								);
+							!doomed.iter().any(|d| {
+								id.starts_with(d) || resolved.starts_with(d)
+							})
+						} else {
+							false
+						}
+					})
+				};
+				if is_holder {
 					holders.push(agent);
 				}
 			}
@@ -720,21 +763,11 @@ pub fn remove_skill_batch(
 		request.project_root.as_deref(),
 	)?;
 
-	let keepers: Vec<AgentType> = if request.all_agents {
-		Vec::new()
-	} else {
-		holders
-			.iter()
-			.filter(|held| !target_agents.contains(held))
-			.copied()
-			.collect()
-	};
-
 	if target_agents.is_empty() {
 		return Ok(SkillRemovalResponse {
 			rows: Vec::new(),
 			prune: PruneStatus::NotRun,
-			keepers,
+			keepers: holders,
 			unreadable,
 			master_reclaimed: false,
 			would_reclaim_master: false,
@@ -920,6 +953,24 @@ pub fn remove_skill_batch(
 				&union_paths,
 			)
 		};
+		let mut planned_deletions: Vec<PathBuf> = Vec::new();
+		for row in &rows {
+			for p in &row.paths {
+				if !planned_deletions.contains(p) {
+					planned_deletions.push(p.clone());
+				}
+			}
+		}
+		let (keepers, _) = if request.keeps_master {
+			(Vec::new(), Vec::new())
+		} else {
+			find_skill_holders_crediting(
+				name,
+				request.scope,
+				request.project_root.as_deref(),
+				&planned_deletions,
+			)
+		};
 		return Ok(SkillRemovalResponse {
 			rows,
 			prune,
@@ -960,7 +1011,10 @@ pub fn remove_skill_batch(
 				rejected_targets: Some(rejected_targets),
 			});
 		} else {
-			return Err(ConfigError::InvalidConfig(message));
+			return Err(ConfigError::InvalidConfigWithTargets {
+				message,
+				rejected_targets: Some(rejected_targets),
+			});
 		}
 	}
 
@@ -1022,16 +1076,6 @@ pub fn remove_skill_batch(
 		request.scope,
 		request.project_root.as_deref(),
 	)?;
-
-	let keepers: Vec<AgentType> = if request.all_agents {
-		Vec::new()
-	} else {
-		holders
-			.iter()
-			.filter(|held| !in_lock_target_agents.contains(held))
-			.copied()
-			.collect()
-	};
 
 	let mut credits =
 		RemovalCredits::new(in_lock_target_agents.clone(), |agent| {
@@ -1203,6 +1247,11 @@ pub fn remove_skill_batch(
 		&& execution_results
 			.iter()
 			.all(|r| r.verdict != Verdict::Partial);
+	let (keepers, _) = if request.keeps_master {
+		(Vec::new(), Vec::new())
+	} else {
+		find_skill_holders(name, request.scope, request.project_root.as_deref())
+	};
 
 	Ok(SkillRemovalResponse {
 		rows,
