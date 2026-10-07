@@ -1945,6 +1945,18 @@ impl ReconcileSkillPlan {
 		};
 
 		let row = response.rows.iter().find(|r| r.agent == target.agent);
+		let verdict = row
+			.map(|r| &r.verdict)
+			.unwrap_or(&crate::skills::removal::Verdict::Absent);
+
+		let still_read_from =
+			row.map(|r| r.still_read_from.as_slice()).unwrap_or(&[]);
+
+		if verdict.shared_master_kept() || self.a_copy_restores_it(target) {
+			return Err(self
+				.refuse_shared_master(target.agent.as_str(), still_read_from));
+		}
+
 		if let Some(r) = row {
 			// Fail open on a config this row cannot load: the mutate arm fails it
 			// anyway, and escalating would abort unrelated copies in the batch.
@@ -1959,17 +1971,6 @@ impl ReconcileSkillPlan {
 			}
 		}
 
-		let verdict = row
-			.map(|r| &r.verdict)
-			.unwrap_or(&crate::skills::removal::Verdict::Absent);
-
-		let still_read_from =
-			row.map(|r| r.still_read_from.as_slice()).unwrap_or(&[]);
-
-		if verdict.shared_master_kept() || self.a_copy_restores_it(target) {
-			return Err(self
-				.refuse_shared_master(target.agent.as_str(), still_read_from));
-		}
 		Ok(())
 	}
 

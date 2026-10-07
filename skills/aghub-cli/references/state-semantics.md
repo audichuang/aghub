@@ -234,8 +234,8 @@ branch.
   (`N ok, M kept (nothing removed), K failed`). In a multi-agent skill delete
   (`delete skills <NAME> -a a,b,c`), `-a` order does not affect the verdict: core
   plans shared slots first and attributes prior-row credit so private readers
-  listed before shared-slot writers succeed without needing to order shared slots
-  Whole-batch preflight rejection exits 1, states that nothing was
+  listed before shared-slot writers succeed without ordering shared slots first
+  or re-running. Whole-batch preflight rejection exits 1, states that nothing was
   written, and lists every refused target; under `--json`, the whole-batch failure
   appears in the top-level `error.code` envelope (`UNSUPPORTED_OPERATION` or `INVALID_CONFIG`
   lives there, not in `results[].code`). In `--json`, every row in `results[]`

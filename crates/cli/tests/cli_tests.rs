@@ -8286,22 +8286,36 @@ fn real_dir_npx_layout_refuses_when_link_belongs_to_unrequested_agent() {
 		.output()
 		.unwrap();
 
-	assert!(
-		preview_out.status.success(),
-		"preview run must succeed; stderr: {}",
-		String::from_utf8_lossy(&preview_out.stderr)
+	assert_eq!(
+		preview_out.status.code(),
+		Some(1),
+		"preview run must exit 1 on refusal; stderr: {}, stdout: {}",
+		String::from_utf8_lossy(&preview_out.stderr),
+		String::from_utf8_lossy(&preview_out.stdout)
 	);
 
 	let preview_json: serde_json::Value =
 		serde_json::from_slice(&preview_out.stdout)
 			.expect("preview output must be valid JSON");
+	assert_eq!(preview_json["failed_count"], 2);
 	let results = preview_json["results"]
 		.as_array()
 		.expect("preview json must contain results array");
+	assert_eq!(results.len(), 2);
 	for row in results {
+		assert_eq!(row["ok"], false, "preview row ok must be false: {row}");
 		assert_eq!(
 			row["output"]["outcome"], "kept",
 			"preview must report outcome 'kept' when unrequested agent holds link: {row}"
+		);
+		assert_eq!(
+			row["code"], "UNSUPPORTED_OPERATION",
+			"preview row code must be UNSUPPORTED_OPERATION: {row}"
+		);
+		let err = row["error"].as_str().unwrap_or_default();
+		assert!(
+			err.contains("claude") && err.contains(".claude/skills/x"),
+			"refusal row error must name claude and link path: {row}"
 		);
 	}
 
@@ -16343,16 +16357,16 @@ fn batch_delete_tally_counts_kept_rows_apart() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
 	let name = "x";
-	let skill_dir = home.path().join(".agents/skills").join(name);
-	std::fs::create_dir_all(&skill_dir).unwrap();
+	let master = home.path().join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
 	std::fs::write(
-		skill_dir.join("SKILL.md"),
+		master.join("SKILL.md"),
 		format!("---\nname: {name}\ndescription: test\n---\n"),
 	)
 	.unwrap();
-	let claude_skills = home.path().join(".claude/skills");
-	std::fs::create_dir_all(&claude_skills).unwrap();
-	std::os::unix::fs::symlink(&skill_dir, claude_skills.join(name)).unwrap();
+	let agents_skills = home.path().join(".agents/skills");
+	std::fs::create_dir_all(&agents_skills).unwrap();
+	std::os::unix::fs::symlink(&master, agents_skills.join(name)).unwrap();
 	let data = state.path().join("data");
 	std::fs::create_dir_all(&data).unwrap();
 	let disabled: std::collections::BTreeSet<String> =
@@ -16373,6 +16387,13 @@ fn batch_delete_tally_counts_kept_rows_apart() {
 		.args(["-g", "-a", "cursor,opencode", "delete", "skills", name])
 		.output()
 		.unwrap();
+	assert_eq!(
+		out.status.code(),
+		Some(0),
+		"preview on genuinely kept targets must exit 0; stderr: {}, stdout: {}",
+		String::from_utf8_lossy(&out.stderr),
+		String::from_utf8_lossy(&out.stdout)
+	);
 	let text = String::from_utf8_lossy(&out.stdout);
 	assert!(
 		text.contains("0 ok, 2 kept (nothing removed), 0 failed"),
@@ -17213,5 +17234,172 @@ fn test_cli_delete_skills_non_exhaustive_lock_only_absent_member_exit_zero_parit
 	assert!(
 		!root.join(".codex/skills/notebooklm").exists(),
 		"Codex must remain absent"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_delete_skills_git_tracked_shared_slot_preview_commit_parity() {
+	if !cli_has_git() {
+		eprintln!("skipping test: git binary unavailable");
+		return;
+	}
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let proj = project.path();
+
+	// Agent marker so project root is recognized
+	std::fs::create_dir_all(proj.join(".claude")).unwrap();
+	cli_git(proj, &["init", "-q"]);
+
+	let name = "shared-tracked";
+	let skill_dir = proj.join(".agents/skills").join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+	cli_git(
+		proj,
+		&["add", "--", &format!(".agents/skills/{name}/SKILL.md")],
+	);
+
+	let disk_before = collect_disk_state(proj);
+
+	// 1. Dry-run preview: deleting a git-tracked real directory in the shared slot
+	// must reject the removal (exit 1), reporting ok: false, outcome: kept,
+	// and typed error code UNSUPPORTED_OPERATION for the refused targets.
+	let preview_out = isolated_cli(home.path(), state.path())
+		.current_dir(proj)
+		.args([
+			"-p",
+			"-a",
+			"claude,codex",
+			"delete",
+			"skills",
+			name,
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		preview_out.status.code(),
+		Some(1),
+		"preview on git-tracked real dir must exit 1; stdout: {}, stderr: {}",
+		String::from_utf8_lossy(&preview_out.stdout),
+		String::from_utf8_lossy(&preview_out.stderr)
+	);
+
+	let preview_json: Value = serde_json::from_slice(&preview_out.stdout)
+		.expect("preview output must be valid JSON");
+
+	// 2. Commit (--yes): whole-batch preflight rejection exits 1 and writes nothing.
+	let commit_out = isolated_cli(home.path(), state.path())
+		.current_dir(proj)
+		.args([
+			"-p",
+			"-a",
+			"claude,codex",
+			"delete",
+			"skills",
+			name,
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		commit_out.status.code(),
+		Some(1),
+		"commit on git-tracked real dir must exit 1; stdout: {}, stderr: {}",
+		String::from_utf8_lossy(&commit_out.stdout),
+		String::from_utf8_lossy(&commit_out.stderr)
+	);
+
+	let commit_json: Value = serde_json::from_slice(&commit_out.stdout)
+		.expect("commit output must be valid JSON");
+
+	// Preview exit code must equal commit exit code
+	assert_eq!(
+		preview_out.status.code(),
+		commit_out.status.code(),
+		"preview and commit exit codes must match"
+	);
+
+	// Commit reports whole-batch preflight rejection
+	assert_eq!(commit_json["error"]["code"], "UNSUPPORTED_OPERATION");
+	let commit_msg = commit_json["error"]["message"].as_str().unwrap();
+	assert!(
+		commit_msg.contains("nothing was written"),
+		"commit message must state nothing was written: {commit_msg}"
+	);
+
+	// Preview reports codex row failure with matching typed UNSUPPORTED_OPERATION code
+	assert_eq!(
+		preview_json["failed_count"], 1,
+		"codex must fail in preview: {preview_json}"
+	);
+	let prev_results =
+		preview_json["results"].as_array().expect("results array");
+	assert_eq!(prev_results.len(), 2);
+	let prev_claude = prev_results
+		.iter()
+		.find(|r| r["agent"] == "claude")
+		.expect("claude row in preview");
+	assert_eq!(prev_claude["ok"], true);
+	assert_eq!(prev_claude["outcome"], "absent");
+
+	let prev_codex = prev_results
+		.iter()
+		.find(|r| r["agent"] == "codex")
+		.expect("codex row in preview");
+	assert_eq!(
+		prev_codex["ok"], false,
+		"codex preview row ok must be false: {prev_codex}"
+	);
+	assert_eq!(
+		prev_codex["outcome"], "kept",
+		"codex preview top-level outcome must be kept: {prev_codex}"
+	);
+	assert_eq!(
+		prev_codex["output"]["outcome"], "kept",
+		"codex preview output outcome must be kept: {prev_codex}"
+	);
+	assert_eq!(
+		prev_codex["code"], "UNSUPPORTED_OPERATION",
+		"codex preview row code must be UNSUPPORTED_OPERATION: {prev_codex}"
+	);
+	assert_eq!(
+		prev_codex["output"]["code"], "UNSUPPORTED_OPERATION",
+		"codex preview output code must be UNSUPPORTED_OPERATION: {prev_codex}"
+	);
+	assert_eq!(
+		prev_codex["code"], commit_json["error"]["code"],
+		"preview codex row code must equal commit error code"
+	);
+
+	// 3. Disk unchanged after both preview and commit
+	let disk_after_preview = collect_disk_state(proj);
+	assert_eq!(
+		disk_before, disk_after_preview,
+		"disk must be byte-identical before and after preview"
+	);
+	let disk_after_commit = collect_disk_state(proj);
+	assert_eq!(
+		disk_before, disk_after_commit,
+		"disk must be byte-identical before and after commit failure"
+	);
+	assert!(
+		skill_dir.exists(),
+		"the git-tracked real skill directory must still exist"
+	);
+	assert!(
+		skill_dir.join("SKILL.md").exists(),
+		"the git-tracked SKILL.md must still exist"
 	);
 }

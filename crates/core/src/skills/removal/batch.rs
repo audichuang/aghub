@@ -54,11 +54,22 @@ pub struct SkillRemovalRow {
 	pub needs_confirm: bool,
 }
 
-impl SkillRemovalRow {
-	pub fn outcome_kind(&self) -> crate::dto::RemovalKind {
-		self.outcome
+fn still_read_paths(
+	outcome: &crate::skills::removal::RemovalOutcome,
+) -> Vec<PathBuf> {
+	if !outcome.plan.still_read_from.is_empty() {
+		outcome.plan.still_read_from.clone()
+	} else if let Verdict::Kept {
+		ref still_read_from,
+	} = outcome.verdict
+	{
+		still_read_from.iter().map(|h| h.path.clone()).collect()
+	} else {
+		Vec::new()
 	}
+}
 
+impl SkillRemovalRow {
 	pub fn outcome_str(&self) -> &'static str {
 		self.outcome.as_str()
 	}
@@ -69,6 +80,64 @@ impl SkillRemovalRow {
 		} else {
 			None
 		}
+	}
+
+	pub fn from_outcome(
+		agent: AgentType,
+		outcome: &crate::skills::removal::RemovalOutcome,
+		dry_run: bool,
+	) -> Self {
+		let kind = crate::dto::removal_kind_from_outcome(outcome, dry_run);
+		let still_read_from = still_read_paths(outcome);
+		Self {
+			agent,
+			verdict: outcome.verdict.clone(),
+			outcome: kind,
+			error: None,
+			typed_error: None,
+			is_load_error: false,
+			still_read_from,
+			paths: outcome.plan.paths.clone(),
+			skipped: outcome.plan.skipped.clone(),
+			executed: outcome.executed,
+			needs_confirm: outcome.plan.needs_confirm,
+		}
+	}
+
+	pub fn noop(
+		agent: AgentType,
+		verdict: Verdict,
+		outcome: crate::dto::RemovalKind,
+	) -> Self {
+		Self {
+			agent,
+			verdict,
+			outcome,
+			error: None,
+			typed_error: None,
+			is_load_error: false,
+			still_read_from: Vec::new(),
+			paths: Vec::new(),
+			skipped: Vec::new(),
+			executed: false,
+			needs_confirm: false,
+		}
+	}
+
+	pub fn absent(agent: AgentType) -> Self {
+		Self::noop(agent, Verdict::Absent, crate::dto::RemovalKind::Absent)
+	}
+
+	pub fn error_row(
+		agent: AgentType,
+		err: ConfigError,
+		is_load_error: bool,
+	) -> Self {
+		let mut row = Self::absent(agent);
+		row.error = Some(err.to_string());
+		row.typed_error = Some(Arc::new(err));
+		row.is_load_error = is_load_error;
+		row
 	}
 }
 
@@ -339,6 +408,24 @@ struct PreflightVerdict {
 	needs_confirm: bool,
 }
 
+impl PreflightVerdict {
+	fn to_row(&self) -> SkillRemovalRow {
+		SkillRemovalRow {
+			agent: self.agent,
+			verdict: self.verdict.clone(),
+			outcome: self.outcome,
+			error: None,
+			typed_error: None,
+			is_load_error: false,
+			still_read_from: self.still_read_from.clone(),
+			paths: self.paths.clone(),
+			skipped: self.skipped.clone(),
+			executed: false,
+			needs_confirm: self.needs_confirm,
+		}
+	}
+}
+
 /// Single core entry point for skill deletion by name across multiple agents.
 pub fn remove_skill_batch(
 	request: &SkillRemovalRequest,
@@ -352,13 +439,6 @@ pub fn remove_skill_batch(
 	} else {
 		find_skill_holders(name, request.scope, request.project_root.as_deref())
 	};
-
-	let master_p = crate::skills::shape::master_path(
-		request.scope,
-		request.project_root.as_deref(),
-		name,
-	);
-	let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
 
 	let target_agents: Vec<AgentType> = if request.agents.is_empty()
 		&& request.all_agents
@@ -458,17 +538,7 @@ pub fn remove_skill_batch(
 					&outcome,
 					request.dry_run,
 				);
-				let still_read_from =
-					if !outcome.plan.still_read_from.is_empty() {
-						outcome.plan.still_read_from.clone()
-					} else if let Verdict::Kept {
-						ref still_read_from,
-					} = outcome.verdict
-					{
-						still_read_from.iter().map(|h| h.path.clone()).collect()
-					} else {
-						Vec::new()
-					};
+				let still_read_from = still_read_paths(&outcome);
 				preflight_verdicts.push(PreflightVerdict {
 					agent,
 					verdict: outcome.verdict.clone(),
@@ -479,21 +549,19 @@ pub fn remove_skill_batch(
 					needs_confirm: outcome.plan.needs_confirm,
 				});
 				if let Verdict::Refused { ref reason } = outcome.verdict {
-					if !request.dry_run {
-						let op = if request.all_agents {
-							"remove from every agent"
-						} else {
-							"remove for this agent alone"
-						};
-						preflight_failures.push((
-							agent,
-							Arc::new(ConfigError::unsupported_operation(
-								op,
-								reason,
-								agent.as_str(),
-							)),
-						));
-					}
+					let op = if request.all_agents {
+						"remove from every agent"
+					} else {
+						"remove for this agent alone"
+					};
+					preflight_failures.push((
+						agent,
+						Arc::new(ConfigError::unsupported_operation(
+							op,
+							reason,
+							agent.as_str(),
+						)),
+					));
 				} else if can_credit_prior {
 					accumulated_deletions
 						.extend(outcome.plan.paths.iter().cloned());
@@ -505,17 +573,7 @@ pub fn remove_skill_batch(
 					&outcome,
 					request.dry_run,
 				);
-				let still_read_from =
-					if !outcome.plan.still_read_from.is_empty() {
-						outcome.plan.still_read_from
-					} else if let Verdict::Kept {
-						ref still_read_from,
-					} = outcome.verdict
-					{
-						still_read_from.iter().map(|h| h.path.clone()).collect()
-					} else {
-						Vec::new()
-					};
+				let still_read_from = still_read_paths(&outcome);
 				preflight_verdicts.push(PreflightVerdict {
 					agent,
 					verdict: outcome.verdict,
@@ -534,51 +592,32 @@ pub fn remove_skill_batch(
 
 	// Preview (dry-run): does not acquire write lock, returns verdicts.
 	if request.dry_run {
+		let master_p = crate::skills::shape::master_path(
+			request.scope,
+			request.project_root.as_deref(),
+			name,
+		);
+		let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
 		let scope_str = scope_to_word(request.scope);
 		let rows = target_agents
 			.iter()
 			.map(|agent| {
 				let verdict_entry =
 					preflight_verdicts.iter().find(|e| e.agent == *agent);
-				let verdict = verdict_entry
-					.map(|e| e.verdict.clone())
-					.unwrap_or(Verdict::Absent);
-				let still_read_from = verdict_entry
-					.map(|e| e.still_read_from.clone())
-					.unwrap_or_default();
-				let paths =
-					verdict_entry.map(|e| e.paths.clone()).unwrap_or_default();
-				let skipped = verdict_entry
-					.map(|e| e.skipped.clone())
-					.unwrap_or_default();
-				let kind = verdict_entry
-					.map(|e| e.outcome)
-					.unwrap_or(crate::dto::RemovalKind::Absent);
-				let needs_confirm =
-					verdict_entry.map(|e| e.needs_confirm).unwrap_or(false);
+				let mut row = verdict_entry
+					.map(|e| e.to_row())
+					.unwrap_or_else(|| SkillRemovalRow::absent(*agent));
 				let load_err =
 					preflight_load_failures.iter().find(|(a, _)| *a == *agent);
 				let plan_err =
 					preflight_failures.iter().find(|(a, _)| *a == *agent);
 				let err_entry = load_err.or(plan_err);
-				let is_load_error = load_err.is_some();
-				let typed_error = err_entry.map(|(_, err)| Arc::clone(err));
-				let error = err_entry.map(|(_, err)| {
+				row.is_load_error = load_err.is_some();
+				row.typed_error = err_entry.map(|(_, err)| Arc::clone(err));
+				row.error = err_entry.map(|(_, err)| {
 					format!("delete {} ({scope_str}): {err}", agent.as_str())
 				});
-				SkillRemovalRow {
-					agent: *agent,
-					verdict,
-					outcome: kind,
-					error,
-					typed_error,
-					is_load_error,
-					still_read_from,
-					paths,
-					skipped,
-					executed: false,
-					needs_confirm,
-				}
+				row
 			})
 			.collect();
 		return Ok(SkillRemovalResponse {
@@ -700,19 +739,7 @@ pub fn remove_skill_batch(
 			request.project_root.as_deref(),
 		);
 		if let Err(e) = manager.load() {
-			execution_results.push(SkillRemovalRow {
-				agent,
-				verdict: Verdict::Absent,
-				outcome: crate::dto::RemovalKind::Absent,
-				error: Some(e.to_string()),
-				typed_error: Some(Arc::new(e)),
-				is_load_error: true,
-				still_read_from: Vec::new(),
-				paths: Vec::new(),
-				skipped: Vec::new(),
-				executed: false,
-				needs_confirm: false,
-			});
+			execution_results.push(SkillRemovalRow::error_row(agent, e, true));
 			continue;
 		}
 
@@ -727,35 +754,20 @@ pub fn remove_skill_batch(
 
 		match res {
 			Ok(outcome) => {
-				let kind = crate::dto::removal_kind_from_outcome(
-					&outcome,
-					request.dry_run,
-				);
-				let still_read_from =
-					if !outcome.plan.still_read_from.is_empty() {
-						outcome.plan.still_read_from
-					} else if let Verdict::Kept {
-						ref still_read_from,
-					} = outcome.verdict
-					{
-						still_read_from.iter().map(|h| h.path.clone()).collect()
-					} else {
-						Vec::new()
-					};
 				if outcome.executed {
 					credits.credit(agent);
-					match outcome.prune {
+					match &outcome.prune {
 						PruneStatus::Failed { reason, pruned } => {
-							all_pruned_keys.extend(pruned);
+							all_pruned_keys.extend(pruned.iter().cloned());
 							batch_prune = PruneStatus::Failed {
-								reason,
+								reason: reason.clone(),
 								pruned: all_pruned_keys.clone(),
 							};
 						}
 						PruneStatus::Pruned(keys) => {
 							for key in keys {
-								if !all_pruned_keys.contains(&key) {
-									all_pruned_keys.push(key);
+								if !all_pruned_keys.contains(key) {
+									all_pruned_keys.push(key.clone());
 								}
 							}
 							if !matches!(
@@ -780,19 +792,11 @@ pub fn remove_skill_batch(
 					}
 				}
 				if outcome.failed_paths.is_empty() {
-					execution_results.push(SkillRemovalRow {
+					execution_results.push(SkillRemovalRow::from_outcome(
 						agent,
-						verdict: outcome.verdict,
-						outcome: kind,
-						error: None,
-						typed_error: None,
-						is_load_error: false,
-						still_read_from,
-						paths: outcome.plan.paths,
-						skipped: outcome.plan.skipped,
-						executed: outcome.executed,
-						needs_confirm: outcome.plan.needs_confirm,
-					});
+						&outcome,
+						request.dry_run,
+					));
 				} else {
 					let err = format!(
 						"failed to remove skill '{}' for agent '{}': {} path(s) could not be deleted: {}",
@@ -806,85 +810,42 @@ pub fn remove_skill_batch(
 							.collect::<Vec<_>>()
 							.join(", ")
 					);
-					execution_results.push(SkillRemovalRow {
+					let mut row = SkillRemovalRow::from_outcome(
 						agent,
-						verdict: Verdict::Partial,
-						outcome: crate::dto::RemovalKind::Partial,
-						error: Some(err.clone()),
-						typed_error: Some(Arc::new(
-							ConfigError::InvalidConfig(err),
-						)),
-						is_load_error: false,
-						still_read_from,
-						paths: outcome.plan.paths,
-						skipped: outcome.plan.skipped,
-						executed: outcome.executed,
-						needs_confirm: outcome.plan.needs_confirm,
-					});
+						&outcome,
+						request.dry_run,
+					);
+					row.verdict = Verdict::Partial;
+					row.outcome = crate::dto::RemovalKind::Partial;
+					row.error = Some(err.clone());
+					row.typed_error =
+						Some(Arc::new(ConfigError::InvalidConfig(err)));
+					execution_results.push(row);
 				}
 			}
 			Err(ConfigError::ResourceNotFound { .. })
 				if credits.already_taken(&agent) =>
 			{
-				execution_results.push(SkillRemovalRow {
+				execution_results.push(SkillRemovalRow::noop(
 					agent,
-					verdict: Verdict::Removed,
-					outcome: crate::dto::RemovalKind::Removed,
-					error: None,
-					typed_error: None,
-					is_load_error: false,
-					still_read_from: Vec::new(),
-					paths: Vec::new(),
-					skipped: Vec::new(),
-					executed: false,
-					needs_confirm: false,
-				});
+					Verdict::Removed,
+					crate::dto::RemovalKind::Removed,
+				));
 			}
 			Err(err @ ConfigError::ResourceNotFound { .. }) => {
 				let outcome = manager.skill_noop_outcome(name);
-				let kind = crate::dto::removal_kind_from_outcome(
+				let mut row = SkillRemovalRow::from_outcome(
+					agent,
 					&outcome,
 					request.dry_run,
 				);
-				let still_read_from =
-					if !outcome.plan.still_read_from.is_empty() {
-						outcome.plan.still_read_from
-					} else if let Verdict::Kept {
-						ref still_read_from,
-					} = outcome.verdict
-					{
-						still_read_from.iter().map(|h| h.path.clone()).collect()
-					} else {
-						Vec::new()
-					};
-				execution_results.push(SkillRemovalRow {
-					agent,
-					verdict: outcome.verdict,
-					outcome: kind,
-					error: Some(err.to_string()),
-					typed_error: Some(Arc::new(err)),
-					is_load_error: false,
-					still_read_from,
-					paths: outcome.plan.paths,
-					skipped: outcome.plan.skipped,
-					executed: false,
-					needs_confirm: false,
-				});
+				row.error = Some(err.to_string());
+				row.typed_error = Some(Arc::new(err));
+				execution_results.push(row);
 			}
 			Err(err) => {
-				execution_results.push(SkillRemovalRow {
-					agent,
-					verdict: Verdict::Absent,
-					outcome: crate::dto::RemovalKind::Absent,
-					error: Some(err.to_string()),
-					typed_error: Some(Arc::new(err)),
-					is_load_error: false,
-					still_read_from: Vec::new(),
-					paths: Vec::new(),
-					skipped: Vec::new(),
-					executed: false,
-					needs_confirm: false,
-				});
+				execution_results
+					.push(SkillRemovalRow::error_row(agent, err, false));
 			}
 		}
 	}
@@ -896,19 +857,7 @@ pub fn remove_skill_batch(
 				.iter()
 				.find(|r| r.agent == *agent)
 				.cloned()
-				.unwrap_or(SkillRemovalRow {
-					agent: *agent,
-					verdict: Verdict::Absent,
-					outcome: crate::dto::RemovalKind::Absent,
-					error: None,
-					typed_error: None,
-					is_load_error: false,
-					still_read_from: Vec::new(),
-					paths: Vec::new(),
-					skipped: Vec::new(),
-					executed: false,
-					needs_confirm: false,
-				})
+				.unwrap_or_else(|| SkillRemovalRow::absent(*agent))
 		})
 		.collect();
 
