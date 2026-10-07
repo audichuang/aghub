@@ -151,6 +151,25 @@ pub(crate) static COMMIT_PREFLIGHT_HOOK: std::sync::Mutex<
 	Option<std::sync::mpsc::Sender<()>>,
 > = std::sync::Mutex::new(None);
 
+fn check_unreadable_exhaustive(
+	name: &str,
+	is_exhaustive: bool,
+	unreadable: &[&'static str],
+) -> Result<()> {
+	if is_exhaustive && !unreadable.is_empty() {
+		return Err(ConfigError::InvalidConfig(format!(
+			"cannot decide whether removing '{name}' leaves the shared \
+			 .aghub master unread: agent(s) '{}' could not be read \
+			 (skills directory unreadable), and an agent aghub cannot read may \
+			 still be holding it — naming it in --remove cannot authorize a \
+			 collection this run is unable to carry out on it. Fix or remove \
+			 those configs, then re-run.",
+			unreadable.join("', '")
+		)));
+	}
+	Ok(())
+}
+
 /// Single core entry point for skill deletion by name across multiple agents.
 pub fn remove_skill_batch(
 	request: &SkillRemovalRequest,
@@ -165,36 +184,30 @@ pub fn remove_skill_batch(
 		find_skill_holders(name, request.scope, request.project_root.as_deref())
 	};
 
+	let target_agents: Vec<AgentType> = if request.agents.is_empty()
+		&& request.all_agents
+	{
+		holders
+			.iter()
+			.filter(|agent| crate::agent_settings::is_managed(agent.as_str()))
+			.copied()
+			.collect()
+	} else {
+		request.agents.clone()
+	};
+
 	let is_exhaustive = !request.keeps_master
 		&& (request.all_agents
 			|| (!holders.is_empty()
-				&& holders.iter().all(|held| request.agents.contains(held))));
+				&& holders.iter().all(|held| target_agents.contains(held))));
 
-	if is_exhaustive && !unreadable.is_empty() {
-		return Err(ConfigError::InvalidConfig(format!(
-			"cannot decide whether removing '{}' leaves the shared \
-			 .aghub master unread: agent(s) '{}' could not be read \
-			 (skills directory unreadable), and an agent aghub cannot read may \
-			 still be holding it — naming it in --remove cannot authorize a \
-			 collection this run is unable to carry out on it. Fix or remove \
-			 those configs, then re-run.",
-			name,
-			unreadable.join("', '")
-		)));
-	}
+	check_unreadable_exhaustive(name, is_exhaustive, &unreadable)?;
 
 	let keepers: Vec<AgentType> = holders
 		.iter()
-		.filter(|held| !request.agents.contains(held))
+		.filter(|held| !target_agents.contains(held))
 		.copied()
 		.collect();
-
-	let target_agents: Vec<AgentType> =
-		if request.agents.is_empty() && request.all_agents {
-			holders.clone()
-		} else {
-			request.agents.clone()
-		};
 
 	if target_agents.is_empty() {
 		return Ok(SkillRemovalResponse {
@@ -257,7 +270,7 @@ pub fn remove_skill_batch(
 			is_exhaustive && holders.contains(&agent),
 			true, // dry_run
 			true, // confirm
-			&request.agents,
+			&target_agents,
 			&accumulated_deletions,
 		);
 
@@ -388,30 +401,47 @@ pub fn remove_skill_batch(
 		find_skill_holders(name, request.scope, request.project_root.as_deref())
 	};
 
+	let in_lock_target_agents: Vec<AgentType> = if request.agents.is_empty()
+		&& request.all_agents
+	{
+		holders
+			.iter()
+			.filter(|agent| crate::agent_settings::is_managed(agent.as_str()))
+			.copied()
+			.collect()
+	} else {
+		request.agents.clone()
+	};
+
 	let is_exhaustive = !request.keeps_master
 		&& (request.all_agents
 			|| (!holders.is_empty()
-				&& holders.iter().all(|held| request.agents.contains(held))));
+				&& holders
+					.iter()
+					.all(|held| in_lock_target_agents.contains(held))));
+
+	check_unreadable_exhaustive(name, is_exhaustive, &unreadable)?;
 
 	let keepers: Vec<AgentType> = holders
 		.iter()
-		.filter(|held| !request.agents.contains(held))
+		.filter(|held| !in_lock_target_agents.contains(held))
 		.copied()
 		.collect();
 
-	let mut credits = RemovalCredits::new(request.agents.clone(), |agent| {
-		let mut mgr = create_manager(
-			*agent,
-			request.scope,
-			request.project_root.as_deref(),
-		);
-		if mgr.load().is_err() {
-			return None;
-		}
-		mgr.get_skill(name)
-			.and_then(crate::skills::removal::skill_root)
-			.map(Backing::of)
-	});
+	let mut credits =
+		RemovalCredits::new(in_lock_target_agents.clone(), |agent| {
+			let mut mgr = create_manager(
+				*agent,
+				request.scope,
+				request.project_root.as_deref(),
+			);
+			if mgr.load().is_err() {
+				return None;
+			}
+			mgr.get_skill(name)
+				.and_then(crate::skills::removal::skill_root)
+				.map(Backing::of)
+		});
 
 	let mut execution_results: Vec<SkillRemovalRow> = Vec::new();
 	let mut batch_prune = PruneStatus::NotRun;
@@ -440,7 +470,7 @@ pub fn remove_skill_batch(
 			is_exhaustive && holders.contains(&agent),
 			false, // dry_run
 			true,  // confirm
-			&request.agents,
+			&in_lock_target_agents,
 			&[],
 		);
 
@@ -582,6 +612,7 @@ pub fn remove_skill_batch(
 mod tests {
 	use super::*;
 	use crate::skills::prune::test_lock::env_lock;
+	#[cfg(unix)]
 	use crate::skills::removal;
 	use std::fs;
 	use tempfile::tempdir;
@@ -849,6 +880,74 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn test_internal_accumulation_credits_later_row() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		setup_shared_fixture(&root, "notebooklm");
+
+		// Disable all agents except Amp, OpenCode, and Claude (who keeps the Master).
+		let ids: Vec<&str> = AgentType::ALL
+			.iter()
+			.map(|a| a.as_str())
+			.filter(|id| *id != "opencode" && *id != "amp" && *id != "claude")
+			.collect();
+		let _off = crate::agent_settings::test_override::disable(&ids);
+
+		// When asked alone, OpenCode (private reader) is Refused because .agents/skills/notebooklm still exists.
+		let req_alone = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::OpenCode],
+			dry_run: true,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let res_alone = remove_skill_batch(&req_alone).unwrap();
+		assert!(
+			matches!(res_alone.rows[0].verdict, Verdict::Refused { .. }),
+			"expected Refused when asked alone, got {:?}",
+			res_alone.rows[0].verdict
+		);
+
+		// When asked together (shared-slot writer Amp + private reader OpenCode),
+		// earlier row (Amp) plans deletion of .agents/skills/notebooklm, crediting OpenCode internally
+		// without caller-supplied prior_removed_paths.
+		let req_batch = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::Amp, AgentType::OpenCode],
+			dry_run: true,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let res_batch = remove_skill_batch(&req_batch).unwrap();
+		let amp_row = res_batch
+			.rows
+			.iter()
+			.find(|r| r.agent == AgentType::Amp)
+			.unwrap();
+		let opencode_row = res_batch
+			.rows
+			.iter()
+			.find(|r| r.agent == AgentType::OpenCode)
+			.unwrap();
+		assert_eq!(amp_row.verdict, Verdict::Removed);
+		assert_eq!(
+			opencode_row.verdict,
+			Verdict::Removed,
+			"internal accumulation must turn OpenCode from Refused into Removed"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn test_whole_batch_preflight_rejection_writes_nothing() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
@@ -929,7 +1028,8 @@ mod tests {
 		std::os::unix::fs::symlink(&master, opencode_skills.join("notebooklm"))
 			.unwrap();
 
-		let _off = crate::agent_settings::test_override::disable(&["opencode"]);
+		let mut _off =
+			Some(crate::agent_settings::test_override::disable(&["opencode"]));
 
 		let req_unnamed = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
@@ -948,6 +1048,29 @@ mod tests {
 		assert!(root.join(".opencode/skills/notebooklm").exists());
 		assert!(root.join(".aghub/notebooklm").exists());
 
+		// all_agents=true with empty agents list: disabled OpenCode is the ONLY remaining reader.
+		// Its Referrer AND the Master must stay.
+		let req_all_disabled = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: Vec::new(),
+			dry_run: false,
+			all_agents: true,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let res_disabled = remove_skill_batch(&req_all_disabled).unwrap();
+		assert!(res_disabled.rows.is_empty());
+		assert!(
+			root.join(".opencode/skills/notebooklm").exists(),
+			"disabled holder Referrer must survive all_agents expansion"
+		);
+		assert!(
+			root.join(".aghub/notebooklm").exists(),
+			"Master must survive while disabled holder is the only remaining reader"
+		);
+
 		let req_named = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
@@ -963,6 +1086,41 @@ mod tests {
 
 		assert!(!root.join(".opencode/skills/notebooklm").exists());
 		assert!(!root.join(".aghub/notebooklm").exists());
+
+		// Compare with the same fixture where the agent is enabled:
+		// Re-create the single-reader fixture with OpenCode enabled.
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: notebooklm\ndescription: test\n---\n",
+		)
+		.unwrap();
+		std::os::unix::fs::symlink(&master, opencode_skills.join("notebooklm"))
+			.unwrap();
+		drop(_off.take());
+
+		let req_all_enabled = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: Vec::new(),
+			dry_run: false,
+			all_agents: true,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let res_enabled = remove_skill_batch(&req_all_enabled).unwrap();
+		assert_eq!(res_enabled.rows.len(), 1);
+		assert_eq!(res_enabled.rows[0].agent, AgentType::OpenCode);
+		assert_eq!(res_enabled.rows[0].verdict, Verdict::Removed);
+		assert!(
+			!root.join(".opencode/skills/notebooklm").exists(),
+			"enabled holder Referrer must be removed by all_agents expansion"
+		);
+		assert!(
+			!root.join(".aghub/notebooklm").exists(),
+			"Master must be GC'd when enabled holder is removed"
+		);
 	}
 
 	#[cfg(unix)]
@@ -1202,6 +1360,101 @@ mod tests {
 		assert!(
 			root.join(".aghub/notebooklm").exists(),
 			"Master must survive because Cursor was added while commit was blocked and commit re-planned inside lock"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_in_lock_replan_refuses_when_holder_becomes_unreadable() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let master = root.join(".aghub/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: test\n---\n",
+		)
+		.unwrap();
+
+		fs::create_dir_all(root.join(".codex/skills")).unwrap();
+		std::os::unix::fs::symlink(&master, root.join(".codex/skills/mover"))
+			.unwrap();
+
+		let (hook_tx, hook_rx) = std::sync::mpsc::channel();
+		*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = Some(hook_tx);
+
+		struct HookReset;
+		impl Drop for HookReset {
+			fn drop(&mut self) {
+				*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = None;
+			}
+		}
+		let _hook_reset = HookReset;
+
+		// Acquire mutation lock first so commit thread blocks before entering lock.
+		let test_lock = crate::skills::lock::mutation_guard(
+			"test competing lock",
+			ResourceScope::ProjectOnly,
+			Some(&root),
+		)
+		.expect("test thread acquires mutation lock");
+
+		let req_commit = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("mover".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::Codex],
+			dry_run: false,
+			all_agents: true,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+
+		let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+		let req_commit_clone = req_commit.clone();
+		let commit_thread = std::thread::spawn(move || {
+			let res = remove_skill_batch(&req_commit_clone);
+			let _ = commit_tx.send(res);
+		});
+
+		// Wait for commit thread to complete unlocked preflight and block on write lock.
+		hook_rx
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.expect("commit thread must signal hook after unlocked preflight");
+
+		// While commit thread is blocked waiting for write lock, create unreadable Windsurf skills dir (symlink loop).
+		fs::create_dir_all(root.join(".windsurf")).unwrap();
+		std::os::unix::fs::symlink(
+			std::path::Path::new("skills"),
+			root.join(".windsurf/skills"),
+		)
+		.unwrap();
+
+		// Release the write lock so commit thread can proceed.
+		drop(test_lock);
+
+		let res_commit = commit_rx
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.expect("commit thread should complete after lock release");
+		commit_thread.join().unwrap();
+
+		let err = res_commit.expect_err(
+			"in-lock replan must refuse when a holder's skills directory is unreadable",
+		);
+		let err_msg = err.to_string();
+		assert!(
+			err_msg.contains(
+				"cannot decide whether removing 'mover' leaves the shared"
+			),
+			"message must match unreadable refusal: {err_msg}"
+		);
+		assert!(
+			err_msg.contains("windsurf"),
+			"message must name unreadable agent: {err_msg}"
 		);
 	}
 

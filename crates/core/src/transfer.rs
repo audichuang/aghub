@@ -746,11 +746,10 @@ fn protected_targets(
 /// reconcile already emptied the shared backing — and record a real deletion.
 ///
 /// `took` is the caller's own answer to "did this row really empty its
-/// backing?": `remove_mcp`/`remove_sub_agent` delete or error, while
-/// `remove_skill_planned` can return a spared outcome (`shared_master_kept`)
-/// that took nothing. Always `Ok(false)`: a Delete row is never
-/// `already_present`. One definition for all three delete arms (MCP, sub-agent,
-/// skill) so they cannot drift.
+/// backing?": `remove_mcp`/`remove_sub_agent` delete or error.
+/// Always `Ok(false)`: a Delete row is never `already_present`.
+/// Defined for MCP and sub-agent delete arms; the skill arm's sibling
+/// credit moved into [`crate::skills::removal::remove_skill_batch`].
 /// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
 fn sibling_already_took_it(
 	removed: Result<bool>,
@@ -2306,10 +2305,7 @@ pub fn reconcile_skill(
 							}
 							crate::skills::removal::Verdict::Kept {
 								..
-							} => Err(plan.refuse_shared_master(
-								row.target.agent.as_str(),
-								&r.still_read_from,
-							)),
+							} => Ok(false),
 							crate::skills::removal::Verdict::Refused {
 								reason,
 							} => {
@@ -2319,8 +2315,10 @@ pub fn reconcile_skill(
 										&r.still_read_from,
 									))
 								} else {
-									Err(ConfigError::InvalidConfig(
-										reason.clone(),
+									Err(ConfigError::unsupported_operation(
+										"remove for this agent alone",
+										reason,
+										row.target.agent.as_str(),
 									))
 								}
 							}
