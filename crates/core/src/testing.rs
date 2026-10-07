@@ -218,6 +218,28 @@ impl TestConfigBuilder {
 	}
 }
 
+/// The shared link is not decoration. Cursor, codex, cline, warp and five
+/// others reach a project skill only by scanning that directory, and it used
+/// to hold the Master itself — so storing the skill granted it to all of
+/// them for free. Now the grant is a link, and a fixture that omits it is
+/// testing an agent that simply does not have the skill.
+#[cfg(unix)]
+pub fn master_with_claude_referrer(root: &Path, name: &str) {
+	let master = root.join(".aghub").join(name);
+	fs::create_dir_all(&master).unwrap();
+	fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: Shared\n---\n\n# {name}\n"),
+	)
+	.unwrap();
+	let claude_skills = root.join(".claude/skills");
+	fs::create_dir_all(&claude_skills).unwrap();
+	std::os::unix::fs::symlink(&master, claude_skills.join(name)).unwrap();
+	let shared = root.join(".agents/skills");
+	fs::create_dir_all(&shared).unwrap();
+	std::os::unix::fs::symlink(&master, shared.join(name)).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

@@ -502,6 +502,144 @@ pub fn run_skill_agent_mutation(
 	run_agent_mutation_with_preflight(agents, "skill", |_| Ok(()), mutate)
 }
 
+/// A plain `canonicalize` fails on a missing leaf and falls back to the literal
+/// path, which is how `~/.gemini/skills` and `~/.claude/skills` read as two
+/// different places while `~/.gemini` is a symlink to `~/.claude`. Falling back
+/// one level up resolves the part that DOES exist.
+pub fn resolve_through_links(path: PathBuf) -> PathBuf {
+	if let Ok(real) = std::fs::canonicalize(&path) {
+		return real;
+	}
+	match (path.parent(), path.file_name()) {
+		(Some(parent), Some(name)) => std::fs::canonicalize(parent)
+			.map(|real| real.join(name))
+			.unwrap_or(path),
+		_ => path,
+	}
+}
+
+#[cfg(unix)]
+pub fn node_id(path: &Path) -> Option<(u64, u64)> {
+	use std::os::unix::fs::MetadataExt;
+	let meta = std::fs::metadata(path).ok()?;
+	Some((meta.dev(), meta.ino()))
+}
+
+// ponytail: no stable std API for the Windows file index, so hard links there
+// fall back to path comparison. Symlink and junction aliasing is still covered
+// — that is `canonicalize`'s job — leaving only NTFS hard links between two
+// agents' config files, which no documented aghub layout produces. Upgrade
+// path: `GetFileInformationByHandle` via the `windows` crate if it ever bites.
+#[cfg(not(unix))]
+pub fn node_id(_path: &Path) -> Option<(u64, u64)> {
+	None
+}
+
+/// A backing file's identity — NOT its path.
+///
+/// `canonicalize` collapses symlinks but NOT hard links (dotfile `cp -l`,
+/// rdfind/jdupes), so identity is `(dev, ino)`.
+/// See docs/history/core-transfer.md#shared-backing-destroyed-a-resource
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Backing {
+	/// `(device, inode)` — identity proper. `None` when the path does not
+	/// exist yet, and then there is nothing to alias.
+	pub node: Option<(u64, u64)>,
+	pub path: PathBuf,
+}
+
+impl Backing {
+	pub fn of(path: PathBuf) -> Self {
+		let path = resolve_through_links(path);
+		let node = node_id(&path);
+		Self { node, path }
+	}
+
+	pub fn is(&self, other: &Self) -> bool {
+		match (self.node, other.node) {
+			(Some(a), Some(b)) => a == b,
+			// Neither exists: the resolved path is all there is.
+			(None, None) => self.path == other.path,
+			// One exists and one does not — not one file.
+			_ => false,
+		}
+	}
+}
+
+/// The removal rows of ONE batch or reconcile, each with the backing it resolved
+/// to at PREFLIGHT, plus which rows actually took something out.
+///
+/// The other half of [`ensure_removals_spare`]: its remedy ("add the sharer to
+/// `--remove`") must work, so a row whose resource a SIBLING row of this
+/// command already took is a success. Sharing a backing is not the credential —
+/// only a row that REALLY emptied it vouches for later rows.
+/// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
+pub struct RemovalCredits<K> {
+	/// One entry per removal target that resolves to a backing at all, in
+	/// input order.
+	resolved: Vec<(K, Backing)>,
+	/// The keys whose row returned a real deletion.
+	credited: Vec<K>,
+}
+
+impl<K: Clone + PartialEq> RemovalCredits<K> {
+	pub fn new<I, F>(keys: I, mut resolve_backing: F) -> Self
+	where
+		I: IntoIterator<Item = K>,
+		F: FnMut(&K) -> Option<Backing>,
+	{
+		let resolved = keys
+			.into_iter()
+			.filter_map(|key| {
+				let backing = resolve_backing(&key)?;
+				Some((key, backing))
+			})
+			.collect();
+		Self {
+			resolved,
+			credited: Vec::new(),
+		}
+	}
+
+	pub fn from_mapped<T, I, F>(items: I, map_fn: F) -> Self
+	where
+		I: IntoIterator<Item = T>,
+		F: FnMut(T) -> Option<(K, Backing)>,
+	{
+		let resolved = items.into_iter().filter_map(map_fn).collect();
+		Self {
+			resolved,
+			credited: Vec::new(),
+		}
+	}
+
+	pub fn backing_of(&self, key: &K) -> Option<&Backing> {
+		self.resolved
+			.iter()
+			.find(|(candidate, _)| candidate == key)
+			.map(|(_, backing)| backing)
+	}
+
+	/// This row really took the resource out, so its backing now vouches for
+	/// the later rows that share it.
+	pub fn credit(&mut self, key: K) {
+		if !self.credited.contains(&key) {
+			self.credited.push(key);
+		}
+	}
+
+	/// Has an EARLIER row of this same command already emptied the backing this
+	/// agent/target reads?
+	pub fn already_taken(&self, key: &K) -> bool {
+		let Some(mine) = self.backing_of(key) else {
+			return false;
+		};
+		self.credited.iter().any(|credited| {
+			self.backing_of(credited).is_some_and(|took| took.is(mine))
+		})
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

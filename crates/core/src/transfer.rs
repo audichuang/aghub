@@ -1,4 +1,5 @@
 use crate::{
+	batch::{Backing, RemovalCredits},
 	create_adapter,
 	errors::{ConfigError, Result},
 	manager::{sub_agent::same_sub_agent_content, ConfigManager},
@@ -435,71 +436,6 @@ fn prove_content_landed(
 	}
 }
 
-/// Resolve a path through symlinks even when it does not exist yet.
-///
-/// A plain `canonicalize` fails on a missing leaf and falls back to the literal
-/// path, which is how `~/.gemini/skills` and `~/.claude/skills` read as two
-/// different places while `~/.gemini` is a symlink to `~/.claude`. Falling back
-/// one level up resolves the part that DOES exist.
-fn resolve_through_links(path: PathBuf) -> PathBuf {
-	if let Ok(real) = std::fs::canonicalize(&path) {
-		return real;
-	}
-	match (path.parent(), path.file_name()) {
-		(Some(parent), Some(name)) => std::fs::canonicalize(parent)
-			.map(|real| real.join(name))
-			.unwrap_or(path),
-		_ => path,
-	}
-}
-
-/// A backing file's identity — NOT its path.
-///
-/// `canonicalize` collapses symlinks but NOT hard links (dotfile `cp -l`,
-/// rdfind/jdupes), so identity is `(dev, ino)`.
-/// See docs/history/core-transfer.md#shared-backing-destroyed-a-resource
-struct Backing {
-	/// `(device, inode)` — identity proper. `None` when the path does not
-	/// exist yet, and then there is nothing to alias.
-	node: Option<(u64, u64)>,
-	path: PathBuf,
-}
-
-impl Backing {
-	fn of(path: PathBuf) -> Self {
-		let path = resolve_through_links(path);
-		let node = node_id(&path);
-		Self { node, path }
-	}
-
-	fn is(&self, other: &Self) -> bool {
-		match (self.node, other.node) {
-			(Some(a), Some(b)) => a == b,
-			// Neither exists: the resolved path is all there is.
-			(None, None) => self.path == other.path,
-			// One exists and one does not — not one file.
-			_ => false,
-		}
-	}
-}
-
-#[cfg(unix)]
-fn node_id(path: &Path) -> Option<(u64, u64)> {
-	use std::os::unix::fs::MetadataExt;
-	let meta = std::fs::metadata(path).ok()?;
-	Some((meta.dev(), meta.ino()))
-}
-
-// ponytail: no stable std API for the Windows file index, so hard links there
-// fall back to path comparison. Symlink and junction aliasing is still covered
-// — that is `canonicalize`'s job — leaving only NTFS hard links between two
-// agents' config files, which no documented aghub layout produces. Upgrade
-// path: `GetFileInformationByHandle` via the `windows` crate if it ever bites.
-#[cfg(not(unix))]
-fn node_id(_path: &Path) -> Option<(u64, u64)> {
-	None
-}
-
 /// What a backing lookup could determine about one target.
 ///
 /// "Holds no such resource" and "config would not parse, cannot tell" are
@@ -806,70 +742,6 @@ fn protected_targets(
 	protect
 }
 
-/// The removal rows of ONE reconcile, each with the backing it resolved to at
-/// PREFLIGHT, plus which rows actually took something out.
-///
-/// The other half of [`ensure_removals_spare`]: its remedy ("add the sharer to
-/// `--remove`") must work, so a row whose resource a SIBLING row of this
-/// command already took is a success. Sharing a backing is not the credential —
-/// only a row that REALLY emptied it vouches for later rows. Scoped to this
-/// command's removal set, so a never-holder's row still errors. Resolved at
-/// preflight because a sub-agent's backing IS the file the first row deletes.
-/// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
-struct RemovalCredits {
-	/// One entry per removal target that resolves to a backing at all, in
-	/// input order.
-	resolved: Vec<(AgentType, Backing)>,
-	/// The agents whose row returned a real deletion.
-	credited: Vec<AgentType>,
-}
-
-impl RemovalCredits {
-	fn new<F>(removing: &[InstallTarget], backing: F) -> Self
-	where
-		F: Fn(&InstallTarget) -> Backed,
-	{
-		Self {
-			resolved: removing
-				.iter()
-				.filter_map(|target| match backing(target) {
-					Backed::At(path) => Some((target.agent, Backing::of(path))),
-					// No key means no credit and no forgiveness — the safe
-					// direction for an undeterminable backing.
-					Backed::Absent | Backed::Unknown => None,
-				})
-				.collect(),
-			credited: Vec::new(),
-		}
-	}
-
-	fn backing_of(&self, agent: AgentType) -> Option<&Backing> {
-		self.resolved
-			.iter()
-			.find(|(candidate, _)| *candidate == agent)
-			.map(|(_, backing)| backing)
-	}
-
-	/// This row really took the resource out, so its backing now vouches for
-	/// the later rows that share it.
-	fn credit(&mut self, agent: AgentType) {
-		if !self.credited.contains(&agent) {
-			self.credited.push(agent);
-		}
-	}
-
-	/// Has an EARLIER row of this same command already emptied the backing this
-	/// agent reads?
-	fn already_taken(&self, agent: AgentType) -> bool {
-		let Some(mine) = self.backing_of(agent) else {
-			return false;
-		};
-		self.credited.iter().any(|credited| {
-			self.backing_of(*credited).is_some_and(|took| took.is(mine))
-		})
-	}
-}
-
 /// Read a removal that found nothing as success when a SIBLING row of the same
 /// reconcile already emptied the shared backing — and record a real deletion.
 ///
@@ -883,7 +755,7 @@ impl RemovalCredits {
 fn sibling_already_took_it(
 	removed: Result<bool>,
 	agent: AgentType,
-	credits: &mut RemovalCredits,
+	credits: &mut RemovalCredits<AgentType>,
 ) -> Result<bool> {
 	match removed {
 		Ok(took) => {
@@ -893,7 +765,7 @@ fn sibling_already_took_it(
 			Ok(false)
 		}
 		Err(ConfigError::ResourceNotFound { .. })
-			if credits.already_taken(agent) =>
+			if credits.already_taken(&agent) =>
 		{
 			Ok(false)
 		}
@@ -1572,7 +1444,14 @@ pub fn reconcile_mcp(
 	ensure_removals_spare(&protect, &removing, source.agent, mcp_backing_path)?;
 	// The rows the refusal's remedy creates must succeed: a row finding the
 	// entry gone because a sibling row took it is a success, credited below.
-	let mut credits = RemovalCredits::new(&removing, mcp_backing_path);
+	let mut credits =
+		RemovalCredits::from_mapped(
+			&removing,
+			|target| match mcp_backing_path(target) {
+				Backed::At(path) => Some((target.agent, Backing::of(path))),
+				Backed::Absent | Backed::Unknown => None,
+			},
+		);
 	// Preflight is a SNAPSHOT: Copilot's project path depends on which of
 	// `.mcp.json` / `.github/mcp.json` exists, so a copy can move the delete
 	// target. The delete arm re-resolves once every path is settled.
@@ -1718,8 +1597,11 @@ pub fn reconcile_sub_agent(
 	})?;
 	// Same credential as the MCP arm; the backing IS the file, so preflight is
 	// the only place it can be resolved.
-	let mut credits = RemovalCredits::new(&removing, |target| {
-		sub_agent_backing_path(target, &source.name)
+	let mut credits = RemovalCredits::from_mapped(&removing, |target| {
+		match sub_agent_backing_path(target, &source.name) {
+			Backed::At(path) => Some((target.agent, Backing::of(path))),
+			Backed::Absent | Backed::Unknown => None,
+		}
 	});
 	// …and only a snapshot: two agents sharing a dir both resolve to `Absent`
 	// until a copy writes the file. The delete-time re-check is the real one.
@@ -1860,6 +1742,39 @@ fn skill_holders(
 	)
 }
 
+fn clone_config_error(err: &ConfigError) -> ConfigError {
+	match err {
+		ConfigError::Io(e) => {
+			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
+		}
+		ConfigError::Json(e) => ConfigError::InvalidConfig(e.to_string()),
+		ConfigError::NotFound { path } => {
+			ConfigError::NotFound { path: path.clone() }
+		}
+		ConfigError::ResourceNotFound {
+			resource_type,
+			name,
+		} => ConfigError::ResourceNotFound {
+			resource_type: resource_type.clone(),
+			name: name.clone(),
+		},
+		ConfigError::ResourceExists {
+			resource_type,
+			name,
+		} => ConfigError::ResourceExists {
+			resource_type: resource_type.clone(),
+			name: name.clone(),
+		},
+		ConfigError::ValidationFailed(s) => {
+			ConfigError::ValidationFailed(s.clone())
+		}
+		ConfigError::UnsupportedOperation(s) => {
+			ConfigError::UnsupportedOperation(s.clone())
+		}
+		ConfigError::InvalidConfig(s) => ConfigError::InvalidConfig(s.clone()),
+	}
+}
+
 /// Everything a skill reconcile decides BEFORE it writes anything: the resolved
 /// source, the Master's fate, and the two plan lists.
 ///
@@ -1869,7 +1784,6 @@ fn skill_holders(
 struct ReconcileSkillPlan {
 	skill: Skill,
 	source_root: PathBuf,
-	requested_removals: Vec<AgentType>,
 	/// Does this reconcile drop the skill from EVERY agent that holds it? Then
 	/// the Master has no remaining reader and goes with it — removed per-agent,
 	/// the Master would be left orphaned (the desktop's manage-agents dialog
@@ -1882,6 +1796,8 @@ struct ReconcileSkillPlan {
 	unreadable: Vec<&'static str>,
 	copies: Vec<OperationPlan>,
 	deletes: Vec<OperationPlan>,
+	dry_run_delete_response:
+		Option<Result<crate::skills::removal::SkillRemovalResponse>>,
 }
 
 /// Load the skill for reconcile: uses the caller's source if present, or
@@ -1987,17 +1903,64 @@ fn plan_reconcile_skill(
 		)));
 	}
 
-	let (copies, deletes) = reconcile_plans(
+	let (copies, mut deletes) = reconcile_plans(
 		added.to_vec(),
 		removed.to_vec(),
 		source.scope,
 		source.project_root.clone(),
 	);
+	// Shared slots must go first: a private Referrer cannot be revoked while
+	// the same agent still reads the shared slot this batch is removing. Reader
+	// count comes from `slot_reader_count` (full roster); never re-derive slot
+	// sharing here.
+	// The sort key counts the full roster (slot_reader_count) because slot
+	// sharing is structural; filtering disabled agents ties shared and private
+	// slots and can put a private row first, which preflight then refuses.
+	// See docs/history/core-transfer.md#seventh-spelling-of-slot-sharing
+	// and docs/history/core-removal.md#reconcile-delete-order-needs-the-full-roster
+	deletes.sort_by_cached_key(|row| {
+		let scope = target_resource_scope(&row.target);
+		let readers = create_adapter(row.target.agent)
+			.target_skills_dir(row.target.project_root.as_deref(), scope)
+			.map(|dir| {
+				crate::skills::removal::slot_reader_count(
+					&dir,
+					scope,
+					row.target.project_root.as_deref(),
+				)
+			})
+			.unwrap_or(0);
+		std::cmp::Reverse(readers)
+	});
+
+	let dry_run_delete_response = if !deletes.is_empty() {
+		let scope = match source.scope {
+			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
+			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
+		};
+		let req = crate::skills::removal::SkillRemovalRequest {
+			target: crate::skills::removal::SkillRemovalTarget::ByName(
+				skill.name.clone(),
+			),
+			scope,
+			project_root: source.project_root.clone(),
+			agents: removed.to_vec(),
+			dry_run: true,
+			all_agents: exhaustive,
+			prior_removed_paths: Vec::new(),
+		};
+		match crate::skills::removal::remove_skill_batch(&req) {
+			Ok(resp) => Some(Ok(resp)),
+			Err(ConfigError::ResourceNotFound { .. }) => None,
+			Err(error) => Some(Err(error)),
+		}
+	} else {
+		None
+	};
 
 	Ok(ReconcileSkillPlan {
 		skill,
 		source_root,
-		requested_removals: removed.to_vec(),
 		exhaustive,
 		// Unreadable agents get their own clause in the refusal, so leaving
 		// them out here keeps a message from naming the same agent twice.
@@ -2015,6 +1978,7 @@ fn plan_reconcile_skill(
 		unreadable,
 		copies,
 		deletes,
+		dry_run_delete_response,
 	})
 }
 
@@ -2037,25 +2001,10 @@ impl ReconcileSkillPlan {
 	/// `exhaustive`, just earlier; runs for every delete row, with or without
 	/// copies.
 	fn preflight_delete(&self, target: &InstallTarget) -> Result<()> {
-		let scope = match target.scope {
-			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-		};
-		let req = crate::skills::removal::SkillRemovalRequest {
-			target: crate::skills::removal::SkillRemovalTarget::ByName(
-				self.skill.name.clone(),
-			),
-			scope,
-			project_root: target.project_root.clone(),
-			agents: self.requested_removals.clone(),
-			dry_run: true,
-			all_agents: self.exhaustive,
-			prior_removed_paths: Vec::new(),
-		};
-		let response = match crate::skills::removal::remove_skill_batch(&req) {
-			Ok(resp) => resp,
-			Err(ConfigError::ResourceNotFound { .. }) => return Ok(()),
-			Err(error) => return Err(error),
+		let response = match &self.dry_run_delete_response {
+			Some(Ok(resp)) => resp,
+			Some(Err(err)) => return Err(clone_config_error(err)),
+			None => return Ok(()),
 		};
 
 		let row = response.rows.iter().find(|r| r.agent == target.agent);
@@ -2063,13 +2012,12 @@ impl ReconcileSkillPlan {
 			.map(|r| &r.verdict)
 			.unwrap_or(&crate::skills::removal::Verdict::Absent);
 
-		let still_read_from = verdict.still_read_from_paths();
+		let still_read_from =
+			row.map(|r| r.still_read_from.as_slice()).unwrap_or(&[]);
 
 		if verdict.shared_master_kept() || self.a_copy_restores_it(target) {
-			return Err(self.refuse_shared_master(
-				target.agent.as_str(),
-				&still_read_from,
-			));
+			return Err(self
+				.refuse_shared_master(target.agent.as_str(), still_read_from));
 		}
 		Ok(())
 	}
@@ -2278,7 +2226,7 @@ pub fn reconcile_skill(
 		skill_backing_dir,
 	)?;
 	let mut delete_batch_result: Option<
-		crate::skills::removal::SkillRemovalResponse,
+		Result<crate::skills::removal::SkillRemovalResponse>,
 	> = None;
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&plan.copies,
@@ -2373,35 +2321,49 @@ pub fn reconcile_skill(
 				// Use the planned-removal seam — never blind-delete a shared
 				// universal master discovered through an agent's read dirs.
 				OperationAction::Delete => (|| -> Result<bool> {
-					ensure_removals_spare(
-						&protect,
-						std::slice::from_ref(&row.target),
-						source.agent,
-						skill_backing_dir,
-					)?;
 					if delete_batch_result.is_none() {
-						let delete_agents: Vec<AgentType> = plan
-							.deletes
-							.iter()
-							.map(|r| r.target.agent)
-							.collect();
-						let scope = target_resource_scope(&row.target);
-						let req = crate::skills::removal::SkillRemovalRequest {
-							target: crate::skills::removal::SkillRemovalTarget::ByName(
-								plan.skill.name.clone(),
-							),
-							scope,
-							project_root: row.target.project_root.clone(),
-							agents: delete_agents,
-							dry_run: false,
-							all_agents: plan.exhaustive,
-							prior_removed_paths: Vec::new(),
-						};
-						delete_batch_result = Some(
-							crate::skills::removal::remove_skill_batch(&req)?,
+						// Before invoking the batch, run ensure_removals_spare
+						// over ALL delete targets. A copy that just ran can
+						// create the dir a delete target resolves through!
+						// If any target fails the spare check, fail without
+						// calling the batch so protected targets survive.
+						let spare_check = ensure_removals_spare(
+							&protect,
+							&removing,
+							source.agent,
+							skill_backing_dir,
 						);
+						if let Err(err) = spare_check {
+							delete_batch_result = Some(Err(err));
+						} else {
+							let delete_agents: Vec<AgentType> = plan
+								.deletes
+								.iter()
+								.map(|r| r.target.agent)
+								.collect();
+							let scope = target_resource_scope(&row.target);
+							let req = crate::skills::removal::SkillRemovalRequest {
+								target: crate::skills::removal::SkillRemovalTarget::ByName(
+									plan.skill.name.clone(),
+								),
+								scope,
+								project_root: row.target.project_root.clone(),
+								agents: delete_agents,
+								dry_run: false,
+								all_agents: plan.exhaustive,
+								prior_removed_paths: Vec::new(),
+							};
+							delete_batch_result = Some(
+								crate::skills::removal::remove_skill_batch(
+									&req,
+								),
+							);
+						}
 					}
-					let resp = delete_batch_result.as_ref().unwrap();
+					let resp = match delete_batch_result.as_ref().unwrap() {
+						Ok(resp) => resp,
+						Err(err) => return Err(clone_config_error(err)),
+					};
 					if let Some(r) =
 						resp.rows.iter().find(|r| r.agent == row.target.agent)
 					{
@@ -2422,21 +2384,17 @@ pub fn reconcile_skill(
 							}
 							crate::skills::removal::Verdict::Kept {
 								..
-							} => {
-								let paths = r.verdict.still_read_from_paths();
-								Err(plan.refuse_shared_master(
-									row.target.agent.as_str(),
-									&paths,
-								))
-							}
+							} => Err(plan.refuse_shared_master(
+								row.target.agent.as_str(),
+								&r.still_read_from,
+							)),
 							crate::skills::removal::Verdict::Refused {
 								reason,
 							} => {
-								let paths = r.verdict.still_read_from_paths();
-								if !paths.is_empty() {
+								if !r.still_read_from.is_empty() {
 									Err(plan.refuse_shared_master(
 										row.target.agent.as_str(),
-										&paths,
+										&r.still_read_from,
 									))
 								} else {
 									Err(ConfigError::InvalidConfig(
@@ -2484,6 +2442,8 @@ mod tests {
 	// serialize against `GlobalLockGuard`'s `XDG_STATE_HOME` swap, which is UB
 	// (and made `manager::skill`'s prune tests resolve the wrong lock file).
 	use crate::skills::prune::test_lock::env_lock;
+	#[cfg(unix)]
+	use crate::testing::master_with_claude_referrer;
 	use tempfile::tempdir;
 
 	/// A reconcile deletes a sub-agent's source only while every copy still
@@ -3629,36 +3589,6 @@ mod tests {
 			"the sibling found nothing only because the first row FAILED, so \
 			 no credential may forgive it, got: {sibling:?}"
 		);
-	}
-
-	// Fixture shared by the shared-master preflight tests: a universal Master
-	// every NativeReader (cursor, codex, …) reads directly, plus claude's
-	// symlink Referrer into it.
-	/// The Master in the store, plus TWO Referrers: claude's private one and the
-	/// shared `.agents/skills` slot.
-	///
-	/// The shared link is not decoration. Cursor, codex, cline, warp and five
-	/// others reach a project skill only by scanning that directory, and it used
-	/// to hold the Master itself — so storing the skill granted it to all of
-	/// them for free. Now the grant is a link, and a fixture that omits it is
-	/// testing an agent that simply does not have the skill.
-	#[cfg(unix)]
-	fn master_with_claude_referrer(root: &std::path::Path, name: &str) {
-		let master = root.join(".aghub").join(name);
-		fs::create_dir_all(&master).unwrap();
-		fs::write(
-			master.join("SKILL.md"),
-			format!(
-				"---\nname: {name}\ndescription: Shared\n---\n\n# {name}\n"
-			),
-		)
-		.unwrap();
-		let claude_skills = root.join(".claude/skills");
-		fs::create_dir_all(&claude_skills).unwrap();
-		std::os::unix::fs::symlink(&master, claude_skills.join(name)).unwrap();
-		let shared = root.join(".agents/skills");
-		fs::create_dir_all(&shared).unwrap();
-		std::os::unix::fs::symlink(&master, shared.join(name)).unwrap();
 	}
 
 	#[cfg(unix)]
@@ -5787,7 +5717,6 @@ mod tests {
 		ReconcileSkillPlan {
 			skill: Skill::new("x"),
 			source_root: PathBuf::from("/nonexistent/x"),
-			requested_removals: vec![],
 			exhaustive: false,
 			keepers: vec![],
 			unreadable: vec![],
@@ -5799,6 +5728,7 @@ mod tests {
 				})
 				.collect(),
 			deletes: vec![],
+			dry_run_delete_response: None,
 		}
 	}
 
@@ -6300,5 +6230,102 @@ mod tests {
 			"no row may claim the skill is gone: {:?}",
 			batch.results
 		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_copy_makes_later_delete_row_dir_coincide_with_protected_target(
+	) {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let master = root.join(".aghub/test-skill");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: test-skill\ndescription: Test\n---\n\n# Test\n",
+		)
+		.unwrap();
+
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		std::os::unix::fs::symlink(&master, codex_dir.join("test-skill"))
+			.unwrap();
+
+		// Claude is the copy target: .claude/skills does NOT exist initially.
+		let claude_dir = private_slot_for(AgentType::Claude, &root);
+		assert!(!claude_dir.exists(), "Claude dir must start absent");
+
+		// OpenCode is delete target 1.
+		let opencode_dir = private_slot_for(AgentType::OpenCode, &root);
+		fs::create_dir_all(&opencode_dir).unwrap();
+		std::os::unix::fs::symlink(&master, opencode_dir.join("test-skill"))
+			.unwrap();
+
+		// Cursor is delete target 2: make Cursor's skills dir a symlink pointing to
+		// Claude's not-yet-created skills dir.
+		let cursor_dir = private_slot_for(AgentType::Cursor, &root);
+		fs::create_dir_all(cursor_dir.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&claude_dir, &cursor_dir).unwrap();
+
+		let source = ResourceLocator {
+			agent: AgentType::Codex,
+			scope: InstallScope::Project,
+			project_root: Some(root.clone()),
+			name: "test-skill".to_string(),
+		};
+
+		let batch = reconcile_skill(
+			source,
+			vec![AgentType::Claude],
+			vec![AgentType::OpenCode, AgentType::Cursor],
+			true,
+		)
+		.expect("reconcile_skill returns Ok(batch) with per-row outcomes");
+
+		let claude_res = batch
+			.results
+			.iter()
+			.find(|r| r.target.agent == AgentType::Claude)
+			.expect("Claude copy row must exist");
+		assert!(claude_res.success, "Claude copy must succeed");
+
+		let opencode_res = batch
+			.results
+			.iter()
+			.find(|r| r.target.agent == AgentType::OpenCode)
+			.expect("OpenCode delete row must exist");
+		assert!(
+			!opencode_res.success,
+			"OpenCode delete must fail due to spared check failure"
+		);
+
+		let cursor_res = batch
+			.results
+			.iter()
+			.find(|r| r.target.agent == AgentType::Cursor)
+			.expect("Cursor delete row must exist");
+		assert!(
+			!cursor_res.success,
+			"Cursor delete must fail due to spared check failure"
+		);
+
+		// The protected target (Claude) must survive!
+		let claude_skill = claude_dir.join("test-skill");
+		assert!(
+			claude_skill.exists(),
+			"protected target Claude's copied skill must survive"
+		);
+		// OpenCode's skill must also survive because the removal batch was never called.
+		let opencode_skill = opencode_dir.join("test-skill");
+		assert!(
+			opencode_skill.exists(),
+			"OpenCode's skill must survive because removal batch was never called"
+		);
+		// Codex's skill must survive.
+		let codex_skill = codex_dir.join("test-skill");
+		assert!(codex_skill.exists(), "Codex's skill must survive");
 	}
 }

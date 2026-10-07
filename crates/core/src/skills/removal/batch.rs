@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::batch::{Backing, RemovalCredits};
 use crate::errors::{ConfigError, Result};
 use crate::models::{AgentType, ResourceScope};
 use crate::registry;
@@ -35,6 +36,7 @@ pub struct SkillRemovalRow {
 	pub agent: AgentType,
 	pub verdict: Verdict,
 	pub error: Option<String>,
+	pub still_read_from: Vec<PathBuf>,
 }
 
 /// Response returned by the batch skill removal entry point.
@@ -78,95 +80,6 @@ pub fn find_skill_holders(
 		}
 	}
 	(holders, unreadable)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Backing {
-	node: Option<(u64, u64)>,
-	path: PathBuf,
-}
-
-impl Backing {
-	pub fn of(path: PathBuf) -> Self {
-		let path = resolve_through_links(path);
-		let node = node_id(&path);
-		Self { node, path }
-	}
-
-	pub fn is(&self, other: &Self) -> bool {
-		match (self.node, other.node) {
-			(Some(a), Some(b)) => a == b,
-			(None, None) => self.path == other.path,
-			_ => false,
-		}
-	}
-}
-
-#[cfg(unix)]
-fn node_id(path: &Path) -> Option<(u64, u64)> {
-	use std::os::unix::fs::MetadataExt;
-	let meta = std::fs::metadata(path).ok()?;
-	Some((meta.dev(), meta.ino()))
-}
-
-#[cfg(not(unix))]
-fn node_id(_path: &Path) -> Option<(u64, u64)> {
-	None
-}
-
-fn resolve_through_links(path: PathBuf) -> PathBuf {
-	if let Ok(real) = std::fs::canonicalize(&path) {
-		return real;
-	}
-	match (path.parent(), path.file_name()) {
-		(Some(parent), Some(name)) => std::fs::canonicalize(parent)
-			.map(|real| real.join(name))
-			.unwrap_or(path),
-		_ => path,
-	}
-}
-
-pub(crate) struct RemovalCredits {
-	resolved: Vec<(AgentType, Backing)>,
-	credited: Vec<AgentType>,
-}
-
-impl RemovalCredits {
-	pub fn new<F>(agents: &[AgentType], mut resolve_backing: F) -> Self
-	where
-		F: FnMut(AgentType) -> Option<Backing>,
-	{
-		let resolved = agents
-			.iter()
-			.filter_map(|&agent| resolve_backing(agent).map(|b| (agent, b)))
-			.collect();
-		Self {
-			resolved,
-			credited: Vec::new(),
-		}
-	}
-
-	pub fn backing_of(&self, agent: AgentType) -> Option<&Backing> {
-		self.resolved
-			.iter()
-			.find(|(candidate, _)| *candidate == agent)
-			.map(|(_, backing)| backing)
-	}
-
-	pub fn credit(&mut self, agent: AgentType) {
-		if !self.credited.contains(&agent) {
-			self.credited.push(agent);
-		}
-	}
-
-	pub fn already_taken(&self, agent: AgentType) -> bool {
-		let Some(mine) = self.backing_of(agent) else {
-			return false;
-		};
-		self.credited.iter().any(|credited| {
-			self.backing_of(*credited).is_some_and(|took| took.is(mine))
-		})
-	}
 }
 
 fn create_manager(
@@ -224,7 +137,15 @@ pub fn remove_skill_batch(
 		});
 	}
 
-	// Shared-first sort keyed by full-roster slot-reader count
+	// Shared slots must go first: a private Referrer cannot be revoked while
+	// the same agent still reads the shared slot this batch is removing. Reader
+	// count comes from `slot_reader_count` (full roster); never re-derive slot
+	// sharing here.
+	// The sort key counts the full roster (slot_reader_count) because slot
+	// sharing is structural; filtering disabled agents ties shared and private
+	// slots and can put a private row first, which preflight then refuses.
+	// See docs/history/core-transfer.md#seventh-spelling-of-slot-sharing
+	// and docs/history/core-removal.md#reconcile-delete-order-needs-the-full-roster
 	let mut execution_order = target_agents.clone();
 	execution_order.sort_by_cached_key(|agent| {
 		let readers = crate::create_adapter(*agent)
@@ -247,7 +168,8 @@ pub fn remove_skill_batch(
 	} else {
 		Vec::new()
 	};
-	let mut preflight_verdicts: Vec<(AgentType, Verdict)> = Vec::new();
+	let mut preflight_verdicts: Vec<(AgentType, Verdict, Vec<PathBuf>)> =
+		Vec::new();
 	let mut preflight_failures: Vec<(AgentType, ConfigError)> = Vec::new();
 
 	for &agent in &execution_order {
@@ -305,18 +227,30 @@ pub fn remove_skill_batch(
 							agent.as_str(),
 						),
 					));
-					preflight_verdicts.push((agent, outcome.verdict));
+					preflight_verdicts.push((
+						agent,
+						outcome.verdict,
+						outcome.plan.still_read_from,
+					));
 				} else {
 					if can_credit_prior {
 						accumulated_deletions
 							.extend(outcome.plan.paths.iter().cloned());
 					}
-					preflight_verdicts.push((agent, outcome.verdict));
+					preflight_verdicts.push((
+						agent,
+						outcome.verdict,
+						outcome.plan.still_read_from,
+					));
 				}
 			}
 			Err(ConfigError::ResourceNotFound { .. }) => {
 				let outcome = manager.skill_noop_outcome(name);
-				preflight_verdicts.push((agent, outcome.verdict));
+				preflight_verdicts.push((
+					agent,
+					outcome.verdict,
+					outcome.plan.still_read_from,
+				));
 			}
 			Err(err) => {
 				preflight_failures.push((agent, err));
@@ -326,18 +260,36 @@ pub fn remove_skill_batch(
 
 	// Preview (dry-run): does not acquire write lock, returns verdicts.
 	if request.dry_run {
+		let scope_str = match request.scope {
+			ResourceScope::GlobalOnly => "global",
+			ResourceScope::ProjectOnly => "project",
+			ResourceScope::Both => "global+project",
+		};
 		let rows = target_agents
 			.iter()
 			.map(|agent| {
-				let verdict = preflight_verdicts
+				let verdict_entry =
+					preflight_verdicts.iter().find(|(a, _, _)| *a == *agent);
+				let verdict = verdict_entry
+					.map(|(_, v, _)| v.clone())
+					.unwrap_or(Verdict::Absent);
+				let still_read_from = verdict_entry
+					.map(|(_, _, s)| s.clone())
+					.unwrap_or_default();
+				let error = preflight_failures
 					.iter()
 					.find(|(a, _)| *a == *agent)
-					.map(|(_, v)| v.clone())
-					.unwrap_or(Verdict::Absent);
+					.map(|(_, err)| {
+						format!(
+							"delete {} ({scope_str}): {err}",
+							agent.as_str()
+						)
+					});
 				SkillRemovalRow {
 					agent: *agent,
 					verdict,
-					error: None,
+					error,
+					still_read_from,
 				}
 			})
 			.collect();
@@ -365,7 +317,7 @@ pub fn remove_skill_batch(
 			.collect::<Vec<_>>()
 			.join("; ");
 		let message = format!(
-			"skill removal preflight failed; nothing was written: {failures_str}"
+			"skill removal preflight failed; no removal was performed: {failures_str}"
 		);
 		if all_unsupported {
 			return Err(ConfigError::UnsupportedOperation(message));
@@ -382,9 +334,9 @@ pub fn remove_skill_batch(
 	)
 	.map_err(ConfigError::Io)?;
 
-	let mut credits = RemovalCredits::new(&request.agents, |agent| {
+	let mut credits = RemovalCredits::new(request.agents.clone(), |agent| {
 		let mut mgr = create_manager(
-			agent,
+			*agent,
 			request.scope,
 			request.project_root.as_deref(),
 		);
@@ -396,8 +348,7 @@ pub fn remove_skill_batch(
 			.map(Backing::of)
 	});
 
-	let mut execution_results: Vec<(AgentType, (Verdict, Option<String>))> =
-		Vec::new();
+	let mut execution_results: Vec<SkillRemovalRow> = Vec::new();
 	let mut any_executed = false;
 
 	for &agent in &execution_order {
@@ -407,8 +358,12 @@ pub fn remove_skill_batch(
 			request.project_root.as_deref(),
 		);
 		if let Err(e) = manager.load() {
-			execution_results
-				.push((agent, (Verdict::Absent, Some(e.to_string()))));
+			execution_results.push(SkillRemovalRow {
+				agent,
+				verdict: Verdict::Absent,
+				error: Some(e.to_string()),
+				still_read_from: Vec::new(),
+			});
 			continue;
 		}
 
@@ -433,7 +388,12 @@ pub fn remove_skill_batch(
 					any_executed = true;
 				}
 				if outcome.failed_paths.is_empty() {
-					execution_results.push((agent, (outcome.verdict, None)));
+					execution_results.push(SkillRemovalRow {
+						agent,
+						verdict: outcome.verdict,
+						error: None,
+						still_read_from: outcome.plan.still_read_from,
+					});
 				} else {
 					let err = format!(
 						"failed to remove skill '{}' for agent '{}': {} path(s) could not be deleted: {}",
@@ -447,22 +407,40 @@ pub fn remove_skill_batch(
 							.collect::<Vec<_>>()
 							.join(", ")
 					);
-					execution_results
-						.push((agent, (Verdict::Partial, Some(err))));
+					execution_results.push(SkillRemovalRow {
+						agent,
+						verdict: Verdict::Partial,
+						error: Some(err),
+						still_read_from: outcome.plan.still_read_from,
+					});
 				}
 			}
 			Err(ConfigError::ResourceNotFound { .. })
-				if credits.already_taken(agent) =>
+				if credits.already_taken(&agent) =>
 			{
-				execution_results.push((agent, (Verdict::Removed, None)));
+				execution_results.push(SkillRemovalRow {
+					agent,
+					verdict: Verdict::Removed,
+					error: None,
+					still_read_from: Vec::new(),
+				});
 			}
 			Err(ConfigError::ResourceNotFound { .. }) => {
 				let outcome = manager.skill_noop_outcome(name);
-				execution_results.push((agent, (outcome.verdict, None)));
+				execution_results.push(SkillRemovalRow {
+					agent,
+					verdict: outcome.verdict,
+					error: None,
+					still_read_from: outcome.plan.still_read_from,
+				});
 			}
 			Err(err) => {
-				execution_results
-					.push((agent, (Verdict::Partial, Some(err.to_string()))));
+				execution_results.push(SkillRemovalRow {
+					agent,
+					verdict: Verdict::Partial,
+					error: Some(err.to_string()),
+					still_read_from: Vec::new(),
+				});
 			}
 		}
 	}
@@ -479,28 +457,20 @@ pub fn remove_skill_batch(
 	let rows = target_agents
 		.iter()
 		.map(|agent| {
-			let (verdict, error) = execution_results
+			execution_results
 				.iter()
-				.find(|(a, _)| *a == *agent)
+				.find(|r| r.agent == *agent)
 				.cloned()
-				.map(|(_, res)| res)
-				.unwrap_or((Verdict::Absent, None));
-			SkillRemovalRow {
-				agent: *agent,
-				verdict,
-				error,
-			}
+				.unwrap_or(SkillRemovalRow {
+					agent: *agent,
+					verdict: Verdict::Absent,
+					error: None,
+					still_read_from: Vec::new(),
+				})
 		})
 		.collect();
 
 	Ok(SkillRemovalResponse { rows, prune })
-}
-
-/// Convenience alias for [`remove_skill_batch`].
-pub fn remove_skill(
-	request: &SkillRemovalRequest,
-) -> Result<SkillRemovalResponse> {
-	remove_skill_batch(request)
 }
 
 #[cfg(test)]
@@ -513,25 +483,52 @@ mod tests {
 
 	#[cfg(unix)]
 	fn setup_shared_fixture(root: &Path, name: &str) {
-		let master = root.join(".aghub").join(name);
-		fs::create_dir_all(&master).unwrap();
-		fs::write(
-			master.join("SKILL.md"),
-			format!(
-				"---\nname: {name}\ndescription: Shared\n---\n\n# {name}\n"
-			),
-		)
-		.unwrap();
-		let claude_skills = root.join(".claude/skills");
-		fs::create_dir_all(&claude_skills).unwrap();
-		std::os::unix::fs::symlink(&master, claude_skills.join(name)).unwrap();
-		let shared = root.join(".agents/skills");
-		fs::create_dir_all(&shared).unwrap();
-		std::os::unix::fs::symlink(&master, shared.join(name)).unwrap();
+		crate::testing::master_with_claude_referrer(root, name);
 		for dir in [".opencode", ".cursor", ".pi", ".grok", ".omp"] {
 			let slot = root.join(dir).join("skills");
 			fs::create_dir_all(&slot).unwrap();
-			std::os::unix::fs::symlink(&master, slot.join(name)).unwrap();
+			std::os::unix::fs::symlink(
+				root.join(".aghub").join(name),
+				slot.join(name),
+			)
+			.unwrap();
+		}
+	}
+
+	#[cfg(unix)]
+	fn collect_normalized_tree(
+		root: &Path,
+		current: &Path,
+		acc: &mut Vec<(PathBuf, String)>,
+	) {
+		let read_dir = match fs::read_dir(current) {
+			Ok(rd) => rd,
+			Err(_) => return,
+		};
+		let mut entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+		entries.sort_by_key(|e| e.path());
+		for entry in entries {
+			let path = entry.path();
+			let rel = path.strip_prefix(root).unwrap().to_path_buf();
+			let meta = fs::symlink_metadata(&path).unwrap();
+			if meta.file_type().is_symlink() {
+				let target = fs::read_link(&path).unwrap();
+				let norm_target =
+					if let Ok(rel_target) = target.strip_prefix(root) {
+						format!("<root>/{}", rel_target.display())
+					} else {
+						target.display().to_string()
+					};
+				acc.push((rel, format!("symlink -> {norm_target}")));
+			} else if meta.is_dir() {
+				acc.push((rel.clone(), "dir".to_string()));
+				collect_normalized_tree(root, &path, acc);
+			} else if meta.is_file() {
+				let mut content = fs::read_to_string(&path).unwrap_or_default();
+				content =
+					content.replace(&root.display().to_string(), "<root>");
+				acc.push((rel, format!("file: {content}")));
+			}
 		}
 	}
 
@@ -627,14 +624,19 @@ mod tests {
 			assert_eq!(v_a.error, v_b.error);
 		}
 
-		assert!(root_a.join(".claude/skills/notebooklm").exists());
-		assert!(root_b.join(".claude/skills/notebooklm").exists());
-		assert!(root_a.join(".aghub/notebooklm").exists());
-		assert!(root_b.join(".aghub/notebooklm").exists());
-		assert!(!root_a.join(".agents/skills/notebooklm").exists());
-		assert!(!root_b.join(".agents/skills/notebooklm").exists());
-		assert!(!root_a.join(".opencode/skills/notebooklm").exists());
-		assert!(!root_b.join(".opencode/skills/notebooklm").exists());
+		let mut tree_a = Vec::new();
+		collect_normalized_tree(root_a, root_a, &mut tree_a);
+		tree_a.sort_by(|a, b| a.0.cmp(&b.0));
+
+		let mut tree_b = Vec::new();
+		collect_normalized_tree(root_b, root_b, &mut tree_b);
+		tree_b.sort_by(|a, b| a.0.cmp(&b.0));
+
+		assert_eq!(
+			tree_a, tree_b,
+			"root_a and root_b disk and lock state must be identical"
+		);
+		assert!(!tree_a.is_empty(), "tree must not be empty");
 
 		for &agent in &order_shared_first {
 			let dirs_a = crate::create_adapter(agent)
@@ -720,7 +722,7 @@ mod tests {
 		let err_msg = err.to_string();
 		assert!(
 			err_msg.contains(
-				"skill removal preflight failed; nothing was written"
+				"skill removal preflight failed; no removal was performed"
 			),
 			"message was: {err_msg}"
 		);
@@ -869,12 +871,24 @@ mod tests {
 		let root = temp.path();
 		setup_shared_fixture(root, "notebooklm");
 
-		let external_lock = crate::skills::lock::mutation_guard(
-			"competing lock",
-			ResourceScope::ProjectOnly,
-			Some(root),
-		)
-		.unwrap();
+		let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+		let (release_tx, release_rx) = std::sync::mpsc::channel();
+		let root_buf = root.to_path_buf();
+
+		let lock_thread = std::thread::spawn(move || {
+			let _lock = crate::skills::lock::mutation_guard(
+				"competing lock",
+				ResourceScope::ProjectOnly,
+				Some(&root_buf),
+			)
+			.unwrap();
+			acquired_tx.send(()).unwrap();
+			release_rx.recv().unwrap();
+		});
+
+		acquired_rx
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.expect("competing lock must be acquired on another thread");
 
 		let req_preview = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
@@ -885,12 +899,25 @@ mod tests {
 			all_agents: false,
 			prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
 		};
-		let res_preview = remove_skill_batch(&req_preview)
-			.expect("preview must not block on write lock");
+
+		let (preview_tx, preview_rx) = std::sync::mpsc::channel();
+		let req_preview_clone = req_preview.clone();
+		std::thread::spawn(move || {
+			let res = remove_skill_batch(&req_preview_clone);
+			let _ = preview_tx.send(res);
+		});
+
+		let res_preview = preview_rx
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.expect(
+				"preview must not block on write lock held by another thread",
+			)
+			.expect("preview should succeed");
 		assert_eq!(res_preview.rows[0].verdict, Verdict::Removed);
 		assert_eq!(res_preview.prune, PruneStatus::NotRun);
 
-		drop(external_lock);
+		release_tx.send(()).unwrap();
+		lock_thread.join().unwrap();
 
 		let req_commit = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
@@ -905,5 +932,85 @@ mod tests {
 			remove_skill_batch(&req_commit).expect("commit should succeed");
 		assert_eq!(res_commit.rows[0].verdict, Verdict::Removed);
 		assert!(!root.join(".claude/skills/notebooklm").exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_commit_follows_replan_after_disk_state_changes() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+
+		crate::testing::master_with_claude_referrer(root, "notebooklm");
+		fs::remove_file(root.join(".agents/skills/notebooklm")).unwrap();
+
+		let req = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.to_path_buf()),
+			agents: vec![AgentType::Claude],
+			dry_run: true,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+		};
+
+		// Preview: Claude is the sole holder, so preview plans to remove Claude and GC master
+		let res_preview = remove_skill_batch(&req).unwrap();
+		assert_eq!(res_preview.rows[0].verdict, Verdict::Removed);
+
+		// Disk state changes before commit: Cursor adds a referrer!
+		let cursor_dir = root.join(".cursor/skills");
+		fs::create_dir_all(&cursor_dir).unwrap();
+		std::os::unix::fs::symlink(
+			root.join(".aghub/notebooklm"),
+			cursor_dir.join("notebooklm"),
+		)
+		.unwrap();
+
+		let mut req_commit = req.clone();
+		req_commit.dry_run = false;
+		let res_commit = remove_skill_batch(&req_commit).unwrap();
+
+		assert_eq!(res_commit.rows[0].verdict, Verdict::Removed);
+		assert!(!root.join(".claude/skills/notebooklm").exists());
+		assert!(root.join(".cursor/skills/notebooklm").exists());
+		assert!(
+			root.join(".aghub/notebooklm").exists(),
+			"Master must survive because Cursor was added before commit and commit re-planned"
+		);
+	}
+
+	#[test]
+	fn test_dry_run_reports_preflight_failure_in_row_error() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+
+		let req = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.to_path_buf()),
+			agents: vec![AgentType::JetBrainsAi],
+			dry_run: true,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+		};
+
+		let res = remove_skill_batch(&req).unwrap();
+		assert_eq!(res.rows.len(), 1);
+		assert_eq!(res.rows[0].agent, AgentType::JetBrainsAi);
+		assert_eq!(res.rows[0].verdict, Verdict::Absent);
+		let err = res.rows[0]
+			.error
+			.as_deref()
+			.expect("dry run must report preflight failure in row error");
+		assert!(
+			err.contains("delete jetbrains-ai (project)"),
+			"unexpected error message: {err}"
+		);
+		assert!(
+			err.contains("no project skill config"),
+			"unexpected error message: {err}"
+		);
 	}
 }
