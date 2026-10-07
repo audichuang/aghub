@@ -9750,6 +9750,75 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn reconcile_skill_removal_row_with_added_keeps_master_reports_holders() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let project = home.join("proj");
+				let master = project.join(".aghub/shared-skill");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: shared-skill\ndescription: shared\n---\n",
+				)
+				.unwrap();
+
+				let shared_slot = project.join(".agents/skills/shared-skill");
+				std::fs::create_dir_all(shared_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &shared_slot).unwrap();
+
+				let claude_slot = project.join(".claude/skills/shared-skill");
+				std::fs::create_dir_all(claude_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &claude_slot).unwrap();
+
+				let response = client
+					.post("/api/v1/skills/reconcile")
+					.json(&serde_json::json!({
+						"source": {
+							"agent": "claude",
+							"scope": "project",
+							"project_root": project.display().to_string(),
+							"name": "shared-skill"
+						},
+						"added": ["windsurf"],
+						"removed": ["claude"],
+						"confirm": true
+					}))
+					.dispatch();
+
+				assert_eq!(response.status(), rocket::http::Status::Ok);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				let results =
+					body["results"].as_array().expect("results array");
+				let delete_row = results
+					.iter()
+					.find(|r| r["action"] == "delete")
+					.expect("delete row");
+
+				let managed = delete_row["still_read_by_managed"]
+					.as_array()
+					.expect("still_read_by_managed array");
+				assert!(
+					!managed.is_empty(),
+					"delete row must carry surviving holders when added is non-empty (keeps_master): {managed:?}"
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn delete_by_name_preview_and_commit_carry_outcome_and_managed_holders() {
 		with_isolated_env(|home, _state| {
 			with_pinned_data_dir(|data_dir| {

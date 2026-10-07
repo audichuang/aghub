@@ -2066,13 +2066,19 @@ impl ReconcileSkillPlan {
 		else {
 			unreachable!("unsupported_operation builds UnsupportedOperation")
 		};
-		if !self.keepers.is_empty() {
+		let other_keepers: Vec<&str> = self
+			.keepers
+			.iter()
+			.copied()
+			.filter(|k| *k != agent)
+			.collect();
+		if !other_keepers.is_empty() {
 			message.push_str(&format!(
 				"; the shared master is still read by '{}'",
-				self.keepers.join("', '")
+				other_keepers.join("', '")
 			));
-		} else if !self.copies.is_empty() {
-			// An add short-circuits the holder scan — the add IS the reason.
+		}
+		if !self.copies.is_empty() {
 			message.push_str(
 				"; this reconcile also adds the skill to another agent, so the \
 				 shared master stays",

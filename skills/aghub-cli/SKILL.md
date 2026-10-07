@@ -463,7 +463,7 @@ exits 1, states that nothing was written, and names each refused target with its
 reason; disk and lock remain byte-identical.
 In `--json`, a whole-batch preflight rejection appears in the top-level `error.code` envelope (`UNSUPPORTED_OPERATION` or `INVALID_CONFIG` lives there, not in `results[].code`). Each row in `results` carries the unified `outcome`
 (`preview` | `removed` | `absent` | `partial` | `kept`), wire `code` that appears only on a row-level failure (`partial` or a config load error, null on success; missing skills report no-op success with `outcome: "absent"` and exit 0 without an error code, whether absent or retaining an in-scope lock entry),
-`still_read_from` (surviving paths when kept/refused), batch-level `still_read_by` (unrequested holders that keep the master, copied onto every row, alongside `still_read_by_managed` and `still_read_by_unmanaged`),
+`still_read_from` (surviving paths when kept/refused), batch-level `still_read_by` (agents still holding the skill after the removal, copied onto every row, alongside `still_read_by_managed` and `still_read_by_unmanaged`),
 and `master_reclaimed` (on commit, whether Master was removed on disk; in preview `master_reclaimed: false` and, if exhaustive and Master exists, `would_reclaim_master: true`). Prune status is reported
 independently (`pruned_lock_entries` / `would_prune_lock_entries` / `prune_error`).
 Rows are returned in the exact request order of `-a`. A real directory inside `.aghub` is never deleted by

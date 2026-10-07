@@ -28,14 +28,6 @@ use crate::dto::skill::DeleteSkillByPathResponse;
 use crate::error::ApiError;
 use crate::extractors::{AgentParam, ResolvedScope};
 
-/// Map a [`RemovalOutcome`] to the shared [`DeleteSkillByPathResponse`] wire
-/// shape, owned ONCE so the skill, MCP and sub-agent delete routes serialize
-/// identically. The core fields come from `aghub_core::dto::RemovalView`; this
-/// adds the api-only lock-prune fields (always None for MCP/sub-agent).
-///
-/// `requested_dry_run` is the CALLER's intent (`!confirm`), never inferred from
-/// `!outcome.executed` — a confirmed delete of an absent target is not a
-/// preview. See docs/history/api.md#removal-response-dry-run-inference
 pub(crate) fn project_prune_status(
 	prune: PruneStatus,
 ) -> (Option<Vec<String>>, Option<Vec<String>>, Option<String>) {
@@ -51,6 +43,14 @@ pub(crate) fn project_prune_status(
 	}
 }
 
+/// Map a [`RemovalOutcome`] to the shared [`DeleteSkillByPathResponse`] wire
+/// shape, owned ONCE so the skill, MCP and sub-agent delete routes serialize
+/// identically. The core fields come from `aghub_core::dto::RemovalView`; this
+/// adds the api-only lock-prune fields (always None for MCP/sub-agent).
+///
+/// `requested_dry_run` is the CALLER's intent (`!confirm`), never inferred from
+/// `!outcome.executed` — a confirmed delete of an absent target is not a
+/// preview. See docs/history/api.md#removal-response-dry-run-inference
 pub(crate) fn removal_response(
 	outcome: RemovalOutcome,
 	requested_dry_run: bool,

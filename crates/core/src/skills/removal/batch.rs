@@ -34,7 +34,7 @@ pub struct SkillRemovalRequest {
 	/// always rechecks the real disk (&[]).
 	pub prior_removed_paths: Vec<PathBuf>,
 	/// A copy in this batch keeps the Master alive; skips the exhaustiveness
-	/// holder scan.
+	/// preflight holder scan (surviving holders are still computed for outcome rows).
 	pub keeps_master: bool,
 }
 
@@ -570,7 +570,7 @@ pub fn find_skill_holders_crediting(
 								id.starts_with(d) || resolved.starts_with(d)
 							})
 						} else {
-							false
+							true
 						}
 					})
 				};
@@ -961,16 +961,12 @@ pub fn remove_skill_batch(
 				}
 			}
 		}
-		let (keepers, _) = if request.keeps_master {
-			(Vec::new(), Vec::new())
-		} else {
-			find_skill_holders_crediting(
-				name,
-				request.scope,
-				request.project_root.as_deref(),
-				&planned_deletions,
-			)
-		};
+		let (keepers, _) = find_skill_holders_crediting(
+			name,
+			request.scope,
+			request.project_root.as_deref(),
+			&planned_deletions,
+		);
 		return Ok(SkillRemovalResponse {
 			rows,
 			prune,
@@ -1247,11 +1243,11 @@ pub fn remove_skill_batch(
 		&& execution_results
 			.iter()
 			.all(|r| r.verdict != Verdict::Partial);
-	let (keepers, _) = if request.keeps_master {
-		(Vec::new(), Vec::new())
-	} else {
-		find_skill_holders(name, request.scope, request.project_root.as_deref())
-	};
+	let (keepers, _) = find_skill_holders(
+		name,
+		request.scope,
+		request.project_root.as_deref(),
+	);
 
 	Ok(SkillRemovalResponse {
 		rows,
