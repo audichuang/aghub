@@ -560,8 +560,14 @@ pub async fn delete_skill_by_path(
 						prune: aghub_core::skills::removal::PruneStatus::NotRun,
 						failed_paths: vec![],
 						absent: false,
+						// TODO(A4): by-path sink-down
 						verdict: aghub_core::skills::removal::Verdict::Kept {
-							still_read_from: Vec::new(),
+							still_read_from: vec![
+								aghub_core::skills::removal::Holder {
+									path: skill_dir.clone(),
+									managed: true,
+								},
+							],
 						},
 					},
 					dry_run,
@@ -588,7 +594,7 @@ pub async fn delete_skill_by_path(
 					match aghub_core::skills::removal::RemovalOutcome::preview(
 						plan,
 						// Reaching here means the guard above did not block.
-						false,
+						aghub_core::skills::removal::Verdict::Removed,
 						resource_scope,
 						project_root.as_deref(),
 						&skill_name,

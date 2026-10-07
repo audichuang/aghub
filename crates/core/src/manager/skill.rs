@@ -654,6 +654,21 @@ impl ConfigManager {
 		)
 	}
 
+	/// True when the named skill exists in the in-scope lock file.
+	pub fn skill_has_lock_entry(&self, name: &str) -> bool {
+		let in_global = self.scope != crate::models::ResourceScope::ProjectOnly
+			&& skill::read_skill_lock().skills.contains_key(name);
+		let in_project = self.scope != crate::models::ResourceScope::GlobalOnly
+			&& self
+				.project_root
+				.as_deref()
+				.map(|r| {
+					skill::read_local_lock(Some(r)).skills.contains_key(name)
+				})
+				.unwrap_or(false);
+		in_global || in_project
+	}
+
 	fn remove_skill_planned_inner(
 		&mut self,
 		name: &str,
@@ -678,7 +693,21 @@ impl ConfigManager {
 			Some(self.guard_and_reload("remove skill", self.scope)?)
 		};
 
-		let skill = self.skill_for_planned_removal(name, all_agents)?;
+		let has_lock_entry = self.skill_has_lock_entry(name);
+		let skill = match self.skill_for_planned_removal(name, all_agents) {
+			Ok(skill) => Some(skill),
+			Err(ConfigError::ResourceNotFound { .. })
+				if has_lock_entry
+					&& (all_agents
+						|| matches!(
+							self.skill_for_planned_removal(name, true),
+							Err(ConfigError::ResourceNotFound { .. })
+						)) =>
+			{
+				None
+			}
+			Err(e) => return Err(e),
+		};
 
 		let scope = self.scope;
 		let project_root = self.project_root.clone();
@@ -730,28 +759,45 @@ impl ConfigManager {
 						.into(),
 				));
 			}
-			let selected_master = removal::skill_root(&skill)
-				.map(|path| skill::lock::resolve_existing(&path));
-			let requested_master = skill::lock::resolve_existing(target_entry);
-			if selected_master.as_deref() != Some(requested_master.as_path()) {
-				return Err(ConfigError::InvalidConfig(
-					"requested skill location does not match the loaded Master"
-						.into(),
-				));
+			if let Some(ref skill) = skill {
+				let selected_master = removal::skill_root(skill)
+					.map(|path| skill::lock::resolve_existing(&path));
+				let requested_master =
+					skill::lock::resolve_existing(target_entry);
+				if selected_master.as_deref()
+					!= Some(requested_master.as_path())
+				{
+					return Err(ConfigError::InvalidConfig(
+						"requested skill location does not match the loaded Master"
+							.into(),
+					));
+				}
 			}
 			Some(target_dir)
 		} else {
 			self.target_skills_dir()
 		};
-		let mut plan = removal::plan_removal_for_agents(
-			&skill,
-			own_agent_dir.as_deref(),
-			&all_agent_dirs,
-			project_root.as_deref(),
-			scope,
-			all_agents,
-			requested_agents,
-		);
+		let mut plan = if let Some(ref skill) = skill {
+			removal::plan_removal_for_agents(
+				skill,
+				own_agent_dir.as_deref(),
+				&all_agent_dirs,
+				project_root.as_deref(),
+				scope,
+				all_agents,
+				requested_agents,
+			)
+		} else {
+			removal::RemovalPlan {
+				layout: removal::Layout::Copy,
+				paths: vec![],
+				skipped: vec![],
+				needs_confirm: false,
+				shared_master_kept: false,
+				still_read_from: Vec::new(),
+				incomplete: false,
+			}
+		};
 
 		let executed = !dry_run && (!plan.needs_confirm || confirm);
 
@@ -768,8 +814,7 @@ impl ConfigManager {
 			self.adapter
 				.get_skills_paths(project_root.as_deref(), scope)
 		};
-		let effect =
-			removal::read_effect_after(&read_dirs, &skill.name, &plan.paths);
+		let effect = removal::read_effect_after(&read_dirs, name, &plan.paths);
 
 		// A removal that goes ahead while something else still serves the skill
 		// has to SAY so, through `skipped` ("present and deliberately not taken").
@@ -787,55 +832,46 @@ impl ConfigManager {
 			requested_agents,
 		);
 
-		let mut readers_outside: Vec<&'static str> = Vec::new();
-		for path in effect.survivors.iter().chain(plan.skipped.iter()) {
-			if let Some(parent) = path.parent() {
-				for id in removal::skill_dir_readers_outside(
-					parent,
-					scope,
-					project_root.as_deref(),
-					requested_agents,
-				) {
-					if !readers_outside.contains(&id) {
-						readers_outside.push(id);
+		let readers_outside_fn = || {
+			let mut readers_outside: Vec<&'static str> = Vec::new();
+			for path in effect.survivors.iter().chain(plan.skipped.iter()) {
+				if let Some(parent) = path.parent() {
+					for id in removal::skill_dir_readers_outside(
+						parent,
+						scope,
+						project_root.as_deref(),
+						requested_agents,
+					) {
+						if !readers_outside.contains(&id) {
+							readers_outside.push(id);
+						}
 					}
 				}
 			}
-		}
+			readers_outside
+		};
 
-		let git_refusal = effect
-			.survivors
-			.iter()
-			.chain(plan.skipped.iter())
-			.find_map(|path| {
-				let reason = if all_agents {
-					removal::shared_slot_git_keep(path, project_root.as_deref())
-				} else {
-					removal::single_agent_keep_reason(
-						path,
-						&all_agent_dirs,
-						name,
-						project_root.as_deref(),
-						scope,
-						requested_agents,
-					)
-				}?;
-				removal::git_keep_hint(&reason, path)
-			});
-
-		let has_lock_entry = {
-			let in_global = scope != crate::models::ResourceScope::ProjectOnly
-				&& skill::read_skill_lock().skills.contains_key(name);
-			let in_project = scope != crate::models::ResourceScope::GlobalOnly
-				&& project_root
-					.as_deref()
-					.map(|r| {
-						skill::read_local_lock(Some(r))
-							.skills
-							.contains_key(name)
-					})
-					.unwrap_or(false);
-			in_global || in_project
+		let git_refusal_fn = || {
+			effect.survivors.iter().chain(plan.skipped.iter()).find_map(
+				|path| {
+					let reason = if all_agents {
+						removal::shared_slot_git_keep(
+							path,
+							project_root.as_deref(),
+						)
+					} else {
+						removal::single_agent_keep_reason(
+							path,
+							&all_agent_dirs,
+							name,
+							project_root.as_deref(),
+							scope,
+							requested_agents,
+						)
+					}?;
+					removal::git_keep_hint(&reason, path)
+				},
+			)
 		};
 
 		let verdict = removal::Verdict::compute(removal::VerdictInputs {
@@ -845,10 +881,9 @@ impl ConfigManager {
 			effect: &effect,
 			all_agents,
 			unmanaged_dirs: &unmanaged_dirs,
-			failed_paths: &[],
 			has_lock_entry,
-			git_refusal,
-			readers_outside: &readers_outside,
+			git_refusal: &git_refusal_fn,
+			readers_outside: &readers_outside_fn,
 		});
 
 		plan.shared_master_kept = verdict.shared_master_kept();

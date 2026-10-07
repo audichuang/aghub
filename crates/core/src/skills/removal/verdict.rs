@@ -3,7 +3,6 @@
 //! Replaces the ad-hoc `blocks` boolean and independently folded `shared_master_kept`.
 //! Computed once from `read_effect_after` and plan facts.
 
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// A skill holder location with its managed / unmanaged status.
@@ -11,7 +10,7 @@ use std::path::{Path, PathBuf};
 /// `managed` is false when the path is in a directory that is only read by
 /// disabled or unselected agents (`unmanaged_skill_dirs`), and true when it is
 /// managed by aghub.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Holder {
 	pub path: PathBuf,
 	pub managed: bool,
@@ -20,15 +19,17 @@ pub struct Holder {
 /// Typed removal verdict, computed once from `read_effect_after` and plan facts.
 ///
 /// Single owner of "what was taken away" across surfaces. Expresses at least
-/// five states:
+/// six states:
 /// - `Removed`: the skill (or planned paths) was removed.
 /// - `Kept`: deliberately kept because other readers still need it (or git-tracked).
 ///   Carries `still_read_from` holders classified as managed or unmanaged.
 /// - `Refused`: could not proceed (e.g. `--all-agents` with surviving readers,
 ///   or taking nothing away while Master continues serving). Carries `reason`.
-/// - `Partial`: some paths were removed, but others failed to delete.
+/// - `Partial`: some paths were removed, but others failed to delete. Downgraded
+///   exclusively by `RemovalOutcome::commit`.
 /// - `LockOnly`: the skill had no files on disk, but was pruned from the lock.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// - `Absent`: the skill had no files on disk and no lock entry.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Verdict {
 	#[default]
 	Removed,
@@ -40,10 +41,10 @@ pub enum Verdict {
 	},
 	Partial,
 	LockOnly,
+	Absent,
 }
 
 /// Borrowed inputs for computing a [`Verdict`].
-#[derive(Debug, Clone)]
 pub struct VerdictInputs<'a> {
 	pub plan_paths: &'a [PathBuf],
 	pub plan_skipped: &'a [PathBuf],
@@ -51,10 +52,9 @@ pub struct VerdictInputs<'a> {
 	pub effect: &'a crate::skills::removal::ReadEffect,
 	pub all_agents: bool,
 	pub unmanaged_dirs: &'a [PathBuf],
-	pub failed_paths: &'a [PathBuf],
 	pub has_lock_entry: bool,
-	pub git_refusal: Option<String>,
-	pub readers_outside: &'a [&'static str],
+	pub git_refusal: &'a dyn Fn() -> Option<String>,
+	pub readers_outside: &'a dyn Fn() -> Vec<&'static str>,
 }
 
 impl Verdict {
@@ -64,53 +64,11 @@ impl Verdict {
 		matches!(self, Verdict::Kept { .. } | Verdict::Refused { .. })
 	}
 
-	/// Returns holders if the verdict is `Kept`.
-	pub fn still_read_from(&self) -> Option<&[Holder]> {
-		match self {
-			Verdict::Kept { still_read_from } => Some(still_read_from),
-			_ => None,
-		}
-	}
-
-	/// Return the list of paths for wire/plan compatibility.
-	pub fn still_read_from_paths(&self) -> Vec<PathBuf> {
-		match self {
-			Verdict::Kept { still_read_from } => {
-				still_read_from.iter().map(|h| h.path.clone()).collect()
-			}
-			_ => Vec::new(),
-		}
-	}
-
-	pub fn is_removed(&self) -> bool {
-		matches!(self, Verdict::Removed)
-	}
-
-	pub fn is_refused(&self) -> bool {
-		matches!(self, Verdict::Refused { .. })
-	}
-
-	pub fn is_kept(&self) -> bool {
-		matches!(self, Verdict::Kept { .. })
-	}
-
-	pub fn is_partial(&self) -> bool {
-		matches!(self, Verdict::Partial)
-	}
-
-	pub fn is_lock_only(&self) -> bool {
-		matches!(self, Verdict::LockOnly)
-	}
-
 	/// Pure constructor for `Verdict`.
 	///
 	/// Computes the verdict from the plan facts, `read_effect_after` result,
 	/// scope options, and lock/disk status.
 	pub fn compute(inputs: VerdictInputs<'_>) -> Self {
-		if !inputs.failed_paths.is_empty() {
-			return Verdict::Partial;
-		}
-
 		let mut still: Vec<PathBuf> = Vec::new();
 		for path in inputs
 			.effect
@@ -152,6 +110,9 @@ impl Verdict {
 			&& inputs.plan_paths.is_empty()
 			&& !inputs.effect.survivors.is_empty();
 
+		// `--all-agents` asserts a POSTCONDITION, so an unreadable read dir
+		// blocks too. The single-agent branch ignores `incomplete`: it decides
+		// whether to REFUSE, and one odd sibling must not make a skill undeletable.
 		let blocks = if inputs.all_agents {
 			!inputs.effect.survivors.is_empty() || inputs.effect.incomplete
 		} else {
@@ -167,6 +128,7 @@ impl Verdict {
 				.collect::<Vec<_>>()
 				.join(", ");
 
+			let git_refusal = (inputs.git_refusal)();
 			let reason = if inputs.all_agents {
 				let held_by_disabled = still
 					.iter()
@@ -178,7 +140,7 @@ impl Verdict {
 					})
 					.map(|path| path.display().to_string())
 					.collect::<Vec<_>>();
-				let mut r = match inputs.git_refusal {
+				let mut r = match git_refusal {
 					Some(hint) => hint,
 					None => format!(
 						"skill still discoverable afterwards in: {where_}"
@@ -193,7 +155,11 @@ impl Verdict {
 				}
 				r
 			} else {
-				let mut r = if let Some(hint) = inputs.git_refusal {
+				// Name the paths, not just the other agents: a leftover
+				// Referrer in this agent's own second read dir is what the user
+				// can act on.
+				// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
+				let mut r = if let Some(hint) = git_refusal {
 					hint
 				} else if where_.is_empty() {
 					"skill it reads from a location shared with other agents"
@@ -204,10 +170,14 @@ impl Verdict {
 						 served to this agent from: {where_}"
 					)
 				};
+				// The gate keeps npx-era/compat leftover refusals (shared_referrer_kept=false)
+				// on their original message instead of listing unrelated readers;
+				// see docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
+				let readers_outside = (inputs.readers_outside)();
 				if inputs.initial_shared_master_kept
-					&& !inputs.readers_outside.is_empty()
+					&& !readers_outside.is_empty()
 				{
-					let formatted = inputs.readers_outside.join(", ");
+					let formatted = readers_outside.join(", ");
 					r.push_str(&format!(
 						". Also read there by agents not in this request: {formatted}. Include them in the same request, or delete for every agent (--all-agents, which also unlinks it for them)"
 					));
@@ -217,9 +187,13 @@ impl Verdict {
 			return Verdict::Refused { reason };
 		}
 
+		// The second disjunct is the planner's OWN keep, which `blocks` cannot
+		// always see (discovery stops at a parsing `SKILL.md`, the planner's
+		// sweep recurses into it). Both single-agent and --all-agents treat an
+		// empty plan with an initial keep as Kept, mirroring the preview prune gate.
+		// See docs/history/core-manager.md#nested-broken-link-reached-commit
 		let is_kept = spared_everything
-			|| (inputs.all_agents
-				&& inputs.initial_shared_master_kept
+			|| (inputs.initial_shared_master_kept
 				&& inputs.plan_paths.is_empty());
 		if is_kept {
 			return Verdict::Kept {
@@ -227,26 +201,15 @@ impl Verdict {
 			};
 		}
 
-		if inputs.plan_paths.is_empty()
-			&& inputs.effect.survivors.is_empty()
-			&& inputs.has_lock_entry
-		{
-			return Verdict::LockOnly;
+		if inputs.plan_paths.is_empty() && inputs.effect.survivors.is_empty() {
+			if inputs.has_lock_entry {
+				return Verdict::LockOnly;
+			} else {
+				return Verdict::Absent;
+			}
 		}
 
 		Verdict::Removed
-	}
-}
-
-impl From<bool> for Verdict {
-	fn from(blocks: bool) -> Self {
-		if blocks {
-			Verdict::Refused {
-				reason: String::new(),
-			}
-		} else {
-			Verdict::Removed
-		}
 	}
 }
 
@@ -331,308 +294,184 @@ mod tests {
 
 	#[test]
 	fn test_verdict_table() {
-		let tmp = tempfile::tempdir().unwrap();
-		let _env = TestEnv::new(tmp.path());
+		let no_refusal: &dyn Fn() -> Option<String> = &|| None;
+		let no_readers: &dyn Fn() -> Vec<&'static str> = &|| Vec::new();
 
-		let claude_dir = tmp.path().join("home/.claude/skills");
-		let cursor_dir = tmp.path().join("home/.cursor/skills");
-		let shared_dir = tmp.path().join("home/.agents/skills");
-		let aghub_dir = tmp.path().join("home/.aghub");
-
-		// --- Row 1: Removed (clean removal of single-agent copy) ---
+		// Row 1: Removed (single-agent planned paths)
 		{
-			let skill_name = "row1-removed";
-			let path = claude_dir.join(skill_name);
-			write_test_skill(&path, skill_name);
-			write_test_lock_entry(skill_name);
-
-			let read_dirs = vec![claude_dir.clone()];
-			let plan_paths = vec![path.clone()];
-			let effect = crate::skills::removal::read_effect_after(
-				&read_dirs,
-				skill_name,
-				&plan_paths,
-			);
-
-			// Execution: file deleted from disk, lock entry pruned
-			std::fs::remove_dir_all(&path).unwrap();
-			skill::lock::remove_skill_from_lock(skill_name).unwrap();
-
+			let p = PathBuf::from("/home/user/.claude/skills/demo");
+			let effect = crate::skills::removal::ReadEffect {
+				survivors: vec![],
+				changed: true,
+				incomplete: false,
+			};
 			let verdict = Verdict::compute(VerdictInputs {
-				plan_paths: &plan_paths,
+				plan_paths: &[p],
 				plan_skipped: &[],
 				initial_shared_master_kept: false,
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &[],
-				failed_paths: &[],
 				has_lock_entry: false,
-				git_refusal: None,
-				readers_outside: &[],
+				git_refusal: no_refusal,
+				readers_outside: no_readers,
 			});
-
-			assert_eq!(verdict, Verdict::Removed, "Row 1 must be Removed");
-			assert!(!path.exists(), "Row 1: disk directory must be removed");
-			assert!(
-				!skill::read_skill_lock().skills.contains_key(skill_name),
-				"Row 1: lock entry must be pruned"
-			);
+			assert_eq!(verdict, Verdict::Removed);
 		}
 
-		// --- Row 2: Removed (private copy shadows Master - disclosing Master) ---
+		// Row 2: Removed (private copy shadows Master - disclosing Master)
 		{
-			let skill_name = "row2-shadow";
-			let master_path = aghub_dir.join(skill_name);
-			let private_path = claude_dir.join(skill_name);
-			write_test_skill(&master_path, skill_name);
-			write_test_skill(&private_path, skill_name);
-			write_test_lock_entry(skill_name);
-
-			let read_dirs = vec![claude_dir.clone(), aghub_dir.clone()];
-			let plan_paths = vec![private_path.clone()];
-			let plan_skipped = vec![master_path.clone()];
-			let effect = crate::skills::removal::read_effect_after(
-				&read_dirs,
-				skill_name,
-				&plan_paths,
-			);
-
-			assert!(
-				!effect.survivors.is_empty(),
-				"Master must survive in effect"
-			);
-			assert!(
-				effect.changed,
-				"Shrinking read set must set effect.changed = true"
-			);
-
-			// Execution: only private copy is deleted; Master is preserved
-			std::fs::remove_dir_all(&private_path).unwrap();
-
+			let private_p = PathBuf::from("/home/user/.claude/skills/demo");
+			let master_p = PathBuf::from("/home/user/.aghub/demo");
+			let effect = crate::skills::removal::ReadEffect {
+				survivors: vec![master_p.clone()],
+				changed: true,
+				incomplete: false,
+			};
 			let verdict = Verdict::compute(VerdictInputs {
-				plan_paths: &plan_paths,
-				plan_skipped: &plan_skipped,
+				plan_paths: &[private_p],
+				plan_skipped: &[master_p],
 				initial_shared_master_kept: false,
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &[],
-				failed_paths: &[],
 				has_lock_entry: true,
-				git_refusal: None,
-				readers_outside: &[],
+				git_refusal: no_refusal,
+				readers_outside: no_readers,
 			});
-
-			assert_eq!(
-				verdict,
-				Verdict::Removed,
-				"Row 2 must be Removed because effect.changed is true (private copy removed)"
-			);
-			assert!(
-				!private_path.exists(),
-				"Row 2: private copy must be deleted"
-			);
-			assert!(master_path.exists(), "Row 2: Master must survive on disk");
+			assert_eq!(verdict, Verdict::Removed);
 		}
 
-		// --- Row 3: Kept (with managed and unmanaged holders) ---
+		// Row 3: Kept (with managed and unmanaged holders)
 		{
-			let skill_name = "row3-kept";
-			let managed_path = shared_dir.join(skill_name);
-			let unmanaged_path = cursor_dir.join(skill_name);
-			write_test_skill(&managed_path, skill_name);
-			write_test_skill(&unmanaged_path, skill_name);
-			write_test_lock_entry(skill_name);
-
-			// Cursor is unmanaged
-			let unmanaged_dirs = vec![cursor_dir.clone()];
-			let read_dirs = vec![shared_dir.clone(), cursor_dir.clone()];
-			let plan_paths: Vec<PathBuf> = vec![];
-			let plan_skipped =
-				vec![managed_path.clone(), unmanaged_path.clone()];
-			let effect = crate::skills::removal::read_effect_after(
-				&read_dirs,
-				skill_name,
-				&plan_paths,
-			);
-
+			let managed_p = PathBuf::from("/home/user/.agents/skills/demo");
+			let unmanaged_p = PathBuf::from("/home/user/.cursor/skills/demo");
+			let unmanaged_dirs =
+				vec![PathBuf::from("/home/user/.cursor/skills")];
+			let effect = crate::skills::removal::ReadEffect {
+				survivors: vec![managed_p.clone(), unmanaged_p.clone()],
+				changed: false,
+				incomplete: false,
+			};
 			let verdict = Verdict::compute(VerdictInputs {
-				plan_paths: &plan_paths,
-				plan_skipped: &plan_skipped,
-				initial_shared_master_kept: false, // initial_shared_master_kept: false -> spared_everything
+				plan_paths: &[],
+				plan_skipped: &[managed_p.clone(), unmanaged_p.clone()],
+				initial_shared_master_kept: false,
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &unmanaged_dirs,
-				failed_paths: &[],
 				has_lock_entry: true,
-				git_refusal: None,
-				readers_outside: &[],
+				git_refusal: no_refusal,
+				readers_outside: no_readers,
 			});
-
-			match &verdict {
+			match verdict {
 				Verdict::Kept { still_read_from } => {
-					assert_eq!(
-						still_read_from.len(),
-						2,
-						"Row 3 must record 2 holders"
-					);
-					let managed_holder = still_read_from
+					assert_eq!(still_read_from.len(), 2);
+					let m = still_read_from
 						.iter()
-						.find(|h| h.path == managed_path)
-						.expect("managed holder must exist");
-					assert!(
-						managed_holder.managed,
-						"shared dir must be categorized as managed"
-					);
-
-					let unmanaged_holder = still_read_from
+						.find(|h| h.path == managed_p)
+						.unwrap();
+					assert!(m.managed);
+					let u = still_read_from
 						.iter()
-						.find(|h| h.path == unmanaged_path)
-						.expect("unmanaged holder must exist");
-					assert!(
-						!unmanaged_holder.managed,
-						"cursor dir must be categorized as unmanaged"
-					);
+						.find(|h| h.path == unmanaged_p)
+						.unwrap();
+					assert!(!u.managed);
 				}
-				other => panic!("Row 3: expected Kept, got {other:?}"),
+				other => panic!("expected Kept, got {other:?}"),
 			}
-
-			// Disk and lock assertions: files and lock entry remain untouched
-			assert!(managed_path.exists(), "Row 3: managed path must remain");
-			assert!(
-				unmanaged_path.exists(),
-				"Row 3: unmanaged path must remain"
-			);
-			assert!(
-				skill::read_skill_lock().skills.contains_key(skill_name),
-				"Row 3: lock entry must remain"
-			);
 		}
 
-		// --- Row 4: Refused (all_agents encountered survivors) ---
+		// Row 4: Refused (all_agents encountered survivors)
 		{
-			let skill_name = "row4-refused";
-			let path = cursor_dir.join(skill_name);
-			write_test_skill(&path, skill_name);
-			write_test_lock_entry(skill_name);
-
-			let read_dirs = vec![cursor_dir.clone()];
-			let plan_paths: Vec<PathBuf> = vec![];
-			let effect = crate::skills::removal::read_effect_after(
-				&read_dirs,
-				skill_name,
-				&plan_paths,
-			);
-
+			let survivor_p = PathBuf::from("/home/user/.cursor/skills/demo");
+			let effect = crate::skills::removal::ReadEffect {
+				survivors: vec![survivor_p.clone()],
+				changed: false,
+				incomplete: false,
+			};
 			let verdict = Verdict::compute(VerdictInputs {
-				plan_paths: &plan_paths,
+				plan_paths: &[],
 				plan_skipped: &[],
 				initial_shared_master_kept: false,
 				effect: &effect,
-				all_agents: true, // all_agents = true with survivors
+				all_agents: true,
 				unmanaged_dirs: &[],
-				failed_paths: &[],
 				has_lock_entry: true,
-				git_refusal: None,
-				readers_outside: &[],
+				git_refusal: no_refusal,
+				readers_outside: no_readers,
 			});
-
-			match &verdict {
+			match verdict {
 				Verdict::Refused { reason } => {
-					assert!(
-						reason.contains("skill still discoverable afterwards in:"),
-						"Row 4: reason must report remaining locations: {reason}"
-					);
-					assert!(
-						reason.contains(&path.display().to_string()),
-						"Row 4: reason must list the survivor path: {reason}"
-					);
+					assert!(reason
+						.contains("skill still discoverable afterwards in:"));
+					assert!(reason.contains(&survivor_p.display().to_string()));
 				}
-				other => panic!("Row 4: expected Refused, got {other:?}"),
+				other => panic!("expected Refused, got {other:?}"),
 			}
-
-			// Disk and lock assertions: files and lock entry remain untouched
-			assert!(path.exists(), "Row 4: file must remain on disk");
-			assert!(
-				skill::read_skill_lock().skills.contains_key(skill_name),
-				"Row 4: lock entry must remain"
-			);
 		}
 
-		// --- Row 5: Partial (failed paths during deletion) ---
+		// Row 5: Kept (single agent planner keep corner, MINOR 8)
 		{
-			let skill_name = "row5-partial";
-			let p1 = claude_dir.join(skill_name);
-			let p2 = cursor_dir.join(skill_name);
-			write_test_skill(&p1, skill_name);
-			write_test_skill(&p2, skill_name);
-			write_test_lock_entry(skill_name);
-
-			// p1 deleted, p2 failed
-			std::fs::remove_dir_all(&p1).unwrap();
-			let failed_paths = vec![p2.clone()];
-
-			let effect = crate::skills::removal::read_effect_after(
-				&[claude_dir.clone(), cursor_dir.clone()],
-				skill_name,
-				&[p1.clone(), p2.clone()],
-			);
-
+			let effect = crate::skills::removal::ReadEffect {
+				survivors: vec![],
+				changed: false,
+				incomplete: false,
+			};
 			let verdict = Verdict::compute(VerdictInputs {
-				plan_paths: &[p1.clone(), p2.clone()],
+				plan_paths: &[],
 				plan_skipped: &[],
-				initial_shared_master_kept: false,
+				initial_shared_master_kept: true,
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &[],
-				failed_paths: &failed_paths,
 				has_lock_entry: true,
-				git_refusal: None,
-				readers_outside: &[],
+				git_refusal: no_refusal,
+				readers_outside: no_readers,
 			});
-
-			assert_eq!(verdict, Verdict::Partial, "Row 5 must be Partial");
-			assert!(!p1.exists(), "Row 5: p1 was deleted");
-			assert!(p2.exists(), "Row 5: p2 failed and remains on disk");
+			assert!(matches!(verdict, Verdict::Kept { .. }));
 		}
 
-		// --- Row 6: LockOnly (skill not on disk, pruned from lock) ---
+		// Row 6: LockOnly (skill not on disk, in lock)
 		{
-			let skill_name = "row6-lockonly";
-			write_test_lock_entry(skill_name);
-
-			let read_dirs = vec![claude_dir.clone()];
-			let plan_paths: Vec<PathBuf> = vec![];
-			let effect = crate::skills::removal::read_effect_after(
-				&read_dirs,
-				skill_name,
-				&plan_paths,
-			);
-
-			// Lock pruned
-			skill::lock::remove_skill_from_lock(skill_name).unwrap();
-
+			let effect = crate::skills::removal::ReadEffect {
+				survivors: vec![],
+				changed: false,
+				incomplete: false,
+			};
 			let verdict = Verdict::compute(VerdictInputs {
-				plan_paths: &plan_paths,
+				plan_paths: &[],
 				plan_skipped: &[],
 				initial_shared_master_kept: false,
 				effect: &effect,
 				all_agents: false,
 				unmanaged_dirs: &[],
-				failed_paths: &[],
-				has_lock_entry: true, // had lock entry
-				git_refusal: None,
-				readers_outside: &[],
+				has_lock_entry: true,
+				git_refusal: no_refusal,
+				readers_outside: no_readers,
 			});
+			assert_eq!(verdict, Verdict::LockOnly);
+		}
 
-			assert_eq!(verdict, Verdict::LockOnly, "Row 6 must be LockOnly");
-			assert!(
-				!claude_dir.join(skill_name).exists(),
-				"Row 6: no disk path"
-			);
-			assert!(
-				!skill::read_skill_lock().skills.contains_key(skill_name),
-				"Row 6: lock entry was pruned"
-			);
+		// Row 7: Absent (skill not on disk, not in lock)
+		{
+			let effect = crate::skills::removal::ReadEffect {
+				survivors: vec![],
+				changed: false,
+				incomplete: false,
+			};
+			let verdict = Verdict::compute(VerdictInputs {
+				plan_paths: &[],
+				plan_skipped: &[],
+				initial_shared_master_kept: false,
+				effect: &effect,
+				all_agents: false,
+				unmanaged_dirs: &[],
+				has_lock_entry: false,
+				git_refusal: no_refusal,
+				readers_outside: no_readers,
+			});
+			assert_eq!(verdict, Verdict::Absent);
 		}
 	}
 
@@ -649,7 +488,7 @@ mod tests {
 		let effect = crate::skills::removal::read_effect_after(
 			&[dir1.clone(), dir2.clone()],
 			"multi",
-			&[dir1.join("multi")], // only dir1 planned
+			&[dir1.join("multi")],
 		);
 
 		let verdict = Verdict::compute(VerdictInputs {
@@ -659,10 +498,9 @@ mod tests {
 			effect: &effect,
 			all_agents: true,
 			unmanaged_dirs: &[],
-			failed_paths: &[],
 			has_lock_entry: false,
-			git_refusal: None,
-			readers_outside: &[],
+			git_refusal: &|| None,
+			readers_outside: &|| Vec::new(),
 		});
 
 		match verdict {
@@ -719,5 +557,199 @@ mod tests {
 			"Preview and commit on the same fixture must yield the identical Verdict"
 		);
 		assert_eq!(preview_outcome.verdict, Verdict::Removed);
+	}
+
+	#[test]
+	fn test_remove_skill_planned_shadowing_copy() {
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		let home = tmp.path().join("home");
+		let claude_dir = home.join(".claude/skills/shadow");
+		let aghub_dir = home.join(".aghub/shadow");
+		write_test_skill(&claude_dir, "shadow");
+		write_test_skill(&aghub_dir, "shadow");
+		write_test_lock_entry("shadow");
+
+		let mut mgr = crate::manager::ConfigManager::new(
+			crate::create_adapter(crate::models::AgentType::Claude),
+			true,
+			None,
+		);
+		mgr.load().unwrap();
+
+		let preview = mgr
+			.remove_skill_planned("shadow", false, true, false)
+			.unwrap();
+		assert_eq!(preview.verdict, Verdict::Removed);
+		assert!(claude_dir.exists(), "preview must not delete private copy");
+		assert!(aghub_dir.exists(), "preview must not delete master");
+		assert!(
+			skill::read_skill_lock().skills.contains_key("shadow"),
+			"preview must not prune lock"
+		);
+
+		let commit = mgr
+			.remove_skill_planned("shadow", false, false, true)
+			.unwrap();
+		assert_eq!(commit.verdict, Verdict::Removed);
+		assert_eq!(preview.verdict, commit.verdict);
+		assert!(
+			!claude_dir.exists(),
+			"commit must delete shadowed private copy"
+		);
+		assert!(aghub_dir.exists(), "commit must preserve Master on disk");
+		assert!(
+			skill::read_skill_lock().skills.contains_key("shadow"),
+			"lock entry must remain because Master still exists"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_remove_skill_planned_kept() {
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		let home = tmp.path().join("home");
+		let aghub_dir = home.join(".aghub/kept-skill");
+		write_test_skill(&aghub_dir, "kept-skill");
+		write_test_lock_entry("kept-skill");
+
+		// An unrelated skill in an in-scope agent dir with a nested link
+		// whose canonicalize fails with ENOTDIR, causing the planner to
+		// spare the Master.
+		let healthy = home.join(".claude/skills/healthy");
+		write_test_skill(&healthy, "healthy");
+		let plain = home.join("regular-file");
+		std::fs::write(&plain, "f").unwrap();
+		std::os::unix::fs::symlink(plain.join("y"), healthy.join("broken"))
+			.unwrap();
+
+		let mut mgr = crate::manager::ConfigManager::new(
+			crate::create_adapter(crate::models::AgentType::Claude),
+			true,
+			None,
+		);
+		mgr.load().unwrap();
+
+		let preview = mgr
+			.remove_skill_planned("kept-skill", true, true, false)
+			.unwrap();
+		assert!(
+			matches!(preview.verdict, Verdict::Kept { .. }),
+			"expected Kept, got {:?}",
+			preview.verdict
+		);
+		assert!(preview.plan.paths.is_empty());
+
+		let commit = mgr
+			.remove_skill_planned("kept-skill", true, false, true)
+			.unwrap();
+		assert_eq!(preview.verdict, commit.verdict);
+		assert!(
+			aghub_dir.exists(),
+			"commit must not delete kept shared skill"
+		);
+		assert!(
+			skill::read_skill_lock().skills.contains_key("kept-skill"),
+			"lock entry must remain intact when kept"
+		);
+	}
+
+	#[test]
+	fn test_remove_skill_planned_refused_shared_slot() {
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		let home = tmp.path().join("home");
+		let shared_path = home.join(".agents/skills/shared-skill");
+		write_test_skill(&shared_path, "shared-skill");
+		write_test_lock_entry("shared-skill");
+
+		let mut mgr = crate::manager::ConfigManager::new(
+			crate::create_adapter(crate::models::AgentType::Cursor),
+			true,
+			None,
+		);
+		mgr.load().unwrap();
+
+		let preview = mgr
+			.remove_skill_planned("shared-skill", false, true, false)
+			.unwrap();
+		match &preview.verdict {
+			Verdict::Refused { reason } => {
+				assert!(
+					reason.contains(
+						"skill it reads from a location shared with other agents"
+					),
+					"refusal reason must explain shared slot: {reason}"
+				);
+			}
+			other => panic!("expected Refused, got {other:?}"),
+		}
+
+		let err = mgr
+			.remove_skill_planned("shared-skill", false, false, true)
+			.unwrap_err();
+		assert!(
+			matches!(err, crate::errors::ConfigError::UnsupportedOperation(_)),
+			"commit on refused shared slot must return UnsupportedOperation: {err:?}"
+		);
+		assert!(
+			shared_path.exists(),
+			"refused removal must preserve shared skill on disk"
+		);
+		assert!(
+			skill::read_skill_lock().skills.contains_key("shared-skill"),
+			"refused removal must preserve lock entry"
+		);
+	}
+
+	#[test]
+	fn test_remove_skill_planned_lock_only() {
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		let skill_name = "lockonly-skill";
+		write_test_lock_entry(skill_name);
+		assert!(
+			skill::read_skill_lock().skills.contains_key(skill_name),
+			"lock entry must exist initially"
+		);
+
+		let mut mgr = crate::manager::ConfigManager::new(
+			crate::create_adapter(crate::models::AgentType::Claude),
+			true,
+			None,
+		);
+		mgr.load().unwrap();
+
+		let preview = mgr
+			.remove_skill_planned(skill_name, false, true, false)
+			.unwrap();
+		assert_eq!(preview.verdict, Verdict::LockOnly);
+		assert!(preview.plan.paths.is_empty());
+		assert!(
+			skill::read_skill_lock().skills.contains_key(skill_name),
+			"preview must not prune lock"
+		);
+		match &preview.prune {
+			crate::skills::removal::PruneStatus::WouldPrune(keys) => {
+				assert!(keys.contains(&skill_name.to_string()));
+			}
+			other => panic!("expected WouldPrune, got {other:?}"),
+		}
+
+		let commit = mgr
+			.remove_skill_planned(skill_name, false, false, true)
+			.unwrap();
+		assert_eq!(commit.verdict, Verdict::LockOnly);
+		assert_eq!(preview.verdict, commit.verdict);
+		assert!(commit.plan.paths.is_empty());
+		assert!(
+			!skill::read_skill_lock().skills.contains_key(skill_name),
+			"commit must prune lock-only entry from lock file"
+		);
 	}
 }

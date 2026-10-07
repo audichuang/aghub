@@ -18,7 +18,7 @@ use aghub_core::{
 	create_adapter,
 	manager::ConfigManager,
 	models::ResourceScope,
-	skills::removal::{PruneStatus, RemovalOutcome, Verdict},
+	skills::removal::{PruneStatus, RemovalOutcome},
 };
 use rocket::http::Status;
 use rocket::response::status::NoContent;
@@ -73,30 +73,10 @@ pub(crate) fn noop_removal_response(
 	skipped: Vec<PathBuf>,
 	requested_dry_run: bool,
 ) -> DeleteSkillByPathResponse {
-	removal_response(
-		RemovalOutcome {
-			plan: aghub_core::skills::removal::RemovalPlan {
-				layout: aghub_core::skills::removal::Layout::Copy,
-				paths,
-				skipped,
-				needs_confirm: false,
-				shared_master_kept: false,
-				still_read_from: Vec::new(),
-				incomplete: false,
-			},
-			executed: false,
-			prune: PruneStatus::NotRun,
-			// This IS the already-gone constructor — every caller reaches it
-			// because the config or the resource does not exist. It outranks
-			// `requested_dry_run` in the wire view, so an unconfirmed delete of
-			// an absent resource reports `absent`, not a `preview` that would
-			// invite a pointless retry.
-			failed_paths: vec![],
-			absent: true,
-			verdict: Verdict::Removed,
-		},
-		requested_dry_run,
-	)
+	let mut outcome = aghub_core::skills::removal::RemovalOutcome::noop(false);
+	outcome.plan.paths = paths;
+	outcome.plan.skipped = skipped;
+	removal_response(outcome, requested_dry_run)
 }
 
 /// Parse a delete route's optional `agents` query (comma list): every agent

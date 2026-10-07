@@ -142,11 +142,13 @@ fn plan_or_noop(
 	) -> aghub_core::errors::Result<RemovalOutcome>,
 ) -> Result<RemovalOutcome> {
 	if manager.config().is_none() {
-		return Ok(RemovalOutcome::noop());
+		return Ok(RemovalOutcome::noop(false));
 	}
 	match plan(manager) {
 		Ok(outcome) => Ok(outcome),
-		Err(ConfigError::ResourceNotFound { .. }) => Ok(RemovalOutcome::noop()),
+		Err(ConfigError::ResourceNotFound { .. }) => {
+			Ok(RemovalOutcome::noop(false))
+		}
 		Err(e) => Err(e.into()),
 	}
 }

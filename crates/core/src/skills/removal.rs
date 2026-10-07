@@ -1611,24 +1611,18 @@ pub struct RemovalOutcome {
 }
 
 impl RemovalOutcome {
-	/// Convenience accessor for wire / backward compatibility.
-	pub fn shared_master_kept(&self) -> bool {
-		self.verdict.shared_master_kept()
-	}
-
 	/// The PREVIEW of `plan` — what a commit would do, including the lock keys
 	/// it would drop. The one producer for every surface (root AGENTS.md: never
 	/// hand-mirror a transactional flow), and it runs `verify_shape` itself for
 	/// the same reason. See docs/history/core-removal.md#preview-and-commit-duplicated-per-surface
 	pub fn preview(
 		plan: RemovalPlan,
-		verdict: impl Into<Verdict>,
+		verdict: Verdict,
 		scope: crate::models::ResourceScope,
 		project_root: Option<&Path>,
 		name: &str,
 	) -> crate::errors::Result<Self> {
 		crate::skills::shape::verify_shape(scope, project_root, name)?;
-		let verdict = verdict.into();
 		let prune = if verdict.shared_master_kept() {
 			PruneStatus::NotRun
 		} else {
@@ -1651,6 +1645,9 @@ impl RemovalOutcome {
 	/// COMMIT `plan`: run the removal, fold what ACTUALLY happened back into the
 	/// plan, and reconcile the per-scope lock. The only place a
 	/// [`RemovalReport`] becomes an outcome (same rule as [`Self::preview`]).
+	///
+	/// Single owner for downgrading the outcome to [`Verdict::Partial`] when
+	/// any paths fail to delete on disk.
 	pub fn commit(
 		mut plan: RemovalPlan,
 		roots: &[PathBuf],
@@ -1705,7 +1702,12 @@ impl RemovalOutcome {
 	/// resource). One constructor so the CLI and API serialize the SAME
 	/// "already gone" shape across skill/MCP/sub-agent deletes. `deleted_path`
 	/// stays null because `executed` is false.
-	pub fn noop() -> Self {
+	pub fn noop(has_lock_entry: bool) -> Self {
+		let verdict = if has_lock_entry {
+			Verdict::LockOnly
+		} else {
+			Verdict::Absent
+		};
 		RemovalOutcome {
 			plan: RemovalPlan {
 				layout: Layout::Copy,
@@ -1720,7 +1722,7 @@ impl RemovalOutcome {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![],
 			absent: true,
-			verdict: Verdict::Removed,
+			verdict,
 		}
 	}
 }
@@ -2817,7 +2819,10 @@ pub(crate) mod tests {
 		// the CLI `plan_or_noop` and the API no-op both serialize): deleting an
 		// absent resource is a SUCCESS no-op — executed:false, no paths, so the
 		// wire `deleted_path` stays null. NOT an error.
-		let n = RemovalOutcome::noop();
+		let n = RemovalOutcome::noop(false);
+		assert_eq!(n.verdict, Verdict::Absent);
+		let lock_only = RemovalOutcome::noop(true);
+		assert_eq!(lock_only.verdict, Verdict::LockOnly);
 		assert!(!n.executed, "a no-op delete must not report execution");
 		assert!(
 			n.absent,

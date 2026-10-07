@@ -4818,7 +4818,7 @@ fn real_dir_batch_with_own_links_is_order_independent() {
 			) {
 				Ok(outcome) => outcome,
 				Err(ConfigError::ResourceNotFound { .. }) if idx > 0 => {
-					crate::skills::removal::RemovalOutcome::noop()
+					crate::skills::removal::RemovalOutcome::noop(false)
 				}
 				Err(e) => panic!(
 					"{order_name}: execution row {idx} ({agent:?}) must succeed: {e:?}"
