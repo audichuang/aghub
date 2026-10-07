@@ -1684,8 +1684,13 @@ fn test_by_path_refuses_skills_root_itself() {
 	let root = temp.path().join("project");
 	let skills = root.join(".claude/skills");
 	fs::create_dir_all(&skills).unwrap();
+	fs::write(
+		skills.join("SKILL.md"),
+		"---\nname: skills\ndescription: skills root treated as skill\n---\n",
+	)
+	.unwrap();
 
-	let req = SkillRemovalRequest {
+	let mut req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(skills.clone()),
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(root.clone()),
@@ -1696,9 +1701,20 @@ fn test_by_path_refuses_skills_root_itself() {
 		keeps_master: false,
 		plugin_owner: None,
 	};
+	let preview_res = remove_skill_batch(&req);
+	assert!(
+		preview_res.is_err(),
+		"must refuse skills root itself in dry-run"
+	);
+
+	req.dry_run = false;
 	let res = remove_skill_batch(&req);
-	assert!(res.is_err(), "must refuse skills root itself");
+	assert!(res.is_err(), "must refuse skills root itself in commit");
 	assert!(skills.exists(), "skills root must survive");
+	assert!(
+		skills.join("SKILL.md").exists(),
+		"SKILL.md inside skills root must survive"
+	);
 }
 
 #[test]
