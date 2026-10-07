@@ -78,7 +78,7 @@ impl RemovalView {
 		let stringify = |paths: &[std::path::PathBuf]| -> Vec<String> {
 			paths.iter().map(|p| p.display().to_string()).collect()
 		};
-		let kind = if outcome.plan.shared_master_kept
+		let kind = if outcome.verdict.shared_master_kept()
 			&& (outcome.plan.paths.is_empty() || !outcome.executed)
 		{
 			// Nothing was or will be removed BECAUSE it is shared. Outranks
@@ -133,7 +133,7 @@ impl RemovalView {
 mod tests {
 	use super::*;
 	use crate::skills::removal::{
-		Layout, PruneStatus, RemovalOutcome, RemovalPlan,
+		Layout, PruneStatus, RemovalOutcome, RemovalPlan, Verdict,
 	};
 	use std::path::PathBuf;
 
@@ -152,6 +152,7 @@ mod tests {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![],
 			absent: false,
+			verdict: Verdict::Removed,
 		}
 	}
 
@@ -250,6 +251,7 @@ mod tests {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![PathBuf::from("/a/locked")],
 			absent: false,
+			verdict: Verdict::Partial,
 		};
 		let view = RemovalView::from_outcome(&all_failed, false);
 		assert_eq!(
@@ -294,6 +296,9 @@ mod tests {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![],
 			absent: false,
+			verdict: Verdict::Kept {
+				still_read_from: Vec::new(),
+			},
 		};
 
 		// Kept regardless of what the caller asked for — the answer is about
@@ -320,6 +325,9 @@ mod tests {
 				paths: vec![PathBuf::from("/a/.opencode/skills/mover")],
 				..kept.plan.clone()
 			},
+			verdict: Verdict::Refused {
+				reason: "still served".to_string(),
+			},
 			..kept.clone()
 		};
 		for requested_dry_run in [true, false] {
@@ -344,6 +352,7 @@ mod tests {
 				..kept.plan.clone()
 			},
 			executed: true,
+			verdict: Verdict::Removed,
 			..kept.clone()
 		};
 		assert_eq!(
@@ -373,6 +382,7 @@ mod tests {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![],
 			absent: false,
+			verdict: Verdict::Removed,
 		};
 		let view = RemovalView::from_outcome(&outcome, true);
 		assert!(view.needs_confirm, "needs_confirm must propagate");

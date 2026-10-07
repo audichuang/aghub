@@ -2,7 +2,9 @@ use super::ConfigManager;
 use crate::{
 	errors::{ConfigError, Result},
 	models::McpServer,
-	skills::removal::{Layout, PruneStatus, RemovalOutcome, RemovalPlan},
+	skills::removal::{
+		Layout, PruneStatus, RemovalOutcome, RemovalPlan, Verdict,
+	},
 	transfer::{self, InstallScope, ResourceLocator},
 };
 use log::info;
@@ -259,6 +261,7 @@ impl ConfigManager {
 				// exists, it just was not removed (dry-run/unconfirmed).
 				failed_paths: vec![],
 				absent: false,
+				verdict: Verdict::Removed,
 			});
 		}
 
@@ -279,6 +282,7 @@ impl ConfigManager {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![],
 			absent: false,
+			verdict: Verdict::Removed,
 		})
 	}
 

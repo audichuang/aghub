@@ -5,6 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod verdict;
+pub use verdict::*;
+
 use crate::models::{AgentType, ResourceScope};
 use crate::skills::linker::Linker;
 
@@ -1603,47 +1606,45 @@ pub struct RemovalOutcome {
 	/// "preview", whose contract says `--yes` WILL change something. Set only
 	/// by [`RemovalOutcome::noop`]. See docs/history/core-removal.md#absent-was-indistinguishable-from-preview
 	pub absent: bool,
+	/// Typed deletion verdict.
+	pub verdict: Verdict,
 }
 
 impl RemovalOutcome {
+	/// Convenience accessor for wire / backward compatibility.
+	pub fn shared_master_kept(&self) -> bool {
+		self.verdict.shared_master_kept()
+	}
+
 	/// The PREVIEW of `plan` — what a commit would do, including the lock keys
 	/// it would drop. The one producer for every surface (root AGENTS.md: never
 	/// hand-mirror a transactional flow), and it runs `verify_shape` itself for
 	/// the same reason. See docs/history/core-removal.md#preview-and-commit-duplicated-per-surface
-	///
-	/// `blocks` is the caller's own `read_effect_after` verdict, passed in: the
-	/// `shared_master_kept && paths.is_empty()` proxy below cannot see an
-	/// npx-era Referrer beside its Master (a real path to unlink, still
-	/// refused). A caller with no verdict passes `false`.
 	pub fn preview(
 		plan: RemovalPlan,
-		blocks: bool,
+		verdict: impl Into<Verdict>,
 		scope: crate::models::ResourceScope,
 		project_root: Option<&Path>,
 		name: &str,
 	) -> crate::errors::Result<Self> {
 		crate::skills::shape::verify_shape(scope, project_root, name)?;
-		// A kept Master never reaches `commit` (a single-agent keep refuses; an
-		// exhaustive keep returns here as a preview even when confirmed), so a
-		// promised prune would never run. `blocks` alone misses the second
-		// shape, hence the plan flag.
-		let prune =
-			if blocks || (plan.shared_master_kept && plan.paths.is_empty()) {
-				PruneStatus::NotRun
-			} else {
-				crate::skills::prune::preview_prune_for_removal(
-					scope,
-					project_root,
-					&plan.paths,
-				)
-			};
+		let verdict = verdict.into();
+		let prune = if verdict.shared_master_kept() {
+			PruneStatus::NotRun
+		} else {
+			crate::skills::prune::preview_prune_for_removal(
+				scope,
+				project_root,
+				&plan.paths,
+			)
+		};
 		Ok(Self {
 			plan,
 			executed: false,
 			prune,
 			failed_paths: Vec::new(),
-			// Callers reach a preview only AFTER their not-found check.
 			absent: false,
+			verdict,
 		})
 	}
 
@@ -1685,12 +1686,18 @@ impl RemovalOutcome {
 			.extend(report.failed.into_iter().map(|(path, _)| path));
 		let prune =
 			crate::skills::prune::prune_lock_for_scope(scope, project_root);
+		let verdict = if !failed_paths.is_empty() {
+			Verdict::Partial
+		} else {
+			Verdict::Removed
+		};
 		Ok(Self {
 			plan,
 			executed: true,
 			prune,
 			failed_paths,
 			absent: false,
+			verdict,
 		})
 	}
 
@@ -1713,6 +1720,7 @@ impl RemovalOutcome {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![],
 			absent: true,
+			verdict: Verdict::Removed,
 		}
 	}
 }
@@ -2798,6 +2806,7 @@ pub(crate) mod tests {
 			prune: PruneStatus::Pruned(vec!["a".to_string()]),
 			failed_paths: vec![],
 			absent: false,
+			verdict: Verdict::Removed,
 		};
 		assert_eq!(outcome.prune, PruneStatus::Pruned(vec!["a".to_string()]));
 	}

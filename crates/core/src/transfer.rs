@@ -2168,28 +2168,32 @@ impl ReconcileSkillPlan {
 			return Ok(());
 		}
 		// A dry-run under the guard this reconcile already holds.
-		// `still_read_from` comes from the same owner as `shared_master_kept` —
+		// `still_read_from` comes from the same owner as Verdict —
 		// never re-derive it.
-		let (mut shared_master_kept, still_read_from, mut deleting) =
-			match manager.remove_skill_planned_for_agents(
+		let (verdict, still_read_from, mut deleting) = match manager
+			.remove_skill_planned_for_agents(
 				&self.skill.name,
 				self.row_exhaustive(target.agent),
 				true, // dry_run
 				true,
 				&self.requested_removals,
 			) {
-				Ok(outcome) => (
-					outcome.plan.shared_master_kept,
-					outcome.plan.still_read_from,
-					outcome.plan.paths,
-				),
-				// The copy may make an absent target present before its delete row
-				// runs, so absence only answers the on-disk half of this preflight.
-				Err(ConfigError::ResourceNotFound { .. }) => {
-					(false, Vec::new(), Vec::new())
-				}
-				Err(error) => return Err(error),
-			};
+			Ok(outcome) => (
+				outcome.verdict,
+				outcome.plan.still_read_from,
+				outcome.plan.paths,
+			),
+			// The copy may make an absent target present before its delete row
+			// runs, so absence only answers the on-disk half of this preflight.
+			Err(ConfigError::ResourceNotFound { .. }) => (
+				crate::skills::removal::Verdict::Removed,
+				Vec::new(),
+				Vec::new(),
+			),
+			Err(error) => return Err(error),
+		};
+
+		let mut shared_master_kept = verdict.shared_master_kept();
 
 		if shared_master_kept && !self.exhaustive && self.unreadable.is_empty()
 		{

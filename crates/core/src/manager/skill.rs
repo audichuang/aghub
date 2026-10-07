@@ -770,63 +770,6 @@ impl ConfigManager {
 		};
 		let effect =
 			removal::read_effect_after(&read_dirs, &skill.name, &plan.paths);
-		// Single agent: survivors alone are NOT the verdict — a removal that
-		// shrinks the set of locations this agent reads (`effect.changed`) took
-		// something away. A survivor the PLANNER kept and named in `skipped`
-		// (peer link into our dir, unsweepable peer dir) is not a broken promise
-		// either. EVERY survivor must be accounted for: one the planner never saw
-		// is exactly the silent no-op this guard catches. Excluded for a shared
-		// MASTER (`shared_master_kept`, read BEFORE the fold below).
-		let accounted_for = |survivor: &std::path::Path| {
-			let survivor =
-				crate::skills::linker::classify::canonicalize_lenient(survivor);
-			plan.skipped.iter().any(|kept| {
-				crate::skills::linker::classify::canonicalize_lenient(kept)
-					== survivor
-			})
-		};
-		let all_survivors_reported = !plan.shared_master_kept
-			&& effect
-				.survivors
-				.iter()
-				.all(|survivor| accounted_for(survivor));
-		// The planner took NOTHING and named everything that survived.
-		let spared_everything = all_survivors_reported
-			&& plan.paths.is_empty()
-			&& !effect.survivors.is_empty();
-		// `--all-agents` asserts a POSTCONDITION, so an unreadable read dir
-		// blocks too. The single-agent branch ignores `incomplete`: it decides
-		// whether to REFUSE, and one odd sibling must not make a skill undeletable.
-		let blocks = if all_agents {
-			// No narrowing: any survivor breaks "gone everywhere", even one the
-			// planner reported in `skipped`.
-			!effect.survivors.is_empty() || effect.incomplete
-		} else {
-			// `paths.is_empty()` (inside `spared_everything`) separates the two
-			// shapes `skipped` alone cannot: took nothing and spared the entry
-			// (`kept`), vs. unlinked an npx-era Referrer while the Master goes on
-			// serving it (refuse).
-			!effect.survivors.is_empty()
-				&& !effect.changed
-				&& !spared_everything
-		};
-
-		// A preview must still PREVIEW: record the fact (`RemovalView` reads it
-		// into `kept`) and let only an executing call refuse — pinned by
-		// `single_agent_delete_keeps_shared_master_and_reports_it`. This (the
-		// refusal/blocks fold below) is the only producer of
-		// `shared_master_kept` that can carry non-empty `paths`; every other
-		// producer always has EMPTY paths: (a) the planner's shared-referrer
-		// keep (removal.rs, `shared_referrer_kept`), (b) the copy layout's
-		// UniversalMaster keep (removal.rs `KeepReason::UniversalMaster`),
-		// (c) the spared / all-agents keep. (a) is always empty because
-		// `unselected_needs` is keyed by dir and every targeted entry
-		// lives in `own_agent_dir`, so if one entry is kept, all of them are
-		// kept. A preview must never green-light what the refusal below
-		// rejects. Fold `blocks`, not raw survivors, or the ALLOWED
-		// private-copy removal previews as `kept`.
-		let referrer_kept_for_readers = plan.shared_master_kept;
-		plan.shared_master_kept |= blocks;
 
 		// A removal that goes ahead while something else still serves the skill
 		// has to SAY so, through `skipped` ("present and deliberately not taken").
@@ -838,31 +781,33 @@ impl ConfigManager {
 			}
 		}
 
-		// Name WHERE, computed ONCE on the plan so every surface reads the same
-		// answer: survivors plus what the sweep could not even list. Set AFTER
-		// the fold above; order-preserving `contains`, not `dedup()` (which drops
-		// only CONSECUTIVE repeats and printed each survivor twice).
-		if blocks {
-			let mut still: Vec<std::path::PathBuf> = Vec::new();
-			for path in effect.survivors.iter().chain(plan.skipped.iter()) {
-				if !still.contains(path) {
-					still.push(path.clone());
+		let unmanaged_dirs = removal::unmanaged_skill_dirs(
+			&all_agent_dirs,
+			project_root.as_deref(),
+			requested_agents,
+		);
+
+		let mut readers_outside: Vec<&'static str> = Vec::new();
+		for path in effect.survivors.iter().chain(plan.skipped.iter()) {
+			if let Some(parent) = path.parent() {
+				for id in removal::skill_dir_readers_outside(
+					parent,
+					scope,
+					project_root.as_deref(),
+					requested_agents,
+				) {
+					if !readers_outside.contains(&id) {
+						readers_outside.push(id);
+					}
 				}
 			}
-			plan.still_read_from = still;
 		}
 
-		if executed && blocks {
-			let where_ = plan
-				.still_read_from
-				.iter()
-				.map(|path| path.display().to_string())
-				.collect::<Vec<_>>()
-				.join(", ");
-			// Reuse the planner's one git keep rule to explain a git keep;
-			// presentation must not invent a second verdict. `--all-agents`
-			// has no requested set, so it asks the shared git half directly.
-			let git_refusal = plan.still_read_from.iter().find_map(|path| {
+		let git_refusal = effect
+			.survivors
+			.iter()
+			.chain(plan.skipped.iter())
+			.find_map(|path| {
 				let reason = if all_agents {
 					removal::shared_slot_git_keep(path, project_root.as_deref())
 				} else {
@@ -877,101 +822,66 @@ impl ConfigManager {
 				}?;
 				removal::git_keep_hint(&reason, path)
 			});
-			// `--all-agents` is a DIFFERENT failure (the sweep left a copy
-			// behind) and needs its own wording.
-			let (operation, reason) = if all_agents {
-				// A dir only disabled agents read is never swept (they are
-				// unmanaged, not absent), so it is the usual reason this sweep
-				// cannot finish — say so and say what to do about it.
-				let unmanaged = removal::unmanaged_skill_dirs(
-					&all_agent_dirs,
-					project_root.as_deref(),
-					requested_agents,
-				);
-				let held_by_disabled = plan
-					.still_read_from
-					.iter()
-					.filter(|path| {
-						unmanaged.iter().any(|dir| path.starts_with(dir))
+
+		let has_lock_entry = {
+			let in_global = scope != crate::models::ResourceScope::ProjectOnly
+				&& skill::read_skill_lock().skills.contains_key(name);
+			let in_project = scope != crate::models::ResourceScope::GlobalOnly
+				&& project_root
+					.as_deref()
+					.map(|r| {
+						skill::read_local_lock(Some(r))
+							.skills
+							.contains_key(name)
 					})
-					.map(|path| path.display().to_string())
-					.collect::<Vec<_>>();
-				let mut reason = match git_refusal {
-					Some(hint) => hint,
-					None => format!(
-						"skill still discoverable afterwards in: {where_}"
-					),
-				};
-				if !held_by_disabled.is_empty() {
-					reason.push_str(&format!(
-						". Read only by disabled agent(s), which --all-agents never touches: {}. \
-						 Re-enable those agents or unlink these entries yourself, then retry",
-						held_by_disabled.join(", ")
-					));
+					.unwrap_or(false);
+			in_global || in_project
+		};
+
+		let verdict = removal::Verdict::compute(removal::VerdictInputs {
+			plan_paths: &plan.paths,
+			plan_skipped: &plan.skipped,
+			initial_shared_master_kept: plan.shared_master_kept,
+			effect: &effect,
+			all_agents,
+			unmanaged_dirs: &unmanaged_dirs,
+			failed_paths: &[],
+			has_lock_entry,
+			git_refusal,
+			readers_outside: &readers_outside,
+		});
+
+		plan.shared_master_kept = verdict.shared_master_kept();
+		if matches!(verdict, removal::Verdict::Refused { .. }) {
+			let mut still: Vec<std::path::PathBuf> = Vec::new();
+			for path in effect.survivors.iter().chain(plan.skipped.iter()) {
+				if !still.contains(path) {
+					still.push(path.clone());
 				}
-				("remove from every agent".to_string(), reason)
-			} else {
-				// Name the paths, not just the other agents: a leftover
-				// Referrer in this agent's own second read dir is what the user
-				// can act on.
-				// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
-				let mut reason = if let Some(reason) = git_refusal {
-					reason
-				} else if where_.is_empty() {
-					"skill it reads from a location shared with other agents"
-						.to_string()
-				} else {
-					format!(
-						"skill it reads from a location shared with other agents; it is still \
-						 served to this agent from: {where_}"
-					)
-				};
-				if referrer_kept_for_readers {
-					// The gate keeps npx-era/compat leftover refusals (shared_referrer_kept=false) on their original message instead of listing unrelated readers; see docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
-					let mut readers: Vec<&'static str> = Vec::new();
-					for path in &plan.still_read_from {
-						if let Some(parent) = path.parent() {
-							for id in removal::skill_dir_readers_outside(
-								parent,
-								scope,
-								project_root.as_deref(),
-								requested_agents,
-							) {
-								if !readers.contains(&id) {
-									readers.push(id);
-								}
-							}
-						}
-					}
-					if !readers.is_empty() {
-						let formatted = readers.join(", ");
-						reason.push_str(&format!(
-							". Also read there by agents not in this request: {formatted}. Include them in the same request, or delete for every agent (--all-agents, which also unlinks it for them)"
-						));
-					}
-				}
-				("remove for this agent alone".to_string(), reason)
-			};
-			return Err(ConfigError::unsupported_operation(
-				&operation,
-				&reason,
-				self.adapter.name(),
-			));
+			}
+			plan.still_read_from = still;
 		}
 
-		// The SECOND disjunct is the planner's OWN keep, which `blocks` cannot
-		// always see (discovery stops at a parsing `SKILL.md`, the planner's
-		// sweep recurses into it). It must return here, never reach `commit`.
-		// See docs/history/core-manager.md#nested-broken-link-reached-commit
-		if spared_everything
-			|| (all_agents && plan.shared_master_kept && plan.paths.is_empty())
-		{
-			// NOT `commit`, even when confirmed: it would report `removed` and
-			// prune the lock entry of a skill still installed. This IS `kept`.
-			plan.shared_master_kept = true;
+		if executed {
+			if let removal::Verdict::Refused { ref reason } = verdict {
+				let operation = if all_agents {
+					"remove from every agent"
+				} else {
+					"remove for this agent alone"
+				};
+				return Err(ConfigError::unsupported_operation(
+					operation,
+					reason,
+					self.adapter.name(),
+				));
+			}
+		}
+
+		// Kept never commits: it would report `removed` and prune lock.
+		if matches!(verdict, removal::Verdict::Kept { .. }) {
 			return removal::RemovalOutcome::preview(
 				plan,
-				true,
+				verdict,
 				scope,
 				project_root.as_deref(),
 				name,
@@ -979,11 +889,9 @@ impl ConfigManager {
 		}
 
 		if !executed {
-			// Disclose the lock prune the COMMIT would run, gated on `blocks` —
-			// the same flag the refusal reads.
 			return removal::RemovalOutcome::preview(
 				plan,
-				blocks,
+				verdict,
 				scope,
 				project_root.as_deref(),
 				name,
@@ -996,13 +904,17 @@ impl ConfigManager {
 		);
 		// Execute + fold the real result back into the plan + reconcile the
 		// per-scope lock, through the ONE producer both surfaces use.
-		let outcome = removal::RemovalOutcome::commit(
+		let mut outcome = removal::RemovalOutcome::commit(
 			plan,
 			&roots,
 			scope,
 			project_root.as_deref(),
 			name,
 		)?;
+
+		if outcome.failed_paths.is_empty() {
+			outcome.verdict = verdict;
+		}
 
 		// Skills are disk-derived; drop the in-memory view (save_current persists
 		// MCPs, not skills, so this is a best-effort cache update).

@@ -1,7 +1,9 @@
 use crate::{
 	errors::{ConfigError, Result},
 	models::SubAgent,
-	skills::removal::{Layout, PruneStatus, RemovalOutcome, RemovalPlan},
+	skills::removal::{
+		Layout, PruneStatus, RemovalOutcome, RemovalPlan, Verdict,
+	},
 };
 use log::{info, warn};
 use std::path::{Path, PathBuf};
@@ -328,6 +330,7 @@ impl ConfigManager {
 				// exists, it just was not removed (dry-run/unconfirmed).
 				failed_paths: vec![],
 				absent: false,
+				verdict: Verdict::Removed,
 			});
 		}
 
@@ -407,6 +410,7 @@ impl ConfigManager {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![],
 			absent: false,
+			verdict: Verdict::Removed,
 		})
 	}
 

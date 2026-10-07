@@ -18,7 +18,7 @@ use aghub_core::{
 	create_adapter,
 	manager::ConfigManager,
 	models::ResourceScope,
-	skills::removal::{PruneStatus, RemovalOutcome},
+	skills::removal::{PruneStatus, RemovalOutcome, Verdict},
 };
 use rocket::http::Status;
 use rocket::response::status::NoContent;
@@ -93,6 +93,7 @@ pub(crate) fn noop_removal_response(
 			// invite a pointless retry.
 			failed_paths: vec![],
 			absent: true,
+			verdict: Verdict::Removed,
 		},
 		requested_dry_run,
 	)
@@ -224,7 +225,7 @@ mod removal_or_noop_tests {
 	use super::*;
 	use crate::dto::skill::RemovalOutcomeKind;
 	use aghub_core::errors::ConfigError;
-	use aghub_core::skills::removal::{Layout, RemovalPlan};
+	use aghub_core::skills::removal::{Layout, RemovalPlan, Verdict};
 
 	fn outcome(executed: bool) -> RemovalOutcome {
 		RemovalOutcome {
@@ -241,6 +242,7 @@ mod removal_or_noop_tests {
 			prune: PruneStatus::NotRun,
 			failed_paths: vec![],
 			absent: false,
+			verdict: Verdict::Removed,
 		}
 	}
 

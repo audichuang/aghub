@@ -560,6 +560,9 @@ pub async fn delete_skill_by_path(
 						prune: aghub_core::skills::removal::PruneStatus::NotRun,
 						failed_paths: vec![],
 						absent: false,
+						verdict: aghub_core::skills::removal::Verdict::Kept {
+							still_read_from: Vec::new(),
+						},
 					},
 					dry_run,
 				);
