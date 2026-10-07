@@ -586,6 +586,14 @@ impl SkillPatch {
 	}
 }
 
+/// Parameter bundle for [`ConfigManager::remove_skill_planned_inner`].
+#[derive(Clone, Copy)]
+struct PlannedRemovalOptions<'a> {
+	target_entry: Option<&'a std::path::Path>,
+	requested_agents: &'a [crate::models::AgentType],
+	prior_deletions: &'a [std::path::PathBuf],
+}
+
 impl ConfigManager {
 	/// Layout-aware skill removal with a default dry-run.
 	///
@@ -624,11 +632,39 @@ impl ConfigManager {
 	) -> Result<crate::skills::removal::RemovalOutcome> {
 		self.remove_skill_planned_inner(
 			name,
-			None,
 			all_agents,
 			dry_run,
 			confirm,
-			requested_agents,
+			PlannedRemovalOptions {
+				target_entry: None,
+				requested_agents,
+				prior_deletions: &[],
+			},
+		)
+	}
+
+	/// Batch-aware removal with prior-row deletion credits: earlier rows in the same
+	/// batch that will have already unlinked/deleted their entries are treated as doomed,
+	/// so this agent's `read_effect_after` does not treat them as survivors.
+	pub fn remove_skill_planned_for_agents_with_prior(
+		&mut self,
+		name: &str,
+		all_agents: bool,
+		dry_run: bool,
+		confirm: bool,
+		requested_agents: &[crate::models::AgentType],
+		prior_deletions: &[std::path::PathBuf],
+	) -> Result<crate::skills::removal::RemovalOutcome> {
+		self.remove_skill_planned_inner(
+			name,
+			all_agents,
+			dry_run,
+			confirm,
+			PlannedRemovalOptions {
+				target_entry: None,
+				requested_agents,
+				prior_deletions,
+			},
 		)
 	}
 
@@ -646,11 +682,14 @@ impl ConfigManager {
 	) -> Result<crate::skills::removal::RemovalOutcome> {
 		self.remove_skill_planned_inner(
 			name,
-			Some(target_entry),
 			all_agents,
 			dry_run,
 			confirm,
-			requested_agents,
+			PlannedRemovalOptions {
+				target_entry: Some(target_entry),
+				requested_agents,
+				prior_deletions: &[],
+			},
 		)
 	}
 
@@ -682,13 +721,17 @@ impl ConfigManager {
 	fn remove_skill_planned_inner(
 		&mut self,
 		name: &str,
-		target_entry: Option<&std::path::Path>,
 		all_agents: bool,
 		dry_run: bool,
 		confirm: bool,
-		requested_agents: &[crate::models::AgentType],
+		options: PlannedRemovalOptions<'_>,
 	) -> Result<crate::skills::removal::RemovalOutcome> {
 		use crate::skills::removal;
+		let PlannedRemovalOptions {
+			target_entry,
+			requested_agents,
+			prior_deletions,
+		} = options;
 		if !requested_agents.contains(&self.agent_type()) {
 			return Err(ConfigError::InvalidConfig(
 				"removal request does not include the target agent".into(),
@@ -793,8 +836,17 @@ impl ConfigManager {
 			self.adapter
 				.get_skills_paths(project_root.as_deref(), scope)
 		};
+		let mut deleting: Vec<std::path::PathBuf> = plan.paths.clone();
+		deleting.extend(prior_deletions.iter().cloned());
 		let effect =
-			removal::read_effect_after(&read_dirs, &skill.name, &plan.paths);
+			removal::read_effect_after(&read_dirs, &skill.name, &deleting);
+
+		if deleting.len() > plan.paths.len()
+			&& !effect.incomplete
+			&& (effect.changed || effect.survivors.is_empty())
+		{
+			plan.shared_master_kept = false;
+		}
 
 		// A removal that goes ahead while something else still serves the skill
 		// has to SAY so, through `skipped` ("present and deliberately not taken").

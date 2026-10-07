@@ -920,30 +920,6 @@ fn skill_backing_dir(target: &InstallTarget) -> Backed {
 	}
 }
 
-/// The folder one agent's skill of this name is actually READ FROM, for
-/// [`RemovalCredits`].
-///
-/// Not interchangeable with [`skill_backing_dir`] ("which dir does this row
-/// rewrite"): the credential needs "what does this row TAKE", which can be the
-/// Master in no agent's write dir. `skill_root` prefers `canonical_path`, so a
-/// Referrer and its Master are ONE backing.
-/// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
-fn skill_entry_backing(target: &InstallTarget, name: &str) -> Backed {
-	let mut manager = build_manager(target);
-	// Same reason as `sub_agent_backing_path`: `load()` parses this agent's
-	// MCPs too, so an unrelated malformed config must not read as "no skill".
-	if ensure_loaded(&mut manager).is_err() {
-		return Backed::Unknown;
-	}
-	match manager
-		.get_skill(name)
-		.and_then(crate::skills::removal::skill_root)
-	{
-		Some(root) => Backed::At(root),
-		None => Backed::Absent,
-	}
-}
-
 /// The file an agent's MCP entries live in, for [`ensure_removals_spare`].
 fn mcp_backing_path(target: &InstallTarget) -> Backed {
 	// `config_path()` asks the descriptor where the file WOULD be; it does not
@@ -1877,40 +1853,11 @@ fn skill_holders(
 		InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
 		InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
 	};
-	let mut holders = Vec::new();
-	let mut unreadable = Vec::new();
-	for descriptor in registry::iter_all() {
-		let Ok(agent) = descriptor.id.parse::<AgentType>() else {
-			continue;
-		};
-		// Through the ADAPTER, never the descriptor: the skills-path test
-		// override lives only there, and bypassing it would answer about the
-		// developer's real home instead of the fixture.
-		let dirs = create_adapter(agent)
-			.get_skills_paths(source.project_root.as_deref(), scope);
-		// FAIL-CLOSED: `Err` means a read dir EXISTS and could not be listed.
-		// An absent dir is not an error.
-		match crate::skills::discovery::load_skills_from_dirs(&dirs) {
-			Ok(skills) => {
-				if skills.iter().any(|s| s.name == name) {
-					holders.push(agent);
-				}
-			}
-			Err(error) => {
-				// Say so even though the answer is already safe, or the removal
-				// silently stops being exhaustive; the error names the path the
-				// user can fix.
-				log::warn!(
-					"cannot read agent '{}' skills, counting it as a holder \
-					 of '{name}': {error}",
-					descriptor.id
-				);
-				unreadable.push(descriptor.id);
-				holders.push(agent);
-			}
-		}
-	}
-	(holders, unreadable)
+	crate::skills::removal::find_skill_holders(
+		name,
+		scope,
+		source.project_root.as_deref(),
+	)
 }
 
 /// Everything a skill reconcile decides BEFORE it writes anything: the resolved
@@ -1933,28 +1880,8 @@ struct ReconcileSkillPlan {
 	keepers: Vec<&'static str>,
 	/// Agents whose skill dirs could not be listed at all.
 	unreadable: Vec<&'static str>,
-	holders: Vec<AgentType>,
 	copies: Vec<OperationPlan>,
 	deletes: Vec<OperationPlan>,
-	deletion_paths: Vec<(AgentType, Vec<PathBuf>)>,
-}
-
-/// The paths rows running BEFORE `target` will already have removed.
-///
-/// By POSITION: `deletion_paths` is 1:1 with `deletes` in execution order, so
-/// "earlier" is a prefix. A target absent from the list credits NOTHING (fail
-/// closed). See docs/history/core-transfer.md#earlier-rows-credited-by-position
-fn earlier_row_removals(
-	deletion_paths: &[(AgentType, Vec<PathBuf>)],
-	target: AgentType,
-) -> impl Iterator<Item = &PathBuf> {
-	let earlier = deletion_paths
-		.iter()
-		.position(|(agent, _)| *agent == target)
-		.unwrap_or(0);
-	deletion_paths[..earlier]
-		.iter()
-		.flat_map(|(_, paths)| paths.iter())
 }
 
 /// Load the skill for reconcile: uses the caller's source if present, or
@@ -2060,55 +1987,12 @@ fn plan_reconcile_skill(
 		)));
 	}
 
-	let (copies, mut deletes) = reconcile_plans(
+	let (copies, deletes) = reconcile_plans(
 		added.to_vec(),
 		removed.to_vec(),
 		source.scope,
 		source.project_root.clone(),
 	);
-	// Shared slots must go first: a private Referrer cannot be revoked while
-	// the same agent still reads the shared slot this batch is removing. Reader
-	// count comes from `slot_reader_count` (full roster); never re-derive slot
-	// sharing here.
-	// The sort key counts the full roster (slot_reader_count) because slot
-	// sharing is structural; filtering disabled agents ties shared and private
-	// slots and can put a private row first, which preflight then refuses.
-	// See docs/history/core-transfer.md#seventh-spelling-of-slot-sharing
-	// and docs/history/core-removal.md#reconcile-delete-order-needs-the-full-roster
-	deletes.sort_by_cached_key(|row| {
-		let scope = target_resource_scope(&row.target);
-		let readers = create_adapter(row.target.agent)
-			.target_skills_dir(row.target.project_root.as_deref(), scope)
-			.map(|dir| {
-				crate::skills::removal::slot_reader_count(
-					&dir,
-					scope,
-					row.target.project_root.as_deref(),
-				)
-			})
-			.unwrap_or(0);
-		std::cmp::Reverse(readers)
-	});
-
-	let deletion_paths = deletes
-		.iter()
-		.map(|row| {
-			let mut manager = build_manager(&row.target);
-			let paths = ensure_loaded(&mut manager)
-				.and_then(|()| {
-					manager.remove_skill_planned_for_agents(
-						&skill.name,
-						exhaustive && holders.contains(&row.target.agent),
-						true,
-						true,
-						removed,
-					)
-				})
-				.map(|outcome| outcome.plan.paths)
-				.unwrap_or_default();
-			(row.target.agent, paths)
-		})
-		.collect();
 
 	Ok(ReconcileSkillPlan {
 		skill,
@@ -2129,20 +2013,12 @@ fn plan_reconcile_skill(
 			.map(|held| held.as_str())
 			.collect(),
 		unreadable,
-		holders,
 		copies,
 		deletes,
-		deletion_paths,
 	})
 }
 
 impl ReconcileSkillPlan {
-	/// A row proves "removal orphans nothing" only if its agent is a holder.
-	/// See docs/history/core-transfer.md#missing-source-blocked-a-removal-only-reconcile
-	fn row_exhaustive(&self, agent: AgentType) -> bool {
-		self.exhaustive && self.holders.contains(&agent)
-	}
-
 	/// The read-only verdict for ONE row, run before any write in the batch and
 	/// reused verbatim by [`reconcile_skill_preview`].
 	fn preflight(&self, plan: &OperationPlan) -> Result<()> {
@@ -2161,71 +2037,35 @@ impl ReconcileSkillPlan {
 	/// `exhaustive`, just earlier; runs for every delete row, with or without
 	/// copies.
 	fn preflight_delete(&self, target: &InstallTarget) -> Result<()> {
-		let mut manager = build_manager(target);
-		// Fail OPEN on a config this row cannot read: the mutate arm fails it
-		// anyway, and escalating would abort unrelated copies in the batch.
-		if ensure_loaded(&mut manager).is_err() {
-			return Ok(());
-		}
-		// A dry-run under the guard this reconcile already holds.
-		// `still_read_from` comes from the same owner as Verdict —
-		// never re-derive it.
-		let (verdict, still_read_from, mut deleting) = match manager
-			.remove_skill_planned_for_agents(
-				&self.skill.name,
-				self.row_exhaustive(target.agent),
-				true, // dry_run
-				true,
-				&self.requested_removals,
-			) {
-			Ok(outcome) => (
-				outcome.verdict,
-				outcome.plan.still_read_from,
-				outcome.plan.paths,
+		let scope = match target.scope {
+			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
+			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
+		};
+		let req = crate::skills::removal::SkillRemovalRequest {
+			target: crate::skills::removal::SkillRemovalTarget::ByName(
+				self.skill.name.clone(),
 			),
-			// The copy may make an absent target present before its delete row
-			// runs, so absence only answers the on-disk half of this preflight.
-			Err(ConfigError::ResourceNotFound { .. }) => (
-				crate::skills::removal::Verdict::Absent,
-				Vec::new(),
-				Vec::new(),
-			),
+			scope,
+			project_root: target.project_root.clone(),
+			agents: self.requested_removals.clone(),
+			dry_run: true,
+			all_agents: self.exhaustive,
+			prior_removed_paths: Vec::new(),
+		};
+		let response = match crate::skills::removal::remove_skill_batch(&req) {
+			Ok(resp) => resp,
+			Err(ConfigError::ResourceNotFound { .. }) => return Ok(()),
 			Err(error) => return Err(error),
 		};
 
-		let mut shared_master_kept = verdict.shared_master_kept();
+		let row = response.rows.iter().find(|r| r.agent == target.agent);
+		let verdict = row
+			.map(|r| &r.verdict)
+			.unwrap_or(&crate::skills::removal::Verdict::Absent);
 
-		if shared_master_kept && !self.exhaustive && self.unreadable.is_empty()
-		{
-			// Preflight sees the disk BEFORE any row runs. Include earlier rows'
-			// planned removals; the executing manager still rechecks the REAL disk,
-			// so a failed earlier unlink cannot authorize a false success here.
-			let own_path_count = deleting.len();
-			deleting.extend(
-				earlier_row_removals(&self.deletion_paths, target.agent)
-					.cloned(),
-			);
-			let dirs = create_adapter(target.agent).get_skills_paths(
-				target.project_root.as_deref(),
-				target_resource_scope(target),
-			);
-			let effect = crate::skills::removal::read_effect_after(
-				&dirs,
-				&self.skill.name,
-				&deleting,
-			);
-			if deleting.len() > own_path_count
-				&& !effect.incomplete
-				&& (effect.changed || effect.survivors.is_empty())
-			{
-				shared_master_kept = false;
-			}
-		}
+		let still_read_from = verdict.still_read_from_paths();
 
-		// Two ways this row takes nothing away: the manager's dry-run verdict
-		// (adjusted only for earlier rows' removals, never narrowed to one
-		// agent's read dirs), and a paired copy re-creating what it reads.
-		if shared_master_kept || self.a_copy_restores_it(target) {
+		if verdict.shared_master_kept() || self.a_copy_restores_it(target) {
 			return Err(self.refuse_shared_master(
 				target.agent.as_str(),
 				&still_read_from,
@@ -2437,13 +2277,9 @@ pub fn reconcile_skill(
 		source.agent,
 		skill_backing_dir,
 	)?;
-	// Same credential as the MCP and sub-agent arms: shared slots and an
-	// exhaustive Master removal make two rows one entry, but only an EARLIER
-	// row that really took it forgives.
-	// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
-	let mut credits = RemovalCredits::new(&removing, |target| {
-		skill_entry_backing(target, &plan.skill.name)
-	});
+	let mut delete_batch_result: Option<
+		crate::skills::removal::SkillRemovalResponse,
+	> = None;
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&plan.copies,
 		&plan.deletes,
@@ -2537,60 +2373,85 @@ pub fn reconcile_skill(
 				// Use the planned-removal seam — never blind-delete a shared
 				// universal master discovered through an agent's read dirs.
 				OperationAction::Delete => (|| -> Result<bool> {
-					// Re-check now that every copy has run: a copy can create
-					// the very directory this target resolves through.
 					ensure_removals_spare(
 						&protect,
 						std::slice::from_ref(&row.target),
 						source.agent,
 						skill_backing_dir,
 					)?;
-					let mut manager = build_manager(&row.target);
-					ensure_loaded(&mut manager)?;
-					// `remove_skill_planned` REFUSES an executing removal that
-					// takes nothing while keeping a shared Master, so that
-					// shape arrives as `Err`; do not add a second copy of the
-					// check here.
-					//
-					// `executed` alone is NOT the credential (it is set even
-					// when every `remove_dir_all` failed); `failed_paths` is. A
-					// row that could not empty its backing is an `Err`, never
-					// `ResourceNotFound` (the variant `sibling_already_took_it`
-					// forgives): reconcile has no `outcome` field to carry
-					// `partial`, so `Err` is the only honest carrier. The
-					// spared preview (a peer links into this agent's own dir)
-					// leaves `executed` false: a credential-free `Ok(false)`.
-					// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
-					sibling_already_took_it(
-						manager
-							.remove_skill_planned_for_agents(
-								&plan.skill.name,
-								plan.row_exhaustive(row.target.agent),
-								false,
-								true,
-								&plan.requested_removals,
-							)
-							.and_then(|outcome| {
-								if outcome.failed_paths.is_empty() {
-									return Ok(outcome.executed);
-								}
-								Err(ConfigError::InvalidConfig(format!(
-									"failed to remove skill '{}' for agent \
-									 '{}': {} path(s) could not be deleted: {}",
-									plan.skill.name,
+					if delete_batch_result.is_none() {
+						let delete_agents: Vec<AgentType> = plan
+							.deletes
+							.iter()
+							.map(|r| r.target.agent)
+							.collect();
+						let scope = target_resource_scope(&row.target);
+						let req = crate::skills::removal::SkillRemovalRequest {
+							target: crate::skills::removal::SkillRemovalTarget::ByName(
+								plan.skill.name.clone(),
+							),
+							scope,
+							project_root: row.target.project_root.clone(),
+							agents: delete_agents,
+							dry_run: false,
+							all_agents: plan.exhaustive,
+							prior_removed_paths: Vec::new(),
+						};
+						delete_batch_result = Some(
+							crate::skills::removal::remove_skill_batch(&req)?,
+						);
+					}
+					let resp = delete_batch_result.as_ref().unwrap();
+					if let Some(r) =
+						resp.rows.iter().find(|r| r.agent == row.target.agent)
+					{
+						if let Some(ref err) = r.error {
+							return Err(ConfigError::InvalidConfig(
+								err.clone(),
+							));
+						}
+						match &r.verdict {
+							crate::skills::removal::Verdict::Removed => {
+								Ok(false)
+							}
+							crate::skills::removal::Verdict::Absent => {
+								Err(ConfigError::resource_not_found(
+									"skill",
+									&plan.skill.name,
+								))
+							}
+							crate::skills::removal::Verdict::Kept {
+								..
+							} => {
+								let paths = r.verdict.still_read_from_paths();
+								Err(plan.refuse_shared_master(
 									row.target.agent.as_str(),
-									outcome.failed_paths.len(),
-									outcome
-										.failed_paths
-										.iter()
-										.map(|path| path.display().to_string())
-										.collect::<Vec<_>>()
-										.join(", "),
-								)))
-							}),
-						row.target.agent,
-						&mut credits,
-					)
+									&paths,
+								))
+							}
+							crate::skills::removal::Verdict::Refused {
+								reason,
+							} => {
+								let paths = r.verdict.still_read_from_paths();
+								if !paths.is_empty() {
+									Err(plan.refuse_shared_master(
+										row.target.agent.as_str(),
+										&paths,
+									))
+								} else {
+									Err(ConfigError::InvalidConfig(
+										reason.clone(),
+									))
+								}
+							}
+							_ => Ok(false),
+						}
+					} else {
+						Err(ConfigError::resource_not_found(
+							"skill",
+							&plan.skill.name,
+						))
+					}
 				})(),
 			};
 			log_operation_outcome(
@@ -5912,41 +5773,6 @@ mod tests {
 		);
 	}
 
-	/// Earlier rows are credited by POSITION, and an unplaceable target credits
-	/// nothing.
-	///
-	/// The `take_while` this replaced walked until it met the target, so a
-	/// target ABSENT from the list consumed every row — crediting removals that
-	/// had not happened. That is the direction that green-lights a row the
-	/// commit then refuses, so the absent case is asserted first.
-	#[test]
-	fn earlier_rows_are_credited_by_position_not_by_scanning() {
-		let rows = vec![
-			(AgentType::Amp, vec![PathBuf::from("/first")]),
-			(AgentType::Codex, vec![PathBuf::from("/second")]),
-			(AgentType::Cursor, vec![PathBuf::from("/third")]),
-		];
-		let credited = |target| {
-			earlier_row_removals(&rows, target)
-				.map(|p| p.to_string_lossy().into_owned())
-				.collect::<Vec<_>>()
-		};
-
-		// THE DEFECT: a target the list cannot place must credit NOTHING.
-		// `take_while` returned all three here.
-		assert!(
-			credited(AgentType::Claude).is_empty(),
-			"a target outside the plan must not inherit other rows' removals"
-		);
-
-		assert!(
-			credited(AgentType::Amp).is_empty(),
-			"the first row has none"
-		);
-		assert_eq!(credited(AgentType::Codex), vec!["/first"]);
-		assert_eq!(credited(AgentType::Cursor), vec!["/first", "/second"]);
-	}
-
 	fn global_target(agent: AgentType) -> InstallTarget {
 		InstallTarget {
 			agent,
@@ -5965,7 +5791,6 @@ mod tests {
 			exhaustive: false,
 			keepers: vec![],
 			unreadable: vec![],
-			holders: vec![],
 			copies: agents
 				.iter()
 				.map(|agent| OperationPlan {
@@ -5974,7 +5799,6 @@ mod tests {
 				})
 				.collect(),
 			deletes: vec![],
-			deletion_paths: vec![],
 		}
 	}
 

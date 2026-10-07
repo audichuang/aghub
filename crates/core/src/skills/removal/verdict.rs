@@ -82,6 +82,51 @@ impl Verdict {
 		matches!(self, Verdict::Kept { .. } | Verdict::Refused { .. })
 	}
 
+	/// Returns the paths the skill is still served from or read by, if any.
+	pub fn still_read_from_paths(&self) -> Vec<PathBuf> {
+		match self {
+			Verdict::Kept { still_read_from } => {
+				still_read_from.iter().map(|h| h.path.clone()).collect()
+			}
+			Verdict::Refused { reason } => {
+				if let Some(idx) =
+					reason.find("; it is still served to this agent from: ")
+				{
+					let tail = &reason[idx
+						+ "; it is still served to this agent from: ".len()..];
+					let paths_str = tail
+						.split(". Also read there")
+						.next()
+						.unwrap_or(tail)
+						.trim_end_matches('.');
+					paths_str
+						.split(", ")
+						.map(|s| PathBuf::from(s.trim()))
+						.filter(|p| !p.as_os_str().is_empty())
+						.collect()
+				} else if let Some(idx) =
+					reason.find("skill still discoverable afterwards in: ")
+				{
+					let tail = &reason[idx
+						+ "skill still discoverable afterwards in: ".len()..];
+					let paths_str = tail
+						.split(". Read only")
+						.next()
+						.unwrap_or(tail)
+						.trim_end_matches('.');
+					paths_str
+						.split(", ")
+						.map(|s| PathBuf::from(s.trim()))
+						.filter(|p| !p.as_os_str().is_empty())
+						.collect()
+				} else {
+					Vec::new()
+				}
+			}
+			_ => Vec::new(),
+		}
+	}
+
 	/// Pure constructor for `Verdict`.
 	///
 	/// Computes the verdict from the plan facts, `read_effect_after` result,
@@ -1137,5 +1182,49 @@ mod tests {
 			skill::read_skill_lock().skills.contains_key("shared-kept"),
 			"lock entry must NOT be pruned"
 		);
+	}
+
+	#[test]
+	fn test_verdict_still_read_from_paths() {
+		let p1 = PathBuf::from("/project/.cline/skills/demo");
+		let p2 = PathBuf::from("/project/.clinerules/skills/demo");
+
+		let kept = Verdict::Kept {
+			still_read_from: vec![Holder {
+				path: p1.clone(),
+				managed: true,
+			}],
+		};
+		assert_eq!(kept.still_read_from_paths(), vec![p1.clone()]);
+
+		let refused_single = Verdict::Refused {
+			reason: format!(
+				"skill it reads from a location shared with other agents; it is still served to this agent from: {}",
+				p2.display()
+			),
+		};
+		assert_eq!(refused_single.still_read_from_paths(), vec![p2.clone()]);
+
+		let refused_with_peers = Verdict::Refused {
+			reason: format!(
+				"skill it reads from a location shared with other agents; it is still served to this agent from: {}. Also read there by agents not in this request: claude",
+				p2.display()
+			),
+		};
+		assert_eq!(
+			refused_with_peers.still_read_from_paths(),
+			vec![p2.clone()]
+		);
+
+		let refused_all = Verdict::Refused {
+			reason: format!(
+				"skill still discoverable afterwards in: {}. Read only by disabled agent(s)...",
+				p1.display()
+			),
+		};
+		assert_eq!(refused_all.still_read_from_paths(), vec![p1]);
+
+		assert!(Verdict::Removed.still_read_from_paths().is_empty());
+		assert!(Verdict::Absent.still_read_from_paths().is_empty());
 	}
 }

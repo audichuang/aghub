@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 pub mod verdict;
 pub use verdict::*;
 
+pub mod batch;
+pub use batch::*;
+
 use crate::models::{AgentType, ResourceScope};
 use crate::skills::linker::Linker;
 
