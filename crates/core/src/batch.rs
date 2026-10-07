@@ -549,21 +549,21 @@ pub(crate) fn node_id(_path: &Path) -> Option<(u64, u64)> {
 /// rdfind/jdupes), so identity is `(dev, ino)`.
 /// See docs/history/core-transfer.md#shared-backing-destroyed-a-resource
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Backing {
+pub(crate) struct Backing {
 	/// `(device, inode)` — identity proper. `None` when the path does not
 	/// exist yet, and then there is nothing to alias.
-	pub node: Option<(u64, u64)>,
-	pub path: PathBuf,
+	pub(crate) node: Option<(u64, u64)>,
+	pub(crate) path: PathBuf,
 }
 
 impl Backing {
-	pub fn of(path: PathBuf) -> Self {
+	pub(crate) fn of(path: PathBuf) -> Self {
 		let path = resolve_through_links(path);
 		let node = node_id(&path);
 		Self { node, path }
 	}
 
-	pub fn is(&self, other: &Self) -> bool {
+	pub(crate) fn is(&self, other: &Self) -> bool {
 		match (self.node, other.node) {
 			(Some(a), Some(b)) => a == b,
 			// Neither exists: the resolved path is all there is.
@@ -582,7 +582,7 @@ impl Backing {
 /// command already took is a success. Sharing a backing is not the credential —
 /// only a row that REALLY emptied it vouches for later rows.
 /// See docs/history/core-transfer.md#sibling-rows-sharing-one-backing
-pub struct RemovalCredits<K> {
+pub(crate) struct RemovalCredits<K> {
 	/// One entry per removal target that resolves to a backing at all, in
 	/// input order.
 	resolved: Vec<(K, Backing)>,
@@ -591,7 +591,7 @@ pub struct RemovalCredits<K> {
 }
 
 impl<K: Clone + PartialEq> RemovalCredits<K> {
-	pub fn new<I, F>(keys: I, mut resolve_backing: F) -> Self
+	pub(crate) fn new<I, F>(keys: I, mut resolve_backing: F) -> Self
 	where
 		I: IntoIterator<Item = K>,
 		F: FnMut(&K) -> Option<Backing>,
@@ -609,7 +609,7 @@ impl<K: Clone + PartialEq> RemovalCredits<K> {
 		}
 	}
 
-	pub fn from_mapped<T, I, F>(items: I, map_fn: F) -> Self
+	pub(crate) fn from_mapped<T, I, F>(items: I, map_fn: F) -> Self
 	where
 		I: IntoIterator<Item = T>,
 		F: FnMut(T) -> Option<(K, Backing)>,
@@ -621,7 +621,7 @@ impl<K: Clone + PartialEq> RemovalCredits<K> {
 		}
 	}
 
-	pub fn backing_of(&self, key: &K) -> Option<&Backing> {
+	pub(crate) fn backing_of(&self, key: &K) -> Option<&Backing> {
 		self.resolved
 			.iter()
 			.find(|(candidate, _)| candidate == key)
@@ -630,7 +630,7 @@ impl<K: Clone + PartialEq> RemovalCredits<K> {
 
 	/// This row really took the resource out, so its backing now vouches for
 	/// the later rows that share it.
-	pub fn credit(&mut self, key: K) {
+	pub(crate) fn credit(&mut self, key: K) {
 		if !self.credited.contains(&key) {
 			self.credited.push(key);
 		}
@@ -638,7 +638,7 @@ impl<K: Clone + PartialEq> RemovalCredits<K> {
 
 	/// Has an EARLIER row of this same command already emptied the backing this
 	/// agent/target reads?
-	pub fn already_taken(&self, key: &K) -> bool {
+	pub(crate) fn already_taken(&self, key: &K) -> bool {
 		let Some(mine) = self.backing_of(key) else {
 			return false;
 		};

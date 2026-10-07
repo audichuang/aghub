@@ -192,7 +192,7 @@ prevent.
 
 Rule: credit by position; an absent target credits nothing.
 
-Test: `earlier_rows_are_credited_by_position_not_by_scanning`.
+Test: `test_internal_accumulation_credits_later_row` (and `reconcile_skill_never_holder_fails_its_own_row_only`).
 
 Commit: d6151c23.
 

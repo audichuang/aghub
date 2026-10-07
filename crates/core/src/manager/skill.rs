@@ -646,7 +646,7 @@ impl ConfigManager {
 	/// Batch-aware removal with prior-row deletion credits: earlier rows in the same
 	/// batch that will have already unlinked/deleted their entries are treated as doomed,
 	/// so this agent's `read_effect_after` does not treat them as survivors.
-	pub fn remove_skill_planned_for_agents_with_prior(
+	pub(crate) fn remove_skill_planned_for_agents_with_prior(
 		&mut self,
 		name: &str,
 		all_agents: bool,

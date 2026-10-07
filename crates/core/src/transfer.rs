@@ -1916,7 +1916,9 @@ fn clone_reconcile_error(err: &ConfigError) -> ConfigError {
 		ConfigError::Io(e) => {
 			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
 		}
-		ConfigError::Json(e) => ConfigError::InvalidConfig(e.to_string()),
+		ConfigError::Json(e) => ConfigError::Json(
+			<serde_json::Error as serde::de::Error>::custom(e.to_string()),
+		),
 	}
 }
 
@@ -6581,5 +6583,23 @@ mod tests {
 			!claude_skill.exists(),
 			"copy to Claude must not land when delete preflight fails"
 		);
+	}
+
+	#[test]
+	fn clone_reconcile_error_preserves_json_error_message() {
+		let raw_json_err =
+			serde_json::from_str::<serde_json::Value>("{invalid").unwrap_err();
+		let expected_msg = raw_json_err.to_string();
+		let err = ConfigError::Json(raw_json_err);
+		let cloned = clone_reconcile_error(&err);
+		let cloned_str = cloned.to_string();
+		match &cloned {
+			ConfigError::Json(e) => {
+				assert_eq!(e.to_string(), expected_msg);
+				assert!(!cloned_str.starts_with("Invalid configuration:"));
+				assert!(cloned_str.starts_with("JSON parsing error:"));
+			}
+			other => panic!("expected ConfigError::Json, got {other:?}"),
+		}
 	}
 }
