@@ -9869,6 +9869,48 @@ mod tests {
 					master.exists(),
 					"master must be kept since shared slot survives"
 				);
+
+				// 3. Commit with all_agents=true: remaining holders removed, keepers empty
+				std::os::unix::fs::symlink(&master, &claude_slot).unwrap();
+				let all_resp = client
+					.delete(format!(
+						"/api/v1/agents/claude/skills/by-name-skill?scope=project&project_root={}&confirm=true&all_agents=true",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(all_resp.status(), rocket::http::Status::Ok);
+				let all_body: serde_json::Value = serde_json::from_str(
+					&all_resp.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				assert_eq!(all_body["outcome"], "removed");
+				assert!(
+					all_body.get("still_read_by").is_none_or(|v| v.is_null()
+						|| v.as_array().is_some_and(|a| a.is_empty())),
+					"still_read_by must be absent or empty: {all_body}"
+				);
+				assert!(
+					all_body
+						.get("still_read_by_managed")
+						.is_none_or(|v| v.is_null()
+							|| v.as_array().is_some_and(|a| a.is_empty())),
+					"still_read_by_managed must be absent or empty: {all_body}"
+				);
+				assert!(
+					all_body.get("still_read_by_unmanaged").is_none_or(|v| v.is_null() || v.as_array().is_some_and(|a| a.is_empty())),
+					"still_read_by_unmanaged must be absent or empty: {all_body}"
+				);
+				assert!(!claude_slot.exists(), "target slot must be removed");
+				assert!(
+					!shared_slot.exists(),
+					"all_agents delete must remove other holder slot"
+				);
+				assert!(
+					!master.exists(),
+					"master must be reclaimed when all holders are gone"
+				);
 			});
 		});
 	}

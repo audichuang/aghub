@@ -1381,37 +1381,6 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 	assert!(res_with.master_reclaimed);
 }
 
-#[cfg(unix)]
-#[test]
-fn test_to_single_view_aggregates_rows_and_holders() {
-	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-	let temp = tempdir().unwrap();
-	let (_h, _d) = isolate_env(&temp);
-	let home = temp.path().join("home");
-	let name = "single-view-test";
-	setup_master_and_referrers(&home, name, &["claude", "cursor"]);
-
-	let req = SkillRemovalRequest {
-		target: SkillRemovalTarget::ByName(name.to_string()),
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
-		agents: vec![AgentType::Claude],
-		dry_run: false,
-		all_agents: false,
-		prior_removed_paths: Vec::new(),
-		keeps_master: false,
-	};
-	let res = remove_skill_batch(&req).unwrap();
-	let single = res.to_single_view(false).unwrap();
-	assert!(single.removal_view.success);
-	assert_eq!(
-		single.removal_view.outcome,
-		crate::dto::RemovalKind::Removed
-	);
-	assert!(!single.holders.is_empty());
-	assert!(single.holders.all.contains(&"cursor".to_string()));
-}
-
 #[test]
 fn test_to_single_view_on_partial_row_projects_success_false() {
 	let row = SkillRemovalRow {

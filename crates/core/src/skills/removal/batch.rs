@@ -720,11 +720,15 @@ pub fn remove_skill_batch(
 		request.project_root.as_deref(),
 	)?;
 
-	let keepers: Vec<AgentType> = holders
-		.iter()
-		.filter(|held| !target_agents.contains(held))
-		.copied()
-		.collect();
+	let keepers: Vec<AgentType> = if request.all_agents {
+		Vec::new()
+	} else {
+		holders
+			.iter()
+			.filter(|held| !target_agents.contains(held))
+			.copied()
+			.collect()
+	};
 
 	if target_agents.is_empty() {
 		return Ok(SkillRemovalResponse {
@@ -1019,11 +1023,15 @@ pub fn remove_skill_batch(
 		request.project_root.as_deref(),
 	)?;
 
-	let keepers: Vec<AgentType> = holders
-		.iter()
-		.filter(|held| !in_lock_target_agents.contains(held))
-		.copied()
-		.collect();
+	let keepers: Vec<AgentType> = if request.all_agents {
+		Vec::new()
+	} else {
+		holders
+			.iter()
+			.filter(|held| !in_lock_target_agents.contains(held))
+			.copied()
+			.collect()
+	};
 
 	let mut credits =
 		RemovalCredits::new(in_lock_target_agents.clone(), |agent| {
