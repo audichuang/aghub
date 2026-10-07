@@ -161,6 +161,13 @@ pub fn apply_prune_fields(
 	}
 }
 
+/// Wire keys `still_read_by{,_managed,_unmanaged}`; `None` when no holders.
+pub type HolderKeys = (
+	Option<Vec<String>>,
+	Option<Vec<String>>,
+	Option<Vec<String>>,
+);
+
 /// Holders of a skill that survive a removal, partitioned into managed and unmanaged.
 #[derive(Debug, Clone, Default)]
 pub struct SkillHoldersView {
@@ -172,6 +179,20 @@ pub struct SkillHoldersView {
 impl SkillHoldersView {
 	pub fn is_empty(&self) -> bool {
 		self.all.is_empty()
+	}
+
+	/// Returns (still_read_by, still_read_by_managed, still_read_by_unmanaged),
+	/// each None when there are no holders, or Some containing the agent IDs.
+	pub fn to_options(&self) -> HolderKeys {
+		if self.is_empty() {
+			(None, None, None)
+		} else {
+			(
+				Some(self.all.clone()),
+				Some(self.managed.clone()),
+				Some(self.unmanaged.clone()),
+			)
+		}
 	}
 }
 
@@ -329,13 +350,17 @@ impl SkillRemovalResponse {
 			}
 
 			// Unrequested holders that keep the master, split into managed vs unmanaged.
-			let holders = self.holders_view();
-			if !holders.is_empty() {
-				payload["still_read_by"] = serde_json::json!(holders.all);
-				payload["still_read_by_managed"] =
-					serde_json::json!(holders.managed);
+			let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
+				self.holders_view().to_options();
+			if let (Some(all), Some(managed), Some(unmanaged)) = (
+				still_read_by,
+				still_read_by_managed,
+				still_read_by_unmanaged,
+			) {
+				payload["still_read_by"] = serde_json::json!(all);
+				payload["still_read_by_managed"] = serde_json::json!(managed);
 				payload["still_read_by_unmanaged"] =
-					serde_json::json!(holders.unmanaged);
+					serde_json::json!(unmanaged);
 			}
 
 			if dry_run {
@@ -758,10 +783,7 @@ pub fn remove_skill_batch(
 			continue;
 		}
 
-		let is_agent_exhaustive = is_exhaustive
-			&& (holders.contains(&agent)
-				|| (holders.is_empty()
-					&& execution_order.first() == Some(&agent)));
+		let is_agent_exhaustive = is_exhaustive && holders.contains(&agent);
 		let plan_result = manager.remove_skill_planned_for_agents_with_prior(
 			name,
 			is_agent_exhaustive || request.all_agents,
@@ -778,6 +800,22 @@ pub fn remove_skill_batch(
 					request.dry_run,
 				);
 				let still_read_from = still_read_paths(&outcome);
+				let needs_confirm =
+					if is_agent_exhaustive && !request.all_agents {
+						manager
+							.remove_skill_planned_for_agents_with_prior(
+								name,
+								request.all_agents,
+								true, // dry_run
+								true, // confirm
+								&target_agents,
+								&accumulated_deletions,
+							)
+							.map(|o| o.plan.needs_confirm)
+							.unwrap_or(outcome.plan.needs_confirm)
+					} else {
+						outcome.plan.needs_confirm
+					};
 				preflight_verdicts.push(PreflightVerdict {
 					agent,
 					verdict: outcome.verdict.clone(),
@@ -785,7 +823,7 @@ pub fn remove_skill_batch(
 					paths: outcome.plan.paths.clone(),
 					skipped: outcome.plan.skipped.clone(),
 					outcome: kind,
-					needs_confirm: outcome.plan.needs_confirm,
+					needs_confirm,
 				});
 				if let Verdict::Refused { ref reason } = outcome.verdict {
 					let op = if request.all_agents {
@@ -846,7 +884,6 @@ pub fn remove_skill_batch(
 				let mut row = verdict_entry
 					.map(|e| e.to_row())
 					.unwrap_or_else(|| SkillRemovalRow::absent(*agent));
-				row.needs_confirm &= request.all_agents;
 				let load_err =
 					preflight_load_failures.iter().find(|(a, _)| *a == *agent);
 				let plan_err =
@@ -1018,10 +1055,23 @@ pub fn remove_skill_batch(
 			continue;
 		}
 
-		let is_agent_exhaustive = is_exhaustive
-			&& (holders.contains(&agent)
-				|| (holders.is_empty()
-					&& execution_order.first() == Some(&agent)));
+		let is_agent_exhaustive = is_exhaustive && holders.contains(&agent);
+		let caller_needs_confirm = if is_agent_exhaustive && !request.all_agents
+		{
+			manager
+				.remove_skill_planned_for_agents_with_prior(
+					name,
+					request.all_agents,
+					true, // dry_run
+					true, // confirm
+					&in_lock_target_agents,
+					&[],
+				)
+				.map(|o| o.plan.needs_confirm)
+				.ok()
+		} else {
+			None
+		};
 		let res = manager.remove_skill_planned_for_agents_with_prior(
 			name,
 			is_agent_exhaustive || request.all_agents,
@@ -1070,12 +1120,16 @@ pub fn remove_skill_batch(
 						_ => {}
 					}
 				}
+				let mut row = SkillRemovalRow::from_outcome(
+					agent,
+					&outcome,
+					request.dry_run,
+				);
+				if let Some(nc) = caller_needs_confirm {
+					row.needs_confirm = nc;
+				}
 				if outcome.failed_paths.is_empty() {
-					execution_results.push(SkillRemovalRow::from_outcome(
-						agent,
-						&outcome,
-						request.dry_run,
-					));
+					execution_results.push(row);
 				} else {
 					let err = format!(
 						"failed to remove skill '{}' for agent '{}': {} path(s) could not be deleted: {}",
@@ -1088,11 +1142,6 @@ pub fn remove_skill_batch(
 							.map(|p| p.display().to_string())
 							.collect::<Vec<_>>()
 							.join(", ")
-					);
-					let mut row = SkillRemovalRow::from_outcome(
-						agent,
-						&outcome,
-						request.dry_run,
 					);
 					row.verdict = Verdict::Partial;
 					row.outcome = crate::dto::RemovalKind::Partial;
@@ -1132,13 +1181,11 @@ pub fn remove_skill_batch(
 	let rows = in_lock_target_agents
 		.iter()
 		.map(|agent| {
-			let mut row = execution_results
+			execution_results
 				.iter()
 				.find(|r| r.agent == *agent)
 				.cloned()
-				.unwrap_or_else(|| SkillRemovalRow::absent(*agent));
-			row.needs_confirm &= request.all_agents;
-			row
+				.unwrap_or_else(|| SkillRemovalRow::absent(*agent))
 		})
 		.collect();
 

@@ -2399,7 +2399,8 @@ pub fn reconcile_skill(
 	.map_err(|error| batch_preflight_error("skill reconcile", error))?;
 	let mut batch_res = operation_batch(report);
 	if let Some(Ok(ref resp)) = delete_batch_result {
-		let holders = resp.holders_view();
+		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
+			resp.holders_view().to_options();
 		for r in &mut batch_res.results {
 			if r.action == OperationAction::Delete {
 				if let Some(row) =
@@ -2407,11 +2408,9 @@ pub fn reconcile_skill(
 				{
 					r.outcome = Some(row.outcome);
 				}
-				if !holders.is_empty() {
-					r.still_read_by = Some(holders.all.clone());
-					r.still_read_by_managed = Some(holders.managed.clone());
-					r.still_read_by_unmanaged = Some(holders.unmanaged.clone());
-				}
+				r.still_read_by = still_read_by.clone();
+				r.still_read_by_managed = still_read_by_managed.clone();
+				r.still_read_by_unmanaged = still_read_by_unmanaged.clone();
 			}
 		}
 	}
@@ -6629,7 +6628,7 @@ mod tests {
 	}
 
 	#[test]
-	fn clone_reconcile_error_preserves_json_error_message() {
+	fn clone_config_error_preserves_json_error_message() {
 		let raw_json_err =
 			serde_json::from_str::<serde_json::Value>("{invalid").unwrap_err();
 		let expected_msg = raw_json_err.to_string();

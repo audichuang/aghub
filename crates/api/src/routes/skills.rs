@@ -1400,15 +1400,7 @@ pub async fn delete_skill(
 			super::project_prune_status(single.prune);
 
 		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
-			if !single.holders.is_empty() {
-				(
-					Some(single.holders.all),
-					Some(single.holders.managed),
-					Some(single.holders.unmanaged),
-				)
-			} else {
-				(None, None, None)
-			};
+			single.holders.to_options();
 
 		Ok(Json(DeleteSkillByPathResponse {
 			success: single.removal_view.success,
@@ -5385,7 +5377,61 @@ mod tests {
 				let private_resp = ask(&private);
 				assert!(private_resp.success, "{:?}", private_resp.error);
 				assert!(!private_resp.needs_confirm);
-				assert!(shared.exists() && private.exists(), "dry-run only");
+
+				let symlink_master = proj.join(".aghub/symlink-skill");
+				std::fs::create_dir_all(&symlink_master).unwrap();
+				std::fs::write(
+					symlink_master.join("SKILL.md"),
+					"---\nname: symlink-skill\ndescription: d\n---\n",
+				)
+				.unwrap();
+				let symlink_slot = proj.join(".cursor/skills/symlink-skill");
+				std::fs::create_dir_all(symlink_slot.parent().unwrap())
+					.unwrap();
+				std::os::unix::fs::symlink(&symlink_master, &symlink_slot)
+					.unwrap();
+
+				let ask_by_name = |name: &str| {
+					let params = DeleteSkillParams {
+						scope: Some("project".to_string()),
+						project_root: Some(proj.display().to_string()),
+						confirm: None,
+						all_agents: None,
+						agents: Some("cursor".to_string()),
+					};
+					block_on(delete_skill(
+						TrustedLocalOrigin,
+						AgentParam(aghub_core::models::AgentType::Cursor),
+						name,
+						params,
+					))
+					.ok()
+					.expect("by-name preview returned ok")
+					.into_inner()
+				};
+
+				let shared_by_name = ask_by_name("shared");
+				assert_eq!(
+					shared_by_name.needs_confirm, shared_resp.needs_confirm,
+					"shared-slot real dir reports the same needs_confirm by-name and by-path"
+				);
+				assert!(
+					shared_by_name.needs_confirm,
+					"shared-slot by-name preview must report needs_confirm: true"
+				);
+
+				let symlink_by_name = ask_by_name("symlink-skill");
+				assert!(
+					symlink_by_name.needs_confirm,
+					"single-agent symlink-layout by-name preview reports needs_confirm: true"
+				);
+
+				assert!(
+					shared.exists()
+						&& private.exists()
+						&& symlink_slot.exists(),
+					"dry-run only"
+				);
 			});
 		});
 	}
