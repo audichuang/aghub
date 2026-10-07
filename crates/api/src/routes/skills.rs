@@ -545,6 +545,10 @@ pub async fn delete_skill_by_path(
 				// reads `outcome: "kept"`, never a success that means "deleted".
 				// `shared_master_kept: true` is this route's OWN judgement
 				// (core sets the same flag in `plan_copy_removal`).
+				let verdict =
+					aghub_core::skills::removal::Verdict::kept_managed(
+						skill_dir.clone(),
+					);
 				let mut response = super::removal_response(
 					aghub_core::skills::removal::RemovalOutcome {
 						plan: aghub_core::skills::removal::RemovalPlan {
@@ -552,7 +556,7 @@ pub async fn delete_skill_by_path(
 							paths: vec![],
 							skipped: vec![skill_dir.clone()],
 							needs_confirm: false,
-							shared_master_kept: true,
+							shared_master_kept: verdict.shared_master_kept(),
 							still_read_from: Vec::new(),
 							incomplete: false,
 						},
@@ -561,10 +565,7 @@ pub async fn delete_skill_by_path(
 						failed_paths: vec![],
 						absent: false,
 						// TODO(#30/A4): by-path sink-down
-						verdict:
-							aghub_core::skills::removal::Verdict::kept_managed(
-								skill_dir.clone(),
-							),
+						verdict,
 					},
 					dry_run,
 				);

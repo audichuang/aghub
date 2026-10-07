@@ -102,9 +102,9 @@ flag) — dropping an unrelated skill's source provenance on a delete that
 removed nothing. Earlier still, `commit` on such a run serialized
 `outcome: "removed"` with the skill on disk.
 
-Rule: `spared_everything || (all_agents && shared_master_kept &&
-paths.is_empty())` returns `RemovalOutcome::preview(plan, true, …)` with
-`shared_master_kept = true`, never `commit`.
+Rule: `spared_everything || (initial_shared_master_kept && paths.is_empty())`
+returns `RemovalOutcome::preview(plan, verdict, …)` with `Verdict::Kept`,
+never `commit`.
 
 Pinning test: `all_agents_keep_previews_instead_of_running_an_undisclosed_prune`.
 Commit: 29116f38.
@@ -113,8 +113,8 @@ Commit: 29116f38.
 
 - **What it used to do**: a single-agent empty plan with an initial keep (`initial_shared_master_kept == true`, `plan_paths.is_empty()`) returned a plan that reached `commit`, falsely reporting `executed: true` and pruning the in-scope lock entry for a kept master.
 - **The finding**: `--all-agents` with an empty plan had previously been guarded to return `Verdict::Kept`, but single-agent removal fell through to `commit`. Both single-agent and `--all-agents` must return `Verdict::Kept` in preview mode with `executed: false` and never prune the lock.
-- **Why real-fs resolves via `spared_everything`**: on a real filesystem, discovery locates the target skill in the agent's `read_dirs` (`survivors > 0`), so a real-fs single-agent keep resolves via the first disjunct (`spared_everything`). The second disjunct `(initial_shared_master_kept && plan_paths.is_empty())` protects the planner-keep corner where discovery cannot see survivors (e.g. an unreadable directory or broken link hiding the entry from discovery while the planner recurses into it).
-- **Pinning tests**: `test_single_agent_spared_master_previews_and_does_not_prune` in `crates/core/src/skills/removal/verdict.rs` (real-fs test covering `spared_everything`) and `test_verdict_table` Row 5 (synthetic table test pinning the second disjunct).
+- **Why real-fs single-agent keep with survivors is Refused**: on a real filesystem, a single-agent removal with an initial keep (`initial_shared_master_kept == true`) that has surviving readers in `read_dirs` is `Verdict::Refused` (`spared_everything` requires `!initial_shared_master_kept`, so `blocks` evaluates to true). The second disjunct `(initial_shared_master_kept && plan_paths.is_empty())` produces `Verdict::Kept` only when discovery cannot see survivors (the planner's own keep that discovery stops short of). Through `remove_skill_planned`, this corner is structurally unreachable on real-fs: if discovery sees the skill in `read_dirs`, `survivors` is non-empty and triggers `Refused`; if discovery cannot see it, `skill_for_planned_removal` bails early with `ResourceNotFound`.
+- **Pinning tests**: `test_single_agent_spared_master_previews_and_does_not_prune` (real-fs test covering `spared_everything` with `!initial_shared_master_kept`) and `test_verdict_table` Row 5 (synthetic table test pinning the second disjunct).
 
 ## Store checks skipped for a linked Master
 

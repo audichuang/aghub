@@ -327,8 +327,8 @@ mod tests {
 
 		// Row 2: Removed (private copy shadows Master - disclosing Master)
 		{
-			let private_p = PathBuf::from("/home/user/.claude/skills/demo");
-			let master_p = PathBuf::from("/home/user/.aghub/demo");
+			let private_p = PathBuf::from("/project/.cursor/skills/demo");
+			let master_p = PathBuf::from("/project/.agents/skills/demo");
 			let effect = crate::skills::removal::ReadEffect {
 				survivors: vec![master_p.clone()],
 				changed: true,
@@ -512,6 +512,45 @@ mod tests {
 	}
 
 	#[test]
+	fn test_verdict_compute_kept_unmanaged_holder_real_fs() {
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		let unmanaged_dir = tmp.path().join("home/.cursor/skills");
+		let unmanaged_skill = unmanaged_dir.join("demo");
+		write_test_skill(&unmanaged_skill, "demo");
+
+		let effect = crate::skills::removal::read_effect_after(
+			std::slice::from_ref(&unmanaged_dir),
+			"demo",
+			&[],
+		);
+
+		let verdict = Verdict::compute(VerdictInputs {
+			plan_paths: &[],
+			plan_skipped: std::slice::from_ref(&unmanaged_skill),
+			initial_shared_master_kept: false,
+			effect: &effect,
+			all_agents: false,
+			unmanaged_dirs: &[unmanaged_dir],
+			git_refusal: &|| None,
+			readers_outside: &|| Vec::new(),
+		});
+
+		match verdict {
+			Verdict::Kept { still_read_from } => {
+				assert_eq!(still_read_from.len(), 1);
+				assert_eq!(still_read_from[0].path, unmanaged_skill);
+				assert!(
+					!still_read_from[0].managed,
+					"holder in unmanaged directory must have managed == false"
+				);
+			}
+			other => panic!("expected Kept, got {other:?}"),
+		}
+	}
+
+	#[test]
 	fn test_preview_and_commit_yield_identical_verdict() {
 		let tmp = tempfile::tempdir().unwrap();
 		let _env = TestEnv::new(tmp.path());
@@ -555,17 +594,21 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let _env = TestEnv::new(tmp.path());
 
-		let home = tmp.path().join("home");
-		let claude_dir = home.join(".claude/skills/shadow");
-		let aghub_dir = home.join(".aghub/shadow");
-		write_test_skill(&claude_dir, "shadow");
-		write_test_skill(&aghub_dir, "shadow");
+		let root = tmp.path().join("project");
+		std::fs::create_dir_all(&root).unwrap();
+
+		let private = root.join(".cursor/skills/shadow");
+		write_test_skill(&private, "shadow");
+		std::fs::write(private.join("extra.md"), "private v1").unwrap();
+
+		let master = root.join(".agents/skills/shadow");
+		write_test_skill(&master, "shadow");
 		write_test_lock_entry("shadow");
 
 		let mut mgr = crate::manager::ConfigManager::new(
-			crate::create_adapter(crate::models::AgentType::Claude),
-			true,
-			None,
+			crate::create_adapter(crate::models::AgentType::Cursor),
+			false,
+			Some(&root),
 		);
 		mgr.load().unwrap();
 
@@ -573,8 +616,13 @@ mod tests {
 			.remove_skill_planned("shadow", false, true, false)
 			.unwrap();
 		assert_eq!(preview.verdict, Verdict::Removed);
-		assert!(claude_dir.exists(), "preview must not delete private copy");
-		assert!(aghub_dir.exists(), "preview must not delete master");
+		assert!(
+			preview.plan.skipped.contains(&master),
+			"preview must disclose surviving master in skipped: {:?}",
+			preview.plan.skipped
+		);
+		assert!(private.exists(), "preview must not delete private copy");
+		assert!(master.exists(), "preview must not delete master");
 		assert!(
 			skill::read_skill_lock().skills.contains_key("shadow"),
 			"preview must not prune lock"
@@ -586,10 +634,19 @@ mod tests {
 		assert_eq!(commit.verdict, Verdict::Removed);
 		assert_eq!(preview.verdict, commit.verdict);
 		assert!(
-			!claude_dir.exists(),
+			commit.plan.skipped.contains(&master),
+			"commit must disclose surviving master in skipped: {:?}",
+			commit.plan.skipped
+		);
+		assert!(
+			!private.exists(),
 			"commit must delete shadowed private copy"
 		);
-		assert!(aghub_dir.exists(), "commit must preserve Master on disk");
+		assert!(master.exists(), "commit must preserve Master on disk");
+		assert!(
+			master.join("SKILL.md").exists(),
+			"Master SKILL.md must remain intact"
+		);
 		assert!(
 			skill::read_skill_lock().skills.contains_key("shadow"),
 			"lock entry must remain because Master still exists"
@@ -728,15 +785,16 @@ mod tests {
 	/// disabled agents) cause `--all-agents` removal to be refused.
 	///
 	/// Note on `Holder.managed == false`:
-	/// The unmanaged (`managed == false`) classification is pinned only by the
-	/// synthetic Row 3 of `test_verdict_table`, and on a real filesystem it is
-	/// structurally unreachable for Kept. In `--all-agents`, any unmanaged holder
-	/// survives and triggers `blocks = true`, resulting in `Verdict::Refused`
-	/// (which carries a string `reason` rather than structured `Holder` items).
-	/// In single-agent removal, an unmanaged peer holder triggers a keep reason
-	/// with `initial_shared_master_kept = true`, which also forces `blocks = true`
-	/// and `Verdict::Refused`. Thus, `Verdict::Kept` containing a holder with
-	/// `managed == false` cannot be produced on a real filesystem.
+	/// The unmanaged (`managed == false`) classification is pinned by synthetic
+	/// Row 3 of `test_verdict_table` and direct `Verdict::compute` tests; through
+	/// `remove_skill_planned` on a real filesystem it is structurally unreachable
+	/// for Kept. In `--all-agents`, any unmanaged holder survives and triggers
+	/// `blocks = true`, resulting in `Verdict::Refused` (which carries a string
+	/// `reason` rather than structured `Holder` items). In single-agent removal,
+	/// an unmanaged peer holder triggers a keep reason with
+	/// `initial_shared_master_kept = true`, which also forces `blocks = true` and
+	/// `Verdict::Refused`. Thus, `Verdict::Kept` containing a holder with
+	/// `managed == false` cannot be produced through `remove_skill_planned`.
 	#[cfg(unix)]
 	#[test]
 	fn test_remove_skill_planned_refused_disabled_agent() {
