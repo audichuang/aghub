@@ -1,25 +1,19 @@
 import { ExclamationTriangleIcon } from "@heroicons/react/24/solid";
-import { Button, Modal, Spinner, toast } from "@heroui/react";
+import { Button, Checkbox, Modal, Spinner, toast } from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { ConfigSource } from "../generated/dto";
+import { useAgentAvailability } from "../hooks/use-agent-availability";
+import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import { BulkOperationError, bulkFailureItemsLabel } from "../lib/bulk-errors";
+import {
+	buildBulkDeleteRequests,
+	collectUnmanagedDeleteTargets,
+	type BulkDeleteGroup,
+} from "../lib/skill-delete-targets";
 import { invalidateMcpQueries } from "../requests/mcps";
 import { invalidateSkillQueries } from "../requests/skills";
-
-interface BulkDeleteItem {
-	name: string;
-	agent?: string | null;
-	source?: ConfigSource | null;
-	source_path?: string | null;
-}
-
-interface BulkDeleteGroup {
-	key: string;
-	items: BulkDeleteItem[];
-	resourceType?: "mcp" | "skill";
-}
 
 interface BulkDeleteDialogProps {
 	groups: BulkDeleteGroup[];
@@ -40,85 +34,112 @@ export function BulkDeleteDialog({
 }: BulkDeleteDialogProps) {
 	const { t } = useTranslation();
 	const api = useApi();
+	const agentName = useAgentName();
 	const queryClient = useQueryClient();
+	const { availableAgents } = useAgentAvailability();
+
+	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
+	const managedAgentIds = useMemo(
+		() =>
+			new Set(
+				availableAgents
+					.filter((agent) => !agent.isDisabled)
+					.map((agent) => agent.id),
+			),
+		[availableAgents],
+	);
+
+	const unmanagedItems = useMemo(
+		() =>
+			collectUnmanagedDeleteTargets(
+				groups,
+				managedAgentIds,
+				resourceType,
+			),
+		[groups, managedAgentIds, resourceType],
+	);
+
+	const unmanagedAgents = useMemo(
+		() => [
+			...new Set(
+				unmanagedItems
+					.map((item) => item.agent)
+					.filter((agent): agent is string => !!agent),
+			),
+		],
+		[unmanagedItems],
+	);
+	const hasUnmanaged = unmanagedAgents.length > 0;
+
+	const handleClose = () => {
+		setIncludeUnmanaged(false);
+		onClose();
+	};
 
 	const deleteMutation = useMutation({
 		mutationFn: async () => {
+			const requests = buildBulkDeleteRequests({
+				groups,
+				resourceType,
+				managedAgentIds,
+				includeUnmanaged,
+				projectPath,
+			});
 			const promises: Promise<void>[] = [];
 			const deleteInfo: Array<{
 				name: string;
 				agent: string;
 				scope: string;
 			}> = [];
-			const seen = new Set<string>();
-			for (const group of groups) {
-				const groupResourceType = group.resourceType ?? resourceType;
-				for (const item of group.items) {
-					if (!item.agent) continue;
-					const scope: "global" | "project" = item.source ?? "global";
-					const projectRoot =
-						scope === "project" ? projectPath : undefined;
-					// Every agent this group is deleted from at this scope. A
-					// shared config file or Referrer is removed only when all
-					// of its readers ride in the same request.
-					const agents = group.items
-						.filter((other) => (other.source ?? "global") === scope)
-						.flatMap((other) => (other.agent ? [other.agent] : []));
-					const dedupKey =
-						groupResourceType === "skill" && item.source_path
-							? `skill:${item.source_path}:${scope}`
-							: groupResourceType === "skill"
-								? `skill:${item.agent}:${group.key}:${scope}`
-								: `${groupResourceType}:${item.agent}:${item.name}:${scope}`;
-					if (seen.has(dedupKey)) continue;
-					seen.add(dedupKey);
-					if (groupResourceType === "mcp") {
-						promises.push(
-							api.mcps.delete(
-								item.name,
-								item.agent,
-								scope,
-								projectRoot,
-								agents,
-							),
-						);
-					} else {
-						promises.push(
-							api.skills
-								.delete(
-									item.agent,
-									group.key,
-									scope,
-									projectRoot,
-									false,
-									agents,
-								)
-								.then((result) => {
-									// HTTP 200 is not "deleted": `kept` removed
-									// nothing and `partial` left paths behind.
-									// See docs/history/desktop-frontend.md#bulk-delete-counted-kept-as-deleted
-									if (
-										result.outcome === "kept" ||
-										result.outcome === "partial"
-									) {
-										throw new Error(
-											t(
-												result.outcome === "kept"
-													? "bulkDeleteKept"
-													: "bulkDeletePartial",
-											),
-										);
-									}
-								}),
-						);
-					}
-					deleteInfo.push({
-						name: item.name,
-						agent: item.agent,
-						scope,
-					});
+
+			for (const req of requests) {
+				if (req.resourceType === "mcp") {
+					promises.push(
+						api.mcps.delete(
+							req.name,
+							req.agent,
+							req.scope,
+							req.projectRoot,
+							req.agents,
+						),
+					);
+				} else {
+					promises.push(
+						api.skills
+							.delete(
+								req.agent,
+								req.groupKey,
+								req.scope,
+								req.projectRoot,
+								false,
+								req.agents,
+							)
+							.then((result) => {
+								// HTTP 200 is not "deleted": `kept` removed
+								// nothing and `partial` left paths behind.
+								// See docs/history/desktop-frontend.md#bulk-delete-counted-kept-as-deleted
+								if (
+									result.outcome === "kept" ||
+									result.outcome === "partial"
+								) {
+									throw new Error(
+										t(
+											result.outcome === "kept"
+												? "bulkDeleteKept"
+												: "bulkDeletePartial",
+										),
+									);
+								}
+							}),
+					);
 				}
+				deleteInfo.push({
+					name: req.name,
+					agent: req.agent,
+					scope: req.scope,
+				});
 			}
+
 			const results = await Promise.allSettled(promises);
 			const failures = results
 				.map((r, i) => ({ result: r, info: deleteInfo[i] }))
@@ -149,6 +170,7 @@ export function BulkDeleteDialog({
 			if (resourceType === "skill" || resourceType === "mixed") {
 				await invalidateSkillQueries(queryClient);
 			}
+			setIncludeUnmanaged(false);
 			onSuccess();
 			onClose();
 		},
@@ -177,7 +199,7 @@ export function BulkDeleteDialog({
 				: "bulkDeleteMixedConfirm";
 
 	return (
-		<Modal.Backdrop isOpen={isOpen} onOpenChange={onClose}>
+		<Modal.Backdrop isOpen={isOpen} onOpenChange={handleClose}>
 			<Modal.Container>
 				<Modal.Dialog>
 					<Modal.CloseTrigger />
@@ -195,13 +217,54 @@ export function BulkDeleteDialog({
 								count: groups.length,
 							})}
 						</p>
+						{hasUnmanaged && (
+							<div className="mt-4 rounded-lg bg-surface-secondary p-3">
+								<h4
+									className="
+										mb-1 text-xs font-medium tracking-wide text-muted
+										uppercase
+									"
+								>
+									{t("deleteSkillUnmanagedTitle")}
+								</h4>
+								<p className="mb-2 text-xs text-muted">
+									{t("deleteSkillUnmanagedHint")}
+								</p>
+								<div className="mb-3 space-y-1">
+									{unmanagedAgents.map((agent) => (
+										<div
+											key={agent}
+											className="flex items-center gap-2 text-sm"
+										>
+											<span className="text-foreground">
+												{agentName(agent)}
+											</span>
+										</div>
+									))}
+								</div>
+								<Checkbox
+									isSelected={includeUnmanaged}
+									onChange={setIncludeUnmanaged}
+									isDisabled={deleteMutation.isPending}
+								>
+									<Checkbox.Content>
+										<Checkbox.Control>
+											<Checkbox.Indicator />
+										</Checkbox.Control>
+										<span className="text-sm">
+											{t("deleteSkillIncludeUnmanaged")}
+										</span>
+									</Checkbox.Content>
+								</Checkbox>
+							</div>
+						)}
 					</Modal.Body>
 					<Modal.Footer>
 						<Button
 							slot="close"
 							variant="secondary"
 							size="md"
-							onPress={onClose}
+							onPress={handleClose}
 							isDisabled={deleteMutation.isPending}
 							className="min-h-[44px]"
 						>
