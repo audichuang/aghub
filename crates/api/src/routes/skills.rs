@@ -99,13 +99,7 @@ impl SkillListParams {
 }
 
 fn expand_tilde_path(path: &str) -> std::path::PathBuf {
-	if path.starts_with("~/") {
-		dirs::home_dir()
-			.map(|home| home.join(&path[2..]))
-			.unwrap_or_else(|| path.into())
-	} else {
-		path.into()
-	}
+	aghub_core::skills::removal::expand_tilde_path(std::path::Path::new(path))
 }
 
 async fn detect_plugin_for_path(path: &std::path::Path) -> Option<String> {
@@ -252,8 +246,9 @@ pub async fn delete_skill_by_path(
 		})
 		.collect::<Result<Vec<AgentType>, _>>()?;
 
-	let source_path = expand_tilde_path(&req.source_path);
-	let plugin_owner = detect_plugin_for_path(&source_path).await;
+	let raw_path = std::path::PathBuf::from(&req.source_path);
+	let expanded_path = expand_tilde_path(&req.source_path);
+	let plugin_owner = detect_plugin_for_path(&expanded_path).await;
 
 	let confirm = req.confirm.unwrap_or(false);
 	let dry_run = !confirm;
@@ -262,7 +257,7 @@ pub async fn delete_skill_by_path(
 	in_mutation_pool(move || {
 		let request = aghub_core::skills::removal::SkillRemovalRequest {
 			target: aghub_core::skills::removal::SkillRemovalTarget::ByPath(
-				source_path,
+				raw_path,
 			),
 			scope: resource_scope,
 			project_root,

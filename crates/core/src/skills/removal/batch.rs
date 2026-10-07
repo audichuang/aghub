@@ -14,7 +14,6 @@ use super::{
 };
 use crate::batch::{Backing, RemovalCredits};
 use crate::errors::{ConfigError, Result};
-use crate::manager::skill::PlannedRemovalOptions;
 use crate::models::{AgentType, ResourceScope};
 use crate::registry;
 use crate::ConfigManager;
@@ -515,7 +514,12 @@ impl SkillRemovalResponse {
 				return Some(crate::error_codes::wire_code(err));
 			}
 			if matches!(r.verdict, Verdict::Refused { .. }) {
-				return Some("UNSUPPORTED_OPERATION");
+				return Some(crate::error_codes::wire_code(
+					&ConfigError::UnsupportedOperation {
+						message: String::new(),
+						rejected_targets: None,
+					},
+				));
 			}
 			None
 		});
@@ -766,25 +770,24 @@ fn remove_skill_by_path(
 	request: &SkillRemovalRequest,
 	raw_path: &Path,
 ) -> Result<SkillRemovalResponse> {
-	let skill_path = expand_tilde_path(raw_path);
+	if request.agents.is_empty() {
+		return Err(ConfigError::InvalidConfig(
+			"No valid agent was provided".to_string(),
+		));
+	}
 
-	let agent_dirs: Vec<PathBuf> = if !request.agents.is_empty() {
-		request
-			.agents
-			.iter()
-			.flat_map(|agent| {
-				crate::create_adapter(*agent).get_skills_paths(
-					request.project_root.as_deref(),
-					request.scope,
-				)
-			})
-			.collect()
-	} else {
-		agent_skill_dirs_in_scope(
-			request.scope,
-			request.project_root.as_deref(),
-		)
-	};
+	let target_agents = request.agents.clone();
+	let agent_dirs: Vec<PathBuf> = target_agents
+		.iter()
+		.flat_map(|agent| {
+			crate::create_adapter(*agent).get_skills_paths(
+				request.project_root.as_deref(),
+				request.scope,
+			)
+		})
+		.collect();
+
+	let skill_path = expand_tilde_path(raw_path);
 
 	// See docs/history/api.md#delete-by-path-parent-dir-rule
 	if skill_path
@@ -818,24 +821,6 @@ fn remove_skill_by_path(
 				.to_string(),
 		));
 	}
-
-	let target_agents: Vec<AgentType> = if !request.agents.is_empty() {
-		request.agents.clone()
-	} else {
-		crate::AgentType::ALL
-			.iter()
-			.filter(|&&agent| {
-				let paths = crate::create_adapter(agent).get_skills_paths(
-					request.project_root.as_deref(),
-					request.scope,
-				);
-				paths
-					.iter()
-					.any(|sp| skill_dir.starts_with(sp) || &skill_dir == sp)
-			})
-			.copied()
-			.collect()
-	};
 
 	if !skill_dir.exists() {
 		let rows = target_agents
@@ -896,11 +881,7 @@ fn remove_skill_by_path(
 	let skill_name = by_path_skill_name(&skill_dir)
 		.map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
 
-	let Some(first_agent) = target_agents.first().copied() else {
-		return Err(ConfigError::InvalidConfig(
-			"No valid agent was provided".to_string(),
-		));
-	};
+	let first_agent = target_agents[0];
 
 	let mut manager = create_manager(
 		first_agent,
@@ -985,13 +966,8 @@ fn remove_skill_by_path(
 			};
 
 			if !request.dry_run {
-				let op = if request.all_agents {
-					"remove from every agent"
-				} else {
-					"remove for this agent alone"
-				};
 				return Err(ConfigError::unsupported_operation(
-					op,
+					"remove for this agent alone",
 					&reason_str,
 					first_agent.as_str(),
 				));
@@ -1067,10 +1043,11 @@ fn remove_skill_by_path(
 		});
 	}
 
+	// By-path removes the targeted entry only; all_agents is ignored and stays false.
 	let outcome = manager.remove_skill_planned_at_dir_for_agents(
 		&skill_name,
 		&skill_dir,
-		request.all_agents,
+		false,
 		request.dry_run,
 		!request.dry_run,
 		&target_agents,
@@ -1078,13 +1055,8 @@ fn remove_skill_by_path(
 
 	if !request.dry_run {
 		if let Verdict::Refused { ref reason } = outcome.verdict {
-			let op = if request.all_agents {
-				"remove from every agent"
-			} else {
-				"remove for this agent alone"
-			};
 			return Err(ConfigError::unsupported_operation(
-				op,
+				"remove for this agent alone",
 				reason,
 				first_agent.as_str(),
 			));
@@ -1112,7 +1084,6 @@ fn remove_skill_by_name(
 	request: &SkillRemovalRequest,
 	name: &str,
 ) -> Result<SkillRemovalResponse> {
-	let target_entry: Option<&Path> = None;
 	let target_agents = request.agents.clone();
 
 	let (holders, unreadable) = if request.keeps_master {
@@ -1209,11 +1180,8 @@ fn remove_skill_by_name(
 			is_agent_exhaustive || request.all_agents,
 			true, // dry_run
 			true, // confirm
-			PlannedRemovalOptions {
-				target_entry,
-				requested_agents: &target_agents,
-				prior_deletions: &accumulated_deletions,
-			},
+			&target_agents,
+			&accumulated_deletions,
 		);
 
 		match plan_result {
@@ -1231,11 +1199,8 @@ fn remove_skill_by_name(
 								request.all_agents,
 								true, // dry_run
 								true, // confirm
-								PlannedRemovalOptions {
-									target_entry,
-									requested_agents: &target_agents,
-									prior_deletions: &accumulated_deletions,
-								},
+								&target_agents,
+								&accumulated_deletions,
 							)
 							.map(|o| o.plan.needs_confirm)
 							.unwrap_or(outcome.plan.needs_confirm)
@@ -1501,11 +1466,8 @@ fn remove_skill_by_name(
 					request.all_agents,
 					true, // dry_run
 					true, // confirm
-					PlannedRemovalOptions {
-						target_entry,
-						requested_agents: &in_lock_target_agents,
-						prior_deletions: &[],
-					},
+					&in_lock_target_agents,
+					&[],
 				)
 				.map(|o| o.plan.needs_confirm)
 				.ok()
@@ -1517,11 +1479,8 @@ fn remove_skill_by_name(
 			is_agent_exhaustive || request.all_agents,
 			false, // dry_run
 			true,  // confirm
-			PlannedRemovalOptions {
-				target_entry,
-				requested_agents: &in_lock_target_agents,
-				prior_deletions: &[],
-			},
+			&in_lock_target_agents,
+			&[],
 		);
 
 		match res {

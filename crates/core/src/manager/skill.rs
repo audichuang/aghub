@@ -504,10 +504,10 @@ impl SkillPatch {
 
 /// Parameter bundle for [`ConfigManager::remove_skill_planned_inner`].
 #[derive(Clone, Copy)]
-pub(crate) struct PlannedRemovalOptions<'a> {
-	pub(crate) target_entry: Option<&'a std::path::Path>,
-	pub(crate) requested_agents: &'a [crate::models::AgentType],
-	pub(crate) prior_deletions: &'a [std::path::PathBuf],
+struct PlannedRemovalOptions<'a> {
+	target_entry: Option<&'a std::path::Path>,
+	requested_agents: &'a [crate::models::AgentType],
+	prior_deletions: &'a [std::path::PathBuf],
 }
 
 impl ConfigManager {
@@ -568,10 +568,19 @@ impl ConfigManager {
 		all_agents: bool,
 		dry_run: bool,
 		confirm: bool,
-		options: PlannedRemovalOptions<'_>,
+		requested_agents: &[crate::models::AgentType],
+		prior_deletions: &[std::path::PathBuf],
 	) -> Result<crate::skills::removal::RemovalOutcome> {
 		self.remove_skill_planned_inner(
-			name, all_agents, dry_run, confirm, options,
+			name,
+			all_agents,
+			dry_run,
+			confirm,
+			PlannedRemovalOptions {
+				target_entry: None,
+				requested_agents,
+				prior_deletions,
+			},
 		)
 	}
 
@@ -587,7 +596,7 @@ impl ConfigManager {
 		confirm: bool,
 		requested_agents: &[crate::models::AgentType],
 	) -> Result<crate::skills::removal::RemovalOutcome> {
-		self.remove_skill_planned_for_agents_with_prior(
+		self.remove_skill_planned_inner(
 			name,
 			all_agents,
 			dry_run,

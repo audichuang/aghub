@@ -74,25 +74,19 @@ pub fn allowed_skill_roots(
 	roots
 }
 
-/// Resolve the on-disk root directory of an installed skill from its model
-/// (`canonical_path` preferred, else `source_path`), expanding a leading `~/`
-/// and stepping up from a `SKILL.md` file to its containing folder. The single
-/// Expands a leading `~/` prefix using the user's home directory.
+/// Expands a leading `~` or `~/` prefix using the user's home directory.
 pub fn expand_tilde_path(path: &Path) -> PathBuf {
-	if let Ok(stripped) = path.strip_prefix("~/") {
+	if let Ok(stripped) = path.strip_prefix("~") {
 		if let Some(home) = dirs::home_dir() {
 			return home.join(stripped);
-		}
-	} else if let Some(s) = path.to_str() {
-		if let Some(stripped) = s.strip_prefix("~/") {
-			if let Some(home) = dirs::home_dir() {
-				return home.join(stripped);
-			}
 		}
 	}
 	path.to_path_buf()
 }
 
+/// Resolve the on-disk root directory of an installed skill from its model
+/// (`canonical_path` preferred, else `source_path`), expanding a leading `~/`
+/// and stepping up from a `SKILL.md` file to its containing folder. The single
 /// home shared by `installed_skill_roots` and the hash-baseline scans in the
 /// CLI `check` and the API check-updates path.
 pub fn skill_root(skill: &crate::models::Skill) -> Option<PathBuf> {
