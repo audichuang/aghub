@@ -1855,6 +1855,10 @@ fn run_for_agent(
 				dry_run,
 				yes,
 				requested_agents: batch.to_vec(),
+				scope,
+				project_root: resolved
+					.project_root()
+					.map(std::path::Path::to_path_buf),
 			},
 		)
 		.map(Some),

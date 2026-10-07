@@ -426,6 +426,7 @@ impl SkillRemovalResponse {
 			None
 		};
 
+		// Outcome precedence across rows: Partial > Removed > Preview > Kept > Absent.
 		let outcome = if self
 			.rows
 			.iter()
@@ -573,8 +574,46 @@ fn check_unreadable_exhaustive(
 	name: &str,
 	is_exhaustive: bool,
 	unreadable: &[&'static str],
+	scope: ResourceScope,
+	project_root: Option<&Path>,
 ) -> Result<()> {
 	if is_exhaustive && !unreadable.is_empty() {
+		let unreadable_agents: Vec<String> = unreadable
+			.iter()
+			.map(|&id| {
+				if let Ok(agent) = id.parse::<AgentType>() {
+					let dirs = crate::create_adapter(agent)
+						.get_skills_paths(project_root, scope);
+					let failing_dirs: Vec<PathBuf> = dirs
+						.iter()
+						.filter(|d| {
+							matches!(
+								std::fs::read_dir(d),
+								Err(e) if e.kind() != std::io::ErrorKind::NotFound
+							)
+						})
+						.cloned()
+						.collect();
+					let reported_dirs = if failing_dirs.is_empty() {
+						&dirs
+					} else {
+						&failing_dirs
+					};
+					let dirs_str = reported_dirs
+						.iter()
+						.map(|d| d.display().to_string())
+						.collect::<Vec<_>>()
+						.join(", ");
+					if dirs_str.is_empty() {
+						id.to_string()
+					} else {
+						format!("{id} ({dirs_str})")
+					}
+				} else {
+					id.to_string()
+				}
+			})
+			.collect();
 		return Err(ConfigError::InvalidConfig(format!(
 			"cannot decide whether removing '{name}' leaves the shared \
 			 .aghub master unread: agent(s) '{}' could not be read \
@@ -582,7 +621,7 @@ fn check_unreadable_exhaustive(
 			 still be holding it — naming it in --remove cannot authorize a \
 			 collection this run is unable to carry out on it. Fix or remove \
 			 those configs, then re-run.",
-			unreadable.join("', '")
+			unreadable_agents.join("', '")
 		)));
 	}
 	Ok(())
@@ -648,7 +687,13 @@ pub fn remove_skill_batch(
 			|| (!holders.is_empty()
 				&& holders.iter().all(|held| target_agents.contains(held))));
 
-	check_unreadable_exhaustive(name, is_exhaustive, &unreadable)?;
+	check_unreadable_exhaustive(
+		name,
+		is_exhaustive,
+		&unreadable,
+		request.scope,
+		request.project_root.as_deref(),
+	)?;
 
 	let keepers: Vec<AgentType> = holders
 		.iter()
@@ -719,7 +764,7 @@ pub fn remove_skill_batch(
 					&& execution_order.first() == Some(&agent)));
 		let plan_result = manager.remove_skill_planned_for_agents_with_prior(
 			name,
-			is_agent_exhaustive,
+			is_agent_exhaustive || request.all_agents,
 			true, // dry_run
 			true, // confirm
 			&target_agents,
@@ -793,7 +838,7 @@ pub fn remove_skill_batch(
 		);
 		let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
 		let scope_str = scope_to_word(request.scope);
-		let rows = target_agents
+		let rows: Vec<SkillRemovalRow> = target_agents
 			.iter()
 			.map(|agent| {
 				let verdict_entry =
@@ -801,6 +846,7 @@ pub fn remove_skill_batch(
 				let mut row = verdict_entry
 					.map(|e| e.to_row())
 					.unwrap_or_else(|| SkillRemovalRow::absent(*agent));
+				row.needs_confirm &= request.all_agents;
 				let load_err =
 					preflight_load_failures.iter().find(|(a, _)| *a == *agent);
 				let plan_err =
@@ -814,9 +860,28 @@ pub fn remove_skill_batch(
 				row
 			})
 			.collect();
+		let shared_master_kept = request.keeps_master
+			|| rows.iter().any(|r| r.verdict.shared_master_kept());
+		let prune = if shared_master_kept {
+			PruneStatus::NotRun
+		} else {
+			let mut union_paths: Vec<PathBuf> = Vec::new();
+			for row in &rows {
+				for p in &row.paths {
+					if !union_paths.contains(p) {
+						union_paths.push(p.clone());
+					}
+				}
+			}
+			crate::skills::prune::preview_prune_for_removal(
+				request.scope,
+				request.project_root.as_deref(),
+				&union_paths,
+			)
+		};
 		return Ok(SkillRemovalResponse {
 			rows,
-			prune: PruneStatus::NotRun,
+			prune,
 			keepers,
 			unreadable,
 			master_reclaimed: false,
@@ -909,7 +974,13 @@ pub fn remove_skill_batch(
 					.iter()
 					.all(|held| in_lock_target_agents.contains(held))));
 
-	check_unreadable_exhaustive(name, is_exhaustive, &unreadable)?;
+	check_unreadable_exhaustive(
+		name,
+		is_exhaustive,
+		&unreadable,
+		request.scope,
+		request.project_root.as_deref(),
+	)?;
 
 	let keepers: Vec<AgentType> = holders
 		.iter()
@@ -953,7 +1024,7 @@ pub fn remove_skill_batch(
 					&& execution_order.first() == Some(&agent)));
 		let res = manager.remove_skill_planned_for_agents_with_prior(
 			name,
-			is_agent_exhaustive,
+			is_agent_exhaustive || request.all_agents,
 			false, // dry_run
 			true,  // confirm
 			&in_lock_target_agents,
@@ -1061,11 +1132,13 @@ pub fn remove_skill_batch(
 	let rows = in_lock_target_agents
 		.iter()
 		.map(|agent| {
-			execution_results
+			let mut row = execution_results
 				.iter()
 				.find(|r| r.agent == *agent)
 				.cloned()
-				.unwrap_or_else(|| SkillRemovalRow::absent(*agent))
+				.unwrap_or_else(|| SkillRemovalRow::absent(*agent));
+			row.needs_confirm &= request.all_agents;
+			row
 		})
 		.collect();
 

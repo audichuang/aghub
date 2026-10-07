@@ -1,7 +1,9 @@
 use crate::{eprintln_verbose, ResourceType};
 use aghub_core::errors::ConfigError;
 use aghub_core::manager::ConfigManager;
-use aghub_core::skills::removal::{PruneStatus, RemovalOutcome};
+use aghub_core::skills::removal::{
+	self, PruneStatus, RemovalOutcome, SkillRemovalRequest, SkillRemovalTarget,
+};
 use anyhow::Result;
 use serde_json::json;
 
@@ -11,6 +13,8 @@ pub struct DeleteOptions {
 	pub yes: bool,
 	/// Every agent this command deletes from; always contains the manager's.
 	pub requested_agents: Vec<aghub_core::models::AgentType>,
+	pub scope: aghub_core::models::ResourceScope,
+	pub project_root: Option<std::path::PathBuf>,
 }
 
 /// Delete a resource.
@@ -40,35 +44,25 @@ pub fn execute(
 				options.all_agents,
 				is_dry_run
 			);
-			// The lock prune happens inside remove_skill_planned on execute;
-			// its result is reported via outcome.prune. A missing config or a
-			// missing skill is an idempotent no-op (matches the API), not an
-			// error — see `plan_or_noop`.
-			let outcome = plan_or_noop(
-				manager,
-				|m| m.skill_noop_outcome(&name),
-				|m| {
-					m.remove_skill_planned_for_agents(
-						&name,
-						options.all_agents,
-						is_dry_run,
-						options.yes,
-						&options.requested_agents,
-					)
-				},
-			)?;
-			// Serialize the shared core builder so the removal fields
-			// (success/dry_run/executed/needs_confirm/paths/skipped/
-			// deleted_path) live once and stay snake_case, matching the API +
-			// desktop DeleteSkillByPathResponse. Then layer the CLI-only
-			// {type,name} envelope and the prune status on top.
-			let view = aghub_core::dto::RemovalView::from_outcome(
-				&outcome, is_dry_run,
-			);
-			let mut payload = serde_json::to_value(&view)?;
+			let request = SkillRemovalRequest {
+				target: SkillRemovalTarget::ByName(name.clone()),
+				scope: options.scope,
+				project_root: options.project_root,
+				agents: options.requested_agents.clone(),
+				dry_run: is_dry_run,
+				all_agents: options.all_agents,
+				prior_removed_paths: Vec::new(),
+				keeps_master: false,
+			};
+			let resp = removal::remove_skill_batch(&request)
+				.map_err(anyhow::Error::from)?;
+			let single = resp
+				.to_single_view(is_dry_run)
+				.map_err(anyhow::Error::from)?;
+			let mut payload = serde_json::to_value(&single.removal_view)?;
 			payload["type"] = json!("skill");
 			payload["name"] = json!(name);
-			apply_prune_fields(&mut payload, &outcome.prune);
+			apply_prune_fields(&mut payload, &single.prune);
 			payload
 		}
 		ResourceType::Mcps => {
@@ -142,9 +136,8 @@ pub fn execute(
 ///   missing config for `delete`): nothing to remove.
 /// - **`ResourceNotFound`**: the config loaded but has no such resource.
 ///
-/// All other errors propagate. The no-op shape comes from `noop` (for skills,
-/// core's `ConfigManager::skill_noop_outcome`), so the CLI and API serialize
-/// byte-identically.
+/// All other errors propagate. The no-op shape comes from `noop`, so the CLI
+/// and API serialize byte-identically.
 fn plan_or_noop(
 	manager: &mut ConfigManager,
 	noop: impl FnOnce(&ConfigManager) -> RemovalOutcome,

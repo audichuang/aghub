@@ -10023,6 +10023,57 @@ mod tests {
 			});
 		});
 	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_preview_with_orphan_lock_discloses_prune_and_preserves_lock(
+	) {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let project = home.join("proj");
+				std::fs::create_dir_all(project.join(".claude")).unwrap();
+
+				let lock_path = project.join("skills-lock.json");
+				let initial_raw = r#"{"version":1,"skills":{"orphan-skill":{"source":"o/r","sourceType":"github","computedHash":"deadbeef"}}}"#;
+				std::fs::write(&lock_path, initial_raw).unwrap();
+
+				let response = client
+					.delete(format!(
+						"/api/v1/agents/claude/skills/orphan-skill?scope=project&project_root={}",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(response.status(), rocket::http::Status::Ok);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				let would_prune = body["would_prune_lock_entries"]
+					.as_array()
+					.expect("would_prune_lock_entries array");
+				assert!(
+					would_prune.contains(&serde_json::json!("orphan-skill")),
+					"must disclose orphan lock entry to prune: {body}"
+				);
+
+				let after_raw = std::fs::read_to_string(&lock_path).unwrap();
+				assert_eq!(
+					initial_raw, after_raw,
+					"preview must not modify the lock file"
+				);
+			});
+		});
+	}
 }
 
 /// `POST /skills/repair` — the desktop's one-click migration.
