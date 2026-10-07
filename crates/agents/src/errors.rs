@@ -68,4 +68,38 @@ impl ConfigError {
 	}
 }
 
+impl Clone for ConfigError {
+	fn clone(&self) -> Self {
+		match self {
+			Self::Io(e) => {
+				Self::Io(std::io::Error::new(e.kind(), e.to_string()))
+			}
+			Self::Json(e) => {
+				use serde::de::Error;
+				Self::Json(serde_json::Error::custom(e.to_string()))
+			}
+			Self::NotFound { path } => Self::NotFound { path: path.clone() },
+			Self::ResourceNotFound {
+				resource_type,
+				name,
+			} => Self::ResourceNotFound {
+				resource_type: resource_type.clone(),
+				name: name.clone(),
+			},
+			Self::ResourceExists {
+				resource_type,
+				name,
+			} => Self::ResourceExists {
+				resource_type: resource_type.clone(),
+				name: name.clone(),
+			},
+			Self::ValidationFailed(s) => Self::ValidationFailed(s.clone()),
+			Self::UnsupportedOperation(s) => {
+				Self::UnsupportedOperation(s.clone())
+			}
+			Self::InvalidConfig(s) => Self::InvalidConfig(s.clone()),
+		}
+	}
+}
+
 pub type Result<T> = std::result::Result<T, ConfigError>;

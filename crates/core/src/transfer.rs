@@ -1742,39 +1742,6 @@ fn skill_holders(
 	)
 }
 
-fn clone_config_error(err: &ConfigError) -> ConfigError {
-	match err {
-		ConfigError::Io(e) => {
-			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
-		}
-		ConfigError::Json(e) => ConfigError::InvalidConfig(e.to_string()),
-		ConfigError::NotFound { path } => {
-			ConfigError::NotFound { path: path.clone() }
-		}
-		ConfigError::ResourceNotFound {
-			resource_type,
-			name,
-		} => ConfigError::ResourceNotFound {
-			resource_type: resource_type.clone(),
-			name: name.clone(),
-		},
-		ConfigError::ResourceExists {
-			resource_type,
-			name,
-		} => ConfigError::ResourceExists {
-			resource_type: resource_type.clone(),
-			name: name.clone(),
-		},
-		ConfigError::ValidationFailed(s) => {
-			ConfigError::ValidationFailed(s.clone())
-		}
-		ConfigError::UnsupportedOperation(s) => {
-			ConfigError::UnsupportedOperation(s.clone())
-		}
-		ConfigError::InvalidConfig(s) => ConfigError::InvalidConfig(s.clone()),
-	}
-}
-
 /// Everything a skill reconcile decides BEFORE it writes anything: the resolved
 /// source, the Master's fate, and the two plan lists.
 ///
@@ -1903,35 +1870,12 @@ fn plan_reconcile_skill(
 		)));
 	}
 
-	let (copies, mut deletes) = reconcile_plans(
+	let (copies, deletes) = reconcile_plans(
 		added.to_vec(),
 		removed.to_vec(),
 		source.scope,
 		source.project_root.clone(),
 	);
-	// Shared slots must go first: a private Referrer cannot be revoked while
-	// the same agent still reads the shared slot this batch is removing. Reader
-	// count comes from `slot_reader_count` (full roster); never re-derive slot
-	// sharing here.
-	// The sort key counts the full roster (slot_reader_count) because slot
-	// sharing is structural; filtering disabled agents ties shared and private
-	// slots and can put a private row first, which preflight then refuses.
-	// See docs/history/core-transfer.md#seventh-spelling-of-slot-sharing
-	// and docs/history/core-removal.md#reconcile-delete-order-needs-the-full-roster
-	deletes.sort_by_cached_key(|row| {
-		let scope = target_resource_scope(&row.target);
-		let readers = create_adapter(row.target.agent)
-			.target_skills_dir(row.target.project_root.as_deref(), scope)
-			.map(|dir| {
-				crate::skills::removal::slot_reader_count(
-					&dir,
-					scope,
-					row.target.project_root.as_deref(),
-				)
-			})
-			.unwrap_or(0);
-		std::cmp::Reverse(readers)
-	});
 
 	let dry_run_delete_response = if !deletes.is_empty() {
 		let scope = match source.scope {
@@ -1949,11 +1893,7 @@ fn plan_reconcile_skill(
 			all_agents: exhaustive,
 			prior_removed_paths: Vec::new(),
 		};
-		match crate::skills::removal::remove_skill_batch(&req) {
-			Ok(resp) => Some(Ok(resp)),
-			Err(ConfigError::ResourceNotFound { .. }) => None,
-			Err(error) => Some(Err(error)),
-		}
+		Some(crate::skills::removal::remove_skill_batch(&req))
 	} else {
 		None
 	};
@@ -2003,11 +1943,25 @@ impl ReconcileSkillPlan {
 	fn preflight_delete(&self, target: &InstallTarget) -> Result<()> {
 		let response = match &self.dry_run_delete_response {
 			Some(Ok(resp)) => resp,
-			Some(Err(err)) => return Err(clone_config_error(err)),
+			Some(Err(err)) => return Err(err.clone()),
 			None => return Ok(()),
 		};
 
 		let row = response.rows.iter().find(|r| r.agent == target.agent);
+		if let Some(r) = row {
+			// Fail open on a config this row cannot load: the mutate arm fails it
+			// anyway, and escalating would abort unrelated copies in the batch.
+			// Only unsupported scope and planner errors pre-refuse before write.
+			if !r.is_load_error {
+				if let Some(ref err) = r.typed_error {
+					return Err(err.clone());
+				}
+				if let Some(ref err_str) = r.error {
+					return Err(ConfigError::InvalidConfig(err_str.clone()));
+				}
+			}
+		}
+
 		let verdict = row
 			.map(|r| &r.verdict)
 			.unwrap_or(&crate::skills::removal::Verdict::Absent);
@@ -2362,11 +2316,14 @@ pub fn reconcile_skill(
 					}
 					let resp = match delete_batch_result.as_ref().unwrap() {
 						Ok(resp) => resp,
-						Err(err) => return Err(clone_config_error(err)),
+						Err(err) => return Err(err.clone()),
 					};
 					if let Some(r) =
 						resp.rows.iter().find(|r| r.agent == row.target.agent)
 					{
+						if let Some(ref err) = r.typed_error {
+							return Err(err.clone());
+						}
 						if let Some(ref err) = r.error {
 							return Err(ConfigError::InvalidConfig(
 								err.clone(),
@@ -6345,5 +6302,91 @@ mod tests {
 		// Codex's skill must survive.
 		let codex_skill = codex_dir.join("test-skill");
 		assert!(codex_skill.exists(), "Codex's skill must survive");
+	}
+
+	#[test]
+	fn reconcile_skill_delete_preflight_failure_aborts_before_copy() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let master = root.join(".aghub/test-skill");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: test-skill\ndescription: Test\n---\n\n# Test\n",
+		)
+		.unwrap();
+
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		#[cfg(unix)]
+		std::os::unix::fs::symlink(&master, codex_dir.join("test-skill"))
+			.unwrap();
+		#[cfg(windows)]
+		std::os::windows::fs::symlink_dir(
+			&master,
+			codex_dir.join("test-skill"),
+		)
+		.unwrap();
+
+		let claude_dir = private_slot_for(AgentType::Claude, &root);
+		assert!(!claude_dir.exists(), "Claude dir must start absent");
+
+		let source = ResourceLocator {
+			agent: AgentType::Codex,
+			scope: InstallScope::Project,
+			project_root: Some(root.clone()),
+			name: "test-skill".to_string(),
+		};
+
+		// Zed does not support project skill scope!
+		// Reconcile: copy to Claude, delete from Zed.
+		let preview_err = reconcile_skill_preview(
+			&source,
+			&[AgentType::Claude],
+			&[AgentType::Zed],
+		)
+		.expect_err(
+			"reconcile_skill_preview must fail due to Zed preflight error",
+		);
+
+		let reconcile_err = reconcile_skill(
+			source,
+			vec![AgentType::Claude],
+			vec![AgentType::Zed],
+			true,
+		)
+		.expect_err("reconcile_skill must fail before staging copies");
+
+		// Both must return the EXACT same error (type and message)
+		assert_eq!(
+			preview_err.to_string(),
+			reconcile_err.to_string(),
+			"preview and reconcile must return the exact same error message"
+		);
+		match (&preview_err, &reconcile_err) {
+			(
+				ConfigError::UnsupportedOperation(p_msg),
+				ConfigError::UnsupportedOperation(r_msg),
+			) => {
+				assert_eq!(p_msg, r_msg);
+				assert!(
+					p_msg.contains("no project skill config"),
+					"error should mention unsupported project skill config: {p_msg}"
+				);
+			}
+			_ => panic!(
+				"expected ConfigError::UnsupportedOperation, got preview: {preview_err:?}, reconcile: {reconcile_err:?}"
+			),
+		}
+
+		// Observable outcome: Claude's copied skill must NOT have landed on disk!
+		let claude_skill = claude_dir.join("test-skill");
+		assert!(
+			!claude_skill.exists(),
+			"copy to Claude must not land when delete preflight fails"
+		);
 	}
 }
