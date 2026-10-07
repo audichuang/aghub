@@ -6264,11 +6264,11 @@ mod tests {
 		std::os::unix::fs::symlink(&master, opencode_dir.join("test-skill"))
 			.unwrap();
 
-		// Cursor is delete target 2: make Cursor's skills dir a symlink pointing to
+		// Windsurf is delete target 2: make Windsurf's skills dir a symlink pointing to
 		// Claude's not-yet-created skills dir.
-		let cursor_dir = private_slot_for(AgentType::Cursor, &root);
-		fs::create_dir_all(cursor_dir.parent().unwrap()).unwrap();
-		std::os::unix::fs::symlink(&claude_dir, &cursor_dir).unwrap();
+		let windsurf_dir = private_slot_for(AgentType::Windsurf, &root);
+		fs::create_dir_all(windsurf_dir.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&claude_dir, &windsurf_dir).unwrap();
 
 		let source = ResourceLocator {
 			agent: AgentType::Codex,
@@ -6280,7 +6280,7 @@ mod tests {
 		let batch = reconcile_skill(
 			source,
 			vec![AgentType::Claude],
-			vec![AgentType::OpenCode, AgentType::Cursor],
+			vec![AgentType::OpenCode, AgentType::Windsurf],
 			true,
 		)
 		.expect("reconcile_skill returns Ok(batch) with per-row outcomes");
@@ -6301,15 +6301,33 @@ mod tests {
 			!opencode_res.success,
 			"OpenCode delete must fail due to spared check failure"
 		);
+		assert!(
+			opencode_res
+				.error
+				.as_deref()
+				.unwrap_or("")
+				.contains("resolve to the same place on disk"),
+			"OpenCode delete error must come from ensure_removals_spare: {:?}",
+			opencode_res.error
+		);
 
-		let cursor_res = batch
+		let windsurf_res = batch
 			.results
 			.iter()
-			.find(|r| r.target.agent == AgentType::Cursor)
-			.expect("Cursor delete row must exist");
+			.find(|r| r.target.agent == AgentType::Windsurf)
+			.expect("Windsurf delete row must exist");
 		assert!(
-			!cursor_res.success,
-			"Cursor delete must fail due to spared check failure"
+			!windsurf_res.success,
+			"Windsurf delete must fail due to spared check failure"
+		);
+		assert!(
+			windsurf_res
+				.error
+				.as_deref()
+				.unwrap_or("")
+				.contains("resolve to the same place on disk"),
+			"Windsurf delete error must come from ensure_removals_spare: {:?}",
+			windsurf_res.error
 		);
 
 		// The protected target (Claude) must survive!
