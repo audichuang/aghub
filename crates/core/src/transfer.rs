@@ -1751,11 +1751,6 @@ fn skill_holders(
 struct ReconcileSkillPlan {
 	skill: Skill,
 	source_root: PathBuf,
-	/// Does this reconcile drop the skill from EVERY agent that holds it? Then
-	/// the Master has no remaining reader and goes with it — removed per-agent,
-	/// the Master would be left orphaned (the desktop's manage-agents dialog
-	/// produces this: deselect every agent, no adds).
-	exhaustive: bool,
 	/// Holders this reconcile does NOT remove: the reason the Master stays, and
 	/// the only thing a refused caller can actually act on.
 	keepers: Vec<&'static str>,
@@ -1764,7 +1759,7 @@ struct ReconcileSkillPlan {
 	copies: Vec<OperationPlan>,
 	deletes: Vec<OperationPlan>,
 	dry_run_delete_response:
-		Option<Result<crate::skills::removal::SkillRemovalResponse>>,
+		Option<crate::skills::removal::SkillRemovalResponse>,
 }
 
 /// Load the skill for reconcile: uses the caller's source if present, or
@@ -1840,44 +1835,16 @@ fn plan_reconcile_skill(
 	let skill = load_reconcile_skill(source, added, removed)?;
 	let source_root = resolve_skill_root(&skill)?;
 
-	// The holder scan walks every agent's whole skill tree, so it runs only
-	// where its answer can change the outcome. An add alone already guarantees
-	// the Master gains a reader, and no removal has nothing to collect:
-	// `exhaustive` is false either way without asking.
-	let collectable = !removed.is_empty() && added.is_empty();
-	let (holders, unreadable) = if collectable {
-		skill_holders(&skill.name, source)
-	} else {
-		(Vec::new(), Vec::new())
-	};
-	let exhaustive =
-		collectable && holders.iter().all(|held| removed.contains(held));
-
-	// Refuse before any row runs while a holder is unreadable, even if the
-	// caller names it: a named unreadable row fails open in preflight, rows are
-	// attempt-all, and a readable row would delete the Master first.
-	// See docs/history/core-transfer.md#naming-an-unreadable-holder
-	if exhaustive && !unreadable.is_empty() {
-		return Err(ConfigError::InvalidConfig(format!(
-			"cannot decide whether removing '{}' leaves the shared \
-			 .aghub master unread: agent(s) '{}' could not be read \
-			 (skills directory unreadable), and an agent aghub cannot read may \
-			 still be holding it — naming it in --remove cannot authorize a \
-			 collection this run is unable to carry out on it. Fix or remove \
-			 those configs, then re-run.",
-			skill.name,
-			unreadable.join("', '")
-		)));
-	}
-
 	let (copies, deletes) = reconcile_plans(
 		added.to_vec(),
 		removed.to_vec(),
 		source.scope,
 		source.project_root.clone(),
 	);
+	// Output rows follow request order; the entry sorts only internally.
 
-	let dry_run_delete_response = if !deletes.is_empty() {
+	let (keepers, unreadable, dry_run_delete_response) = if !deletes.is_empty()
+	{
 		let scope = match source.scope {
 			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
 			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
@@ -1890,31 +1857,29 @@ fn plan_reconcile_skill(
 			project_root: source.project_root.clone(),
 			agents: removed.to_vec(),
 			dry_run: true,
-			all_agents: exhaustive,
+			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: !added.is_empty(),
 		};
-		Some(crate::skills::removal::remove_skill_batch(&req))
+		let resp = crate::skills::removal::remove_skill_batch(&req)?;
+		let keepers: Vec<&'static str> = resp
+			.keepers
+			.iter()
+			.filter(|held| {
+				!resp.unreadable.contains(&held.as_str())
+					&& crate::agent_settings::is_managed(held.as_str())
+			})
+			.map(|held| held.as_str())
+			.collect();
+		(keepers, resp.unreadable.clone(), Some(resp))
 	} else {
-		None
+		(Vec::new(), Vec::new(), None)
 	};
 
 	Ok(ReconcileSkillPlan {
 		skill,
 		source_root,
-		exhaustive,
-		// Unreadable agents get their own clause in the refusal, so leaving
-		// them out here keeps a message from naming the same agent twice.
-		// A disabled agent is unmanaged, not a reader: it still keeps the
-		// Master alive (`exhaustive` above) but is never NAMED as one.
-		keepers: holders
-			.iter()
-			.filter(|held| {
-				!removed.contains(held)
-					&& !unreadable.contains(&held.as_str())
-					&& crate::agent_settings::is_managed(held.as_str())
-			})
-			.map(|held| held.as_str())
-			.collect(),
+		keepers,
 		unreadable,
 		copies,
 		deletes,
@@ -1942,8 +1907,7 @@ impl ReconcileSkillPlan {
 	/// copies.
 	fn preflight_delete(&self, target: &InstallTarget) -> Result<()> {
 		let response = match &self.dry_run_delete_response {
-			Some(Ok(resp)) => resp,
-			Some(Err(err)) => return Err(err.clone()),
+			Some(resp) => resp,
 			None => return Ok(()),
 		};
 
@@ -2307,8 +2271,9 @@ pub fn reconcile_skill(
 							project_root: row.target.project_root.clone(),
 							agents: delete_agents,
 							dry_run: false,
-							all_agents: plan.exhaustive,
+							all_agents: false,
 							prior_removed_paths: Vec::new(),
+							keeps_master: !added.is_empty(),
 						};
 						delete_batch_result = Some(
 							crate::skills::removal::remove_skill_batch(&req),
@@ -4293,6 +4258,102 @@ mod tests {
 		);
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_move_with_unreadable_agent_is_not_refused_wholesale() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".aghub/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
+		)
+		.unwrap();
+
+		// Codex holds a private Referrer in its own skills dir.
+		fs::create_dir_all(root.join(".codex/skills")).unwrap();
+		let codex_referrer = root.join(".codex/skills/mover");
+		std::os::unix::fs::symlink(&master, &codex_referrer).unwrap();
+
+		// Windsurf has an unreadable skills directory (self-referential symlink).
+		fs::create_dir_all(root.join(".windsurf")).unwrap();
+		std::os::unix::fs::symlink(
+			std::path::Path::new("skills"),
+			root.join(".windsurf/skills"),
+		)
+		.unwrap();
+
+		// Move: add Claude, remove Codex and Windsurf.
+		// Since Claude is added, the Master will survive, so the unreadable Windsurf
+		// does not threaten Master collection and must not cause wholesale refusal.
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Codex,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![AgentType::Claude],
+			vec![AgentType::Codex, AgentType::Windsurf],
+			true, // confirm
+		);
+
+		let batch = outcome.expect(
+			"move must not be refused wholesale due to unreadable Windsurf",
+		);
+
+		// Claude copy succeeded.
+		let claude_row = batch
+			.results
+			.iter()
+			.find(|r| {
+				r.target.agent == AgentType::Claude
+					&& r.action == OperationAction::Copy
+			})
+			.expect("claude copy row exists");
+		assert!(claude_row.success, "claude copy must succeed");
+
+		// Codex delete succeeded.
+		let codex_row = batch
+			.results
+			.iter()
+			.find(|r| {
+				r.target.agent == AgentType::Codex
+					&& r.action == OperationAction::Delete
+			})
+			.expect("codex delete row exists");
+		assert!(codex_row.success, "codex delete must succeed");
+
+		// Windsurf delete failed its own row.
+		let windsurf_row = batch
+			.results
+			.iter()
+			.find(|r| {
+				r.target.agent == AgentType::Windsurf
+					&& r.action == OperationAction::Delete
+			})
+			.expect("windsurf delete row exists");
+		assert!(
+			!windsurf_row.success,
+			"windsurf delete must fail its own row"
+		);
+		assert!(windsurf_row.error.is_some(), "windsurf must have an error");
+
+		// Disk state checks:
+		// Master must survive because Claude was added.
+		assert!(master.join("SKILL.md").exists(), "Master must survive");
+		// Claude's referrer was created.
+		assert!(
+			root.join(".claude/skills/mover").exists(),
+			"Claude referrer must exist"
+		);
+		// Codex's referrer was unlinked.
+		assert!(!codex_referrer.exists(), "Codex referrer must be removed");
+	}
+
 	// An agent that reads BOTH a private dir and the Master defeats a verdict
 	// read off the plan alone: the private artifact IS removable, so the plan
 	// looks effective, while the agent keeps seeing the skill through the
@@ -5674,7 +5735,6 @@ mod tests {
 		ReconcileSkillPlan {
 			skill: Skill::new("x"),
 			source_root: PathBuf::from("/nonexistent/x"),
-			exhaustive: false,
 			keepers: vec![],
 			unreadable: vec![],
 			copies: agents

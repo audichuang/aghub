@@ -27,7 +27,14 @@ pub struct SkillRemovalRequest {
 	pub agents: Vec<AgentType>,
 	pub dry_run: bool,
 	pub all_agents: bool,
+	/// Caller-supplied paths credited as already removed during dry-run preflight only.
+	/// In commit mode, caller prior credit is ignored (seeded empty), but the preflight pass
+	/// still accumulates earlier rows' plan.paths for sibling credit. The in-lock execution
+	/// always rechecks the real disk (&[]).
 	pub prior_removed_paths: Vec<PathBuf>,
+	/// A copy in this batch keeps the Master alive; skips the exhaustiveness
+	/// holder scan.
+	pub keeps_master: bool,
 }
 
 /// Outcome row for a single agent in a batch skill removal.
@@ -46,6 +53,9 @@ pub struct SkillRemovalRow {
 pub struct SkillRemovalResponse {
 	pub rows: Vec<SkillRemovalRow>,
 	pub prune: PruneStatus,
+	pub exhaustive: bool,
+	pub keepers: Vec<AgentType>,
+	pub unreadable: Vec<&'static str>,
 }
 
 fn scope_to_word(scope: ResourceScope) -> &'static str {
@@ -136,6 +146,11 @@ fn create_manager(
 	ConfigManager::with_scope(adapter, global, project_root, scope)
 }
 
+#[cfg(test)]
+pub(crate) static COMMIT_PREFLIGHT_HOOK: std::sync::Mutex<
+	Option<std::sync::mpsc::Sender<()>>,
+> = std::sync::Mutex::new(None);
+
 /// Single core entry point for skill deletion by name across multiple agents.
 pub fn remove_skill_batch(
 	request: &SkillRemovalRequest,
@@ -144,15 +159,16 @@ pub fn remove_skill_batch(
 		SkillRemovalTarget::ByName(name) => name.as_str(),
 	};
 
-	let (holders, unreadable) = find_skill_holders(
-		name,
-		request.scope,
-		request.project_root.as_deref(),
-	);
+	let (holders, unreadable) = if request.keeps_master {
+		(Vec::new(), Vec::new())
+	} else {
+		find_skill_holders(name, request.scope, request.project_root.as_deref())
+	};
 
-	let is_exhaustive = request.all_agents
-		|| (!holders.is_empty()
-			&& holders.iter().all(|held| request.agents.contains(held)));
+	let is_exhaustive = !request.keeps_master
+		&& (request.all_agents
+			|| (!holders.is_empty()
+				&& holders.iter().all(|held| request.agents.contains(held))));
 
 	if is_exhaustive && !unreadable.is_empty() {
 		return Err(ConfigError::InvalidConfig(format!(
@@ -167,6 +183,12 @@ pub fn remove_skill_batch(
 		)));
 	}
 
+	let keepers: Vec<AgentType> = holders
+		.iter()
+		.filter(|held| !request.agents.contains(held))
+		.copied()
+		.collect();
+
 	let target_agents: Vec<AgentType> =
 		if request.agents.is_empty() && request.all_agents {
 			holders.clone()
@@ -178,6 +200,9 @@ pub fn remove_skill_batch(
 		return Ok(SkillRemovalResponse {
 			rows: Vec::new(),
 			prune: PruneStatus::NotRun,
+			exhaustive: is_exhaustive,
+			keepers,
+			unreadable,
 		});
 	}
 
@@ -191,7 +216,7 @@ pub fn remove_skill_batch(
 	// Prior-row credit applies only to non-exhaustive runs; an exhaustive run
 	// removes the Master as part of the batch itself.
 	let can_credit_prior = !is_exhaustive && unreadable.is_empty();
-	let mut accumulated_deletions = if can_credit_prior {
+	let mut accumulated_deletions = if can_credit_prior && request.dry_run {
 		request.prior_removed_paths.clone()
 	} else {
 		Vec::new()
@@ -315,6 +340,9 @@ pub fn remove_skill_batch(
 		return Ok(SkillRemovalResponse {
 			rows,
 			prune: PruneStatus::NotRun,
+			exhaustive: is_exhaustive,
+			keepers,
+			unreadable,
 		});
 	}
 
@@ -341,6 +369,11 @@ pub fn remove_skill_batch(
 		}
 	}
 
+	#[cfg(test)]
+	if let Some(ref tx) = *COMMIT_PREFLIGHT_HOOK.lock().unwrap() {
+		let _ = tx.send(());
+	}
+
 	// Commit re-plans inside the mutation write lock
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"remove skill batch",
@@ -349,17 +382,22 @@ pub fn remove_skill_batch(
 	)
 	.map_err(ConfigError::Io)?;
 
-	let (holders, unreadable) = find_skill_holders(
-		name,
-		request.scope,
-		request.project_root.as_deref(),
-	);
+	let (holders, unreadable) = if request.keeps_master {
+		(Vec::new(), Vec::new())
+	} else {
+		find_skill_holders(name, request.scope, request.project_root.as_deref())
+	};
 
-	let is_exhaustive = request.all_agents
-		|| (!holders.is_empty()
-			&& holders.iter().all(|held| request.agents.contains(held)));
+	let is_exhaustive = !request.keeps_master
+		&& (request.all_agents
+			|| (!holders.is_empty()
+				&& holders.iter().all(|held| request.agents.contains(held))));
 
-	let can_credit_prior = !is_exhaustive && unreadable.is_empty();
+	let keepers: Vec<AgentType> = holders
+		.iter()
+		.filter(|held| !request.agents.contains(held))
+		.copied()
+		.collect();
 
 	let mut credits = RemovalCredits::new(request.agents.clone(), |agent| {
 		let mut mgr = create_manager(
@@ -376,7 +414,8 @@ pub fn remove_skill_batch(
 	});
 
 	let mut execution_results: Vec<SkillRemovalRow> = Vec::new();
-	let mut any_executed = false;
+	let mut batch_prune = PruneStatus::NotRun;
+	let mut all_pruned_keys: Vec<String> = Vec::new();
 
 	for &agent in &execution_order {
 		let mut manager = create_manager(
@@ -396,25 +435,53 @@ pub fn remove_skill_batch(
 			continue;
 		}
 
-		let prior = if can_credit_prior {
-			request.prior_removed_paths.as_slice()
-		} else {
-			&[]
-		};
 		let res = manager.remove_skill_planned_for_agents_with_prior(
 			name,
 			is_exhaustive && holders.contains(&agent),
 			false, // dry_run
 			true,  // confirm
 			&request.agents,
-			prior,
+			&[],
 		);
 
 		match res {
 			Ok(outcome) => {
 				if outcome.executed {
 					credits.credit(agent);
-					any_executed = true;
+					match outcome.prune {
+						PruneStatus::Failed { reason, pruned } => {
+							all_pruned_keys.extend(pruned);
+							batch_prune = PruneStatus::Failed {
+								reason,
+								pruned: all_pruned_keys.clone(),
+							};
+						}
+						PruneStatus::Pruned(keys) => {
+							for key in keys {
+								if !all_pruned_keys.contains(&key) {
+									all_pruned_keys.push(key);
+								}
+							}
+							if !matches!(
+								batch_prune,
+								PruneStatus::Failed { .. }
+							) {
+								batch_prune = PruneStatus::Pruned(
+									all_pruned_keys.clone(),
+								);
+							} else if let PruneStatus::Failed {
+								ref reason,
+								..
+							} = batch_prune
+							{
+								batch_prune = PruneStatus::Failed {
+									reason: reason.clone(),
+									pruned: all_pruned_keys.clone(),
+								};
+							}
+						}
+						_ => {}
+					}
 				}
 				if outcome.failed_paths.is_empty() {
 					execution_results.push(SkillRemovalRow {
@@ -484,15 +551,6 @@ pub fn remove_skill_batch(
 		}
 	}
 
-	let prune = if any_executed {
-		crate::skills::prune::prune_lock_for_scope(
-			request.scope,
-			request.project_root.as_deref(),
-		)
-	} else {
-		PruneStatus::NotRun
-	};
-
 	let rows = target_agents
 		.iter()
 		.map(|agent| {
@@ -511,7 +569,13 @@ pub fn remove_skill_batch(
 		})
 		.collect();
 
-	Ok(SkillRemovalResponse { rows, prune })
+	Ok(SkillRemovalResponse {
+		rows,
+		prune: batch_prune,
+		exhaustive: is_exhaustive,
+		keepers,
+		unreadable,
+	})
 }
 
 #[cfg(test)]
@@ -606,17 +670,6 @@ mod tests {
 	#[test]
 	fn test_removal_ordering_independence() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-		let temp_a = tempdir().unwrap();
-		let _env_a = isolate_env(&temp_a);
-		let root_a = temp_a.path().join("project");
-		fs::create_dir_all(&root_a).unwrap();
-		setup_shared_fixture(&root_a, "notebooklm");
-
-		let temp_b = tempdir().unwrap();
-		let _env_b = isolate_env(&temp_b);
-		let root_b = temp_b.path().join("project");
-		fs::create_dir_all(&root_b).unwrap();
-		setup_shared_fixture(&root_b, "notebooklm");
 
 		// Shared slot readers first
 		let order_shared_first = vec![
@@ -656,29 +709,45 @@ mod tests {
 			AgentType::Dsh,
 		];
 
-		let req_a = SkillRemovalRequest {
-			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root_a.clone()),
-			agents: order_shared_first.clone(),
-			dry_run: false,
-			all_agents: false,
-			prior_removed_paths: Vec::new(),
+		let temp_a = tempdir().unwrap();
+		let root_a = temp_a.path().join("project");
+		let res_a = {
+			let _env_a = isolate_env(&temp_a);
+			fs::create_dir_all(&root_a).unwrap();
+			setup_shared_fixture(&root_a, "notebooklm");
+			let req_a = SkillRemovalRequest {
+				target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+				scope: ResourceScope::ProjectOnly,
+				project_root: Some(root_a.clone()),
+				agents: order_shared_first.clone(),
+				dry_run: false,
+				all_agents: false,
+				prior_removed_paths: Vec::new(),
+				keeps_master: false,
+			};
+			remove_skill_batch(&req_a)
+				.expect("order_shared_first batch should succeed")
 		};
-		let res_a = remove_skill_batch(&req_a)
-			.expect("order_shared_first batch should succeed");
 
-		let req_b = SkillRemovalRequest {
-			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root_b.clone()),
-			agents: order_private_first.clone(),
-			dry_run: false,
-			all_agents: false,
-			prior_removed_paths: Vec::new(),
+		let temp_b = tempdir().unwrap();
+		let root_b = temp_b.path().join("project");
+		let res_b = {
+			let _env_b = isolate_env(&temp_b);
+			fs::create_dir_all(&root_b).unwrap();
+			setup_shared_fixture(&root_b, "notebooklm");
+			let req_b = SkillRemovalRequest {
+				target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+				scope: ResourceScope::ProjectOnly,
+				project_root: Some(root_b.clone()),
+				agents: order_private_first.clone(),
+				dry_run: false,
+				all_agents: false,
+				prior_removed_paths: Vec::new(),
+				keeps_master: false,
+			};
+			remove_skill_batch(&req_b)
+				.expect("order_private_first batch should succeed")
 		};
-		let res_b = remove_skill_batch(&req_b)
-			.expect("order_private_first batch should succeed");
 
 		assert_eq!(res_a.rows.len(), 15);
 		assert_eq!(res_b.rows.len(), 15);
@@ -751,6 +820,7 @@ mod tests {
 			dry_run: true,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 		let res_without = remove_skill_batch(&req_without_credit).unwrap();
 		assert!(
@@ -767,6 +837,7 @@ mod tests {
 			dry_run: true,
 			all_agents: false,
 			prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
+			keeps_master: false,
 		};
 		let res_with = remove_skill_batch(&req_with_credit).unwrap();
 		assert_eq!(
@@ -800,6 +871,7 @@ mod tests {
 			dry_run: false,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 
 		let err = remove_skill_batch(&req).unwrap_err();
@@ -867,6 +939,7 @@ mod tests {
 			dry_run: false,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 		let res_unnamed = remove_skill_batch(&req_unnamed).unwrap();
 		assert_eq!(res_unnamed.rows[0].verdict, Verdict::Removed);
@@ -883,6 +956,7 @@ mod tests {
 			dry_run: false,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 		let res_named = remove_skill_batch(&req_named).unwrap();
 		assert_eq!(res_named.rows[0].verdict, Verdict::Removed);
@@ -925,6 +999,7 @@ mod tests {
 			dry_run: false,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 		let res1 = remove_skill_batch(&req1).unwrap();
 		assert_eq!(res1.rows[0].verdict, Verdict::Removed);
@@ -946,6 +1021,7 @@ mod tests {
 			dry_run: false,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 		let res2 = remove_skill_batch(&req2).unwrap();
 		assert_eq!(res2.rows[0].verdict, Verdict::Removed);
@@ -998,6 +1074,7 @@ mod tests {
 			dry_run: true,
 			all_agents: false,
 			prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
+			keeps_master: false,
 		};
 
 		let (preview_tx, preview_rx) = std::sync::mpsc::channel();
@@ -1027,6 +1104,7 @@ mod tests {
 			dry_run: false,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 		let res_commit =
 			remove_skill_batch(&req_commit).expect("commit should succeed");
@@ -1046,6 +1124,17 @@ mod tests {
 		crate::testing::master_with_claude_referrer(&root, "notebooklm");
 		fs::remove_file(root.join(".agents/skills/notebooklm")).unwrap();
 
+		let (hook_tx, hook_rx) = std::sync::mpsc::channel();
+		*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = Some(hook_tx);
+
+		struct HookReset;
+		impl Drop for HookReset {
+			fn drop(&mut self) {
+				*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = None;
+			}
+		}
+		let _hook_reset = HookReset;
+
 		// Test thread acquires the mutation write lock first.
 		let test_lock = crate::skills::lock::mutation_guard(
 			"test competing lock",
@@ -1062,11 +1151,12 @@ mod tests {
 			dry_run: false,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 
 		// Spawn commit thread.
 		// Commit will perform its unlocked preflight (which sees ONLY Claude holds notebooklm),
-		// then attempt to acquire the mutation write lock and BLOCK because test_lock is held!
+		// signals COMMIT_PREFLIGHT_HOOK, then attempts to acquire mutation write lock and BLOCKS!
 		let (commit_tx, commit_rx) = std::sync::mpsc::channel();
 		let req_commit_clone = req_commit.clone();
 		let commit_thread = std::thread::spawn(move || {
@@ -1074,8 +1164,10 @@ mod tests {
 			let _ = commit_tx.send(res);
 		});
 
-		// Wait briefly to allow the commit thread to run its unlocked preflight and block on the mutation lock.
-		std::thread::sleep(std::time::Duration::from_millis(200));
+		// Wait on hook: commit thread has completed preflight and is about to block on mutation lock.
+		hook_rx
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.expect("commit thread must signal hook after unlocked preflight");
 
 		// While commit thread is blocked waiting for write lock, mutate disk state:
 		// Cursor adds a referrer symlink to the Master!
@@ -1129,6 +1221,7 @@ mod tests {
 			dry_run: true,
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
+			keeps_master: false,
 		};
 
 		let res = remove_skill_batch(&req).unwrap();
@@ -1151,5 +1244,88 @@ mod tests {
 			res.rows[0].typed_error,
 			Some(ConfigError::UnsupportedOperation(_))
 		));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_commit_mode_ignores_prior_removed_paths() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		setup_shared_fixture(&root, "notebooklm");
+
+		let req = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::OpenCode],
+			dry_run: false,
+			all_agents: false,
+			prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
+			keeps_master: false,
+		};
+		// In commit mode, prior_removed_paths is ignored so preflight fails because .agents/skills/notebooklm actually exists on disk.
+		let err = remove_skill_batch(&req).unwrap_err();
+		assert!(err.to_string().contains("skill removal preflight failed"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_keeps_master_skips_unreadable_holder_scan_refusal() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let master = root.join(".aghub/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: test\n---\n",
+		)
+		.unwrap();
+
+		fs::create_dir_all(root.join(".codex/skills")).unwrap();
+		std::os::unix::fs::symlink(&master, root.join(".codex/skills/mover"))
+			.unwrap();
+
+		fs::create_dir_all(root.join(".windsurf")).unwrap();
+		std::os::unix::fs::symlink(
+			std::path::Path::new("skills"),
+			root.join(".windsurf/skills"),
+		)
+		.unwrap();
+
+		// With keeps_master: false, it would be exhaustive and fail because Windsurf is unreadable.
+		let req_false = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("mover".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::Codex, AgentType::Windsurf],
+			dry_run: true,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		assert!(remove_skill_batch(&req_false).is_err());
+
+		// With keeps_master: true, scan is skipped, so it does NOT fail wholesale.
+		let req_true = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("mover".to_string()),
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(root.clone()),
+			agents: vec![AgentType::Codex, AgentType::Windsurf],
+			dry_run: true,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: true,
+		};
+		let res = remove_skill_batch(&req_true)
+			.expect("keeps_master skips unreadable scan refusal");
+		assert!(!res.exhaustive);
+		assert!(res.unreadable.is_empty());
 	}
 }
