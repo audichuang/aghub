@@ -461,11 +461,10 @@ or run the command again; core evaluates shared slots first and applies prior-ro
 credit in a single pass. If whole-batch preflight rejects the request, the command
 exits 1, states that nothing was written, and names each refused target with its
 reason; disk and lock remain byte-identical.
-In `--json`, each row in `results` carries the unified `outcome`
-(`preview` | `removed` | `absent` | `partial` | `kept`), wire `code`
-(`UNSUPPORTED_OPERATION`, `INVALID_CONFIG`, or null; missing skills report no-op success with `outcome: "absent"` and exit 0 without an error code),
+In `--json`, a whole-batch preflight rejection appears in the top-level `error.code` envelope (`UNSUPPORTED_OPERATION` or `INVALID_CONFIG` lives there, not in `results[].code`). Each row in `results` carries the unified `outcome`
+(`preview` | `removed` | `absent` | `partial` | `kept`), wire `code` that appears only on a row-level failure (`partial` or a config load error, null on success; missing skills report no-op success with `outcome: "absent"` and exit 0 without an error code, whether absent or retaining an in-scope lock entry),
 `still_read_from` (surviving paths when kept/refused), batch-level `still_read_by` (unrequested holders that keep the master, copied onto every row),
-and `master_reclaimed` (on commit, whether Master was removed on disk; in preview `master_reclaimed: false` and, if exhaustive, `would_reclaim_master: true`). Prune status is reported
+and `master_reclaimed` (on commit, whether Master was removed on disk; in preview `master_reclaimed: false` and, if exhaustive and Master exists, `would_reclaim_master: true`). Prune status is reported
 independently (`pruned_lock_entries` / `would_prune_lock_entries` / `prune_error`).
 Rows are returned in the exact request order of `-a`. A real directory inside `.aghub` is never deleted by
 a single-agent delete, and neither is a real directory in a shared slot that git tracks (exit 1;

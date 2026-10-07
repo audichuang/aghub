@@ -101,6 +101,7 @@ pub struct SkillRemovalResponse {
 	pub keepers: Vec<AgentType>,
 	pub unreadable: Vec<&'static str>,
 	pub master_reclaimed: bool,
+	pub would_reclaim_master: bool,
 }
 
 impl SkillRemovalResponse {
@@ -115,11 +116,12 @@ impl SkillRemovalResponse {
 		let mut failed_count = 0;
 
 		for row in &self.rows {
-			let is_absent_noop = row.verdict == Verdict::Absent
-				&& matches!(
-					row.typed_error.as_deref(),
-					Some(ConfigError::ResourceNotFound { .. })
-				);
+			let is_absent_noop =
+				matches!(row.verdict, Verdict::Absent | Verdict::LockOnly)
+					&& matches!(
+						row.typed_error.as_deref(),
+						Some(ConfigError::ResourceNotFound { .. })
+					);
 			let outcome_str = row.outcome_str();
 			let wire_code = if is_absent_noop {
 				None
@@ -176,6 +178,7 @@ impl SkillRemovalResponse {
 					.collect::<Vec<_>>());
 			}
 
+			// Unfiltered list of unrequested holders that keep the master; copied onto every row until managed/unmanaged split lands.
 			if !self.keepers.is_empty() {
 				payload["still_read_by"] = serde_json::json!(self
 					.keepers
@@ -186,7 +189,7 @@ impl SkillRemovalResponse {
 
 			if dry_run {
 				payload["master_reclaimed"] = serde_json::json!(false);
-				if self.exhaustive {
+				if self.would_reclaim_master {
 					payload["would_reclaim_master"] = serde_json::json!(true);
 				}
 			} else {
@@ -350,6 +353,13 @@ pub fn remove_skill_batch(
 		find_skill_holders(name, request.scope, request.project_root.as_deref())
 	};
 
+	let master_p = crate::skills::shape::master_path(
+		request.scope,
+		request.project_root.as_deref(),
+		name,
+	);
+	let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
+
 	let target_agents: Vec<AgentType> = if request.agents.is_empty()
 		&& request.all_agents
 	{
@@ -383,6 +393,7 @@ pub fn remove_skill_batch(
 			keepers,
 			unreadable,
 			master_reclaimed: false,
+			would_reclaim_master: false,
 		});
 	}
 
@@ -577,6 +588,7 @@ pub fn remove_skill_batch(
 			keepers,
 			unreadable,
 			master_reclaimed: false,
+			would_reclaim_master: is_exhaustive && had_master,
 		});
 	}
 
@@ -914,6 +926,7 @@ pub fn remove_skill_batch(
 		keepers,
 		unreadable,
 		master_reclaimed,
+		would_reclaim_master: false,
 	})
 }
 
@@ -2198,6 +2211,7 @@ mod tests {
 		};
 		let resp_preview = remove_skill_batch(&req_preview).unwrap();
 		assert!(resp_preview.exhaustive);
+		assert!(resp_preview.would_reclaim_master);
 		assert!(!resp_preview.master_reclaimed);
 		let view_preview = resp_preview.to_batch_view("reclaim-test", true);
 		for r in &view_preview.results {
@@ -2222,6 +2236,7 @@ mod tests {
 		let resp_non_exhaustive =
 			remove_skill_batch(&req_non_exhaustive).unwrap();
 		assert!(!resp_non_exhaustive.exhaustive);
+		assert!(!resp_non_exhaustive.would_reclaim_master);
 		assert!(!resp_non_exhaustive.master_reclaimed);
 		let view_non_exhaustive =
 			resp_non_exhaustive.to_batch_view("reclaim-test", false);
@@ -2249,6 +2264,7 @@ mod tests {
 		};
 		let resp_exhaustive = remove_skill_batch(&req_exhaustive).unwrap();
 		assert!(resp_exhaustive.exhaustive);
+		assert!(!resp_exhaustive.would_reclaim_master);
 		assert!(resp_exhaustive.master_reclaimed);
 		let view_exhaustive =
 			resp_exhaustive.to_batch_view("reclaim-test", false);
@@ -2258,5 +2274,25 @@ mod tests {
 			assert!(output.get("would_reclaim_master").is_none());
 		}
 		assert!(!master.exists(), "master must be gone on disk");
+
+		// 4. Exhaustive preview when Master is already gone:
+		// would_reclaim_master must be false because Master does not exist.
+		let mut req_preview_no_master = req_preview.clone();
+		req_preview_no_master.all_agents = true;
+		let resp_preview_no_master =
+			remove_skill_batch(&req_preview_no_master).unwrap();
+		assert!(resp_preview_no_master.exhaustive);
+		assert!(
+			!resp_preview_no_master.would_reclaim_master,
+			"would_reclaim_master must be false when Master does not exist"
+		);
+		let view_no_master =
+			resp_preview_no_master.to_batch_view("reclaim-test", true);
+		assert_eq!(view_no_master.results.len(), 2);
+		for r in &view_no_master.results {
+			let output = r.output.as_ref().unwrap();
+			assert_eq!(output["master_reclaimed"], false);
+			assert!(output.get("would_reclaim_master").is_none());
+		}
 	}
 }

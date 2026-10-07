@@ -296,4 +296,7 @@ and results are projected in original request order. `--json` rows carry unified
 Rule: CLI skill deletions delegate to `remove_skill_batch`; `-a` order does not affect the verdict.
 
 Tests: `test_cli_delete_skills_agent_order_independence`,
-`test_cli_delete_skills_whole_batch_preflight_rejection`.
+`test_cli_delete_skills_whole_batch_preflight_rejection`,
+`test_cli_delete_skills_absent_member_exit_zero_and_preview_commit_verdict_parity`,
+`test_cli_delete_skills_non_exhaustive_lock_only_absent_member_exit_zero_parity`,
+core `test_master_reclaimed_preview_commit_and_surviving_master`.

@@ -16776,25 +16776,26 @@ fn test_cli_delete_skills_agent_order_independence() {
 		serde_json::from_str(&s).unwrap()
 	};
 
-	let norm_json_0 = normalize_json(&runs[0].1, &runs[0].3);
-	let norm_json_1 = normalize_json(&runs[1].1, &runs[1].3);
+	let mut norm_json_0 = normalize_json(&runs[0].1, &runs[0].3);
+	let mut norm_json_1 = normalize_json(&runs[1].1, &runs[1].3);
 
-	// Both orderings yield identical total counts
-	assert_eq!(norm_json_0["success_count"], norm_json_1["success_count"]);
-	assert_eq!(norm_json_0["failed_count"], norm_json_1["failed_count"]);
-
-	// For each agent, output rows must be identical across both orderings
-	let results_0 = norm_json_0["results"].as_array().unwrap();
-	let results_1 = norm_json_1["results"].as_array().unwrap();
-	for agent in order_shared_first.split(',') {
-		let row_0 = results_0.iter().find(|r| r["agent"] == agent).unwrap();
-		let row_1 = results_1.iter().find(|r| r["agent"] == agent).unwrap();
-		assert_eq!(row_0["ok"], row_1["ok"]);
-		assert_eq!(row_0["output"]["outcome"], row_1["output"]["outcome"]);
-		assert_eq!(row_0["output"]["code"], row_1["output"]["code"]);
-		assert_eq!(row_0["output"]["paths"], row_1["output"]["paths"]);
-		assert_eq!(row_0["output"]["skipped"], row_1["output"]["skipped"]);
+	if let Some(arr_0) = norm_json_0
+		.get_mut("results")
+		.and_then(|v| v.as_array_mut())
+	{
+		arr_0.sort_by(|a, b| a["agent"].as_str().cmp(&b["agent"].as_str()));
 	}
+	if let Some(arr_1) = norm_json_1
+		.get_mut("results")
+		.and_then(|v| v.as_array_mut())
+	{
+		arr_1.sort_by(|a, b| a["agent"].as_str().cmp(&b["agent"].as_str()));
+	}
+
+	assert_eq!(
+		norm_json_0, norm_json_1,
+		"whole normalized envelopes must be identical across both orderings"
+	);
 }
 
 #[cfg(unix)]
@@ -17036,6 +17037,179 @@ fn test_cli_delete_skills_absent_member_exit_zero_and_preview_commit_verdict_par
 		!root.join(".aghub/notebooklm").exists(),
 		"Master must be reclaimed on commit"
 	);
+	assert!(
+		!root.join(".codex/skills/notebooklm").exists(),
+		"Codex must remain absent"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_delete_skills_non_exhaustive_lock_only_absent_member_exit_zero_parity(
+) {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let root = project.path();
+
+	// Fixture:
+	// - Claude has a private link in .claude/skills
+	// - Cursor has a private link in .cursor/skills (third holder outside -a)
+	// - Codex has no link (never held the skill)
+	// - Master exists in .aghub/notebooklm
+	// - skills-lock.json tracks notebooklm
+	let claude_slot = root.join(".claude/skills");
+	let cursor_slot = root.join(".cursor/skills");
+	let master = root.join(".aghub/notebooklm");
+	std::fs::create_dir_all(&claude_slot).unwrap();
+	std::fs::create_dir_all(&cursor_slot).unwrap();
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: notebooklm\ndescription: test\n---\n",
+	)
+	.unwrap();
+	std::os::unix::fs::symlink(&master, claude_slot.join("notebooklm"))
+		.unwrap();
+	std::os::unix::fs::symlink(&master, cursor_slot.join("notebooklm"))
+		.unwrap();
+
+	let lock_path = root.join("skills-lock.json");
+	std::fs::write(
+		&lock_path,
+		r#"{"version":1,"skills":{"notebooklm":{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}"#,
+	)
+	.unwrap();
+
+	// 1. Dry-run preview: requested agents are claude (holder) and codex (absent member).
+	// Cursor is outside -a, so deletion will be non-exhaustive and lock entry will survive.
+	let preview_out = isolated_cli(home.path(), state.path())
+		.current_dir(root)
+		.args([
+			"-p",
+			"-a",
+			"claude,codex",
+			"delete",
+			"skills",
+			"notebooklm",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		preview_out.status.code(),
+		Some(0),
+		"preview must exit 0; stderr: {}, stdout: {}",
+		String::from_utf8_lossy(&preview_out.stderr),
+		String::from_utf8_lossy(&preview_out.stdout)
+	);
+
+	let preview_json: Value = serde_json::from_slice(&preview_out.stdout)
+		.expect("preview output must be valid JSON");
+	assert_eq!(preview_json["success_count"], 2);
+	assert_eq!(preview_json["failed_count"], 0);
+
+	let prev_results = preview_json["results"].as_array().unwrap();
+	let prev_claude = prev_results
+		.iter()
+		.find(|r| r["agent"] == "claude")
+		.unwrap();
+	let prev_codex =
+		prev_results.iter().find(|r| r["agent"] == "codex").unwrap();
+
+	assert_eq!(prev_claude["ok"], true);
+	assert_eq!(prev_claude["output"]["outcome"], "preview");
+	assert_eq!(prev_claude["output"]["code"], Value::Null);
+	assert_eq!(prev_claude["code"], Value::Null);
+
+	assert_eq!(prev_codex["ok"], true);
+	assert_eq!(prev_codex["output"]["outcome"], "absent");
+	assert_eq!(prev_codex["output"]["code"], Value::Null);
+	assert_eq!(prev_codex["code"], Value::Null);
+	assert_eq!(prev_codex["error"], Value::Null);
+
+	// 2. Commit (--yes): Claude is removed, Codex is absent no-op (Verdict::LockOnly).
+	// Must exit 0, 2 successes, 0 failures, and Codex must report ok: true, code: null.
+	let commit_out = isolated_cli(home.path(), state.path())
+		.current_dir(root)
+		.args([
+			"-p",
+			"-a",
+			"claude,codex",
+			"delete",
+			"skills",
+			"notebooklm",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		commit_out.status.code(),
+		Some(0),
+		"commit must exit 0; stderr: {}, stdout: {}",
+		String::from_utf8_lossy(&commit_out.stderr),
+		String::from_utf8_lossy(&commit_out.stdout)
+	);
+
+	let commit_json: Value = serde_json::from_slice(&commit_out.stdout)
+		.expect("commit output must be valid JSON");
+	assert_eq!(commit_json["success_count"], 2);
+	assert_eq!(commit_json["failed_count"], 0);
+
+	let comm_results = commit_json["results"].as_array().unwrap();
+	let comm_claude = comm_results
+		.iter()
+		.find(|r| r["agent"] == "claude")
+		.unwrap();
+	let comm_codex =
+		comm_results.iter().find(|r| r["agent"] == "codex").unwrap();
+
+	assert_eq!(comm_claude["ok"], true);
+	assert_eq!(comm_claude["output"]["outcome"], "removed");
+	assert_eq!(comm_claude["output"]["code"], Value::Null);
+	assert_eq!(comm_claude["code"], Value::Null);
+
+	assert_eq!(comm_codex["ok"], true);
+	assert_eq!(comm_codex["output"]["outcome"], "absent");
+	assert_eq!(comm_codex["output"]["code"], Value::Null);
+	assert_eq!(comm_codex["code"], Value::Null);
+	assert_eq!(comm_codex["error"], Value::Null);
+
+	// 3. Verdict parity between preview and commit:
+	assert_eq!(prev_codex["ok"], comm_codex["ok"]);
+	assert_eq!(
+		prev_codex["output"]["outcome"],
+		comm_codex["output"]["outcome"]
+	);
+	assert_eq!(prev_codex["output"]["code"], comm_codex["output"]["code"]);
+	assert_eq!(prev_codex["error"], comm_codex["error"]);
+
+	// 4. On-disk invariants:
+	// Claude link deleted
+	assert!(
+		!root.join(".claude/skills/notebooklm").exists(),
+		"Claude link must be deleted on commit"
+	);
+	// Cursor link survives (unrequested holder)
+	assert!(
+		root.join(".cursor/skills/notebooklm").exists(),
+		"Cursor link must survive"
+	);
+	// Master survives because Cursor still reads it
+	assert!(
+		root.join(".aghub/notebooklm").exists(),
+		"Master must survive while Cursor holds it"
+	);
+	// Lock entry survives
+	let lock_content = std::fs::read_to_string(&lock_path).unwrap();
+	assert!(
+		lock_content.contains("notebooklm"),
+		"Lock entry must survive while Master and Cursor link survive"
+	);
+	// Codex remains absent
 	assert!(
 		!root.join(".codex/skills/notebooklm").exists(),
 		"Codex must remain absent"
