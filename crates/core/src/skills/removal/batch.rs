@@ -41,18 +41,6 @@ pub struct SkillRemovalRow {
 	pub still_read_from: Vec<PathBuf>,
 }
 
-impl PartialEq for SkillRemovalRow {
-	fn eq(&self, other: &Self) -> bool {
-		self.agent == other.agent
-			&& self.verdict == other.verdict
-			&& self.error == other.error
-			&& self.is_load_error == other.is_load_error
-			&& self.still_read_from == other.still_read_from
-	}
-}
-
-impl Eq for SkillRemovalRow {}
-
 /// Response returned by the batch skill removal entry point.
 #[derive(Debug, Clone)]
 pub struct SkillRemovalResponse {
@@ -533,10 +521,8 @@ mod tests {
 	use crate::skills::removal;
 	use std::fs;
 	use tempfile::tempdir;
-	#[cfg(unix)]
 	struct EnvVarGuard(&'static str, Option<std::ffi::OsString>);
 
-	#[cfg(unix)]
 	impl EnvVarGuard {
 		fn set(key: &'static str, value: &Path) -> Self {
 			let previous = std::env::var_os(key);
@@ -545,7 +531,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(unix)]
 	impl Drop for EnvVarGuard {
 		fn drop(&mut self) {
 			match self.1.take() {
@@ -555,7 +540,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(unix)]
 	fn isolate_env(temp: &tempfile::TempDir) -> (EnvVarGuard, EnvVarGuard) {
 		let isolated_home = temp.path().join("home");
 		let isolated_data = temp.path().join("data");
@@ -623,12 +607,16 @@ mod tests {
 	fn test_removal_ordering_independence() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp_a = tempdir().unwrap();
-		let root_a = temp_a.path();
-		setup_shared_fixture(root_a, "notebooklm");
+		let _env_a = isolate_env(&temp_a);
+		let root_a = temp_a.path().join("project");
+		fs::create_dir_all(&root_a).unwrap();
+		setup_shared_fixture(&root_a, "notebooklm");
 
 		let temp_b = tempdir().unwrap();
-		let root_b = temp_b.path();
-		setup_shared_fixture(root_b, "notebooklm");
+		let _env_b = isolate_env(&temp_b);
+		let root_b = temp_b.path().join("project");
+		fs::create_dir_all(&root_b).unwrap();
+		setup_shared_fixture(&root_b, "notebooklm");
 
 		// Shared slot readers first
 		let order_shared_first = vec![
@@ -671,7 +659,7 @@ mod tests {
 		let req_a = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root_a.to_path_buf()),
+			project_root: Some(root_a.clone()),
 			agents: order_shared_first.clone(),
 			dry_run: false,
 			all_agents: false,
@@ -683,7 +671,7 @@ mod tests {
 		let req_b = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root_b.to_path_buf()),
+			project_root: Some(root_b.clone()),
 			agents: order_private_first.clone(),
 			dry_run: false,
 			all_agents: false,
@@ -711,11 +699,11 @@ mod tests {
 		}
 
 		let mut tree_a = Vec::new();
-		collect_normalized_tree(root_a, root_a, &mut tree_a);
+		collect_normalized_tree(&root_a, &root_a, &mut tree_a);
 		tree_a.sort_by(|a, b| a.0.cmp(&b.0));
 
 		let mut tree_b = Vec::new();
-		collect_normalized_tree(root_b, root_b, &mut tree_b);
+		collect_normalized_tree(&root_b, &root_b, &mut tree_b);
 		tree_b.sort_by(|a, b| a.0.cmp(&b.0));
 
 		assert_eq!(
@@ -726,7 +714,7 @@ mod tests {
 
 		for &agent in &order_shared_first {
 			let dirs_a = crate::create_adapter(agent)
-				.get_skills_paths(Some(root_a), ResourceScope::ProjectOnly);
+				.get_skills_paths(Some(&root_a), ResourceScope::ProjectOnly);
 			let eff_a = removal::read_effect_after(&dirs_a, "notebooklm", &[]);
 			assert!(
 				eff_a.survivors.is_empty(),
@@ -735,7 +723,7 @@ mod tests {
 			);
 
 			let dirs_b = crate::create_adapter(agent)
-				.get_skills_paths(Some(root_b), ResourceScope::ProjectOnly);
+				.get_skills_paths(Some(&root_b), ResourceScope::ProjectOnly);
 			let eff_b = removal::read_effect_after(&dirs_b, "notebooklm", &[]);
 			assert!(
 				eff_b.survivors.is_empty(),
@@ -747,16 +735,18 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn test_prior_row_credit_turns_kept_into_removed() {
+	fn test_prior_row_credit_turns_refused_into_removed() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
-		let root = temp.path();
-		setup_shared_fixture(root, "notebooklm");
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		setup_shared_fixture(&root, "notebooklm");
 
 		let req_without_credit = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root.to_path_buf()),
+			project_root: Some(root.clone()),
 			agents: vec![AgentType::OpenCode],
 			dry_run: true,
 			all_agents: false,
@@ -772,7 +762,7 @@ mod tests {
 		let req_with_credit = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root.to_path_buf()),
+			project_root: Some(root.clone()),
 			agents: vec![AgentType::OpenCode],
 			dry_run: true,
 			all_agents: false,
@@ -906,7 +896,9 @@ mod tests {
 	fn test_master_gc_and_prune_failure_reported_independently() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
-		let root = temp.path();
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
 
 		let master = root.join(".aghub/notebooklm");
 		fs::create_dir_all(&master).unwrap();
@@ -928,7 +920,7 @@ mod tests {
 		let req1 = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root.to_path_buf()),
+			project_root: Some(root.clone()),
 			agents: vec![AgentType::Claude],
 			dry_run: false,
 			all_agents: false,
@@ -949,7 +941,7 @@ mod tests {
 		let req2 = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root.to_path_buf()),
+			project_root: Some(root.clone()),
 			agents: vec![AgentType::Cursor],
 			dry_run: false,
 			all_agents: false,
@@ -974,12 +966,14 @@ mod tests {
 	fn test_preview_does_not_take_write_lock() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
-		let root = temp.path();
-		setup_shared_fixture(root, "notebooklm");
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		setup_shared_fixture(&root, "notebooklm");
 
 		let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
 		let (release_tx, release_rx) = std::sync::mpsc::channel();
-		let root_buf = root.to_path_buf();
+		let root_buf = root.clone();
 
 		let lock_thread = std::thread::spawn(move || {
 			let _lock = crate::skills::lock::mutation_guard(
@@ -999,7 +993,7 @@ mod tests {
 		let req_preview = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root.to_path_buf()),
+			project_root: Some(root.clone()),
 			agents: vec![AgentType::OpenCode],
 			dry_run: true,
 			all_agents: false,
@@ -1028,7 +1022,7 @@ mod tests {
 		let req_commit = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root.to_path_buf()),
+			project_root: Some(root.clone()),
 			agents: vec![AgentType::Claude],
 			dry_run: false,
 			all_agents: false,
@@ -1123,12 +1117,14 @@ mod tests {
 	fn test_dry_run_reports_preflight_failure_in_row_error() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
-		let root = temp.path();
+		let _env = isolate_env(&temp);
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
 
 		let req = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root.to_path_buf()),
+			project_root: Some(root.clone()),
 			agents: vec![AgentType::JetBrainsAi],
 			dry_run: true,
 			all_agents: false,

@@ -918,8 +918,10 @@ impl ConfigManager {
 		});
 
 		plan.shared_master_kept = verdict.shared_master_kept();
-		plan.still_read_from =
-			removal::still_read_from(&effect.survivors, &plan.skipped);
+		if matches!(verdict, removal::Verdict::Refused { .. }) {
+			plan.still_read_from =
+				removal::still_read_from(&effect.survivors, &plan.skipped);
+		}
 
 		if executed {
 			if let removal::Verdict::Refused { ref reason } = verdict {

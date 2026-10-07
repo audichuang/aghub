@@ -506,7 +506,7 @@ pub fn run_skill_agent_mutation(
 /// path, which is how `~/.gemini/skills` and `~/.claude/skills` read as two
 /// different places while `~/.gemini` is a symlink to `~/.claude`. Falling back
 /// one level up resolves the part that DOES exist.
-pub fn resolve_through_links(path: PathBuf) -> PathBuf {
+pub(crate) fn resolve_through_links(path: PathBuf) -> PathBuf {
 	if let Ok(real) = std::fs::canonicalize(&path) {
 		return real;
 	}
@@ -519,7 +519,7 @@ pub fn resolve_through_links(path: PathBuf) -> PathBuf {
 }
 
 #[cfg(unix)]
-pub fn node_id(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn node_id(path: &Path) -> Option<(u64, u64)> {
 	use std::os::unix::fs::MetadataExt;
 	let meta = std::fs::metadata(path).ok()?;
 	Some((meta.dev(), meta.ino()))
@@ -531,7 +531,7 @@ pub fn node_id(path: &Path) -> Option<(u64, u64)> {
 // agents' config files, which no documented aghub layout produces. Upgrade
 // path: `GetFileInformationByHandle` via the `windows` crate if it ever bites.
 #[cfg(not(unix))]
-pub fn node_id(_path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn node_id(_path: &Path) -> Option<(u64, u64)> {
 	None
 }
 

@@ -2275,44 +2275,44 @@ pub fn reconcile_skill(
 				// Use the planned-removal seam — never blind-delete a shared
 				// universal master discovered through an agent's read dirs.
 				OperationAction::Delete => (|| -> Result<bool> {
+					// Re-check now that every copy has run: a copy can create
+					// the very directory this target resolves through.
+					ensure_removals_spare(
+						&protect,
+						std::slice::from_ref(&row.target),
+						source.agent,
+						skill_backing_dir,
+					)?;
 					if delete_batch_result.is_none() {
-						// Before invoking the batch, run ensure_removals_spare
-						// over ALL delete targets. A copy that just ran can
-						// create the dir a delete target resolves through!
-						// If any target fails the spare check, fail without
-						// calling the batch so protected targets survive.
-						let spare_check = ensure_removals_spare(
-							&protect,
-							&removing,
-							source.agent,
-							skill_backing_dir,
+						let delete_agents: Vec<AgentType> = plan
+							.deletes
+							.iter()
+							.filter(|r| {
+								ensure_removals_spare(
+									&protect,
+									std::slice::from_ref(&r.target),
+									source.agent,
+									skill_backing_dir,
+								)
+								.is_ok()
+							})
+							.map(|r| r.target.agent)
+							.collect();
+						let scope = target_resource_scope(&row.target);
+						let req = crate::skills::removal::SkillRemovalRequest {
+							target: crate::skills::removal::SkillRemovalTarget::ByName(
+								plan.skill.name.clone(),
+							),
+							scope,
+							project_root: row.target.project_root.clone(),
+							agents: delete_agents,
+							dry_run: false,
+							all_agents: plan.exhaustive,
+							prior_removed_paths: Vec::new(),
+						};
+						delete_batch_result = Some(
+							crate::skills::removal::remove_skill_batch(&req),
 						);
-						if let Err(err) = spare_check {
-							delete_batch_result = Some(Err(err));
-						} else {
-							let delete_agents: Vec<AgentType> = plan
-								.deletes
-								.iter()
-								.map(|r| r.target.agent)
-								.collect();
-							let scope = target_resource_scope(&row.target);
-							let req = crate::skills::removal::SkillRemovalRequest {
-								target: crate::skills::removal::SkillRemovalTarget::ByName(
-									plan.skill.name.clone(),
-								),
-								scope,
-								project_root: row.target.project_root.clone(),
-								agents: delete_agents,
-								dry_run: false,
-								all_agents: plan.exhaustive,
-								prior_removed_paths: Vec::new(),
-							};
-							delete_batch_result = Some(
-								crate::skills::removal::remove_skill_batch(
-									&req,
-								),
-							);
-						}
 					}
 					let resp = match delete_batch_result.as_ref().unwrap() {
 						Ok(resp) => resp,
@@ -6255,18 +6255,11 @@ mod tests {
 			.find(|r| r.target.agent == AgentType::OpenCode)
 			.expect("OpenCode delete row must exist");
 		assert!(
-			!opencode_res.success,
-			"OpenCode delete must fail due to spared check failure"
-		);
-		assert!(
-			opencode_res
-				.error
-				.as_deref()
-				.unwrap_or("")
-				.contains("resolve to the same place on disk"),
-			"OpenCode delete error must come from ensure_removals_spare: {:?}",
+			opencode_res.success,
+			"OpenCode delete must succeed: {:?}",
 			opencode_res.error
 		);
+		assert!(opencode_res.error.is_none());
 
 		let windsurf_res = batch
 			.results
@@ -6293,12 +6286,9 @@ mod tests {
 			claude_skill.exists(),
 			"protected target Claude's copied skill must survive"
 		);
-		// OpenCode's skill must also survive because the removal batch was never called.
+		// OpenCode's skill was removed by the batch.
 		let opencode_skill = opencode_dir.join("test-skill");
-		assert!(
-			opencode_skill.exists(),
-			"OpenCode's skill must survive because removal batch was never called"
-		);
+		assert!(!opencode_skill.exists(), "OpenCode's skill must be removed");
 		// Codex's skill must survive.
 		let codex_skill = codex_dir.join("test-skill");
 		assert!(codex_skill.exists(), "Codex's skill must survive");

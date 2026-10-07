@@ -68,6 +68,11 @@ impl ConfigError {
 	}
 }
 
+/// Note: this [`Clone`] implementation is lossy for [`ConfigError::Io`] and
+/// [`ConfigError::Json`]. Because neither underlying error type implements `Clone`,
+/// `Io` is reconstructed from its `ErrorKind` and formatted message (losing raw OS
+/// error codes / inner source errors) and `Json` is reconstructed from its formatted
+/// message (losing parsed line/column numbers).
 impl Clone for ConfigError {
 	fn clone(&self) -> Self {
 		match self {
