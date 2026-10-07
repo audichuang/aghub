@@ -1756,7 +1756,7 @@ fn test_remove_mcp_planned_unsupported_agent_errors() {
 		.remove_mcp_planned("anything", false, true)
 		.unwrap_err();
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"non-MCP agent should reject planned removal, got: {err}"
 	);
 }
@@ -1868,7 +1868,7 @@ fn test_adapter_save_mcps_rejects_both_scope() {
 		.unwrap_err();
 
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(message) if message.contains("persist"))
+		matches!(err, ConfigError::UnsupportedOperation { ref message, .. } if message.contains("persist"))
 	);
 }
 

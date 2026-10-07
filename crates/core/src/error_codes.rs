@@ -15,7 +15,7 @@ pub fn wire_code(error: &ConfigError) -> &'static str {
 		ConfigError::ResourceNotFound { .. } => "RESOURCE_NOT_FOUND",
 		ConfigError::ResourceExists { .. } => "RESOURCE_EXISTS",
 		ConfigError::NotFound { .. } => "CONFIG_NOT_FOUND",
-		ConfigError::UnsupportedOperation(_) => "UNSUPPORTED_OPERATION",
+		ConfigError::UnsupportedOperation { .. } => "UNSUPPORTED_OPERATION",
 		ConfigError::ValidationFailed(_) => "VALIDATION_FAILED",
 		ConfigError::InvalidConfig(_) => "INVALID_CONFIG",
 		ConfigError::Json(_) => "JSON_PARSE_ERROR",

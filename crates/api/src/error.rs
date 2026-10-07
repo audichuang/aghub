@@ -9,6 +9,8 @@ use serde::Serialize;
 pub struct ErrorBody {
 	pub error: String,
 	pub code: &'static str,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub rejected_targets: Option<Vec<aghub_core::errors::RejectedTarget>>,
 }
 
 /// Fixed, safe message for "the OS credential backend is unreachable". The
@@ -33,6 +35,23 @@ impl ApiError {
 			body: ErrorBody {
 				error: error.into(),
 				code,
+				rejected_targets: None,
+			},
+		}
+	}
+
+	pub fn with_rejected_targets(
+		status: Status,
+		error: impl Into<String>,
+		code: &'static str,
+		rejected_targets: Option<Vec<aghub_core::errors::RejectedTarget>>,
+	) -> Self {
+		Self {
+			status,
+			body: ErrorBody {
+				error: error.into(),
+				code,
+				rejected_targets,
 			},
 		}
 	}
@@ -66,13 +85,13 @@ impl ApiError {
 	}
 }
 
-impl From<ConfigError> for ApiError {
-	fn from(e: ConfigError) -> Self {
+impl ApiError {
+	pub fn from_config_ref(e: &ConfigError) -> Self {
 		// The machine code comes from `aghub_core::error_codes`, the ONE place
 		// it is defined, so the CLI's `--json` errors and this response speak
 		// the same vocabulary. Only the HTTP status and the message wording are
 		// decided here — they are the genuinely transport-specific half.
-		let code = aghub_core::error_codes::wire_code(&e);
+		let code = aghub_core::error_codes::wire_code(e);
 		match e {
 			ConfigError::ResourceNotFound {
 				resource_type,
@@ -95,14 +114,20 @@ impl From<ConfigError> for ApiError {
 				format!("Config file not found: {}", path.display()),
 				code,
 			),
-			ConfigError::UnsupportedOperation(msg) => {
-				ApiError::new(Status::UnprocessableEntity, msg, code)
-			}
+			ConfigError::UnsupportedOperation {
+				message,
+				rejected_targets,
+			} => ApiError::with_rejected_targets(
+				Status::UnprocessableEntity,
+				message.clone(),
+				code,
+				rejected_targets.clone(),
+			),
 			ConfigError::ValidationFailed(msg) => {
-				ApiError::new(Status::UnprocessableEntity, msg, code)
+				ApiError::new(Status::UnprocessableEntity, msg.clone(), code)
 			}
 			ConfigError::InvalidConfig(msg) => {
-				ApiError::new(Status::BadRequest, msg, code)
+				ApiError::new(Status::BadRequest, msg.clone(), code)
 			}
 			ConfigError::Json(e) => {
 				ApiError::new(Status::BadRequest, e.to_string(), code)
@@ -119,6 +144,18 @@ impl From<ConfigError> for ApiError {
 				ApiError::new(Status::InternalServerError, e.to_string(), code)
 			}
 		}
+	}
+}
+
+impl From<&ConfigError> for ApiError {
+	fn from(e: &ConfigError) -> Self {
+		Self::from_config_ref(e)
+	}
+}
+
+impl From<ConfigError> for ApiError {
+	fn from(e: ConfigError) -> Self {
+		Self::from_config_ref(&e)
 	}
 }
 

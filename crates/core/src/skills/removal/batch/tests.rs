@@ -873,7 +873,7 @@ fn test_dry_run_reports_preflight_failure_in_row_error() {
 	);
 	assert!(matches!(
 		res.rows[0].typed_error.as_deref(),
-		Some(ConfigError::UnsupportedOperation(_))
+		Some(ConfigError::UnsupportedOperation { .. })
 	));
 }
 

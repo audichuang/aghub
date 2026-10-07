@@ -246,13 +246,21 @@ impl SkillRemovalResponse {
 					.collect::<Vec<_>>());
 			}
 
-			// Unfiltered list of unrequested holders that keep the master; copied onto every row until managed/unmanaged split lands.
+			// Unrequested holders that keep the master, split into managed vs unmanaged.
 			if !self.keepers.is_empty() {
+				let (managed, unmanaged): (Vec<_>, Vec<_>) = self
+					.keepers
+					.iter()
+					.map(|a| a.as_str().to_string())
+					.partition(|a| crate::agent_settings::is_managed(a));
 				payload["still_read_by"] = serde_json::json!(self
 					.keepers
 					.iter()
 					.map(|a| a.as_str())
 					.collect::<Vec<_>>());
+				payload["still_read_by_managed"] = serde_json::json!(managed);
+				payload["still_read_by_unmanaged"] =
+					serde_json::json!(unmanaged);
 			}
 
 			if dry_run {
@@ -442,11 +450,35 @@ pub fn remove_skill_batch(
 	let target_agents: Vec<AgentType> = if request.agents.is_empty()
 		&& request.all_agents
 	{
-		holders
+		let managed_holders: Vec<AgentType> = holders
 			.iter()
 			.filter(|agent| crate::agent_settings::is_managed(agent.as_str()))
 			.copied()
-			.collect()
+			.collect();
+		if managed_holders.is_empty() {
+			let master_exists = crate::skills::shape::master_path(
+				request.scope,
+				request.project_root.as_deref(),
+				name,
+			)
+			.map(|p| p.exists())
+			.unwrap_or(false);
+			if master_exists {
+				registry::iter_all()
+					.filter_map(|d| d.id.parse::<AgentType>().ok())
+					.find(|&a| {
+						crate::agent_settings::is_managed(a.as_str())
+							&& registry::get(a)
+								.supports_skill_scope(request.scope)
+					})
+					.into_iter()
+					.collect()
+			} else {
+				Vec::new()
+			}
+		} else {
+			managed_holders
+		}
 	} else {
 		request.agents.clone()
 	};
@@ -521,9 +553,13 @@ pub fn remove_skill_batch(
 			continue;
 		}
 
+		let is_agent_exhaustive = is_exhaustive
+			&& (holders.contains(&agent)
+				|| (holders.is_empty()
+					&& execution_order.first() == Some(&agent)));
 		let plan_result = manager.remove_skill_planned_for_agents_with_prior(
 			name,
-			is_exhaustive && holders.contains(&agent),
+			is_agent_exhaustive,
 			true, // dry_run
 			true, // confirm
 			&target_agents,
@@ -631,8 +667,16 @@ pub fn remove_skill_batch(
 	// Commit path: if predictable failures occurred, reject the WHOLE batch before any write!
 	if !preflight_failures.is_empty() {
 		let all_unsupported = preflight_failures.iter().all(|(_, err)| {
-			matches!(**err, ConfigError::UnsupportedOperation(_))
+			matches!(**err, ConfigError::UnsupportedOperation { .. })
 		});
+		let rejected_targets: Vec<crate::errors::RejectedTarget> =
+			preflight_failures
+				.iter()
+				.map(|(agent, err)| crate::errors::RejectedTarget {
+					agent: agent.as_str().to_string(),
+					reason: err.to_string(),
+				})
+				.collect();
 		let scope_str = scope_to_word(request.scope);
 		let failures_str = preflight_failures
 			.into_iter()
@@ -645,7 +689,10 @@ pub fn remove_skill_batch(
 			"skill removal preflight failed; no removal was performed (nothing was written): {failures_str}"
 		);
 		if all_unsupported {
-			return Err(ConfigError::UnsupportedOperation(message));
+			return Err(ConfigError::UnsupportedOperation {
+				message,
+				rejected_targets: Some(rejected_targets),
+			});
 		} else {
 			return Err(ConfigError::InvalidConfig(message));
 		}
@@ -740,9 +787,13 @@ pub fn remove_skill_batch(
 			continue;
 		}
 
+		let is_agent_exhaustive = is_exhaustive
+			&& (holders.contains(&agent)
+				|| (holders.is_empty()
+					&& execution_order.first() == Some(&agent)));
 		let res = manager.remove_skill_planned_for_agents_with_prior(
 			name,
-			is_exhaustive && holders.contains(&agent),
+			is_agent_exhaustive,
 			false, // dry_run
 			true,  // confirm
 			&in_lock_target_agents,

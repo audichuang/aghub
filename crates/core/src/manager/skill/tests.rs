@@ -708,7 +708,7 @@ fn remove_skill_refuses_master_another_agent_links_to() {
 		.remove_skill_planned("shared-master", false, false, true)
 		.expect_err("must refuse: other slot readers would lose it");
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"unexpected error: {err:?}"
 	);
 	assert!(
@@ -774,7 +774,7 @@ fn remove_skill_refuses_a_shared_slot_other_agents_read() {
 		.remove_skill_planned("native-shared", false, false, true)
 		.expect_err("a shared universal master is not this seam's to take");
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"unexpected error: {err:?}"
 	);
 	assert!(master.join("SKILL.md").exists(), "the master must survive");
@@ -909,7 +909,7 @@ fn single_agent_remove_skill_shared_slot_refused_when_other_reader_enabled() {
 		.expect_err("removal must be refused when cursor also reads the slot");
 
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"expected UnsupportedOperation, got {err:?}"
 	);
 	let message = err.to_string();
@@ -991,7 +991,7 @@ fn single_agent_remove_skill_refused_when_initiator_disabled_and_other_reader_en
 		);
 
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"expected UnsupportedOperation, got {err:?}"
 	);
 	let message = err.to_string();
@@ -1053,7 +1053,7 @@ fn single_agent_remove_skill_project_scope_refused_when_initiator_disabled_and_o
 		);
 
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"expected UnsupportedOperation, got {err:?}"
 	);
 	let message = err.to_string();
@@ -1281,7 +1281,7 @@ fn real_dir_shared_slot_kept_when_initiator_disabled_and_other_reader_enabled()
 		);
 
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"expected UnsupportedOperation, got {err:?}"
 	);
 	let message = err.to_string();
@@ -1365,7 +1365,7 @@ fn real_dir_shared_slot_kept_when_enabled_reader_not_in_request() {
 		);
 
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"expected UnsupportedOperation, got {err:?}"
 	);
 	let message = err.to_string();
@@ -4275,7 +4275,7 @@ fn real_dir_keeps_and_refuses_when_link_belongs_to_unrequested_agent() {
 		.remove_skill_planned_for_agents(name, false, false, true, &requested)
 		.expect_err("execution must be refused");
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"expected UnsupportedOperation, got {err:?}"
 	);
 	let msg = err.to_string();
@@ -4403,7 +4403,7 @@ fn real_dir_git_tracked_single_agent_delete_is_refused() {
 		.expect_err("tracked real directory deletion must be refused");
 
 	assert!(
-		matches!(err, ConfigError::UnsupportedOperation(_)),
+		matches!(err, ConfigError::UnsupportedOperation { .. }),
 		"expected UnsupportedOperation, got {err:?}"
 	);
 	let message = err.to_string();
@@ -4962,7 +4962,7 @@ fn real_dir_with_unrequested_enabled_linker_refuses_the_direct_reader_row() {
 					"{order_name}: execution must be refused for {agent:?}"
 				));
 			assert!(
-				matches!(err, ConfigError::UnsupportedOperation(_)),
+				matches!(err, ConfigError::UnsupportedOperation { .. }),
 				"{order_name}: expected UnsupportedOperation for {agent:?}, got {err:?}"
 			);
 			let msg = err.to_string();

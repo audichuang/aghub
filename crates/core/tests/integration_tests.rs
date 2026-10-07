@@ -730,7 +730,7 @@ fn test_pi_rejects_mcp_workflow() {
 		.unwrap_err();
 	assert!(matches!(
 		err,
-		aghub_core::errors::ConfigError::UnsupportedOperation(_)
+		aghub_core::errors::ConfigError::UnsupportedOperation { .. }
 	));
 }
 
@@ -747,7 +747,7 @@ fn test_trae_rejects_global_mcp() {
 		.unwrap_err();
 	assert!(matches!(
 		err,
-		aghub_core::errors::ConfigError::UnsupportedOperation(_)
+		aghub_core::errors::ConfigError::UnsupportedOperation { .. }
 	));
 }
 
@@ -764,7 +764,7 @@ fn test_jetbrains_ai_rejects_mcp() {
 		.unwrap_err();
 	assert!(matches!(
 		err,
-		aghub_core::errors::ConfigError::UnsupportedOperation(_)
+		aghub_core::errors::ConfigError::UnsupportedOperation { .. }
 	));
 }
 

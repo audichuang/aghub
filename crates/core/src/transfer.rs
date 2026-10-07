@@ -65,6 +65,10 @@ pub struct OperationResult {
 	/// `RemovalKind`'s vocabulary, in `crate::dto::removal`.
 	pub already_present: bool,
 	pub error: Option<String>,
+	pub outcome: Option<String>,
+	pub still_read_by: Option<Vec<String>>,
+	pub still_read_by_managed: Option<Vec<String>>,
+	pub still_read_by_unmanaged: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +116,14 @@ pub struct OperationResultView {
 	pub already_present: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub outcome: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub still_read_by: Option<Vec<String>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub still_read_by_managed: Option<Vec<String>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub still_read_by_unmanaged: Option<Vec<String>>,
 }
 
 impl From<&OperationResult> for OperationResultView {
@@ -132,6 +144,10 @@ impl From<&OperationResult> for OperationResultView {
 			ok: r.success,
 			already_present: r.already_present,
 			error: r.error.clone(),
+			outcome: r.outcome.clone(),
+			still_read_by: r.still_read_by.clone(),
+			still_read_by_managed: r.still_read_by_managed.clone(),
+			still_read_by_unmanaged: r.still_read_by_unmanaged.clone(),
 		}
 	}
 }
@@ -1248,10 +1264,9 @@ fn batch_preflight_error(
 	// aggregation must not relabel the answer (and its HTTP status).
 	// See docs/history/core-transfer.md#batch-refusal-variant-was-flattened
 	let all_unsupported = !error.failures.is_empty()
-		&& error
-			.failures
-			.iter()
-			.all(|f| matches!(f.reason, ConfigError::UnsupportedOperation(_)));
+		&& error.failures.iter().all(|f| {
+			matches!(f.reason, ConfigError::UnsupportedOperation { .. })
+		});
 	let failures = error
 		.failures
 		.into_iter()
@@ -1273,7 +1288,7 @@ fn batch_preflight_error(
 		"{operation} preflight failed; nothing was written: {failures}"
 	);
 	if all_unsupported {
-		ConfigError::UnsupportedOperation(message)
+		ConfigError::unsupported_op(message)
 	} else {
 		ConfigError::InvalidConfig(message)
 	}
@@ -1303,6 +1318,10 @@ fn operation_batch(
 					success,
 					already_present,
 					error,
+					outcome: None,
+					still_read_by: None,
+					still_read_by_managed: None,
+					still_read_by_unmanaged: None,
 				}
 			})
 			.collect(),
@@ -1399,6 +1418,10 @@ pub fn transfer_mcp(
 				success,
 				already_present,
 				error,
+				outcome: None,
+				still_read_by: None,
+				still_read_by_managed: None,
+				still_read_by_unmanaged: None,
 			}
 		})
 		.collect();
@@ -1889,9 +1912,13 @@ fn plan_reconcile_skill(
 
 fn clone_reconcile_error(err: &ConfigError) -> ConfigError {
 	match err {
-		ConfigError::UnsupportedOperation(s) => {
-			ConfigError::UnsupportedOperation(s.clone())
-		}
+		ConfigError::UnsupportedOperation {
+			message,
+			rejected_targets,
+		} => ConfigError::UnsupportedOperation {
+			message: message.clone(),
+			rejected_targets: rejected_targets.clone(),
+		},
 		ConfigError::ResourceNotFound {
 			resource_type,
 			name,
@@ -2053,7 +2080,7 @@ impl ReconcileSkillPlan {
 		agent: &str,
 		still_read_from: &[PathBuf],
 	) -> ConfigError {
-		let ConfigError::UnsupportedOperation(mut message) =
+		let ConfigError::UnsupportedOperation { mut message, .. } =
 			ConfigError::unsupported_operation(
 				"remove for this agent alone",
 				"skill it reads from a location shared with other agents",
@@ -2094,7 +2121,7 @@ impl ReconcileSkillPlan {
 				self.unreadable.join("', '")
 			));
 		}
-		ConfigError::UnsupportedOperation(message)
+		ConfigError::unsupported_op(message)
 	}
 }
 
@@ -2388,7 +2415,35 @@ pub fn reconcile_skill(
 		},
 	)
 	.map_err(|error| batch_preflight_error("skill reconcile", error))?;
-	Ok(operation_batch(report))
+	let mut batch_res = operation_batch(report);
+	if let Some(Ok(ref resp)) = delete_batch_result {
+		let (managed, unmanaged): (Vec<_>, Vec<_>) = resp
+			.keepers
+			.iter()
+			.map(|a| a.as_str().to_string())
+			.partition(|a| crate::agent_settings::is_managed(a));
+		let still_read_by: Vec<String> = resp
+			.keepers
+			.iter()
+			.map(|a| a.as_str().to_string())
+			.collect();
+
+		for r in &mut batch_res.results {
+			if r.action == OperationAction::Delete {
+				if let Some(row) =
+					resp.rows.iter().find(|row| row.agent == r.target.agent)
+				{
+					r.outcome = Some(row.outcome_str().to_string());
+				}
+				if !resp.keepers.is_empty() {
+					r.still_read_by = Some(still_read_by.clone());
+					r.still_read_by_managed = Some(managed.clone());
+					r.still_read_by_unmanaged = Some(unmanaged.clone());
+				}
+			}
+		}
+	}
+	Ok(batch_res)
 }
 
 #[cfg(test)]
@@ -6563,8 +6618,12 @@ mod tests {
 		);
 		match (&preview_err, &reconcile_err) {
 			(
-				ConfigError::UnsupportedOperation(p_msg),
-				ConfigError::UnsupportedOperation(r_msg),
+				ConfigError::UnsupportedOperation {
+					message: p_msg, ..
+				},
+				ConfigError::UnsupportedOperation {
+					message: r_msg, ..
+				},
 			) => {
 				assert_eq!(p_msg, r_msg);
 				assert!(

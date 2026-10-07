@@ -555,7 +555,7 @@ fn test_remove_skill_planned_refused_shared_slot() {
 		.remove_skill_planned("shared-skill", false, false, true)
 		.unwrap_err();
 	assert!(
-		matches!(err, crate::errors::ConfigError::UnsupportedOperation(_)),
+		matches!(err, crate::errors::ConfigError::UnsupportedOperation { .. }),
 		"commit on refused shared slot must return UnsupportedOperation: {err:?}"
 	);
 	assert!(
@@ -642,7 +642,7 @@ fn test_remove_skill_planned_refused_disabled_agent() {
 		.remove_skill_planned("disabled-holder", true, false, true)
 		.unwrap_err();
 	assert!(
-		matches!(err, crate::errors::ConfigError::UnsupportedOperation(_)),
+		matches!(err, crate::errors::ConfigError::UnsupportedOperation { .. }),
 		"commit on refused removal must error with UnsupportedOperation: {err:?}"
 	);
 	assert!(

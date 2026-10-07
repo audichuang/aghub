@@ -243,7 +243,7 @@ branch.
   null on success; missing skills report no-op success with `outcome: "absent"` and exit 0 without an error code,
   whether completely absent or retaining an in-scope lock entry),
   `still_read_from` (paths still reading the
-  skill if kept), batch-level `still_read_by` (unrequested holders that keep the master, copied onto every row),
+  skill if kept), batch-level `still_read_by` (unrequested holders that keep the master, copied onto every row, alongside `still_read_by_managed` and `still_read_by_unmanaged`),
   `master_reclaimed` (on commit, whether Master was removed on disk; in preview `master_reclaimed: false` and, if exhaustive and Master exists, `would_reclaim_master: true`),
   and independent lock prune fields (`pruned_lock_entries`, `would_prune_lock_entries`,
   `prune_error`). Rows preserve the caller's request order. A Master listed under

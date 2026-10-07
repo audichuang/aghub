@@ -200,6 +200,9 @@ impl From<&aghub_core::dto::RemovalView> for DeleteSkillByPathResponse {
 			outcome: v.outcome.into(),
 			error: None,
 			validation_errors: None,
+			still_read_by: None,
+			still_read_by_managed: None,
+			still_read_by_unmanaged: None,
 		}
 	}
 }
@@ -524,6 +527,15 @@ pub struct DeleteSkillByPathResponse {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub validation_errors: Option<Vec<ValidationError>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub still_read_by: Option<Vec<String>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub still_read_by_managed: Option<Vec<String>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub still_read_by_unmanaged: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, TS)]

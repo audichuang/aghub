@@ -1,5 +1,13 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
+
+/// A target rejected during preflight validation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectedTarget {
+	pub agent: String,
+	pub reason: String,
+}
 
 /// Errors that can occur in the core library
 #[derive(Error, Debug)]
@@ -22,8 +30,11 @@ pub enum ConfigError {
 	#[error("Agent validation failed: {0}")]
 	ValidationFailed(String),
 
-	#[error("Unsupported operation for agent: {0}")]
-	UnsupportedOperation(String),
+	#[error("Unsupported operation for agent: {message}")]
+	UnsupportedOperation {
+		message: String,
+		rejected_targets: Option<Vec<RejectedTarget>>,
+	},
 
 	#[error("Invalid configuration: {0}")]
 	InvalidConfig(String),
@@ -59,12 +70,22 @@ impl ConfigError {
 		resource_type: impl Into<String>,
 		agent: impl Into<String>,
 	) -> Self {
-		Self::UnsupportedOperation(format!(
-			"Cannot {} {} for {} agent",
-			operation.into(),
-			resource_type.into(),
-			agent.into()
-		))
+		Self::UnsupportedOperation {
+			message: format!(
+				"Cannot {} {} for {} agent",
+				operation.into(),
+				resource_type.into(),
+				agent.into()
+			),
+			rejected_targets: None,
+		}
+	}
+
+	pub fn unsupported_op(message: impl Into<String>) -> Self {
+		Self::UnsupportedOperation {
+			message: message.into(),
+			rejected_targets: None,
+		}
 	}
 }
 

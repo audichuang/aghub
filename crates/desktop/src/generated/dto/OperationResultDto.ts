@@ -29,4 +29,8 @@ export type OperationResultDto = {
 	 */
 	already_present: boolean;
 	error: string | null;
+	outcome?: string;
+	still_read_by?: Array<string>;
+	still_read_by_managed?: Array<string>;
+	still_read_by_unmanaged?: Array<string>;
 };

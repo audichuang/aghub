@@ -61,4 +61,7 @@ export type DeleteSkillByPathResponse = {
 	outcome: RemovalOutcomeKind;
 	error?: string;
 	validation_errors?: Array<ValidationError>;
+	still_read_by?: Array<string>;
+	still_read_by_managed?: Array<string>;
+	still_read_by_unmanaged?: Array<string>;
 };

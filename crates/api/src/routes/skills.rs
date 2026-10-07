@@ -1359,7 +1359,7 @@ pub async fn delete_skill(
 	params: DeleteSkillParams,
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let resolved = params.resolve_scope()?;
-	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
@@ -1375,18 +1375,122 @@ pub async fn delete_skill(
 	let dry_run = !confirm;
 	let name = name.to_string();
 	let all_agents = params.all_agents.unwrap_or(false);
-	// Only the lock-taking call moves to the blocking pool; every check above
-	// stays exactly where it was, so which error wins is unchanged.
+
 	in_mutation_pool(move || {
-		// `remove_skill_planned` already prunes the lock (`outcome.prune`); the
-		// idempotent-delete contract is owned ONCE in `routes::removal_or_noop`.
-		super::removal_or_noop(
-			manager.remove_skill_planned_for_agents(
-				&name, all_agents, dry_run, confirm, &requested,
+		// Shared batch removal entry; projects outcome and managed/unmanaged holders.
+		// See docs/history/api.md#by-name-delete-and-reconcile-removal-rows-wire-fields.
+		let request = aghub_core::skills::removal::SkillRemovalRequest {
+			target: aghub_core::skills::removal::SkillRemovalTarget::ByName(
+				name.clone(),
 			),
+			scope: resource_scope,
+			project_root,
+			agents: requested,
 			dry_run,
-			|| manager.skill_noop_outcome(&name),
-		)
+			all_agents,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
+			.map_err(ApiError::from)?;
+
+		let primary_row = resp
+			.rows
+			.iter()
+			.find(|r| r.agent == agent.0)
+			.or_else(|| resp.rows.first());
+		if let Some(row) = primary_row {
+			let is_error_verdict = !dry_run
+				&& !matches!(
+					row.verdict,
+					aghub_core::skills::removal::Verdict::Absent
+						| aghub_core::skills::removal::Verdict::LockOnly
+				);
+			if row.is_load_error || is_error_verdict {
+				if let Some(ref err) = row.typed_error {
+					return Err(ApiError::from(err.as_ref()));
+				}
+				if let Some(ref err_msg) = row.error {
+					return Err(ApiError::bad_request(err_msg.clone()));
+				}
+			}
+		}
+
+		let mut paths: Vec<String> = Vec::new();
+		let mut skipped: Vec<String> = Vec::new();
+		for row in &resp.rows {
+			for p in &row.paths {
+				let s = p.display().to_string();
+				if !paths.contains(&s) {
+					paths.push(s);
+				}
+			}
+			for p in &row.skipped {
+				let s = p.display().to_string();
+				if !skipped.contains(&s) {
+					skipped.push(s);
+				}
+			}
+		}
+
+		let executed = resp.rows.iter().any(|r| r.executed);
+		let deleted_path = if executed {
+			paths.first().cloned()
+		} else {
+			None
+		};
+
+		let (pruned_lock_entries, would_prune_lock_entries, prune_error) =
+			super::project_prune_status(resp.prune);
+
+		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
+			if !resp.keepers.is_empty() {
+				let (managed, unmanaged): (Vec<_>, Vec<_>) = resp
+					.keepers
+					.iter()
+					.map(|a| a.as_str().to_string())
+					.partition(|a| aghub_core::agent_settings::is_managed(a));
+				let all: Vec<String> = resp
+					.keepers
+					.iter()
+					.map(|a| a.as_str().to_string())
+					.collect();
+				(Some(all), Some(managed), Some(unmanaged))
+			} else {
+				(None, None, None)
+			};
+
+		let (outcome, needs_confirm, success) = if let Some(row) = primary_row {
+			(
+				row.outcome.into(),
+				row.needs_confirm,
+				!matches!(
+					row.verdict,
+					aghub_core::skills::removal::Verdict::Partial
+				),
+			)
+		} else {
+			(crate::dto::skill::RemovalOutcomeKind::Absent, false, true)
+		};
+
+		Ok(Json(DeleteSkillByPathResponse {
+			success,
+			dry_run,
+			executed,
+			needs_confirm,
+			paths,
+			skipped,
+			deleted_path,
+			pruned_lock_entries,
+			would_prune_lock_entries,
+			prune_error,
+			outcome,
+			error: None,
+			validation_errors: None,
+			still_read_by,
+			still_read_by_managed,
+			still_read_by_unmanaged,
+		}))
 	})
 	.await
 }
@@ -9563,6 +9667,304 @@ mod tests {
 				serde_json::from_str(&response.into_string().unwrap()).unwrap();
 			assert_eq!(body["code"], "PROJECT_ROOT_REQUIRED");
 		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_removal_row_reports_outcome_and_managed_holders() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let disabled: std::collections::BTreeSet<String> =
+					["opencode".to_string()].into_iter().collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					data_dir, &disabled,
+				)
+				.unwrap();
+
+				let project = home.join("proj");
+				let master = project.join(".aghub/shared-skill");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: shared-skill\ndescription: shared\n---\n",
+				)
+				.unwrap();
+
+				let shared_slot = project.join(".agents/skills/shared-skill");
+				std::fs::create_dir_all(shared_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &shared_slot).unwrap();
+
+				let claude_slot = project.join(".claude/skills/shared-skill");
+				std::fs::create_dir_all(claude_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &claude_slot).unwrap();
+
+				let response = client
+					.post("/api/v1/skills/reconcile")
+					.json(&serde_json::json!({
+						"source": {
+							"agent": "claude",
+							"scope": "project",
+							"project_root": project.display().to_string(),
+							"name": "shared-skill"
+						},
+						"removed": ["claude"],
+						"confirm": true
+					}))
+					.dispatch();
+
+				assert_eq!(response.status(), rocket::http::Status::Ok);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				let results =
+					body["results"].as_array().expect("results array");
+				assert_eq!(results.len(), 1);
+				let row = &results[0];
+
+				assert_eq!(row["agent"], "claude");
+				assert_eq!(row["action"], "delete");
+				assert!(
+					row.get("outcome").is_some(),
+					"removal row must carry outcome: {row}"
+				);
+				let outcome = row["outcome"].as_str().expect("outcome string");
+				assert!(!outcome.is_empty());
+
+				let managed = row["still_read_by_managed"]
+					.as_array()
+					.expect("still_read_by_managed array");
+				let unmanaged = row["still_read_by_unmanaged"]
+					.as_array()
+					.expect("still_read_by_unmanaged array");
+				let all = row["still_read_by"]
+					.as_array()
+					.expect("still_read_by array");
+
+				assert!(
+					unmanaged.contains(&serde_json::json!("opencode")),
+					"unmanaged list must contain disabled opencode: {unmanaged:?}"
+				);
+				assert!(
+					!managed.contains(&serde_json::json!("opencode")),
+					"managed list must not contain disabled opencode: {managed:?}"
+				);
+				assert!(
+					all.contains(&serde_json::json!("opencode")),
+					"all holders list must contain opencode: {all:?}"
+				);
+				assert!(
+					!managed.is_empty(),
+					"managed list must contain remaining enabled holders: {managed:?}"
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_preview_and_commit_carry_outcome_and_managed_holders() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let disabled: std::collections::BTreeSet<String> =
+					["opencode".to_string()].into_iter().collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					data_dir, &disabled,
+				)
+				.unwrap();
+
+				let project = home.join("proj");
+				let master = project.join(".aghub/by-name-skill");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: by-name-skill\ndescription: test\n---\n",
+				)
+				.unwrap();
+
+				let shared_slot = project.join(".agents/skills/by-name-skill");
+				std::fs::create_dir_all(shared_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &shared_slot).unwrap();
+
+				let claude_slot = project.join(".claude/skills/by-name-skill");
+				std::fs::create_dir_all(claude_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &claude_slot).unwrap();
+
+				// 1. Dry-run preview (confirm omitted)
+				let preview_resp = client
+					.delete(format!(
+						"/api/v1/agents/claude/skills/by-name-skill?scope=project&project_root={}",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(preview_resp.status(), rocket::http::Status::Ok);
+				let preview_body: serde_json::Value = serde_json::from_str(
+					&preview_resp.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				assert_eq!(preview_body["dry_run"], true);
+				assert!(
+					preview_body.get("outcome").is_some(),
+					"preview must carry outcome: {preview_body}"
+				);
+				let preview_unmanaged = preview_body["still_read_by_unmanaged"]
+					.as_array()
+					.expect("still_read_by_unmanaged");
+				let preview_managed = preview_body["still_read_by_managed"]
+					.as_array()
+					.expect("still_read_by_managed");
+				let preview_all = preview_body["still_read_by"]
+					.as_array()
+					.expect("still_read_by");
+
+				assert!(
+					preview_unmanaged.contains(&serde_json::json!("opencode"))
+				);
+				assert!(
+					!preview_managed.contains(&serde_json::json!("opencode"))
+				);
+				assert!(preview_all.contains(&serde_json::json!("opencode")));
+				assert!(!preview_managed.is_empty());
+				assert!(
+					claude_slot.exists(),
+					"preview must not delete disk files"
+				);
+
+				// 2. Commit (confirm=true)
+				let commit_resp = client
+					.delete(format!(
+						"/api/v1/agents/claude/skills/by-name-skill?scope=project&project_root={}&confirm=true",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(commit_resp.status(), rocket::http::Status::Ok);
+				let commit_body: serde_json::Value = serde_json::from_str(
+					&commit_resp.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				assert_eq!(commit_body["dry_run"], false);
+				assert_eq!(commit_body["outcome"], "removed");
+				let commit_unmanaged = commit_body["still_read_by_unmanaged"]
+					.as_array()
+					.expect("still_read_by_unmanaged");
+				let commit_managed = commit_body["still_read_by_managed"]
+					.as_array()
+					.expect("still_read_by_managed");
+				let commit_all = commit_body["still_read_by"]
+					.as_array()
+					.expect("still_read_by");
+
+				assert!(
+					commit_unmanaged.contains(&serde_json::json!("opencode"))
+				);
+				assert!(
+					!commit_managed.contains(&serde_json::json!("opencode"))
+				);
+				assert!(commit_all.contains(&serde_json::json!("opencode")));
+				assert!(!commit_managed.is_empty());
+				assert!(
+					!claude_slot.exists(),
+					"commit must remove requested slot"
+				);
+				assert!(
+					master.exists(),
+					"master must be kept since shared slot survives"
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_preflight_rejection_carries_structured_rejected_targets()
+	{
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let project = home.join("proj");
+				let master = project.join(".aghub/notebooklm");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: notebooklm\ndescription: test\n---\n",
+				)
+				.unwrap();
+
+				let claude_slot = project.join(".claude/skills/notebooklm");
+				std::fs::create_dir_all(claude_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &claude_slot).unwrap();
+
+				let shared_slot = project.join(".agents/skills/notebooklm");
+				std::fs::create_dir_all(shared_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &shared_slot).unwrap();
+
+				let cursor_slot = project.join(".cursor/skills/notebooklm");
+				std::fs::create_dir_all(cursor_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &cursor_slot).unwrap();
+
+				let opencode_slot = project.join(".opencode/skills/notebooklm");
+				std::fs::create_dir_all(opencode_slot.parent().unwrap())
+					.unwrap();
+				std::os::unix::fs::symlink(&master, &opencode_slot).unwrap();
+
+				let response = client
+					.delete(format!(
+						"/api/v1/agents/opencode/skills/notebooklm?scope=project&project_root={}&confirm=true",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(
+					response.status(),
+					rocket::http::Status::UnprocessableEntity
+				);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				assert_eq!(body["code"], "UNSUPPORTED_OPERATION");
+				let rejected = body["rejected_targets"]
+					.as_array()
+					.expect("rejected_targets array");
+				assert_eq!(rejected.len(), 1);
+				assert_eq!(rejected[0]["agent"], "opencode");
+				let reason =
+					rejected[0]["reason"].as_str().expect("reason string");
+				assert!(
+					reason.contains("location shared with other agents"),
+					"reason must contain refusal detail, got: {reason}"
+				);
+			});
+		});
 	}
 }
 

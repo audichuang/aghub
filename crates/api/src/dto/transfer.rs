@@ -164,6 +164,18 @@ pub struct OperationResultDto {
 	pub already_present: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub outcome: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub still_read_by: Option<Vec<String>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub still_read_by_managed: Option<Vec<String>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub still_read_by_unmanaged: Option<Vec<String>>,
 }
 
 impl From<OperationResult> for OperationResultDto {
@@ -180,6 +192,10 @@ impl From<OperationResult> for OperationResultDto {
 			ok: value.success,
 			already_present: value.already_present,
 			error: value.error,
+			outcome: value.outcome,
+			still_read_by: value.still_read_by,
+			still_read_by_managed: value.still_read_by_managed,
+			still_read_by_unmanaged: value.still_read_by_unmanaged,
 		}
 	}
 }
@@ -228,6 +244,10 @@ mod tests {
 					// `false` cannot catch a mapper that hard-codes it.
 					already_present: true,
 					error: None,
+					outcome: None,
+					still_read_by: None,
+					still_read_by_managed: None,
+					still_read_by_unmanaged: None,
 				},
 				OperationResult {
 					target: InstallTarget {
@@ -239,6 +259,10 @@ mod tests {
 					success: false,
 					already_present: false,
 					error: Some("nope".to_string()),
+					outcome: None,
+					still_read_by: None,
+					still_read_by_managed: None,
+					still_read_by_unmanaged: None,
 				},
 			],
 		};
@@ -267,6 +291,10 @@ mod tests {
 			success: true,
 			error: None,
 			already_present: false,
+			outcome: None,
+			still_read_by: None,
+			still_read_by_managed: None,
+			still_read_by_unmanaged: None,
 		};
 		let dto =
 			serde_json::to_string(&OperationResultDto::from(result.clone()))

@@ -250,3 +250,14 @@ Pinned by: `delete_by_path_rejects_trailing_dotdot_project_agents_slot`,
 `delete_by_path_accepts_dotdot_in_project_root` (`crates/api/src/routes/skills.rs`);
 `assert_strictly_contained_rejects_inner_root_nested_in_another_root`
 (`crates/core/src/skills/removal.rs`).
+
+## by-name delete and reconcile removal rows wire fields
+
+`DELETE /agents/<agent>/skills/<name>` and `POST /skills/reconcile` deletion rows now share the core batch removal entry (`remove_skill_batch`).
+Removal rows in both endpoints now project the core-decided `outcome` and partition surviving holders into `still_read_by_managed` and `still_read_by_unmanaged` (while deriving `still_read_by` for compatibility).
+In addition, whole-batch preflight rejection preserves the HTTP 422 status and `UNSUPPORTED_OPERATION` code, while providing a structured `rejected_targets: [{agent, reason}]` payload.
+
+Pinned by: `reconcile_skill_removal_row_reports_outcome_and_managed_holders`,
+`delete_by_name_preview_and_commit_carry_outcome_and_managed_holders`,
+`delete_by_name_preflight_rejection_carries_structured_rejected_targets`
+(`crates/api/src/routes/skills.rs`).

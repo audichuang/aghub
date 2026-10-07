@@ -2686,7 +2686,7 @@ pub fn verify_shape(
 		// slot, so never phrase this as "read by".
 		format!(" (the skills directory of {})", blocker.agents.join(", "))
 	};
-	Err(crate::errors::ConfigError::UnsupportedOperation(format!(
+	Err(crate::errors::ConfigError::unsupported_op(format!(
 		"Cannot remove skill '{name}': {} at {}{writers} — {detail}. Run \
 		 `aghub-cli repair {name}` first; deleting now could destroy content \
 		 aghub cannot recover.",

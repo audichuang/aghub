@@ -8,6 +8,7 @@ pub fn not_found(req: &Request) -> Json<ErrorBody> {
 	Json(ErrorBody {
 		error: format!("Route '{}' not found", req.uri()),
 		code: "NOT_FOUND",
+		rejected_targets: None,
 	})
 }
 
@@ -17,6 +18,7 @@ pub fn unprocessable_entity(_: &Request) -> Json<ErrorBody> {
 		error: "Unprocessable entity — check your request body and parameters"
 			.to_string(),
 		code: "UNPROCESSABLE_ENTITY",
+		rejected_targets: None,
 	})
 }
 
@@ -25,6 +27,7 @@ pub fn internal_error(_: &Request) -> Json<ErrorBody> {
 	Json(ErrorBody {
 		error: "Internal server error".to_string(),
 		code: "INTERNAL_SERVER_ERROR",
+		rejected_targets: None,
 	})
 }
 
@@ -40,5 +43,6 @@ pub fn default_catcher(
 			status.reason().unwrap_or("Unknown Error")
 		),
 		code: "UNKNOWN_ERROR",
+		rejected_targets: None,
 	})
 }
