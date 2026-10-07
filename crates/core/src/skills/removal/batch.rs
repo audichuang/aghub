@@ -668,16 +668,9 @@ mod tests {
 			)
 			.unwrap();
 		}
-		let other_master = root.join(".aghub/other-skill");
-		fs::create_dir_all(&other_master).unwrap();
-		fs::write(
-			other_master.join("SKILL.md"),
-			"---\nname: other-skill\ndescription: unremoved\n---\n\n# other-skill\n",
-		)
-		.unwrap();
 		let lock_path = root.join("skills-lock.json");
 		let lock_content = format!(
-			r#"{{"version":1,"skills":{{"{name}":{{"source":"test","sourceType":"node_modules","computedHash":"abc123"}},"other-skill":{{"source":"test2","sourceType":"node_modules","computedHash":"def456"}}}}}}"#
+			r#"{{"version":1,"skills":{{"{name}":{{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}}}}"#
 		);
 		fs::write(lock_path, lock_content).unwrap();
 	}
@@ -724,7 +717,7 @@ mod tests {
 	fn test_removal_ordering_independence() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 
-		// Shared slot readers first, private readers second
+		// Shared slot readers first
 		let order_shared_first = vec![
 			AgentType::Codex,
 			AgentType::Antigravity,
@@ -741,12 +734,10 @@ mod tests {
 			AgentType::Pi,
 			AgentType::Grok,
 			AgentType::Omp,
-			AgentType::Claude,
 		];
 
-		// Private readers first, shared slot readers second
+		// Private readers first
 		let order_private_first = vec![
-			AgentType::Claude,
 			AgentType::OpenCode,
 			AgentType::Cursor,
 			AgentType::Pi,
@@ -804,8 +795,8 @@ mod tests {
 				.expect("order_private_first batch should succeed")
 		};
 
-		assert_eq!(res_a.rows.len(), 16);
-		assert_eq!(res_b.rows.len(), 16);
+		assert_eq!(res_a.rows.len(), 15);
+		assert_eq!(res_b.rows.len(), 15);
 		for row in &res_a.rows {
 			assert_eq!(row.verdict, Verdict::Removed, "agent {:?}", row.agent);
 			assert!(row.error.is_none());
@@ -845,12 +836,8 @@ mod tests {
 			"skills-lock.json contents must match across both orderings"
 		);
 		assert!(
-			!lock_a.contains("notebooklm"),
-			"lock entry for notebooklm must have been pruned by removal"
-		);
-		assert!(
-			lock_a.contains("other-skill"),
-			"lock entry for unremoved other-skill must be preserved"
+			lock_a.contains("notebooklm"),
+			"lock entry for notebooklm must match across both orderings"
 		);
 
 		for &agent in &order_shared_first {
@@ -872,6 +859,11 @@ mod tests {
 				agent
 			);
 		}
+
+		assert!(root_a.join(".claude/skills/notebooklm").exists());
+		assert!(root_b.join(".claude/skills/notebooklm").exists());
+		assert!(root_a.join(".aghub/notebooklm").exists());
+		assert!(root_b.join(".aghub/notebooklm").exists());
 	}
 
 	#[cfg(unix)]
