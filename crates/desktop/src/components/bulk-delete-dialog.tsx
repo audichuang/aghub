@@ -76,15 +76,20 @@ export function BulkDeleteDialog({
 		onClose();
 	};
 
-	const deleteMutation = useMutation({
-		mutationFn: async () => {
-			const requests = buildBulkDeleteRequests({
+	const { requests, skippedGroupKeys } = useMemo(
+		() =>
+			buildBulkDeleteRequests({
 				groups,
 				resourceType,
 				managedAgentIds,
 				includeUnmanaged,
 				projectPath,
-			});
+			}),
+		[groups, resourceType, managedAgentIds, includeUnmanaged, projectPath],
+	);
+
+	const deleteMutation = useMutation({
+		mutationFn: async () => {
 			const promises: Promise<void>[] = [];
 			const deleteInfo: Array<{
 				name: string;
@@ -141,25 +146,41 @@ export function BulkDeleteDialog({
 			}
 
 			const results = await Promise.allSettled(promises);
-			const failures = results
+			const failures: Array<{
+				name: string;
+				agent?: string | null;
+				error: string | null;
+			}> = results
 				.map((r, i) => ({ result: r, info: deleteInfo[i] }))
 				.filter(({ result }) => result.status === "rejected")
 				.map(({ result, info }) => ({
-					...info,
-					reason: (result as PromiseRejectedResult).reason,
+					name: info.name,
+					agent: info.agent,
+					error:
+						(result as PromiseRejectedResult).reason instanceof
+						Error
+							? (
+									(result as PromiseRejectedResult)
+										.reason as Error
+								).message
+							: null,
 				}));
+
+			for (const key of skippedGroupKeys) {
+				const group = groups.find((g) => g.key === key);
+				failures.push({
+					name: group?.items[0]?.name ?? key,
+					agent: group?.items[0]?.agent ?? null,
+					error: t("bulkDeleteKept"),
+				});
+			}
+
 			if (failures.length > 0) {
 				console.error(
 					`${resourceType} bulk delete failures:`,
 					failures,
 				);
-				throw new BulkOperationError(
-					failures.map(({ name, agent, reason }) => ({
-						name,
-						agent,
-						error: reason instanceof Error ? reason.message : null,
-					})),
-				);
+				throw new BulkOperationError(failures);
 			}
 			return { deleted: promises.length };
 		},
@@ -225,10 +246,10 @@ export function BulkDeleteDialog({
 										uppercase
 									"
 								>
-									{t("deleteSkillUnmanagedTitle")}
+									{t("bulkDeleteUnmanagedTitle")}
 								</h4>
 								<p className="mb-2 text-xs text-muted">
-									{t("deleteSkillUnmanagedHint")}
+									{t("bulkDeleteUnmanagedHint")}
 								</p>
 								<div className="mb-3 space-y-1">
 									{unmanagedAgents.map((agent) => (
@@ -274,7 +295,10 @@ export function BulkDeleteDialog({
 							variant="danger"
 							size="md"
 							onPress={() => deleteMutation.mutate()}
-							isDisabled={deleteMutation.isPending}
+							isDisabled={
+								deleteMutation.isPending ||
+								requests.length === 0
+							}
 							className="min-h-[44px] min-w-[120px]"
 						>
 							{deleteMutation.isPending ? (

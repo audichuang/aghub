@@ -626,6 +626,9 @@ export default {
 	bulkDeleteKept: "kept: another agent still reads it",
 	bulkDeletePartial: "only partly removed",
 	bulkDeleteFailedItems: "{{count}} item(s) failed to delete: {{items}}",
+	bulkDeleteUnmanagedTitle: "Unmanaged agents still read selected skills",
+	bulkDeleteUnmanagedHint:
+		"These agents are disabled (or undetected); aghub does not touch them by default, but the skills stay on disk while their link remains.",
 	favoriteSaveError: "Failed to update your favourites",
 	starSkill: "Favorite",
 	unstarSkill: "Unfavorite",

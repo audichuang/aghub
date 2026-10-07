@@ -587,6 +587,9 @@ const zhHans: typeof en = {
 	bulkDeleteKept: "已保留：其他代理仍在读取",
 	bulkDeletePartial: "只删除了一部分",
 	bulkDeleteFailedItems: "{{count}} 项删除失败: {{items}}",
+	bulkDeleteUnmanagedTitle: "未管理的代理仍在读取选取的技能",
+	bulkDeleteUnmanagedHint:
+		"这些代理已停用（或未检测到），aghub 默认不动它们；但只要它们的链接还在，技能就会保留在磁盘上。",
 	favoriteSaveError: "无法更新你的收藏",
 	starSkill: "收藏技能",
 	unstarSkill: "取消收藏",

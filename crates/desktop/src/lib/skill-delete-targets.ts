@@ -62,6 +62,7 @@ export interface BulkDeleteRequest {
 	scope: "global" | "project";
 	projectRoot?: string;
 	agents: string[];
+	/** Retained for observable outcome assertions in unit tests. */
 	sourcePath?: string | null;
 }
 
@@ -73,12 +74,18 @@ export interface BuildBulkDeleteRequestsOptions {
 	projectPath?: string;
 }
 
+export interface BuildBulkDeleteRequestsResult {
+	requests: BulkDeleteRequest[];
+	skippedGroupKeys: string[];
+}
+
 /**
  * Builds the list of delete requests for bulk delete.
  *
  * For skills, disabled agents are excluded from both target items and the
  * `agents` parameter unless the user explicitly ticked consent
- * (`includeUnmanaged === true`).
+ * (`includeUnmanaged === true`). Groups with no named agents are returned in
+ * `skippedGroupKeys`.
  */
 export function buildBulkDeleteRequests({
 	groups,
@@ -86,9 +93,13 @@ export function buildBulkDeleteRequests({
 	managedAgentIds,
 	includeUnmanaged,
 	projectPath,
-}: BuildBulkDeleteRequestsOptions): BulkDeleteRequest[] {
+}: BuildBulkDeleteRequestsOptions): BuildBulkDeleteRequestsResult {
 	const requests: BulkDeleteRequest[] = [];
+	const skippedGroupKeys: string[] = [];
 	const seen = new Set<string>();
+
+	const scopeOf = (item: DeleteTargetItem): "global" | "project" =>
+		item.source === "project" ? "project" : "global";
 
 	for (const group of groups) {
 		const groupResourceType = group.resourceType ?? resourceType;
@@ -98,26 +109,33 @@ export function buildBulkDeleteRequests({
 			: null;
 		const candidateItems = targets ? targets.named : group.items;
 
-		for (const item of candidateItems) {
-			if (!item.agent) continue;
-			const scope: "global" | "project" =
-				item.source === "project" ? "project" : "global";
+		const validCandidateItems = candidateItems.filter(
+			(item) => !!item.agent,
+		);
+		if (validCandidateItems.length === 0) {
+			skippedGroupKeys.push(group.key);
+			continue;
+		}
+
+		for (const item of validCandidateItems) {
+			const agent = item.agent as string;
+			const scope = scopeOf(item);
 			const projectRoot = scope === "project" ? projectPath : undefined;
 
 			// Every agent this group is deleted from at this scope. A
 			// shared config file or Referrer is removed only when all of
 			// its readers ride in the same request. Disabled agents must
 			// never be named without consent.
-			const scopeAgents = (targets ? targets.named : candidateItems)
-				.filter((other) => (other.source ?? "global") === scope)
+			const scopeAgents = candidateItems
+				.filter((other) => scopeOf(other) === scope)
 				.flatMap((other) => (other.agent ? [other.agent] : []));
 
 			const dedupKey =
 				groupResourceType === "skill" && item.source_path
 					? `skill:${item.source_path}:${scope}`
 					: groupResourceType === "skill"
-						? `skill:${item.agent}:${group.key}:${scope}`
-						: `${groupResourceType}:${item.agent}:${item.name}:${scope}`;
+						? `skill:${agent}:${group.key}:${scope}`
+						: `${groupResourceType}:${agent}:${item.name}:${scope}`;
 
 			if (seen.has(dedupKey)) continue;
 			seen.add(dedupKey);
@@ -126,7 +144,7 @@ export function buildBulkDeleteRequests({
 				resourceType: groupResourceType === "mcp" ? "mcp" : "skill",
 				name: item.name,
 				groupKey: group.key,
-				agent: item.agent,
+				agent,
 				scope,
 				projectRoot,
 				agents: [...new Set(scopeAgents)],
@@ -135,7 +153,7 @@ export function buildBulkDeleteRequests({
 		}
 	}
 
-	return requests;
+	return { requests, skippedGroupKeys };
 }
 
 /**
