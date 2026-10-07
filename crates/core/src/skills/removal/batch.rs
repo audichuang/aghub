@@ -161,6 +161,67 @@ pub fn apply_prune_fields(
 	}
 }
 
+/// Holders of a skill that survive a removal, partitioned into managed and unmanaged.
+#[derive(Debug, Clone, Default)]
+pub struct SkillHoldersView {
+	pub all: Vec<String>,
+	pub managed: Vec<String>,
+	pub unmanaged: Vec<String>,
+}
+
+impl SkillHoldersView {
+	pub fn is_empty(&self) -> bool {
+		self.all.is_empty()
+	}
+}
+
+/// Unified wire view for a single-skill removal across one or more target agents.
+#[derive(Debug, Clone)]
+pub struct SingleSkillRemovalView {
+	pub removal_view: crate::dto::RemovalView,
+	pub holders: SkillHoldersView,
+	pub prune: PruneStatus,
+}
+
+fn clone_config_error(err: &ConfigError) -> ConfigError {
+	match err {
+		ConfigError::UnsupportedOperation {
+			message,
+			rejected_targets,
+		} => ConfigError::UnsupportedOperation {
+			message: message.clone(),
+			rejected_targets: rejected_targets.clone(),
+		},
+		ConfigError::ResourceNotFound {
+			resource_type,
+			name,
+		} => ConfigError::ResourceNotFound {
+			resource_type: resource_type.clone(),
+			name: name.clone(),
+		},
+		ConfigError::ResourceExists {
+			resource_type,
+			name,
+		} => ConfigError::ResourceExists {
+			resource_type: resource_type.clone(),
+			name: name.clone(),
+		},
+		ConfigError::NotFound { path } => {
+			ConfigError::NotFound { path: path.clone() }
+		}
+		ConfigError::ValidationFailed(s) => {
+			ConfigError::ValidationFailed(s.clone())
+		}
+		ConfigError::InvalidConfig(s) => ConfigError::InvalidConfig(s.clone()),
+		ConfigError::Json(e) => {
+			ConfigError::InvalidConfig(format!("JSON error: {e}"))
+		}
+		ConfigError::Io(e) => {
+			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
+		}
+	}
+}
+
 /// Response returned by the batch skill removal entry point.
 #[derive(Debug, Clone)]
 pub struct SkillRemovalResponse {
@@ -173,6 +234,27 @@ pub struct SkillRemovalResponse {
 }
 
 impl SkillRemovalResponse {
+	/// Holders of the skill that keep the master, split into managed vs unmanaged.
+	pub fn holders_view(&self) -> SkillHoldersView {
+		if self.keepers.is_empty() {
+			return SkillHoldersView::default();
+		}
+		let all: Vec<String> = self
+			.keepers
+			.iter()
+			.map(|a| a.as_str().to_string())
+			.collect();
+		let (managed, unmanaged): (Vec<String>, Vec<String>) = all
+			.iter()
+			.cloned()
+			.partition(|a| crate::agent_settings::is_managed(a));
+		SkillHoldersView {
+			all,
+			managed,
+			unmanaged,
+		}
+	}
+
 	/// Project this response into the shared [`AgentBatchView`] wire envelope.
 	pub fn to_batch_view(
 		&self,
@@ -247,20 +329,13 @@ impl SkillRemovalResponse {
 			}
 
 			// Unrequested holders that keep the master, split into managed vs unmanaged.
-			if !self.keepers.is_empty() {
-				let (managed, unmanaged): (Vec<_>, Vec<_>) = self
-					.keepers
-					.iter()
-					.map(|a| a.as_str().to_string())
-					.partition(|a| crate::agent_settings::is_managed(a));
-				payload["still_read_by"] = serde_json::json!(self
-					.keepers
-					.iter()
-					.map(|a| a.as_str())
-					.collect::<Vec<_>>());
-				payload["still_read_by_managed"] = serde_json::json!(managed);
+			let holders = self.holders_view();
+			if !holders.is_empty() {
+				payload["still_read_by"] = serde_json::json!(holders.all);
+				payload["still_read_by_managed"] =
+					serde_json::json!(holders.managed);
 				payload["still_read_by_unmanaged"] =
-					serde_json::json!(unmanaged);
+					serde_json::json!(holders.unmanaged);
 			}
 
 			if dry_run {
@@ -289,6 +364,109 @@ impl SkillRemovalResponse {
 			failed_count,
 			results,
 		}
+	}
+
+	/// Project this batch removal response into an aggregate single-skill removal view.
+	///
+	/// Yields the aggregate outcome, success, paths, and any fatal error across ALL rows.
+	pub fn to_single_view(
+		&self,
+		dry_run: bool,
+	) -> Result<SingleSkillRemovalView> {
+		for row in &self.rows {
+			let is_absent_noop =
+				matches!(row.verdict, Verdict::Absent | Verdict::LockOnly)
+					&& matches!(
+						row.typed_error.as_deref(),
+						Some(ConfigError::ResourceNotFound { .. })
+					);
+			let is_fatal_error =
+				row.is_load_error || (!dry_run && !is_absent_noop);
+			if is_fatal_error {
+				if let Some(ref err) = row.typed_error {
+					return Err(clone_config_error(err));
+				}
+				if let Some(ref msg) = row.error {
+					return Err(ConfigError::InvalidConfig(msg.clone()));
+				}
+			}
+		}
+
+		let mut paths: Vec<String> = Vec::new();
+		for row in &self.rows {
+			for p in &row.paths {
+				let s = p.display().to_string();
+				if !paths.contains(&s) {
+					paths.push(s);
+				}
+			}
+		}
+
+		let mut skipped: Vec<String> = Vec::new();
+		for row in &self.rows {
+			for p in &row.skipped {
+				let s = p.display().to_string();
+				if !skipped.contains(&s) {
+					skipped.push(s);
+				}
+			}
+		}
+
+		let executed = self.rows.iter().any(|r| r.executed);
+		let needs_confirm = self.rows.iter().any(|r| r.needs_confirm);
+		let deleted_path = if executed {
+			paths.first().cloned()
+		} else {
+			None
+		};
+
+		let outcome = if self
+			.rows
+			.iter()
+			.any(|r| r.outcome == crate::dto::RemovalKind::Partial)
+		{
+			crate::dto::RemovalKind::Partial
+		} else if self
+			.rows
+			.iter()
+			.any(|r| r.outcome == crate::dto::RemovalKind::Removed)
+		{
+			crate::dto::RemovalKind::Removed
+		} else if self
+			.rows
+			.iter()
+			.any(|r| r.outcome == crate::dto::RemovalKind::Preview)
+		{
+			crate::dto::RemovalKind::Preview
+		} else if self
+			.rows
+			.iter()
+			.any(|r| r.outcome == crate::dto::RemovalKind::Kept)
+		{
+			crate::dto::RemovalKind::Kept
+		} else {
+			crate::dto::RemovalKind::Absent
+		};
+
+		let success = outcome != crate::dto::RemovalKind::Partial
+			&& self.rows.iter().all(|r| r.verdict != Verdict::Partial);
+
+		let removal_view = crate::dto::RemovalView {
+			success,
+			dry_run,
+			executed,
+			needs_confirm,
+			paths,
+			skipped,
+			deleted_path,
+			outcome,
+		};
+
+		Ok(SingleSkillRemovalView {
+			removal_view,
+			holders: self.holders_view(),
+			prune: self.prune.clone(),
+		})
 	}
 }
 
@@ -450,35 +628,11 @@ pub fn remove_skill_batch(
 	let target_agents: Vec<AgentType> = if request.agents.is_empty()
 		&& request.all_agents
 	{
-		let managed_holders: Vec<AgentType> = holders
+		holders
 			.iter()
 			.filter(|agent| crate::agent_settings::is_managed(agent.as_str()))
 			.copied()
-			.collect();
-		if managed_holders.is_empty() {
-			let master_exists = crate::skills::shape::master_path(
-				request.scope,
-				request.project_root.as_deref(),
-				name,
-			)
-			.map(|p| p.exists())
-			.unwrap_or(false);
-			if master_exists {
-				registry::iter_all()
-					.filter_map(|d| d.id.parse::<AgentType>().ok())
-					.find(|&a| {
-						crate::agent_settings::is_managed(a.as_str())
-							&& registry::get(a)
-								.supports_skill_scope(request.scope)
-					})
-					.into_iter()
-					.collect()
-			} else {
-				Vec::new()
-			}
-		} else {
-			managed_holders
-		}
+			.collect()
 	} else {
 		request.agents.clone()
 	};

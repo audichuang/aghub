@@ -1299,3 +1299,87 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 		assert!(output.get("would_reclaim_master").is_none());
 	}
 }
+
+#[cfg(unix)]
+#[test]
+fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let (_h, _d) = isolate_env(&temp);
+	let home = temp.path().join("home");
+	let name = "orphan-skill";
+	let master = home.join(".aghub").join(name);
+	fs::create_dir_all(&master).unwrap();
+	fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+
+	// 1. Without all_agents: orphan master must be kept
+	let req_without = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName(name.to_string()),
+		scope: ResourceScope::GlobalOnly,
+		project_root: None,
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+	let res_without = remove_skill_batch(&req_without).unwrap();
+	assert!(
+		master.exists(),
+		"orphan master must be kept when all_agents is false"
+	);
+	assert!(!res_without.master_reclaimed);
+
+	// 2. With all_agents: orphan master must be reclaimed
+	let req_with = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName(name.to_string()),
+		scope: ResourceScope::GlobalOnly,
+		project_root: None,
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: true,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+	let res_with = remove_skill_batch(&req_with).unwrap();
+	assert!(
+		!master.exists(),
+		"orphan master must be reclaimed when all_agents is true"
+	);
+	assert!(res_with.master_reclaimed);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_to_single_view_aggregates_rows_and_holders() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let (_h, _d) = isolate_env(&temp);
+	let home = temp.path().join("home");
+	let name = "single-view-test";
+	setup_master_and_referrers(&home, name, &["claude", "cursor"]);
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName(name.to_string()),
+		scope: ResourceScope::GlobalOnly,
+		project_root: None,
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+	let res = remove_skill_batch(&req).unwrap();
+	let single = res.to_single_view(false).unwrap();
+	assert!(single.removal_view.success);
+	assert_eq!(
+		single.removal_view.outcome,
+		crate::dto::RemovalKind::Removed
+	);
+	assert!(!single.holders.is_empty());
+	assert!(single.holders.all.contains(&"cursor".to_string()));
+}

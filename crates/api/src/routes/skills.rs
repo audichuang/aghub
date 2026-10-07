@@ -1394,97 +1394,34 @@ pub async fn delete_skill(
 		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
 			.map_err(ApiError::from)?;
 
-		let primary_row = resp
-			.rows
-			.iter()
-			.find(|r| r.agent == agent.0)
-			.or_else(|| resp.rows.first());
-		if let Some(row) = primary_row {
-			let is_error_verdict = !dry_run
-				&& !matches!(
-					row.verdict,
-					aghub_core::skills::removal::Verdict::Absent
-						| aghub_core::skills::removal::Verdict::LockOnly
-				);
-			if row.is_load_error || is_error_verdict {
-				if let Some(ref err) = row.typed_error {
-					return Err(ApiError::from(err.as_ref()));
-				}
-				if let Some(ref err_msg) = row.error {
-					return Err(ApiError::bad_request(err_msg.clone()));
-				}
-			}
-		}
-
-		let mut paths: Vec<String> = Vec::new();
-		let mut skipped: Vec<String> = Vec::new();
-		for row in &resp.rows {
-			for p in &row.paths {
-				let s = p.display().to_string();
-				if !paths.contains(&s) {
-					paths.push(s);
-				}
-			}
-			for p in &row.skipped {
-				let s = p.display().to_string();
-				if !skipped.contains(&s) {
-					skipped.push(s);
-				}
-			}
-		}
-
-		let executed = resp.rows.iter().any(|r| r.executed);
-		let deleted_path = if executed {
-			paths.first().cloned()
-		} else {
-			None
-		};
+		let single = resp.to_single_view(dry_run).map_err(ApiError::from)?;
 
 		let (pruned_lock_entries, would_prune_lock_entries, prune_error) =
-			super::project_prune_status(resp.prune);
+			super::project_prune_status(single.prune);
 
 		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
-			if !resp.keepers.is_empty() {
-				let (managed, unmanaged): (Vec<_>, Vec<_>) = resp
-					.keepers
-					.iter()
-					.map(|a| a.as_str().to_string())
-					.partition(|a| aghub_core::agent_settings::is_managed(a));
-				let all: Vec<String> = resp
-					.keepers
-					.iter()
-					.map(|a| a.as_str().to_string())
-					.collect();
-				(Some(all), Some(managed), Some(unmanaged))
+			if !single.holders.is_empty() {
+				(
+					Some(single.holders.all),
+					Some(single.holders.managed),
+					Some(single.holders.unmanaged),
+				)
 			} else {
 				(None, None, None)
 			};
 
-		let (outcome, needs_confirm, success) = if let Some(row) = primary_row {
-			(
-				row.outcome.into(),
-				row.needs_confirm,
-				!matches!(
-					row.verdict,
-					aghub_core::skills::removal::Verdict::Partial
-				),
-			)
-		} else {
-			(crate::dto::skill::RemovalOutcomeKind::Absent, false, true)
-		};
-
 		Ok(Json(DeleteSkillByPathResponse {
-			success,
-			dry_run,
-			executed,
-			needs_confirm,
-			paths,
-			skipped,
-			deleted_path,
+			success: single.removal_view.success,
+			dry_run: single.removal_view.dry_run,
+			executed: single.removal_view.executed,
+			needs_confirm: single.removal_view.needs_confirm,
+			paths: single.removal_view.paths,
+			skipped: single.removal_view.skipped,
+			deleted_path: single.removal_view.deleted_path,
 			pruned_lock_entries,
 			would_prune_lock_entries,
 			prune_error,
-			outcome,
+			outcome: single.removal_view.outcome.into(),
 			error: None,
 			validation_errors: None,
 			still_read_by,
@@ -9733,12 +9670,7 @@ mod tests {
 
 				assert_eq!(row["agent"], "claude");
 				assert_eq!(row["action"], "delete");
-				assert!(
-					row.get("outcome").is_some(),
-					"removal row must carry outcome: {row}"
-				);
-				let outcome = row["outcome"].as_str().expect("outcome string");
-				assert!(!outcome.is_empty());
+				assert_eq!(row["outcome"], "removed");
 
 				let managed = row["still_read_by_managed"]
 					.as_array()
@@ -9961,6 +9893,77 @@ mod tests {
 					rejected[0]["reason"].as_str().expect("reason string");
 				assert!(
 					reason.contains("location shared with other agents"),
+					"reason must contain refusal detail, got: {reason}"
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_route_preflight_rejection_carries_structured_rejected_targets()
+	{
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let project = home.join("proj");
+				let master = project.join(".aghub/reconcile-reject");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: reconcile-reject\ndescription: test\n---\n",
+				)
+				.unwrap();
+
+				let codex_slot = project.join(".codex/skills/reconcile-reject");
+				std::fs::create_dir_all(codex_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &codex_slot).unwrap();
+
+				// Zed does not support project skill scope -> preflight refusal
+				let response = client
+					.post("/api/v1/skills/reconcile")
+					.header(rocket::http::ContentType::JSON)
+					.body(
+						serde_json::to_string(&serde_json::json!({
+							"source": {
+								"agent": "codex",
+								"scope": "project",
+								"project_root": project.display().to_string(),
+								"name": "reconcile-reject"
+							},
+							"removed": ["zed"],
+							"confirm": true
+						}))
+						.unwrap(),
+					)
+					.dispatch();
+
+				assert_eq!(
+					response.status(),
+					rocket::http::Status::UnprocessableEntity
+				);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				assert_eq!(body["code"], "UNSUPPORTED_OPERATION");
+				let rejected = body["rejected_targets"]
+					.as_array()
+					.expect("rejected_targets array");
+				assert_eq!(rejected.len(), 1);
+				assert_eq!(rejected[0]["agent"], "zed");
+				let reason =
+					rejected[0]["reason"].as_str().expect("reason string");
+				assert!(
+					reason.contains("no project skill config"),
 					"reason must contain refusal detail, got: {reason}"
 				);
 			});

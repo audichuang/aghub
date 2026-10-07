@@ -1267,6 +1267,14 @@ fn batch_preflight_error(
 		&& error.failures.iter().all(|f| {
 			matches!(f.reason, ConfigError::UnsupportedOperation { .. })
 		});
+	let rejected_targets: Vec<crate::errors::RejectedTarget> = error
+		.failures
+		.iter()
+		.map(|failure| crate::errors::RejectedTarget {
+			agent: failure.target.target.agent.as_str().to_string(),
+			reason: failure.reason.to_string(),
+		})
+		.collect();
 	let failures = error
 		.failures
 		.into_iter()
@@ -1288,7 +1296,10 @@ fn batch_preflight_error(
 		"{operation} preflight failed; nothing was written: {failures}"
 	);
 	if all_unsupported {
-		ConfigError::unsupported_op(message)
+		ConfigError::UnsupportedOperation {
+			message,
+			rejected_targets: Some(rejected_targets),
+		}
 	} else {
 		ConfigError::InvalidConfig(message)
 	}
@@ -2417,17 +2428,7 @@ pub fn reconcile_skill(
 	.map_err(|error| batch_preflight_error("skill reconcile", error))?;
 	let mut batch_res = operation_batch(report);
 	if let Some(Ok(ref resp)) = delete_batch_result {
-		let (managed, unmanaged): (Vec<_>, Vec<_>) = resp
-			.keepers
-			.iter()
-			.map(|a| a.as_str().to_string())
-			.partition(|a| crate::agent_settings::is_managed(a));
-		let still_read_by: Vec<String> = resp
-			.keepers
-			.iter()
-			.map(|a| a.as_str().to_string())
-			.collect();
-
+		let holders = resp.holders_view();
 		for r in &mut batch_res.results {
 			if r.action == OperationAction::Delete {
 				if let Some(row) =
@@ -2435,10 +2436,10 @@ pub fn reconcile_skill(
 				{
 					r.outcome = Some(row.outcome_str().to_string());
 				}
-				if !resp.keepers.is_empty() {
-					r.still_read_by = Some(still_read_by.clone());
-					r.still_read_by_managed = Some(managed.clone());
-					r.still_read_by_unmanaged = Some(unmanaged.clone());
+				if !holders.is_empty() {
+					r.still_read_by = Some(holders.all.clone());
+					r.still_read_by_managed = Some(holders.managed.clone());
+					r.still_read_by_unmanaged = Some(holders.unmanaged.clone());
 				}
 			}
 		}
@@ -6619,16 +6620,28 @@ mod tests {
 		match (&preview_err, &reconcile_err) {
 			(
 				ConfigError::UnsupportedOperation {
-					message: p_msg, ..
+					message: p_msg,
+					rejected_targets: p_rej,
 				},
 				ConfigError::UnsupportedOperation {
-					message: r_msg, ..
+					message: r_msg,
+					rejected_targets: r_rej,
 				},
 			) => {
 				assert_eq!(p_msg, r_msg);
 				assert!(
 					p_msg.contains("no project skill config"),
 					"error should mention unsupported project skill config: {p_msg}"
+				);
+				assert_eq!(p_rej, r_rej);
+				let rej =
+					p_rej.as_ref().expect("rejected_targets must be present");
+				assert_eq!(rej.len(), 1);
+				assert_eq!(rej[0].agent, "zed");
+				assert!(
+					rej[0].reason.contains("no project skill config"),
+					"reason must contain failure detail: {}",
+					rej[0].reason
 				);
 			}
 			_ => panic!(

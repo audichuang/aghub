@@ -166,7 +166,7 @@ pub struct OperationResultDto {
 	pub error: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
-	pub outcome: Option<String>,
+	pub outcome: Option<crate::dto::skill::RemovalOutcomeKind>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub still_read_by: Option<Vec<String>>,
@@ -192,7 +192,7 @@ impl From<OperationResult> for OperationResultDto {
 			ok: value.success,
 			already_present: value.already_present,
 			error: value.error,
-			outcome: value.outcome,
+			outcome: value.outcome.as_deref().and_then(|s| s.parse().ok()),
 			still_read_by: value.still_read_by,
 			still_read_by_managed: value.still_read_by_managed,
 			still_read_by_unmanaged: value.still_read_by_unmanaged,
