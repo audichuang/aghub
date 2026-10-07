@@ -29,16 +29,11 @@ pub struct Holder {
 ///   exclusively by `RemovalOutcome::commit`.
 /// - `LockOnly`: the skill had no files on disk, but was pruned from the lock.
 /// - `Absent`: the skill had no files on disk and no lock entry.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-	#[default]
 	Removed,
-	Kept {
-		still_read_from: Vec<Holder>,
-	},
-	Refused {
-		reason: String,
-	},
+	Kept { still_read_from: Vec<Holder> },
+	Refused { reason: String },
 	Partial,
 	LockOnly,
 	Absent,
@@ -58,6 +53,16 @@ pub struct VerdictInputs<'a> {
 }
 
 impl Verdict {
+	/// Convenience constructor for a single managed holder kept.
+	pub fn kept_managed(path: PathBuf) -> Self {
+		Verdict::Kept {
+			still_read_from: vec![Holder {
+				path,
+				managed: true,
+			}],
+		}
+	}
+
 	/// True when the removal took nothing away and kept the skill
 	/// (shared master / referrer kept, or refused).
 	pub fn shared_master_kept(&self) -> bool {
@@ -190,7 +195,10 @@ impl Verdict {
 		// The second disjunct is the planner's OWN keep, which `blocks` cannot
 		// always see (discovery stops at a parsing `SKILL.md`, the planner's
 		// sweep recurses into it). Both single-agent and --all-agents treat an
-		// empty plan with an initial keep as Kept, mirroring the preview prune gate.
+		// empty plan with an initial keep as Kept: previously single-agent
+		// reached commit which would falsely report `executed: true` and prune
+		// the lock for a kept master; now both return preview with `Verdict::Kept`,
+		// `executed: false`, and no lock prune.
 		// See docs/history/core-manager.md#nested-broken-link-reached-commit
 		let is_kept = spared_everything
 			|| (inputs.initial_shared_master_kept
@@ -606,6 +614,26 @@ mod tests {
 	}
 
 	#[cfg(unix)]
+	fn perms_enforced(under: &Path) -> bool {
+		use std::os::unix::fs::PermissionsExt;
+		let probe = under.join(".perm-probe");
+		std::fs::create_dir(&probe).unwrap();
+		std::fs::set_permissions(
+			&probe,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+		let blocked = std::fs::write(probe.join("x"), b"x").is_err();
+		std::fs::set_permissions(
+			&probe,
+			std::fs::Permissions::from_mode(0o755),
+		)
+		.unwrap();
+		std::fs::remove_dir_all(&probe).ok();
+		blocked
+	}
+
+	#[cfg(unix)]
 	#[test]
 	fn test_remove_skill_planned_kept() {
 		let tmp = tempfile::tempdir().unwrap();
@@ -636,11 +664,17 @@ mod tests {
 		let preview = mgr
 			.remove_skill_planned("kept-skill", true, true, false)
 			.unwrap();
-		assert!(
-			matches!(preview.verdict, Verdict::Kept { .. }),
-			"expected Kept, got {:?}",
-			preview.verdict
-		);
+		match &preview.verdict {
+			Verdict::Kept { still_read_from } => {
+				assert_eq!(still_read_from.len(), 1);
+				assert_eq!(still_read_from[0].path, aghub_dir);
+				assert!(
+					still_read_from[0].managed,
+					"master in .aghub must be classified as managed: true"
+				);
+			}
+			other => panic!("expected Kept, got {other:?}"),
+		}
 		assert!(preview.plan.paths.is_empty());
 
 		let commit = mgr
@@ -706,6 +740,144 @@ mod tests {
 		);
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn test_remove_skill_planned_refused_disabled_agent() {
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		// Override disabled-agent selection: disable cursor.
+		let _disabled_guard =
+			crate::agent_settings::test_override::disable(&["cursor"]);
+		let data_dir = tmp.path().join("data");
+		let mut disabled = std::collections::BTreeSet::new();
+		disabled.insert("cursor".to_string());
+		crate::agent_settings::write_disabled_agents_in(&data_dir, &disabled)
+			.unwrap();
+
+		let home = tmp.path().join("home");
+		let master = home.join(".aghub/disabled-holder");
+		write_test_skill(&master, "disabled-holder");
+		write_test_lock_entry("disabled-holder");
+
+		let claude_dir = home.join(".claude/skills");
+		let cursor_dir = home.join(".cursor/skills");
+		std::fs::create_dir_all(&claude_dir).unwrap();
+		std::fs::create_dir_all(&cursor_dir).unwrap();
+
+		let claude_skill = claude_dir.join("disabled-holder");
+		let cursor_skill = cursor_dir.join("disabled-holder");
+		std::os::unix::fs::symlink(&master, &claude_skill).unwrap();
+		std::os::unix::fs::symlink(&master, &cursor_skill).unwrap();
+
+		let mut mgr = crate::manager::ConfigManager::new(
+			crate::create_adapter(crate::models::AgentType::Claude),
+			true,
+			None,
+		);
+		mgr.load().unwrap();
+
+		let preview = mgr
+			.remove_skill_planned("disabled-holder", true, true, false)
+			.unwrap();
+		match &preview.verdict {
+			Verdict::Refused { reason } => {
+				assert!(
+					reason.contains(
+						"Read only by disabled agent(s), which --all-agents never touches:"
+					),
+					"must identify survivor held by disabled agent: {reason}"
+				);
+				assert!(
+					reason.contains(&cursor_skill.display().to_string()),
+					"must report exact unmanaged holder path: {reason}"
+				);
+			}
+			other => panic!("expected Refused, got {other:?}"),
+		}
+
+		let err = mgr
+			.remove_skill_planned("disabled-holder", true, false, true)
+			.unwrap_err();
+		assert!(
+			matches!(err, crate::errors::ConfigError::UnsupportedOperation(_)),
+			"commit on refused removal must error with UnsupportedOperation: {err:?}"
+		);
+		assert!(
+			claude_skill.exists(),
+			"refused removal must preserve files on disk"
+		);
+		assert!(
+			cursor_skill.exists(),
+			"refused removal must preserve unmanaged files on disk"
+		);
+		assert!(
+			master.exists(),
+			"refused removal must preserve master on disk"
+		);
+		assert!(
+			skill::read_skill_lock()
+				.skills
+				.contains_key("disabled-holder"),
+			"refused removal must preserve lock entry"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_remove_skill_planned_partial() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		if !perms_enforced(tmp.path()) {
+			eprintln!("skipping: 0o555 not enforced (running as root)");
+			return;
+		}
+
+		let home = tmp.path().join("home");
+		let claude_dir = home.join(".claude/skills/partial-skill");
+		write_test_skill(&claude_dir, "partial-skill");
+		write_test_lock_entry("partial-skill");
+
+		let mut mgr = crate::manager::ConfigManager::new(
+			crate::create_adapter(crate::models::AgentType::Claude),
+			true,
+			None,
+		);
+		mgr.load().unwrap();
+
+		let parent = claude_dir.parent().unwrap();
+		let orig_perms = std::fs::metadata(parent).unwrap().permissions();
+		std::fs::set_permissions(
+			parent,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+		let commit_res =
+			mgr.remove_skill_planned("partial-skill", false, false, true);
+		std::fs::set_permissions(parent, orig_perms).unwrap();
+
+		let outcome = commit_res.unwrap();
+		assert_eq!(outcome.verdict, Verdict::Partial);
+		assert!(outcome.executed, "executed must be true for commit attempt");
+		assert!(
+			!outcome.failed_paths.is_empty(),
+			"failed_paths must record the failed deletion"
+		);
+		assert_eq!(outcome.failed_paths, vec![claude_dir.clone()]);
+		assert_eq!(outcome.plan.skipped, outcome.failed_paths);
+		assert!(
+			claude_dir.exists(),
+			"path that failed to delete must remain on disk"
+		);
+		assert!(
+			!outcome.verdict.shared_master_kept(),
+			"partial is not shared_master_kept"
+		);
+	}
+
 	#[test]
 	fn test_remove_skill_planned_lock_only() {
 		let tmp = tempfile::tempdir().unwrap();
@@ -725,31 +897,169 @@ mod tests {
 		);
 		mgr.load().unwrap();
 
-		let preview = mgr
+		// Skill absent from disk: core must return ResourceNotFound
+		let preview_err = mgr
 			.remove_skill_planned(skill_name, false, true, false)
-			.unwrap();
-		assert_eq!(preview.verdict, Verdict::LockOnly);
-		assert!(preview.plan.paths.is_empty());
+			.unwrap_err();
+		assert!(
+			matches!(
+				preview_err,
+				crate::errors::ConfigError::ResourceNotFound { .. }
+			),
+			"absent skill must return ResourceNotFound: {preview_err:?}"
+		);
+
+		let commit_err = mgr
+			.remove_skill_planned(skill_name, false, false, true)
+			.unwrap_err();
+		assert!(
+			matches!(
+				commit_err,
+				crate::errors::ConfigError::ResourceNotFound { .. }
+			),
+			"absent skill must return ResourceNotFound: {commit_err:?}"
+		);
+
+		// Producer for surfaces: skill_noop_outcome yields Verdict::LockOnly.
+		let noop = mgr.skill_noop_outcome(skill_name);
+		assert_eq!(noop.verdict, Verdict::LockOnly);
+		assert!(!noop.executed, "no-op must not report execution");
+		assert!(noop.absent, "no-op must have absent set");
+		assert!(noop.plan.paths.is_empty());
+
+		// Wire view mapping must report absent, executed: false.
+		let view = crate::dto::RemovalView::from_outcome(&noop, false);
+		assert_eq!(
+			view.outcome,
+			crate::dto::RemovalKind::Absent,
+			"wire outcome must be absent"
+		);
+		assert!(!view.executed, "wire view executed must be false");
+		assert!(view.paths.is_empty(), "wire view paths must be empty");
+		assert!(view.success, "wire view success must be true");
+
+		// Lock entry must NOT be pruned.
 		assert!(
 			skill::read_skill_lock().skills.contains_key(skill_name),
-			"preview must not prune lock"
+			"lock entry must remain intact"
 		);
-		match &preview.prune {
-			crate::skills::removal::PruneStatus::WouldPrune(keys) => {
-				assert!(keys.contains(&skill_name.to_string()));
-			}
-			other => panic!("expected WouldPrune, got {other:?}"),
-		}
+	}
 
-		let commit = mgr
-			.remove_skill_planned(skill_name, false, false, true)
-			.unwrap();
-		assert_eq!(commit.verdict, Verdict::LockOnly);
-		assert_eq!(preview.verdict, commit.verdict);
-		assert!(commit.plan.paths.is_empty());
+	#[test]
+	fn test_remove_skill_planned_absent() {
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		let skill_name = "absent-skill";
 		assert!(
 			!skill::read_skill_lock().skills.contains_key(skill_name),
-			"commit must prune lock-only entry from lock file"
+			"lock entry must not exist initially"
+		);
+
+		let mut mgr = crate::manager::ConfigManager::new(
+			crate::create_adapter(crate::models::AgentType::Claude),
+			true,
+			None,
+		);
+		mgr.load().unwrap();
+
+		let preview_err = mgr
+			.remove_skill_planned(skill_name, false, true, false)
+			.unwrap_err();
+		assert!(
+			matches!(
+				preview_err,
+				crate::errors::ConfigError::ResourceNotFound { .. }
+			),
+			"absent skill must return ResourceNotFound: {preview_err:?}"
+		);
+
+		let noop = mgr.skill_noop_outcome(skill_name);
+		assert_eq!(noop.verdict, Verdict::Absent);
+		assert!(!noop.executed);
+		assert!(noop.absent);
+		assert!(noop.plan.paths.is_empty());
+
+		let view = crate::dto::RemovalView::from_outcome(&noop, false);
+		assert_eq!(view.outcome, crate::dto::RemovalKind::Absent);
+		assert!(!view.executed);
+		assert!(view.paths.is_empty());
+		assert!(view.success);
+
+		assert!(
+			!skill::read_skill_lock().skills.contains_key(skill_name),
+			"lock entry must remain absent"
+		);
+	}
+
+	/// A single-agent removal where the planner takes nothing and spares the
+	/// Master (`spared_everything`) previews and commits with identical `Verdict::Kept`,
+	/// `executed: false`, without pruning the lock.
+	///
+	/// Fixture rationale:
+	/// On a real filesystem, single-agent removal through `remove_skill_planned`
+	/// requires the skill to exist in `read_dirs` (otherwise `skill_for_planned_removal`
+	/// bails with `ResourceNotFound`). When `plan.paths` is empty, `read_effect_after`
+	/// inevitably rediscovers the skill, so `effect.survivors` is non-empty.
+	/// If `initial_shared_master_kept` were true, `all_survivors_reported` would be false
+	/// (it requires `!initial_shared_master_kept`), making `spared_everything` false, which
+	/// triggers `blocks = true` and produces `Verdict::Refused` (refusing to let a single
+	/// agent delete a shared slot). Therefore, any real-fs single-agent `Verdict::Kept`
+	/// necessarily resolves via `spared_everything`.
+	///
+	/// The second disjunct in `is_kept` (`(initial_shared_master_kept && plan_paths.is_empty())`)
+	/// covers the planner-keep corner where discovery cannot see survivors; that disjunct
+	/// is directly pinned by the synthetic table test `test_verdict_table` (Row 5).
+	#[cfg(unix)]
+	#[test]
+	fn test_single_agent_spared_master_previews_and_does_not_prune() {
+		let tmp = tempfile::tempdir().unwrap();
+		let _env = TestEnv::new(tmp.path());
+
+		let home = tmp.path().join("home");
+		let aghub_master = home.join(".aghub/shared-kept");
+		write_test_skill(&aghub_master, "shared-kept");
+		write_test_lock_entry("shared-kept");
+
+		let agents_skills = home.join(".agents/skills");
+		std::fs::create_dir_all(&agents_skills).unwrap();
+		let referrer = agents_skills.join("shared-kept");
+		std::os::unix::fs::symlink(&aghub_master, &referrer).unwrap();
+
+		let mut mgr = crate::manager::ConfigManager::new(
+			crate::create_adapter(crate::models::AgentType::Cursor),
+			true,
+			None,
+		);
+		mgr.load().unwrap();
+
+		// Preview
+		let preview = mgr
+			.remove_skill_planned("shared-kept", false, true, false)
+			.unwrap();
+		assert!(
+			matches!(preview.verdict, Verdict::Kept { .. }),
+			"preview must yield Verdict::Kept: {:?}",
+			preview.verdict
+		);
+		assert!(!preview.executed, "preview executed must be false");
+		assert!(preview.plan.paths.is_empty(), "plan paths must be empty");
+
+		// Commit (with confirm: true) must return the same Kept outcome,
+		// executed: false, and must NOT prune the lock.
+		let commit = mgr
+			.remove_skill_planned("shared-kept", false, false, true)
+			.unwrap();
+		assert_eq!(
+			preview.verdict, commit.verdict,
+			"preview and commit must yield identical Verdict::Kept"
+		);
+		assert!(!commit.executed, "commit executed must be false");
+		assert!(aghub_master.exists(), "kept Master must remain on disk");
+		assert!(referrer.exists(), "kept Referrer must remain on disk");
+		assert!(
+			skill::read_skill_lock().skills.contains_key("shared-kept"),
+			"lock entry must NOT be pruned"
 		);
 	}
 }

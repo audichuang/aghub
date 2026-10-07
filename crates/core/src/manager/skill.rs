@@ -655,7 +655,7 @@ impl ConfigManager {
 	}
 
 	/// True when the named skill exists in the in-scope lock file.
-	pub fn skill_has_lock_entry(&self, name: &str) -> bool {
+	pub(crate) fn skill_has_lock_entry(&self, name: &str) -> bool {
 		let in_global = self.scope != crate::models::ResourceScope::ProjectOnly
 			&& skill::read_skill_lock().skills.contains_key(name);
 		let in_project = self.scope != crate::models::ResourceScope::GlobalOnly
@@ -667,6 +667,16 @@ impl ConfigManager {
 				})
 				.unwrap_or(false);
 		in_global || in_project
+	}
+
+	/// Produce a no-op removal outcome for an absent skill, attributing
+	/// `Verdict::LockOnly` if an in-scope lock entry exists, else `Verdict::Absent`.
+	pub fn skill_noop_outcome(
+		&self,
+		name: &str,
+	) -> crate::skills::removal::RemovalOutcome {
+		let has_lock = self.skill_has_lock_entry(name);
+		crate::skills::removal::RemovalOutcome::noop(has_lock)
 	}
 
 	fn remove_skill_planned_inner(
@@ -693,21 +703,7 @@ impl ConfigManager {
 			Some(self.guard_and_reload("remove skill", self.scope)?)
 		};
 
-		let has_lock_entry = self.skill_has_lock_entry(name);
-		let skill = match self.skill_for_planned_removal(name, all_agents) {
-			Ok(skill) => Some(skill),
-			Err(ConfigError::ResourceNotFound { .. })
-				if has_lock_entry
-					&& (all_agents
-						|| matches!(
-							self.skill_for_planned_removal(name, true),
-							Err(ConfigError::ResourceNotFound { .. })
-						)) =>
-			{
-				None
-			}
-			Err(e) => return Err(e),
-		};
+		let skill = self.skill_for_planned_removal(name, all_agents)?;
 
 		let scope = self.scope;
 		let project_root = self.project_root.clone();
@@ -759,45 +755,28 @@ impl ConfigManager {
 						.into(),
 				));
 			}
-			if let Some(ref skill) = skill {
-				let selected_master = removal::skill_root(skill)
-					.map(|path| skill::lock::resolve_existing(&path));
-				let requested_master =
-					skill::lock::resolve_existing(target_entry);
-				if selected_master.as_deref()
-					!= Some(requested_master.as_path())
-				{
-					return Err(ConfigError::InvalidConfig(
-						"requested skill location does not match the loaded Master"
-							.into(),
-					));
-				}
+			let selected_master = removal::skill_root(&skill)
+				.map(|path| skill::lock::resolve_existing(&path));
+			let requested_master = skill::lock::resolve_existing(target_entry);
+			if selected_master.as_deref() != Some(requested_master.as_path()) {
+				return Err(ConfigError::InvalidConfig(
+					"requested skill location does not match the loaded Master"
+						.into(),
+				));
 			}
 			Some(target_dir)
 		} else {
 			self.target_skills_dir()
 		};
-		let mut plan = if let Some(ref skill) = skill {
-			removal::plan_removal_for_agents(
-				skill,
-				own_agent_dir.as_deref(),
-				&all_agent_dirs,
-				project_root.as_deref(),
-				scope,
-				all_agents,
-				requested_agents,
-			)
-		} else {
-			removal::RemovalPlan {
-				layout: removal::Layout::Copy,
-				paths: vec![],
-				skipped: vec![],
-				needs_confirm: false,
-				shared_master_kept: false,
-				still_read_from: Vec::new(),
-				incomplete: false,
-			}
-		};
+		let mut plan = removal::plan_removal_for_agents(
+			&skill,
+			own_agent_dir.as_deref(),
+			&all_agent_dirs,
+			project_root.as_deref(),
+			scope,
+			all_agents,
+			requested_agents,
+		);
 
 		let executed = !dry_run && (!plan.needs_confirm || confirm);
 
@@ -814,7 +793,8 @@ impl ConfigManager {
 			self.adapter
 				.get_skills_paths(project_root.as_deref(), scope)
 		};
-		let effect = removal::read_effect_after(&read_dirs, name, &plan.paths);
+		let effect =
+			removal::read_effect_after(&read_dirs, &skill.name, &plan.paths);
 
 		// A removal that goes ahead while something else still serves the skill
 		// has to SAY so, through `skipped` ("present and deliberately not taken").
@@ -881,7 +861,7 @@ impl ConfigManager {
 			effect: &effect,
 			all_agents,
 			unmanaged_dirs: &unmanaged_dirs,
-			has_lock_entry,
+			has_lock_entry: self.skill_has_lock_entry(name),
 			git_refusal: &git_refusal_fn,
 			readers_outside: &readers_outside_fn,
 		});

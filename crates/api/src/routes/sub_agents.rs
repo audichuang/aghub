@@ -310,6 +310,7 @@ fn delete_sub_agent_inner(
 	crate::routes::removal_or_noop(
 		manager.remove_sub_agent_planned(&name, dry_run, confirm),
 		dry_run,
+		aghub_core::skills::removal::RemovalOutcome::noop(false),
 	)
 }
 

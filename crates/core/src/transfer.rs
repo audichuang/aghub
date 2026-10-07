@@ -2186,7 +2186,7 @@ impl ReconcileSkillPlan {
 			// The copy may make an absent target present before its delete row
 			// runs, so absence only answers the on-disk half of this preflight.
 			Err(ConfigError::ResourceNotFound { .. }) => (
-				crate::skills::removal::Verdict::Removed,
+				crate::skills::removal::Verdict::Absent,
 				Vec::new(),
 				Vec::new(),
 			),

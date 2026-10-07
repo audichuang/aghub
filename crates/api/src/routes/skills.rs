@@ -560,15 +560,11 @@ pub async fn delete_skill_by_path(
 						prune: aghub_core::skills::removal::PruneStatus::NotRun,
 						failed_paths: vec![],
 						absent: false,
-						// TODO(A4): by-path sink-down
-						verdict: aghub_core::skills::removal::Verdict::Kept {
-							still_read_from: vec![
-								aghub_core::skills::removal::Holder {
-									path: skill_dir.clone(),
-									managed: true,
-								},
-							],
-						},
+						// TODO(#30/A4): by-path sink-down
+						verdict:
+							aghub_core::skills::removal::Verdict::kept_managed(
+								skill_dir.clone(),
+							),
 					},
 					dry_run,
 				);
@@ -1383,11 +1379,13 @@ pub async fn delete_skill(
 	in_mutation_pool(move || {
 		// `remove_skill_planned` already prunes the lock (`outcome.prune`); the
 		// idempotent-delete contract is owned ONCE in `routes::removal_or_noop`.
+		let noop = manager.skill_noop_outcome(&name);
 		super::removal_or_noop(
 			manager.remove_skill_planned_for_agents(
 				&name, all_agents, dry_run, confirm, &requested,
 			),
 			dry_run,
+			noop,
 		)
 	})
 	.await

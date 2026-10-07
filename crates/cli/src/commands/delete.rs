@@ -44,15 +44,19 @@ pub fn execute(
 			// its result is reported via outcome.prune. A missing config or a
 			// missing skill is an idempotent no-op (matches the API), not an
 			// error — see `plan_or_noop`.
-			let outcome = plan_or_noop(manager, |m| {
-				m.remove_skill_planned_for_agents(
-					&name,
-					options.all_agents,
-					is_dry_run,
-					options.yes,
-					&options.requested_agents,
-				)
-			})?;
+			let outcome = plan_or_noop(
+				manager,
+				|m| m.skill_noop_outcome(&name),
+				|m| {
+					m.remove_skill_planned_for_agents(
+						&name,
+						options.all_agents,
+						is_dry_run,
+						options.yes,
+						&options.requested_agents,
+					)
+				},
+			)?;
 			// Serialize the shared core builder so the removal fields
 			// (success/dry_run/executed/needs_confirm/paths/skipped/
 			// deleted_path) live once and stay snake_case, matching the API +
@@ -78,14 +82,18 @@ pub fn execute(
 			);
 			// Missing config / missing MCP is an idempotent no-op (matches the
 			// API), not an error — see `plan_or_noop`.
-			let outcome = plan_or_noop(manager, |m| {
-				m.remove_mcp_planned_single_guarded(
-					&name,
-					is_dry_run,
-					options.yes,
-					&options.requested_agents,
-				)
-			})?;
+			let outcome = plan_or_noop(
+				manager,
+				|_| RemovalOutcome::noop(false),
+				|m| {
+					m.remove_mcp_planned_single_guarded(
+						&name,
+						is_dry_run,
+						options.yes,
+						&options.requested_agents,
+					)
+				},
+			)?;
 			// Reuse the shared core RemovalView so the removal fields stay
 			// snake_case and byte-identical to the skills branch + the API +
 			// desktop DeleteSkillByPathResponse; layer the CLI {type,name}
@@ -108,9 +116,11 @@ pub fn execute(
 				name,
 				is_dry_run
 			);
-			let outcome = plan_or_noop(manager, |m| {
-				m.remove_sub_agent_planned(&name, is_dry_run, options.yes)
-			})?;
+			let outcome = plan_or_noop(
+				manager,
+				|_| RemovalOutcome::noop(false),
+				|m| m.remove_sub_agent_planned(&name, is_dry_run, options.yes),
+			)?;
 			let view = aghub_core::dto::RemovalView::from_outcome(
 				&outcome, is_dry_run,
 			);
@@ -132,23 +142,22 @@ pub fn execute(
 ///   missing config for `delete`): nothing to remove.
 /// - **`ResourceNotFound`**: the config loaded but has no such resource.
 ///
-/// All other errors propagate. The no-op shape comes from the same
-/// `RemovalOutcome::noop()` the API's `noop_removal_response` uses, so the two
-/// surfaces serialize byte-identically.
+/// All other errors propagate. The no-op shape comes from `noop` (for skills,
+/// core's `ConfigManager::skill_noop_outcome`), so the CLI and API serialize
+/// byte-identically.
 fn plan_or_noop(
 	manager: &mut ConfigManager,
+	noop: impl FnOnce(&ConfigManager) -> RemovalOutcome,
 	plan: impl FnOnce(
 		&mut ConfigManager,
 	) -> aghub_core::errors::Result<RemovalOutcome>,
 ) -> Result<RemovalOutcome> {
 	if manager.config().is_none() {
-		return Ok(RemovalOutcome::noop(false));
+		return Ok(noop(manager));
 	}
 	match plan(manager) {
 		Ok(outcome) => Ok(outcome),
-		Err(ConfigError::ResourceNotFound { .. }) => {
-			Ok(RemovalOutcome::noop(false))
-		}
+		Err(ConfigError::ResourceNotFound { .. }) => Ok(noop(manager)),
 		Err(e) => Err(e.into()),
 	}
 }
