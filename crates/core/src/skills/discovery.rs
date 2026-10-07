@@ -28,7 +28,7 @@ pub fn load_skills_from_dir(skills_dir: &Path) -> std::io::Result<Vec<Skill>> {
 /// `Err`-or-nothing on purpose for a DESTRUCTIVE caller: an unopenable
 /// `SKILL.md` may be the very skill under another folder name, so a partial
 /// list cannot answer "not there". Do not add a `_partial` twin here.
-pub fn load_master_skills(store: &Path) -> std::io::Result<Vec<Skill>> {
+pub(crate) fn load_master_skills(store: &Path) -> std::io::Result<Vec<Skill>> {
 	let (skills, failure, _) = walk_dir(store, true);
 	match failure {
 		Some(error) => Err(error),
