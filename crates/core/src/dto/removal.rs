@@ -46,6 +46,18 @@ pub enum RemovalKind {
 	Kept,
 }
 
+impl RemovalKind {
+	pub fn as_str(&self) -> &'static str {
+		match self {
+			Self::Preview => "preview",
+			Self::Removed => "removed",
+			Self::Absent => "absent",
+			Self::Partial => "partial",
+			Self::Kept => "kept",
+		}
+	}
+}
+
 /// Wire view of a [`RemovalOutcome`]: the post-execution plan flattened to
 /// strings plus the derived `deleted_path`/`outcome` fields.
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +75,46 @@ pub struct RemovalView {
 	pub outcome: RemovalKind,
 }
 
+/// Derives [`RemovalKind`] from a [`RemovalOutcome`] and the caller's dry-run intent.
+///
+/// This is the single canonical function that decides what kind of removal occurred
+/// across both single-agent [`RemovalView`] and batch [`crate::skills::removal::SkillRemovalRow`].
+pub fn removal_kind_from_outcome(
+	outcome: &RemovalOutcome,
+	requested_dry_run: bool,
+) -> RemovalKind {
+	if outcome.verdict.shared_master_kept()
+		&& (outcome.plan.paths.is_empty() || !outcome.executed)
+	{
+		// Nothing was or will be removed BECAUSE it is shared. Outranks
+		// every other answer: an executing call refuses (the manager
+		// guard), and an `executed` call that took nothing is not a removal.
+		//
+		// `|| !outcome.executed` covers a plan WITH paths that change
+		// nothing the agent reads (an npx-era Referrer beside its Master):
+		// the manager folds that into `shared_master_kept` and refuses the
+		// confirmed call. An EXECUTED run falls through to `Removed`/
+		// `Partial` — it got past the refusal, so its paths really went.
+		RemovalKind::Kept
+	} else if outcome.executed && !outcome.failed_paths.is_empty() {
+		// Checked BEFORE `Removed`: `executed` is true even when every
+		// delete failed.
+		RemovalKind::Partial
+	} else if outcome.executed {
+		RemovalKind::Removed
+	} else if outcome.absent {
+		// Already gone OUTRANKS the caller's intent: `preview` would invite
+		// a pointless `--yes` retry.
+		RemovalKind::Absent
+	} else if requested_dry_run {
+		RemovalKind::Preview
+	} else {
+		// Confirmed, nothing ran, and the plan did not say "absent" —
+		// treated as absent because there is nothing else it can be.
+		RemovalKind::Absent
+	}
+}
+
 impl RemovalView {
 	/// Build the wire view.
 	///
@@ -78,36 +130,7 @@ impl RemovalView {
 		let stringify = |paths: &[std::path::PathBuf]| -> Vec<String> {
 			paths.iter().map(|p| p.display().to_string()).collect()
 		};
-		let kind = if outcome.verdict.shared_master_kept()
-			&& (outcome.plan.paths.is_empty() || !outcome.executed)
-		{
-			// Nothing was or will be removed BECAUSE it is shared. Outranks
-			// every other answer: an executing call refuses (the manager
-			// guard), and an `executed` call that took nothing is not a removal.
-			//
-			// `|| !outcome.executed` covers a plan WITH paths that change
-			// nothing the agent reads (an npx-era Referrer beside its Master):
-			// the manager folds that into `shared_master_kept` and refuses the
-			// confirmed call. An EXECUTED run falls through to `Removed`/
-			// `Partial` — it got past the refusal, so its paths really went.
-			RemovalKind::Kept
-		} else if outcome.executed && !outcome.failed_paths.is_empty() {
-			// Checked BEFORE `Removed`: `executed` is true even when every
-			// delete failed.
-			RemovalKind::Partial
-		} else if outcome.executed {
-			RemovalKind::Removed
-		} else if outcome.absent {
-			// Already gone OUTRANKS the caller's intent: `preview` would invite
-			// a pointless `--yes` retry.
-			RemovalKind::Absent
-		} else if requested_dry_run {
-			RemovalKind::Preview
-		} else {
-			// Confirmed, nothing ran, and the plan did not say "absent" —
-			// treated as absent because there is nothing else it can be.
-			RemovalKind::Absent
-		};
+		let kind = removal_kind_from_outcome(outcome, requested_dry_run);
 		Self {
 			// NOT hard-coded true: `Partial` may have deleted nothing. Every
 			// other variant IS a success (previewed, nothing to do, or a shared

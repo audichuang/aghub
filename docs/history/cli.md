@@ -276,3 +276,24 @@ An earlier version of its comment claimed it covered the symlink sweep too,
 and reverting the symlink fix left every test there green; the symlink sweep
 has its own pair: the two arms of
 `an_agent_dir_we_cannot_stat_is_not_one_that_holds_nothing`.
+
+## delete skills -a order independence
+
+`aghub-cli delete skills <name> -a <list>` used to dispatch through
+`batch::run_skill_agent_mutation`, executing row-by-row in argv order with
+only per-agent capability preflight. When private readers preceded shared-slot
+writers in `-a`, the private readers saw the shared slot still populated and kept
+their links, leaving partial removals (issue #21).
+
+CLI `delete skills -a` now routes directly through `skills::removal::remove_skill_batch`,
+the same shared core entry used by the API and `reconcile skill --remove`. Whole-batch
+preflight checks all targets atomically (exiting 1 with nothing written on refusal),
+internal shared-first execution handles prior-row credit regardless of `-a` order,
+and results are projected in original request order. `--json` rows carry unified
+`outcome`, wire `code`, and attribution fields (`still_read_from`, `still_read_by`,
+`master_reclaimed`).
+
+Rule: CLI skill deletions delegate to `remove_skill_batch`; `-a` order does not affect the verdict.
+
+Tests: `test_cli_delete_skills_agent_order_independence`,
+`test_cli_delete_skills_whole_batch_preflight_rejection`.

@@ -16554,3 +16554,261 @@ fn doctor_reports_unsanitized_name_skill_as_healthy_and_linked() {
 	);
 	assert_eq!(untracked_row["master"], "dir");
 }
+
+#[cfg(unix)]
+#[test]
+fn test_cli_delete_skills_agent_order_independence() {
+	let order_shared_first =
+		"codex,antigravity,gemini,cline,copilot,kimi,amp,warp,zcode,dsh,opencode,cursor,pi,grok,omp";
+	let order_private_first =
+		"opencode,cursor,pi,grok,omp,codex,antigravity,gemini,cline,copilot,kimi,amp,warp,zcode,dsh";
+
+	let mut runs = Vec::new();
+
+	for order in [order_shared_first, order_private_first] {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let project = tempfile::TempDir::new().unwrap();
+		let root = project.path();
+
+		aghub_core::testing::master_with_claude_referrer(root, "notebooklm");
+		for dir in [".opencode", ".cursor", ".pi", ".grok", ".omp"] {
+			let slot = root.join(dir).join("skills");
+			std::fs::create_dir_all(&slot).unwrap();
+			std::os::unix::fs::symlink(
+				root.join(".aghub/notebooklm"),
+				slot.join("notebooklm"),
+			)
+			.unwrap();
+		}
+		let lock_path = root.join("skills-lock.json");
+		std::fs::write(
+			&lock_path,
+			r#"{"version":1,"skills":{"notebooklm":{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}"#,
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(root)
+			.args([
+				"-p",
+				"-a",
+				order,
+				"delete",
+				"skills",
+				"notebooklm",
+				"--yes",
+				"--json",
+			])
+			.output()
+			.unwrap();
+
+		assert_eq!(
+			out.status.code(),
+			Some(0),
+			"order {order} must exit 0 in ONE run; stderr: {}, stdout: {}",
+			String::from_utf8_lossy(&out.stderr),
+			String::from_utf8_lossy(&out.stdout)
+		);
+
+		let json: Value = serde_json::from_slice(&out.stdout)
+			.expect("delete output must be valid JSON");
+		assert_eq!(
+			json["success_count"], 15,
+			"all 15 agents must succeed in {order}: {json}"
+		);
+		assert_eq!(
+			json["failed_count"], 0,
+			"no agents should fail in {order}: {json}"
+		);
+
+		let results = json["results"].as_array().expect("results is array");
+		assert_eq!(results.len(), 15);
+		for row in results {
+			assert_eq!(row["ok"], true, "row ok must be true: {row}");
+			let outcome = row["output"]["outcome"]
+				.as_str()
+				.expect("outcome in output");
+			assert_eq!(outcome, "removed", "outcome must be removed: {row}");
+			assert_eq!(
+				row["outcome"], "removed",
+				"top-level outcome must be removed: {row}"
+			);
+			assert!(
+				row["output"].get("code").is_some(),
+				"code must be present in output: {row}"
+			);
+			assert_eq!(
+				row["output"]["master_reclaimed"], false,
+				"master_reclaimed must be false because Claude still reads it: {row}"
+			);
+			assert_eq!(
+				row["output"]["still_read_by"],
+				serde_json::json!(["claude"]),
+				"still_read_by must name claude: {row}"
+			);
+		}
+
+		// Verify on-disk removal: 15 Referrers gone, Master and Claude link kept
+		assert!(
+			root.join(".aghub/notebooklm").exists(),
+			"Master must be kept while Claude still holds it"
+		);
+		assert!(
+			root.join(".claude/skills/notebooklm").exists(),
+			"Claude link must still exist"
+		);
+		assert!(
+			!root.join(".agents/skills/notebooklm").exists(),
+			"Shared slot link must be deleted"
+		);
+		for dir in [".opencode", ".cursor", ".pi", ".grok", ".omp"] {
+			assert!(
+				std::fs::symlink_metadata(
+					root.join(dir).join("skills/notebooklm")
+				)
+				.is_err(),
+				"{dir} link must be deleted"
+			);
+		}
+		let lock_content = std::fs::read_to_string(&lock_path).unwrap();
+		assert!(
+			lock_content.contains("notebooklm"),
+			"lock entry must be kept while Master is kept"
+		);
+
+		let disk_state = collect_disk_state(root);
+		runs.push((order, json, disk_state, root.to_path_buf()));
+	}
+
+	// Both orderings yield identical on-disk state
+	assert_eq!(
+		runs[0].2, runs[1].2,
+		"disk state must be identical across both orderings"
+	);
+
+	let normalize_json = |val: &Value, root_path: &std::path::Path| -> Value {
+		let s = val
+			.to_string()
+			.replace(&root_path.display().to_string(), "<root>");
+		serde_json::from_str(&s).unwrap()
+	};
+
+	let norm_json_0 = normalize_json(&runs[0].1, &runs[0].3);
+	let norm_json_1 = normalize_json(&runs[1].1, &runs[1].3);
+
+	// Both orderings yield identical total counts
+	assert_eq!(norm_json_0["success_count"], norm_json_1["success_count"]);
+	assert_eq!(norm_json_0["failed_count"], norm_json_1["failed_count"]);
+
+	// For each agent, output rows must be identical across both orderings
+	let results_0 = norm_json_0["results"].as_array().unwrap();
+	let results_1 = norm_json_1["results"].as_array().unwrap();
+	for agent in order_shared_first.split(',') {
+		let row_0 = results_0.iter().find(|r| r["agent"] == agent).unwrap();
+		let row_1 = results_1.iter().find(|r| r["agent"] == agent).unwrap();
+		assert_eq!(row_0["ok"], row_1["ok"]);
+		assert_eq!(row_0["output"]["outcome"], row_1["output"]["outcome"]);
+		assert_eq!(row_0["output"]["code"], row_1["output"]["code"]);
+		assert_eq!(row_0["output"]["paths"], row_1["output"]["paths"]);
+		assert_eq!(row_0["output"]["skipped"], row_1["output"]["skipped"]);
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_delete_skills_whole_batch_preflight_rejection() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let root = project.path();
+
+	// Setup shared fixture: creates .aghub/notebooklm, .claude/skills/notebooklm,
+	// .agents/skills/notebooklm, and private links for opencode, cursor, pi, grok, omp.
+	aghub_core::testing::master_with_claude_referrer(root, "notebooklm");
+	for dir in [".opencode", ".cursor", ".pi", ".grok", ".omp"] {
+		let slot = root.join(dir).join("skills");
+		std::fs::create_dir_all(&slot).unwrap();
+		std::os::unix::fs::symlink(
+			root.join(".aghub/notebooklm"),
+			slot.join("notebooklm"),
+		)
+		.unwrap();
+	}
+	let lock_path = root.join("skills-lock.json");
+	std::fs::write(
+		&lock_path,
+		r#"{"version":1,"skills":{"notebooklm":{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}"#,
+	)
+	.unwrap();
+
+	let disk_before = collect_disk_state(root);
+	let lock_before = std::fs::read_to_string(&lock_path).unwrap();
+
+	// Deleting for claude and opencode alone:
+	// OpenCode reads its private link AND .agents/skills/notebooklm.
+	// Because .agents/skills/notebooklm is also read by unrequested agents (codex, copilot, etc.),
+	// OpenCode's removal is refused in commit mode, causing whole-batch preflight failure.
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(root)
+		.args([
+			"-p",
+			"-a",
+			"claude,opencode",
+			"delete",
+			"skills",
+			"notebooklm",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		out.status.code(),
+		Some(1),
+		"whole-batch preflight rejection must exit 1; stdout: {}, stderr: {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&out.stdout)
+		.expect("must be valid JSON failure envelope");
+	assert_eq!(json["error"]["code"], "UNSUPPORTED_OPERATION");
+	let err_msg = json["error"]["message"].as_str().unwrap();
+	assert!(
+		err_msg.contains("nothing was written"),
+		"message must state nothing was written: {err_msg}"
+	);
+	assert!(
+		err_msg.contains("opencode"),
+		"message must name refused target opencode: {err_msg}"
+	);
+
+	let disk_after = collect_disk_state(root);
+	let lock_after = std::fs::read_to_string(&lock_path).unwrap();
+	assert_eq!(
+		disk_before, disk_after,
+		"disk must be byte-identical before and after preflight failure"
+	);
+	assert_eq!(
+		lock_before, lock_after,
+		"lock must be byte-identical before and after preflight failure"
+	);
+	assert!(
+		root.join(".aghub/notebooklm").exists(),
+		"Master must still exist"
+	);
+	assert!(
+		root.join(".claude/skills/notebooklm").exists(),
+		"Claude link must still exist"
+	);
+	assert!(
+		root.join(".agents/skills/notebooklm").exists(),
+		"Shared slot link must still exist"
+	);
+	assert!(
+		root.join(".opencode/skills/notebooklm").exists(),
+		"OpenCode link must still exist"
+	);
+}

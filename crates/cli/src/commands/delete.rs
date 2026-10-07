@@ -174,21 +174,7 @@ fn plan_or_noop(
 ///   when empty) so the CLI and API agree on the `Failed` shape; a `Both`-scope
 ///   prune can leave a non-empty partial here.
 fn apply_prune_fields(payload: &mut serde_json::Value, prune: &PruneStatus) {
-	match prune {
-		PruneStatus::NotRun => {}
-		// A PREVIEW's disclosure, under its own key: a preview must never
-		// read as "dropped these".
-		PruneStatus::WouldPrune(keys) => {
-			payload["would_prune_lock_entries"] = json!(keys);
-		}
-		PruneStatus::Pruned(keys) => {
-			payload["pruned_lock_entries"] = json!(keys);
-		}
-		PruneStatus::Failed { reason, pruned } => {
-			payload["prune_error"] = json!(reason);
-			payload["pruned_lock_entries"] = json!(pruned);
-		}
-	}
+	aghub_core::skills::removal::apply_prune_fields(payload, prune);
 }
 
 #[cfg(test)]

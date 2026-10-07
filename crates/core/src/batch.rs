@@ -231,6 +231,10 @@ pub struct AgentOpResultView {
 	pub agent: String,
 	pub ok: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	pub outcome: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub code: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
 	pub output: Option<serde_json::Value>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
@@ -455,12 +459,16 @@ fn run_agent_mutation_with_preflight(
 			Ok(output) => AgentOpResultView {
 				agent: row.target.as_str().to_string(),
 				ok: true,
+				outcome: None,
+				code: None,
 				output: Some(output),
 				error: None,
 			},
 			Err(error) => AgentOpResultView {
 				agent: row.target.as_str().to_string(),
 				ok: false,
+				outcome: None,
+				code: None,
 				output: None,
 				error: Some(error),
 			},

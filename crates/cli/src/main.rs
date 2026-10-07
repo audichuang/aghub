@@ -2124,6 +2124,44 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 					},
 				)
 				.map_err(|e| anyhow::anyhow!("{e}"))?
+			} else if matches!(resource, ResourceType::Skills)
+				&& matches!(cli.command, Commands::Delete { .. })
+			{
+				let (name, all_agents, dry_run, yes) = match &cli.command {
+					Commands::Delete {
+						name,
+						all_agents,
+						dry_run,
+						yes,
+						..
+					} => (name, *all_agents, *dry_run, *yes),
+					_ => unreachable!(),
+				};
+				let resolved = resolve_cli_scope(cli)?;
+				let is_dry_run = dry_run || !yes;
+				let request =
+					aghub_core::skills::removal::SkillRemovalRequest {
+						target:
+							aghub_core::skills::removal::SkillRemovalTarget::ByName(
+								name.clone(),
+							),
+						scope: resolved.resource_scope(),
+						project_root: resolved
+							.project_root()
+							.map(std::path::Path::to_path_buf),
+						agents: agents.to_vec(),
+						dry_run: is_dry_run,
+						all_agents,
+						prior_removed_paths: Vec::new(),
+						keeps_master: false,
+					};
+				// Skill delete goes through core's batch removal entry to ensure
+				// order-independent removal across shared and private readers.
+				// See docs/history/cli.md#delete-skills--a-order-independence
+				let resp =
+					aghub_core::skills::removal::remove_skill_batch(&request)
+						.map_err(anyhow::Error::from)?;
+				resp.to_batch_view(name, is_dry_run)
 			} else {
 				let write_scope = resolve_cli_scope(cli)?.resource_scope();
 				aghub_core::batch::run_skill_agent_mutation(

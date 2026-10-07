@@ -231,7 +231,17 @@ branch.
 - Read `outcome` (`preview` | `removed` | `absent` | `partial` | `kept`), never
   `dry_run` / `executed` — and for `preview` and `kept`, exit zero is not
   completion. A `-a` list's text tally counts `kept` rows apart
-  (`N ok, M kept (nothing removed), K failed`). A Master listed under
+  (`N ok, M kept (nothing removed), K failed`). In a multi-agent skill delete
+  (`delete skills <NAME> -a a,b,c`), `-a` order does not affect the verdict: core
+  plans shared slots first and attributes prior-row credit so private readers
+  listed before shared-slot writers succeed without needing to order shared slots
+  first or re-run. Whole-batch preflight failure exits 1, states that nothing was
+  written, and lists every refused target. In `--json`, every row in `results[]`
+  carries `outcome`, wire `code` (e.g. `UNSUPPORTED_OPERATION`, `INVALID_CONFIG`,
+  `RESOURCE_NOT_FOUND`, or null), `still_read_from` (paths still reading the
+  skill if kept), `still_read_by` (agents), `master_reclaimed`, and independent
+  lock prune fields (`pruned_lock_entries`, `would_prune_lock_entries`,
+  `prune_error`). Rows preserve the caller's request order. A Master listed under
   `kept (shared with other agents)` is still read by another agent: never `rm`
   it; name every holder in one `-a` list or use `--all-agents`.
 - `check` is offline unless `--online`, and its scope spans global + project

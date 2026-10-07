@@ -12,6 +12,6 @@ pub mod skill;
 pub mod sub_agent;
 
 pub use mcp::McpView;
-pub use removal::{RemovalKind, RemovalView};
+pub use removal::{removal_kind_from_outcome, RemovalKind, RemovalView};
 pub use skill::SkillView;
 pub use sub_agent::SubAgentView;

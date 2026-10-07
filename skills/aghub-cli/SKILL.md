@@ -456,7 +456,18 @@ message gives paths, not agent names, and a link from a DISABLED agent's own
 directory blocks the same way. A symlink from
 an agent that IS in the `-a` list does not block it; that agent's own row
 unlinks it, and the verdict is the same in whatever order `-a` lists the agents
-(preview and `--yes` agree). A real directory inside `.aghub` is never deleted by
+(preview and `--yes` agree). You do not need to order shared-slot writers first
+or run the command again; core evaluates shared slots first and applies prior-row
+credit in a single pass. If whole-batch preflight rejects the request, the command
+exits 1, states that nothing was written, and names each refused target with its
+reason; disk and lock remain byte-identical.
+In `--json`, each row in `results` carries the unified `outcome`
+(`preview` | `removed` | `absent` | `partial` | `kept`), wire `code`
+(`UNSUPPORTED_OPERATION`, `INVALID_CONFIG`, `RESOURCE_NOT_FOUND`, or null),
+`still_read_from` (surviving paths when kept/refused), `still_read_by` (keepers),
+and `master_reclaimed` (whether Master was removed). Prune status is reported
+independently (`pruned_lock_entries` / `would_prune_lock_entries` / `prune_error`).
+Rows are returned in the exact request order of `-a`. A real directory inside `.aghub` is never deleted by
 a single-agent delete, and neither is a real directory in a shared slot that git tracks (exit 1;
 untrack it with `git rm -r --cached <path>` first, or keep authoring it there;
 if git cannot answer — missing, an unusable repository, `dubious ownership`, or a probe that
