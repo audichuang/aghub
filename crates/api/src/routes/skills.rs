@@ -9754,9 +9754,9 @@ mod tests {
 				.expect("json body");
 
 				assert_eq!(preview_body["dry_run"], true);
-				assert!(
-					preview_body.get("outcome").is_some(),
-					"preview must carry outcome: {preview_body}"
+				assert_eq!(
+					preview_body["outcome"], "preview",
+					"preview must carry preview outcome: {preview_body}"
 				);
 				let preview_unmanaged = preview_body["still_read_by_unmanaged"]
 					.as_array()
@@ -9823,6 +9823,60 @@ mod tests {
 					master.exists(),
 					"master must be kept since shared slot survives"
 				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_preview_refuses_when_shape_needs_repair() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let project = home.join("proj");
+				let name = "forked-skill";
+				let master = project.join(".aghub").join(name);
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: master\n---\n"),
+				)
+				.unwrap();
+
+				// npx clobber: real directory in .agents/skills instead of symlink
+				let shared = project.join(".agents/skills").join(name);
+				std::fs::create_dir_all(&shared).unwrap();
+				std::fs::write(
+					shared.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: clobber\n---\n"),
+				)
+				.unwrap();
+
+				// Cursor reads .agents/skills
+				let resp = client
+					.delete(format!(
+						"/api/v1/agents/cursor/skills/{name}?scope=project&project_root={}",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(
+					resp.status(),
+					rocket::http::Status::UnprocessableEntity
+				);
+				let body: serde_json::Value = serde_json::from_str(
+					&resp.into_string().expect("response body"),
+				)
+				.expect("json body");
+				assert_eq!(body["code"], "UNSUPPORTED_OPERATION");
+				assert!(body["error"].as_str().unwrap().contains("repair"));
 			});
 		});
 	}

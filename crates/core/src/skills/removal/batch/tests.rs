@@ -1411,3 +1411,85 @@ fn test_to_single_view_aggregates_rows_and_holders() {
 	assert!(!single.holders.is_empty());
 	assert!(single.holders.all.contains(&"cursor".to_string()));
 }
+
+#[test]
+fn test_to_single_view_on_partial_row_projects_success_false() {
+	let row = SkillRemovalRow {
+		agent: AgentType::Claude,
+		verdict: Verdict::Partial,
+		outcome: crate::dto::RemovalKind::Partial,
+		error: Some("some path failed".to_string()),
+		typed_error: Some(std::sync::Arc::new(ConfigError::InvalidConfig(
+			"some path failed".to_string(),
+		))),
+		is_load_error: false,
+		still_read_from: Vec::new(),
+		paths: vec![PathBuf::from("/a/b")],
+		skipped: Vec::new(),
+		executed: true,
+		needs_confirm: false,
+	};
+	let resp = SkillRemovalResponse {
+		rows: vec![row],
+		prune: PruneStatus::NotRun,
+		keepers: Vec::new(),
+		unreadable: Vec::new(),
+		master_reclaimed: false,
+		would_reclaim_master: false,
+	};
+	let single = resp
+		.to_single_view(false)
+		.expect("to_single_view must not treat Partial as fatal");
+	assert!(!single.removal_view.success);
+	assert_eq!(
+		single.removal_view.outcome,
+		crate::dto::RemovalKind::Partial
+	);
+	assert_eq!(single.removal_view.paths, vec!["/a/b".to_string()]);
+}
+
+#[test]
+fn test_to_single_view_dry_run_propagates_plan_error() {
+	let row = SkillRemovalRow {
+		agent: AgentType::Cursor,
+		verdict: Verdict::Absent,
+		outcome: crate::dto::RemovalKind::Absent,
+		error: Some("delete cursor: unsupported".to_string()),
+		typed_error: Some(std::sync::Arc::new(ConfigError::unsupported_op(
+			"repair needed",
+		))),
+		is_load_error: false,
+		still_read_from: Vec::new(),
+		paths: Vec::new(),
+		skipped: Vec::new(),
+		executed: false,
+		needs_confirm: false,
+	};
+	let resp = SkillRemovalResponse {
+		rows: vec![row],
+		prune: PruneStatus::NotRun,
+		keepers: Vec::new(),
+		unreadable: Vec::new(),
+		master_reclaimed: false,
+		would_reclaim_master: false,
+	};
+	let err = resp
+		.to_single_view(true)
+		.expect_err("dry run must propagate plan error");
+	assert!(matches!(err, ConfigError::UnsupportedOperation { .. }));
+}
+
+#[test]
+fn test_clone_config_error_preserves_json() {
+	let raw_json_err =
+		serde_json::from_str::<serde_json::Value>("{invalid").unwrap_err();
+	let expected_msg = raw_json_err.to_string();
+	let err = ConfigError::Json(raw_json_err);
+	let cloned = clone_config_error(&err);
+	match &cloned {
+		ConfigError::Json(e) => {
+			assert_eq!(e.to_string(), expected_msg);
+		}
+		other => panic!("expected ConfigError::Json, got {other:?}"),
+	}
+}

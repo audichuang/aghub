@@ -65,7 +65,7 @@ pub struct OperationResult {
 	/// `RemovalKind`'s vocabulary, in `crate::dto::removal`.
 	pub already_present: bool,
 	pub error: Option<String>,
-	pub outcome: Option<String>,
+	pub outcome: Option<crate::dto::RemovalKind>,
 	pub still_read_by: Option<Vec<String>>,
 	pub still_read_by_managed: Option<Vec<String>>,
 	pub still_read_by_unmanaged: Option<Vec<String>>,
@@ -144,7 +144,7 @@ impl From<&OperationResult> for OperationResultView {
 			ok: r.success,
 			already_present: r.already_present,
 			error: r.error.clone(),
-			outcome: r.outcome.clone(),
+			outcome: r.outcome.map(|k| k.as_str().to_string()),
 			still_read_by: r.still_read_by.clone(),
 			still_read_by_managed: r.still_read_by_managed.clone(),
 			still_read_by_unmanaged: r.still_read_by_unmanaged.clone(),
@@ -1921,45 +1921,6 @@ fn plan_reconcile_skill(
 	})
 }
 
-fn clone_reconcile_error(err: &ConfigError) -> ConfigError {
-	match err {
-		ConfigError::UnsupportedOperation {
-			message,
-			rejected_targets,
-		} => ConfigError::UnsupportedOperation {
-			message: message.clone(),
-			rejected_targets: rejected_targets.clone(),
-		},
-		ConfigError::ResourceNotFound {
-			resource_type,
-			name,
-		} => ConfigError::ResourceNotFound {
-			resource_type: resource_type.clone(),
-			name: name.clone(),
-		},
-		ConfigError::InvalidConfig(s) => ConfigError::InvalidConfig(s.clone()),
-		ConfigError::ValidationFailed(s) => {
-			ConfigError::ValidationFailed(s.clone())
-		}
-		ConfigError::ResourceExists {
-			resource_type,
-			name,
-		} => ConfigError::ResourceExists {
-			resource_type: resource_type.clone(),
-			name: name.clone(),
-		},
-		ConfigError::NotFound { path } => {
-			ConfigError::NotFound { path: path.clone() }
-		}
-		ConfigError::Io(e) => {
-			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
-		}
-		ConfigError::Json(e) => ConfigError::Json(
-			<serde_json::Error as serde::de::Error>::custom(e.to_string()),
-		),
-	}
-}
-
 impl ReconcileSkillPlan {
 	/// The read-only verdict for ONE row, run before any write in the batch and
 	/// reused verbatim by [`reconcile_skill_preview`].
@@ -2003,7 +1964,9 @@ impl ReconcileSkillPlan {
 			// Only unsupported scope and planner errors pre-refuse before write.
 			if !r.is_load_error {
 				if let Some(ref err) = r.typed_error {
-					return Err(clone_reconcile_error(err));
+					return Err(
+						crate::skills::removal::batch::clone_config_error(err),
+					);
 				}
 				if let Some(ref err_str) = r.error {
 					return Err(ConfigError::InvalidConfig(err_str.clone()));
@@ -2355,13 +2318,21 @@ pub fn reconcile_skill(
 					}
 					let resp = match delete_batch_result.as_ref().unwrap() {
 						Ok(resp) => resp,
-						Err(err) => return Err(clone_reconcile_error(err)),
+						Err(err) => return Err(
+							crate::skills::removal::batch::clone_config_error(
+								err,
+							),
+						),
 					};
 					if let Some(r) =
 						resp.rows.iter().find(|r| r.agent == row.target.agent)
 					{
 						if let Some(ref err) = r.typed_error {
-							return Err(clone_reconcile_error(err));
+							return Err(
+								crate::skills::removal::batch::clone_config_error(
+									err,
+								),
+							);
 						}
 						if let Some(ref err) = r.error {
 							return Err(ConfigError::InvalidConfig(
@@ -2434,7 +2405,7 @@ pub fn reconcile_skill(
 				if let Some(row) =
 					resp.rows.iter().find(|row| row.agent == r.target.agent)
 				{
-					r.outcome = Some(row.outcome_str().to_string());
+					r.outcome = Some(row.outcome);
 				}
 				if !holders.is_empty() {
 					r.still_read_by = Some(holders.all.clone());
@@ -6663,7 +6634,7 @@ mod tests {
 			serde_json::from_str::<serde_json::Value>("{invalid").unwrap_err();
 		let expected_msg = raw_json_err.to_string();
 		let err = ConfigError::Json(raw_json_err);
-		let cloned = clone_reconcile_error(&err);
+		let cloned = crate::skills::removal::batch::clone_config_error(&err);
 		let cloned_str = cloned.to_string();
 		match &cloned {
 			ConfigError::Json(e) => {

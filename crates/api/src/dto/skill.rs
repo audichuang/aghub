@@ -476,21 +476,6 @@ impl From<aghub_core::dto::RemovalKind> for RemovalOutcomeKind {
 	}
 }
 
-impl std::str::FromStr for RemovalOutcomeKind {
-	type Err = ();
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		match s {
-			"preview" => Ok(Self::Preview),
-			"removed" => Ok(Self::Removed),
-			"absent" => Ok(Self::Absent),
-			"partial" => Ok(Self::Partial),
-			"kept" => Ok(Self::Kept),
-			"failed" => Ok(Self::Failed),
-			_ => Err(()),
-		}
-	}
-}
-
 #[derive(Debug, Default, Serialize, TS)]
 #[ts(export)]
 pub struct DeleteSkillByPathResponse {

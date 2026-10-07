@@ -183,7 +183,7 @@ pub struct SingleSkillRemovalView {
 	pub prune: PruneStatus,
 }
 
-fn clone_config_error(err: &ConfigError) -> ConfigError {
+pub fn clone_config_error(err: &ConfigError) -> ConfigError {
 	match err {
 		ConfigError::UnsupportedOperation {
 			message,
@@ -213,12 +213,12 @@ fn clone_config_error(err: &ConfigError) -> ConfigError {
 			ConfigError::ValidationFailed(s.clone())
 		}
 		ConfigError::InvalidConfig(s) => ConfigError::InvalidConfig(s.clone()),
-		ConfigError::Json(e) => {
-			ConfigError::InvalidConfig(format!("JSON error: {e}"))
-		}
 		ConfigError::Io(e) => {
 			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
 		}
+		ConfigError::Json(e) => ConfigError::Json(
+			<serde_json::Error as serde::de::Error>::custom(e.to_string()),
+		),
 	}
 }
 
@@ -380,8 +380,14 @@ impl SkillRemovalResponse {
 						row.typed_error.as_deref(),
 						Some(ConfigError::ResourceNotFound { .. })
 					);
-			let is_fatal_error =
-				row.is_load_error || (!dry_run && !is_absent_noop);
+			let is_refused_preview =
+				dry_run && matches!(row.verdict, Verdict::Refused { .. });
+			let is_partial = matches!(row.verdict, Verdict::Partial);
+			let is_fatal_error = (row.typed_error.is_some()
+				|| row.error.is_some())
+				&& !is_absent_noop
+				&& !is_refused_preview
+				&& !is_partial;
 			if is_fatal_error {
 				if let Some(ref err) = row.typed_error {
 					return Err(clone_config_error(err));
