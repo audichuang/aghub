@@ -1334,7 +1334,30 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 	);
 	assert!(!res_without.master_reclaimed);
 
-	// 2. With all_agents: orphan master must be reclaimed
+	// 2. Preview with all_agents: orphan master must be planned for removal
+	let req_preview = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName(name.to_string()),
+		scope: ResourceScope::GlobalOnly,
+		project_root: None,
+		agents: vec![AgentType::Claude],
+		dry_run: true,
+		all_agents: true,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+	let res_preview = remove_skill_batch(&req_preview).unwrap();
+	assert_eq!(
+		res_preview.rows[0].outcome,
+		crate::dto::RemovalKind::Preview,
+		"orphan master must be planned as Preview when all_agents is true"
+	);
+	assert!(
+		res_preview.rows[0].paths.contains(&master),
+		"orphan master path must be planned for removal in preview"
+	);
+	assert!(master.exists(), "preview must not remove master from disk");
+
+	// 3. Commit with all_agents: orphan master must be reclaimed
 	let req_with = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName(name.to_string()),
 		scope: ResourceScope::GlobalOnly,
@@ -1346,6 +1369,11 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 		keeps_master: false,
 	};
 	let res_with = remove_skill_batch(&req_with).unwrap();
+	assert_eq!(
+		res_with.rows[0].outcome,
+		crate::dto::RemovalKind::Removed,
+		"commit with all_agents=true must report Removed outcome for orphan master"
+	);
 	assert!(
 		!master.exists(),
 		"orphan master must be reclaimed when all_agents is true"
