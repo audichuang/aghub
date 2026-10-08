@@ -885,16 +885,9 @@ fn remove_skill_by_path(
 	let skill_dir = by_path_skill_dir(&skill_path)
 		.map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
 
-	let roots =
-		allowed_skill_roots(&agent_dirs, request.project_root.as_deref());
-
-	if assert_strictly_contained(&skill_dir, &roots).is_none() {
-		return Err(ConfigError::InvalidConfig(
-			"Refusing to delete: resolved path is not strictly inside an allow-listed skills root"
-				.to_string(),
-		));
-	}
-
+	// Idempotent: nothing on disk to remove. Answer through the shared
+	// no-op seam (`outcome: "absent"`), never a hand-built body.
+	// See docs/history/api.md#delete-by-path-absent-body
 	if !skill_dir.exists() {
 		let rows = target_agents
 			.into_iter()
@@ -908,6 +901,16 @@ fn remove_skill_by_path(
 			master_reclaimed: false,
 			would_reclaim_master: false,
 		});
+	}
+
+	let roots =
+		allowed_skill_roots(&agent_dirs, request.project_root.as_deref());
+
+	if assert_strictly_contained(&skill_dir, &roots).is_none() {
+		return Err(ConfigError::InvalidConfig(
+			"Refusing to delete: resolved path is not strictly inside an allow-listed skills root"
+				.to_string(),
+		));
 	}
 
 	if let Some(ref plugin_name) = request.plugin_owner {

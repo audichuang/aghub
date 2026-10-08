@@ -1727,6 +1727,63 @@ fn test_by_path_removes_contained_dir() {
 	assert!(!foo.exists(), "a contained skill dir is removed normally");
 }
 
+#[test]
+fn test_by_path_repeated_delete_returns_absent_outcome() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let skills = root.join(".claude/skills");
+	let foo = skills.join("foo");
+	fs::create_dir_all(&foo).unwrap();
+	fs::write(
+		foo.join("SKILL.md"),
+		"---\nname: foo\ndescription: f\n---\n",
+	)
+	.unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(foo.join("SKILL.md")),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let first = remove_skill_batch(&req).expect("first removal should succeed");
+	assert!(
+		!foo.exists(),
+		"contained skill dir must be removed on first call"
+	);
+	assert_eq!(first.rows.len(), 1);
+	assert_eq!(first.rows[0].outcome, crate::dto::RemovalKind::Removed);
+
+	// Repeated by-path request on the now-absent skill
+	let second =
+		remove_skill_batch(&req).expect("repeated removal should succeed");
+	assert_eq!(second.rows.len(), 1);
+	assert_eq!(second.rows[0].outcome, crate::dto::RemovalKind::Absent);
+	assert_eq!(second.rows[0].verdict, Verdict::Absent);
+	assert!(
+		second.rows[0].error.is_none(),
+		"absent row must not have an error"
+	);
+	assert!(
+		second
+			.rows
+			.iter()
+			.all(|r| r.outcome == crate::dto::RemovalKind::Absent),
+		"every row outcome must be Absent"
+	);
+	assert!(
+		second.rows.iter().all(|r| r.error.is_none()),
+		"every row must have no error"
+	);
+}
+
 #[cfg(windows)]
 #[test]
 fn test_by_path_unlinks_junction_keeps_master() {
