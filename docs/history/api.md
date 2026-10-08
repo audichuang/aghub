@@ -278,4 +278,6 @@ Pinned by: `delete_by_path_git_tracked_is_kept_untracked_is_deleted`,
 
 `GET /skills/<name>/holders?<scope..>` queries in-scope skill holders partitioned into `managed` and `unmanaged` lists (`SkillHoldersResponse`), allowing client consent dialogs to classify holders without heuristics.
 
+Why a separate route instead of A5's `still_read_by_managed` / `still_read_by_unmanaged`: those fields describe who remains AFTER a planned deletion credits the requested agents, so the requested agent is never listed and a sole managed holder is indistinguishable from a sole disabled holder in a by-name dry run. The dialogs need the current in-scope holders, hence this read-only query (one producer of the partition, `SkillHoldersView::from_agents`).
+
 Pinned by: `get_skill_holders_returns_managed_unmanaged_split` (`crates/api/src/routes/skills.rs`).

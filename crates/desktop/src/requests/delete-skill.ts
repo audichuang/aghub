@@ -46,9 +46,7 @@ export interface ScopeTarget {
 
 export interface BackendHolders {
 	managed?: readonly string[];
-	unmanaged?: readonly string[];
-	still_read_by_unmanaged?: readonly string[];
-	byGroup?: Record<string, { managed?: string[]; unmanaged?: string[] }>;
+	byGroup?: Record<string, { managed?: readonly string[] }>;
 }
 
 export interface DeleteTargetItem {
@@ -144,9 +142,6 @@ export function buildBulkDeleteRequests({
 			backendHolders.byGroup && backendHolders.byGroup[group.key]
 				? {
 						managed: backendHolders.byGroup[group.key].managed,
-						unmanaged: backendHolders.byGroup[group.key].unmanaged,
-						still_read_by_unmanaged:
-							backendHolders.byGroup[group.key].unmanaged,
 					}
 				: backendHolders;
 		const targets = isSkill
@@ -210,10 +205,6 @@ export function collectUnmanagedDeleteTargets(
 				backendHolders.byGroup && backendHolders.byGroup[group.key]
 					? {
 							managed: backendHolders.byGroup[group.key].managed,
-							unmanaged:
-								backendHolders.byGroup[group.key].unmanaged,
-							still_read_by_unmanaged:
-								backendHolders.byGroup[group.key].unmanaged,
 						}
 					: backendHolders;
 			const targets = splitDeleteTargets(
@@ -232,7 +223,7 @@ export function isGoneSkillPath(error: unknown): boolean {
 }
 
 /**
- * Retrieves skill holders partitioned into managed and unmanaged from the backend.
+ * Retrieves skill holders from the backend.
  */
 export async function getSkillHolders(
 	api: ApiClient,
@@ -243,8 +234,100 @@ export async function getSkillHolders(
 	const res = await api.skills.holders(name, scope, projectRoot);
 	return {
 		managed: res.managed,
-		unmanaged: res.unmanaged,
-		still_read_by_unmanaged: res.unmanaged,
+	};
+}
+
+/**
+ * Fetches and merges backend holders across all scopes present in a skill group's items.
+ */
+export async function fetchSkillHoldersForGroup(
+	api: ApiClient,
+	skillName: string,
+	items: readonly DeleteTargetItem[],
+	projectPath?: string,
+): Promise<BackendHolders> {
+	const scopes = new Set<"global" | "project">();
+	for (const item of items) {
+		scopes.add(item.source === "project" ? "project" : "global");
+	}
+	if (scopes.size === 0) scopes.add("global");
+
+	const results = await Promise.all(
+		Array.from(scopes).map((scope) =>
+			getSkillHolders(
+				api,
+				skillName,
+				scope,
+				scope === "project" ? projectPath : undefined,
+			),
+		),
+	);
+
+	const allManaged = new Set<string>();
+	for (const r of results) {
+		for (const m of r.managed ?? []) allManaged.add(m);
+	}
+
+	return {
+		managed: Array.from(allManaged),
+	};
+}
+
+export interface FetchBulkHoldersOptions {
+	api: ApiClient;
+	groups: readonly BulkDeleteGroup[];
+	resourceType?: "mcp" | "skill" | "mixed";
+	projectPath?: string;
+}
+
+/**
+ * Fetches and aggregates holders across all skill groups and their respective scopes.
+ */
+export async function fetchBulkHolders({
+	api,
+	groups,
+	resourceType = "mixed",
+	projectPath,
+}: FetchBulkHoldersOptions): Promise<BackendHolders> {
+	const skillGroups = groups.filter(
+		(g) => (g.resourceType ?? resourceType) === "skill",
+	);
+
+	if (skillGroups.length === 0) {
+		return { managed: [], byGroup: {} };
+	}
+
+	const groupResults = await Promise.all(
+		skillGroups.map(async (group) => {
+			const skillName = group.items[0]?.name ?? group.key;
+			const holders = await fetchSkillHoldersForGroup(
+				api,
+				skillName,
+				group.items,
+				projectPath,
+			);
+			return { groupKey: group.key, holders };
+		}),
+	);
+
+	const byGroup: Record<string, { managed: string[] }> = {};
+	const allManaged = new Set<string>();
+
+	for (const { groupKey, holders } of groupResults) {
+		if (!byGroup[groupKey]) {
+			byGroup[groupKey] = { managed: [] };
+		}
+		for (const m of holders.managed ?? []) {
+			if (!byGroup[groupKey].managed.includes(m)) {
+				byGroup[groupKey].managed.push(m);
+			}
+			allManaged.add(m);
+		}
+	}
+
+	return {
+		managed: Array.from(allManaged),
+		byGroup,
 	};
 }
 

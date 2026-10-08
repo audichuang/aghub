@@ -783,6 +783,7 @@ impl ConfigManager {
 					path.as_deref(),
 					scope,
 					project_root.as_deref(),
+					requested_agents,
 				);
 				return Err(ConfigError::unsupported_operation_with_targets(
 					operation,

@@ -15,8 +15,6 @@ const items = [
 ];
 const managed: BackendHolders = {
 	managed: ["claude"],
-	unmanaged: ["cursor", "opencode"],
-	still_read_by_unmanaged: ["cursor", "opencode"],
 };
 
 test("a disabled agent is not named unless the user opts in", () => {
@@ -48,8 +46,6 @@ test("a row with no agent is never named", () => {
 		items,
 		{
 			managed: ["claude", "cursor", "opencode"],
-			unmanaged: [],
-			still_read_by_unmanaged: [],
 		},
 		true,
 	);
@@ -80,8 +76,6 @@ test("bulk delete: disabled agent is not named and its source_path delete is not
 	];
 	const managed: BackendHolders = {
 		managed: ["claude"],
-		unmanaged: ["cursor"],
-		still_read_by_unmanaged: ["cursor"],
 	};
 
 	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
@@ -129,8 +123,6 @@ test("bulk delete: disabled agent is named and its source_path delete is sent wh
 	];
 	const managed: BackendHolders = {
 		managed: ["claude"],
-		unmanaged: ["cursor"],
-		still_read_by_unmanaged: ["cursor"],
 	};
 
 	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
@@ -173,8 +165,6 @@ test("bulk delete: shared source_path is deduplicated but carries consented agen
 	];
 	const managed: BackendHolders = {
 		managed: ["claude"],
-		unmanaged: ["cursor"],
-		still_read_by_unmanaged: ["cursor"],
 	};
 
 	const withoutConsent = buildBulkDeleteRequests({
@@ -214,8 +204,6 @@ test("bulk delete: a group held only by a disabled agent is skipped without cons
 	];
 	const managed: BackendHolders = {
 		managed: [],
-		unmanaged: ["cursor"],
-		still_read_by_unmanaged: ["cursor"],
 	};
 
 	// No consent: appears in skippedGroupKeys, produces no request
@@ -280,8 +268,6 @@ test("bulk delete: mixed selection filters skill group but leaves mcp group unch
 	];
 	const managed: BackendHolders = {
 		managed: ["claude"],
-		unmanaged: ["cursor"],
-		still_read_by_unmanaged: ["cursor"],
 	};
 
 	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
@@ -323,8 +309,6 @@ test("collectUnmanagedDeleteTargets returns unmanaged items across skill groups"
 	];
 	const managed: BackendHolders = {
 		managed: ["claude"],
-		unmanaged: ["cursor", "opencode"],
-		still_read_by_unmanaged: ["cursor", "opencode"],
 	};
 	const unmanaged = collectUnmanagedDeleteTargets(groups, managed, "skill");
 	assert.deepEqual(

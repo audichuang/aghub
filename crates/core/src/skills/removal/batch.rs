@@ -647,35 +647,8 @@ pub fn find_readers_of_kept_path(
 }
 
 /// Build a [`RejectedTarget`] for a refused agent, populating `readers` when `kind == "shared"`.
-///
-/// `all_requested` is excluded from the reader roster so sibling requested agents
-/// do not falsely appear as managed readers.
-pub fn build_rejected_target(
-	agent: AgentType,
-	reason: &str,
-	kind: Option<&str>,
-	path: Option<&Path>,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-	all_requested: &[AgentType],
-) -> crate::errors::RejectedTarget {
-	let readers = if kind == Some("shared") {
-		path.map(|p| {
-			find_readers_of_kept_path(p, scope, project_root, all_requested)
-		})
-	} else {
-		None
-	};
-	crate::errors::RejectedTarget {
-		agent: agent.as_str().to_string(),
-		reason: reason.to_string(),
-		kind: kind.map(ToString::to_string),
-		path: path.map(|p| p.display().to_string()),
-		readers,
-	}
-}
-
 /// Build [`RejectedTarget`]s for a set of rejected agents, sharing the populated `readers`.
+/// Readers come from the first kept path only.
 pub fn build_rejected_targets(
 	agents: &[AgentType],
 	reason: &str,
@@ -683,9 +656,12 @@ pub fn build_rejected_targets(
 	path: Option<&Path>,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
+	excluding: &[AgentType],
 ) -> Vec<crate::errors::RejectedTarget> {
 	let readers = if kind == Some("shared") {
-		path.map(|p| find_readers_of_kept_path(p, scope, project_root, agents))
+		path.map(|p| {
+			find_readers_of_kept_path(p, scope, project_root, excluding)
+		})
 	} else {
 		None
 	};
@@ -1049,6 +1025,7 @@ fn remove_skill_by_path(
 					path.as_deref(),
 					request.scope,
 					request.project_root.as_deref(),
+					&target_agents,
 				);
 				return Err(ConfigError::unsupported_operation_with_targets(
 					"remove for this agent alone",
@@ -1257,15 +1234,16 @@ fn remove_skill_by_name(
 					} else {
 						"remove for this agent alone"
 					};
-					let rejected_target = build_rejected_target(
-						agent,
+					let rejected_target = build_rejected_targets(
+						&[agent],
 						reason,
 						Some(kind),
 						path.as_deref(),
 						request.scope,
 						request.project_root.as_deref(),
 						&request.agents,
-					);
+					)
+					.remove(0);
 					preflight_failures.push((
 						agent,
 						Arc::new(

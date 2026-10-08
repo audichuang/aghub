@@ -4,6 +4,8 @@ import { HTTPError } from "ky";
 import {
 	buildBulkDeleteRequests,
 	deleteSkill,
+	fetchBulkHolders,
+	fetchSkillHoldersForGroup,
 	formatDeleteMessage,
 	getSkillHolders,
 	interpretRefusal,
@@ -779,39 +781,6 @@ test("deleteSkill returns unmanagedKept directly from backend still_read_by_unma
 	assert.deepEqual(result.stillReadByUnmanaged, ["cursor"]);
 });
 
-test("splitDeleteTargets classifies managed based on backend fields, not frontend rule", () => {
-	const items = [
-		{ agent: "claude", source: "global" },
-		{ agent: "cursor", source: "global" },
-		{ agent: "opencode", source: "global" },
-	];
-
-	// Backend classification identifies disabled agents via unmanaged:
-	const backend: BackendHolders = {
-		managed: ["claude"],
-		unmanaged: ["cursor", "opencode"],
-		still_read_by_unmanaged: ["cursor", "opencode"],
-	};
-
-	const { named, managed, unmanaged } = splitDeleteTargets(
-		items,
-		backend,
-		false,
-	);
-	assert.deepEqual(
-		managed.map((i) => i.agent),
-		["claude"],
-	);
-	assert.deepEqual(
-		unmanaged.map((i) => i.agent),
-		["cursor", "opencode"],
-	);
-	assert.deepEqual(
-		named.map((i) => i.agent),
-		["claude"],
-	);
-});
-
 test("splitDeleteTargets: disabled agent missing from both managed and unmanaged lists is not named without consent (fail-closed)", () => {
 	const items = [
 		{ name: "my-skill", agent: "claude", source: "global" as const },
@@ -824,10 +793,9 @@ test("splitDeleteTargets: disabled agent missing from both managed and unmanaged
 	];
 
 	// Backend holders only knows about claude in managed.
-	// cursor is in unmanaged, and unknown-disabled is missing from both lists.
+	// Any agent not in managed is classified as unmanaged (fail-closed).
 	const backend: BackendHolders = {
 		managed: ["claude"],
-		unmanaged: ["cursor"],
 	};
 
 	// Unticked consent: unknown-disabled must NOT be classified as managed, so it must NOT be named!
@@ -872,7 +840,6 @@ test("getSkillHolders fetches holders and splits managed vs unmanaged from respo
 	const holders = await getSkillHolders(api, "my-skill", "global");
 
 	assert.deepEqual(holders.managed, ["claude"]);
-	assert.deepEqual(holders.unmanaged, ["cursor", "opencode"]);
 
 	const items = [
 		{ agent: "claude", source: "global" },
@@ -890,66 +857,9 @@ test("getSkillHolders fetches holders and splits managed vs unmanaged from respo
 	);
 });
 
-test("first item's agent is disabled => not in named/request until includeUnmanaged is ticked", () => {
-	const backendHolders: BackendHolders = {
-		managed: ["claude"],
-		unmanaged: ["cursor"],
-		still_read_by_unmanaged: ["cursor"],
-	};
-
-	// cursor is the FIRST item in the group
-	const items = [
-		{ name: "my-skill", agent: "cursor", source: "global" as const },
-		{ name: "my-skill", agent: "claude", source: "global" as const },
-	];
-
-	// Unticked: cursor is not in named
-	const unticked = splitDeleteTargets(items, backendHolders, false);
-	assert.deepEqual(
-		unticked.managed.map((i) => i.agent),
-		["claude"],
-	);
-	assert.deepEqual(
-		unticked.unmanaged.map((i) => i.agent),
-		["cursor"],
-	);
-	assert.deepEqual(
-		unticked.named.map((i) => i.agent),
-		["claude"],
-	);
-
-	// In bulk request building, cursor is not in requests without consent
-	const untickedBulk = buildBulkDeleteRequests({
-		groups: [{ key: "my-skill", items }],
-		resourceType: "skill",
-		backendHolders,
-		includeUnmanaged: false,
-	});
-	assert.equal(untickedBulk.requests.length, 1);
-	assert.equal(untickedBulk.requests[0].agent, "claude");
-	assert.deepEqual(untickedBulk.requests[0].agents, ["claude"]);
-
-	// Ticked: cursor is included in named and request
-	const ticked = splitDeleteTargets(items, backendHolders, true);
-	assert.deepEqual(
-		ticked.named.map((i) => i.agent),
-		["claude", "cursor"],
-	);
-	const tickedBulk = buildBulkDeleteRequests({
-		groups: [{ key: "my-skill", items }],
-		resourceType: "skill",
-		backendHolders,
-		includeUnmanaged: true,
-	});
-	assert.ok(tickedBulk.requests.some((r) => r.agent === "cursor"));
-	assert.ok(tickedBulk.requests[0].agents.includes("cursor"));
-});
-
 test("mixed-scope group: disabled agent is not named in either scope's request", () => {
 	const backendHolders: BackendHolders = {
 		managed: ["claude"],
-		unmanaged: ["cursor"],
-		still_read_by_unmanaged: ["cursor"],
 	};
 
 	const group = {
@@ -986,30 +896,6 @@ test("mixed-scope group: disabled agent is not named in either scope's request",
 	assert.ok(!requests.some((r) => r.agents.includes("cursor")));
 	assert.ok(!requests.some((r) => r.scope === "project"));
 	assert.deepEqual(skippedGroupKeys, []);
-});
-
-test("deleteSkill returns verdict 'absent' when backend returns outcome 'absent', not 'removed'", async () => {
-	const api = {
-		skills: {
-			delete: async () => ({
-				outcome: "absent",
-				still_read_by_managed: [],
-				still_read_by_unmanaged: [],
-			}),
-		},
-	} as any;
-
-	const res = await deleteSkill({
-		api,
-		skillName: "withheld-skill",
-		agent: "claude",
-		scope: "global",
-		intent: { kind: "all-agents" },
-		t,
-	});
-
-	assert.equal(res.verdict, "absent");
-	assert.notEqual(res.verdict, "removed");
 });
 
 test("deleteSkill by-path with project location passes scope='project' and project_root to api.skills.deleteByPath", async () => {
@@ -1072,4 +958,129 @@ test("deleteSkill by-name throws if agent is not provided", async () => {
 		}),
 		/agent is required for by-name skill deletion/,
 	);
+});
+
+test("fetchSkillHoldersForGroup queries scopes from items and merges managed holders", async () => {
+	const calls: Array<{
+		name: string;
+		scope: string;
+		projectRoot?: string | null;
+	}> = [];
+	const api = {
+		skills: {
+			holders: async (
+				name: string,
+				scope: string,
+				projectRoot?: string | null,
+			) => {
+				calls.push({ name, scope, projectRoot });
+				if (scope === "global") {
+					return {
+						managed: ["claude"],
+						unmanaged: ["cursor"],
+						all: ["claude", "cursor"],
+					};
+				}
+				return {
+					managed: ["codex"],
+					unmanaged: ["cursor"],
+					all: ["codex", "cursor"],
+				};
+			},
+		},
+	} as any;
+
+	const items = [
+		{ name: "my-skill", agent: "claude", source: "global" },
+		{ name: "my-skill", agent: "codex", source: "project" },
+	];
+
+	const result = await fetchSkillHoldersForGroup(
+		api,
+		"my-skill",
+		items,
+		"/project",
+	);
+
+	assert.deepEqual(result.managed?.slice().sort(), ["claude", "codex"]);
+	assert.equal(calls.length, 2);
+	assert.ok(calls.some((c) => c.scope === "global"));
+	assert.ok(
+		calls.some(
+			(c) => c.scope === "project" && c.projectRoot === "/project",
+		),
+	);
+});
+
+test("fetchBulkHolders queries holders across groups and builds managed and byGroup", async () => {
+	const api = {
+		skills: {
+			holders: async (name: string, _scope: string) => {
+				if (name === "skill-1") {
+					return {
+						managed: ["claude"],
+						unmanaged: ["cursor"],
+						all: ["claude", "cursor"],
+					};
+				}
+				return { managed: ["codex"], unmanaged: [], all: ["codex"] };
+			},
+		},
+	} as any;
+
+	const groups = [
+		{
+			key: "skill-1",
+			items: [{ name: "skill-1", agent: "claude", source: "global" }],
+			resourceType: "skill" as const,
+		},
+		{
+			key: "skill-2",
+			items: [{ name: "skill-2", agent: "codex", source: "global" }],
+			resourceType: "skill" as const,
+		},
+		{
+			key: "mcp-server",
+			items: [{ name: "mcp-server", agent: "claude", source: "global" }],
+			resourceType: "mcp" as const,
+		},
+	];
+
+	const result = await fetchBulkHolders({
+		api,
+		groups,
+		resourceType: "mixed",
+	});
+
+	assert.deepEqual(result.managed?.slice().sort(), ["claude", "codex"]);
+	assert.deepEqual(result.byGroup?.["skill-1"]?.managed, ["claude"]);
+	assert.deepEqual(result.byGroup?.["skill-2"]?.managed, ["codex"]);
+	assert.equal(result.byGroup?.["mcp-server"], undefined);
+});
+
+test("fetchBulkHolders returns empty managed and byGroup when no skill groups present", async () => {
+	const api = {
+		skills: {
+			holders: async () => {
+				throw new Error("should not be called");
+			},
+		},
+	} as any;
+
+	const groups = [
+		{
+			key: "mcp-server",
+			items: [{ name: "mcp-server", agent: "claude", source: "global" }],
+			resourceType: "mcp" as const,
+		},
+	];
+
+	const result = await fetchBulkHolders({
+		api,
+		groups,
+		resourceType: "mixed",
+	});
+
+	assert.deepEqual(result.managed, []);
+	assert.deepEqual(result.byGroup, {});
 });

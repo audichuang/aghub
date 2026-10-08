@@ -19,7 +19,7 @@ import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import {
 	deleteSkill,
-	getSkillHolders,
+	fetchSkillHoldersForGroup,
 	splitDeleteTargets,
 	type BackendHolders,
 } from "../requests/delete-skill";
@@ -208,34 +208,9 @@ export function DeleteSkillDialog({
 		setLoadingHolders(true);
 		setHoldersError(null);
 
-		const scopes = new Set<"global" | "project">();
-		for (const item of group.items) {
-			scopes.add(item.source === "project" ? "project" : "global");
-		}
-		if (scopes.size === 0) scopes.add("global");
-
-		Promise.all(
-			Array.from(scopes).map((scope) =>
-				getSkillHolders(
-					api,
-					skill.name,
-					scope,
-					scope === "project" ? projectPath : undefined,
-				),
-			),
-		)
-			.then((results) => {
-				const allManaged = new Set<string>();
-				const allUnmanaged = new Set<string>();
-				for (const r of results) {
-					for (const m of r.managed ?? []) allManaged.add(m);
-					for (const u of r.unmanaged ?? []) allUnmanaged.add(u);
-				}
-				setBackendHolders({
-					managed: Array.from(allManaged),
-					unmanaged: Array.from(allUnmanaged),
-					still_read_by_unmanaged: Array.from(allUnmanaged),
-				});
+		fetchSkillHoldersForGroup(api, skill.name, group.items, projectPath)
+			.then((holders) => {
+				setBackendHolders(holders);
 				setLoadingHolders(false);
 			})
 			.catch((err) => {
@@ -295,7 +270,8 @@ export function DeleteSkillDialog({
 				t,
 				scopes,
 				intent: {
-					kind: "all-agents",
+					kind: "from-agents",
+					agents: itemsWithAgent.map((item) => item.agent),
 					includeUnmanaged,
 				},
 			});
