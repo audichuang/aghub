@@ -1,5 +1,6 @@
 use aghub_core::models::AgentType;
 use aghub_core::paths::find_project_root;
+use aghub_core::WriteScope;
 use rocket::http::Status;
 use rocket::request::FromParam;
 use std::path::PathBuf;
@@ -26,6 +27,20 @@ impl ResolvedScope {
 	pub fn is_all(&self) -> bool {
 		matches!(self, ResolvedScope::All { .. })
 	}
+
+	pub fn to_write_scope(&self) -> Result<WriteScope, ApiError> {
+		match self {
+			ResolvedScope::Global => Ok(WriteScope::Global),
+			ResolvedScope::Project { root } => {
+				Ok(WriteScope::project(root.clone()))
+			}
+			ResolvedScope::All { .. } => Err(ApiError::new(
+				Status::MethodNotAllowed,
+				"scope 'all' is read-only; use 'global' or 'project' for write operations",
+				"READ_ONLY_SCOPE",
+			)),
+		}
+	}
 }
 
 #[derive(rocket::FromForm)]
@@ -46,6 +61,67 @@ pub fn absolutize_root(root: &str) -> PathBuf {
 		return canon;
 	}
 	std::env::current_dir().map(|cwd| cwd.join(&p)).unwrap_or(p)
+}
+
+/// Resolve a request body's `scope` string and optional `project_root` into a
+/// [`WriteScope`].
+///
+/// `project_root` is always converted to an absolute path.
+/// Errors use the existing API codes:
+/// - `INVALID_SCOPE` when scope is neither `"global"` nor `"project"`
+/// - `PROJECT_ROOT_REQUIRED` when scope is `"project"` but `project_root` is missing
+pub fn resolve_write_scope(
+	scope: &str,
+	project_root: Option<&str>,
+) -> Result<WriteScope, ApiError> {
+	match scope {
+		"global" => Ok(WriteScope::Global),
+		"project" => {
+			let root = project_root
+				.map(str::trim)
+				.filter(|r| !r.is_empty())
+				.ok_or_else(|| {
+					ApiError::new(
+						Status::BadRequest,
+						"project scope requires project_root",
+						"PROJECT_ROOT_REQUIRED",
+					)
+				})?;
+			Ok(WriteScope::project(absolutize_root(root)))
+		}
+		_ => Err(ApiError::new(
+			Status::BadRequest,
+			format!("Invalid scope '{scope}'. Use 'global' or 'project'"),
+			"INVALID_SCOPE",
+		)),
+	}
+}
+
+/// Parse a comma-separated list of agent IDs into [`AgentType`]s.
+///
+/// Uses [`AgentType::parse_list`] so empty tokens are rejected and duplicates
+/// are removed in order, matching CLI `-a`.
+pub fn resolve_agent_list(s: &str) -> Result<Vec<AgentType>, ApiError> {
+	AgentType::parse_list(s)
+		.map_err(|err| ApiError::new(Status::BadRequest, err, "INVALID_PARAM"))
+}
+
+/// Parse a slice of agent ID strings into [`AgentType`]s.
+///
+/// Delegates to [`resolve_agent_list`] so empty tokens and duplicate rules stay
+/// identical to CLI `-a`.
+pub fn resolve_agent_strings<S: AsRef<str>>(
+	agents: &[S],
+) -> Result<Vec<AgentType>, ApiError> {
+	if agents.is_empty() {
+		return Ok(Vec::new());
+	}
+	let joined = agents
+		.iter()
+		.map(|s| s.as_ref())
+		.collect::<Vec<_>>()
+		.join(",");
+	resolve_agent_list(&joined)
 }
 
 impl ScopeParams {
@@ -216,5 +292,91 @@ mod tests {
 			),
 			_ => panic!("expected Project scope"),
 		}
+	}
+
+	fn unwrap_ok<T>(res: Result<T, ApiError>) -> T {
+		match res {
+			Ok(v) => v,
+			Err(e) => panic!("expected Ok, got ApiError: {}", e.body.error),
+		}
+	}
+
+	fn unwrap_err<T>(res: Result<T, ApiError>) -> ApiError {
+		match res {
+			Ok(_) => panic!("expected Err(ApiError), got Ok"),
+			Err(e) => e,
+		}
+	}
+
+	#[test]
+	fn resolve_write_scope_valid_global() {
+		let scope = unwrap_ok(resolve_write_scope("global", None));
+		assert_eq!(scope, WriteScope::Global);
+	}
+
+	#[test]
+	fn resolve_write_scope_valid_project() {
+		let path = if cfg!(windows) {
+			"C:\\test\\proj"
+		} else {
+			"/test/proj"
+		};
+		let scope = unwrap_ok(resolve_write_scope("project", Some(path)));
+		assert_eq!(scope, WriteScope::project(path));
+	}
+
+	#[test]
+	fn resolve_write_scope_relative_root_becomes_absolute() {
+		let scope =
+			unwrap_ok(resolve_write_scope("project", Some("relative/path")));
+		match scope {
+			WriteScope::Project { root } => {
+				assert!(
+					root.is_absolute(),
+					"project root must be absolutized, got {}",
+					root.display()
+				);
+			}
+			WriteScope::Global => panic!("expected Project scope"),
+		}
+	}
+
+	#[test]
+	fn resolve_write_scope_missing_root_returns_project_root_required() {
+		let err = unwrap_err(resolve_write_scope("project", None));
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "PROJECT_ROOT_REQUIRED");
+
+		let err_empty = unwrap_err(resolve_write_scope("project", Some("   ")));
+		assert_eq!(err_empty.status, Status::BadRequest);
+		assert_eq!(err_empty.body.code, "PROJECT_ROOT_REQUIRED");
+	}
+
+	#[test]
+	fn resolve_write_scope_unknown_scope_returns_invalid_scope() {
+		let err = unwrap_err(resolve_write_scope("unknown", None));
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_SCOPE");
+	}
+
+	#[test]
+	fn resolve_agent_list_empty_token_returns_invalid_param() {
+		let err = unwrap_err(resolve_agent_list("claude,,grok"));
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_PARAM");
+
+		let err_trailing = unwrap_err(resolve_agent_list("claude,"));
+		assert_eq!(err_trailing.status, Status::BadRequest);
+		assert_eq!(err_trailing.body.code, "INVALID_PARAM");
+
+		let err_empty = unwrap_err(resolve_agent_list(""));
+		assert_eq!(err_empty.status, Status::BadRequest);
+		assert_eq!(err_empty.body.code, "INVALID_PARAM");
+	}
+
+	#[test]
+	fn resolve_agent_list_duplicate_agents_deduplicated() {
+		let agents = unwrap_ok(resolve_agent_list("claude,claude,grok"));
+		assert_eq!(agents, vec![AgentType::Claude, AgentType::Grok]);
 	}
 }

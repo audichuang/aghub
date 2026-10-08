@@ -94,20 +94,11 @@ pub(crate) fn requested_delete_agents(
 	agents: Option<&str>,
 ) -> Result<Vec<aghub_core::models::AgentType>, ApiError> {
 	let mut requested = vec![agent];
-	for id in agents
-		.unwrap_or_default()
-		.split(',')
-		.map(str::trim)
-		.filter(|id| !id.is_empty())
-	{
-		let parsed =
-			id.parse::<aghub_core::models::AgentType>().map_err(|_| {
-				ApiError::bad_request(format!(
-					"unknown agent in `agents`: {id}"
-				))
-			})?;
-		if !requested.contains(&parsed) {
-			requested.push(parsed);
+	if let Some(agents_str) = agents {
+		for parsed in crate::extractors::resolve_agent_list(agents_str)? {
+			if !requested.contains(&parsed) {
+				requested.push(parsed);
+			}
 		}
 	}
 	Ok(requested)
@@ -148,6 +139,27 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
 	static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
 		std::sync::OnceLock::new();
 	LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Restores the process CWD on drop, so a mid-test panic can never leave
+/// the process standing in a soon-deleted temp dir.
+#[cfg(all(test, unix))]
+pub(crate) struct CwdGuard(std::path::PathBuf);
+
+#[cfg(all(test, unix))]
+impl CwdGuard {
+	pub(crate) fn change_to(dir: &std::path::Path) -> Self {
+		let prev = std::env::current_dir().unwrap();
+		std::env::set_current_dir(dir).unwrap();
+		Self(prev)
+	}
+}
+
+#[cfg(all(test, unix))]
+impl Drop for CwdGuard {
+	fn drop(&mut self) {
+		let _ = std::env::set_current_dir(&self.0);
+	}
 }
 
 pub fn build_manager_from_resolved(

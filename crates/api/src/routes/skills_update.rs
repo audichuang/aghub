@@ -569,25 +569,23 @@ pub(crate) async fn apply_skill_update_inner(
 		)));
 	}
 
-	let project_root = req.project_root.as_deref().map(PathBuf::from);
-	let resource_scope = match req.scope.as_str() {
-		"global" => ResourceScope::GlobalOnly,
-		"project" => ResourceScope::ProjectOnly,
-		_ => {
-			return Ok(Json(apply_error(
+	let write_scope = match crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	) {
+		Ok(scope) => scope,
+		Err(err) => {
+			return Ok(Json(apply_error_with_code(
 				&req.name,
 				&req.scope,
-				"scope must be global or project",
+				&err.body.error,
+				Some(err.body.code),
 			)));
 		}
 	};
-	if resource_scope == ResourceScope::ProjectOnly && project_root.is_none() {
-		return Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"project_root is required when scope is project",
-		)));
-	}
+	let resource_scope = write_scope.resource_scope();
+	let project_root =
+		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	// `resync_locked_skill` is synchronous but does BOTH the network fetch and the
 	// lock-holding transaction, so it must not run on an async worker.
@@ -658,24 +656,13 @@ pub(crate) async fn apply_skill_updates_inner(
 		));
 	}
 
-	let resolved = ScopeParams {
-		scope: Some(req.scope.clone()),
-		project_root: req.project_root.clone(),
-	}
-	.resolve()?;
-	let (resource_scope, project_root) = match resolved {
-		ResolvedScope::Global => (ResourceScope::GlobalOnly, None),
-		ResolvedScope::Project { root } => {
-			(ResourceScope::ProjectOnly, Some(root))
-		}
-		ResolvedScope::All { .. } => {
-			return Err(ApiError::new(
-				Status::BadRequest,
-				"scope must be global or project",
-				"INVALID_PARAM",
-			));
-		}
-	};
+	let write_scope = crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	)?;
+	let resource_scope = write_scope.resource_scope();
+	let project_root =
+		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	let names = req.names;
 	let scope = req.scope;
@@ -771,7 +758,6 @@ pub(crate) async fn accept_rename_inner(
 	resolver: &dyn TokenResolver,
 ) -> ApiResult<AcceptRenameResponse> {
 	use aghub_core::skills::rename::{self, RenameRequest};
-	use aghub_core::WriteScope;
 
 	// Adapter concern: confirmation gate.
 	if !req.confirm.unwrap_or(false) {
@@ -784,27 +770,17 @@ pub(crate) async fn accept_rename_inner(
 	}
 
 	// Adapter concern: scope string -> WriteScope (illegal states rejected).
-	let scope = match req.scope.as_str() {
-		"global" => WriteScope::Global,
-		"project" => match req.project_root.as_deref() {
-			Some(root) => WriteScope::Project {
-				root: PathBuf::from(root),
-			},
-			None => {
-				return Ok(Json(accept_rename_error(
-					&req.old_name,
-					&req.new_name,
-					&req.scope,
-					"project_root is required when scope is project",
-				)));
-			}
-		},
-		_ => {
+	let scope = match crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	) {
+		Ok(scope) => scope,
+		Err(err) => {
 			return Ok(Json(accept_rename_error(
 				&req.old_name,
 				&req.new_name,
 				&req.scope,
-				"scope must be global or project",
+				&err.body.error,
 			)));
 		}
 	};
@@ -2913,6 +2889,87 @@ mod tests {
 			assert!(
 				lock.skills["some-skill"].content_hash.is_some(),
 				"global lock hash must advance after a successful apply"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_update_relative_project_root_is_absolutized() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let home_path = home.path().canonicalize().unwrap();
+			let _home = HomeGuard::set(&home_path);
+			prepare_global_batch(&home_path);
+
+			let project = home_path.join("proj");
+			std::fs::create_dir_all(&project).unwrap();
+			let installed = project.join(".claude/skills/alpha");
+			std::fs::create_dir_all(&installed).unwrap();
+			std::fs::write(
+				installed.join("SKILL.md"),
+				"---\nname: alpha\ndescription: old\n---\nold\n",
+			)
+			.unwrap();
+
+			let mut lock = skill::LocalSkillLockFile::default();
+			lock.skills.insert(
+				"alpha".to_string(),
+				skill::LocalSkillLockEntry {
+					source_url: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("skills/alpha/SKILL.md".to_string()),
+					ref_commit: None,
+				},
+			);
+			skill::lock::local::write_local_lock(&lock, Some(&project))
+				.unwrap();
+
+			let fetched = tempfile::tempdir().unwrap();
+			let directory = fetched.path().join("skills/alpha");
+			std::fs::create_dir_all(&directory).unwrap();
+			std::fs::write(
+				directory.join("SKILL.md"),
+				"---\nname: alpha\ndescription: new\n---\nnew\n",
+			)
+			.unwrap();
+
+			let fetcher = LocalRepoFetcher {
+				root: fetched.path().to_path_buf(),
+			};
+			let resolver = empty_keyring_resolver();
+
+			let _guard = crate::routes::CwdGuard::change_to(&home_path);
+
+			let req = ApplySkillUpdateRequest {
+				name: "alpha".to_string(),
+				scope: "project".to_string(),
+				project_root: Some("proj".to_string()),
+				confirm: Some(true),
+			};
+			let result = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap()
+				.block_on(apply_skill_update_inner(req, &fetcher, &resolver));
+
+			let resp = match result {
+				Ok(json) => json.into_inner(),
+				Err(error) => {
+					panic!("apply should return Ok: {}", error.body.error)
+				}
+			};
+			assert!(resp.success, "apply should succeed: {:?}", resp.error);
+			assert!(std::fs::read_to_string(installed.join("SKILL.md"))
+				.unwrap()
+				.contains("new"));
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert_ne!(
+				lock.skills["alpha"].computed_hash, "old",
+				"project lock hash must advance after a successful apply"
 			);
 		});
 	}

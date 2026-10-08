@@ -40,7 +40,7 @@ use crate::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
 	},
 	error::{ApiCreated, ApiError, ApiResult},
-	extractors::{AgentParam, ResolvedScope, ScopeParams, TrustedLocalOrigin},
+	extractors::{AgentParam, ScopeParams, TrustedLocalOrigin},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope,
@@ -215,36 +215,16 @@ pub async fn delete_skill_by_path(
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let req = body.into_inner();
 
-	let resource_scope = match req.scope.as_str() {
-		"global" => ResourceScope::GlobalOnly,
-		"project" => ResourceScope::ProjectOnly,
-		other => {
-			return Err(ApiError::new(
-				Status::BadRequest,
-				format!("Invalid scope: {other}"),
-				"INVALID_PARAM",
-			));
-		}
-	};
+	let write_scope = crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	)?;
+	let resource_scope = write_scope.resource_scope();
+	let project_root =
+		write_scope.project_root().map(std::path::Path::to_path_buf);
 
-	let project_root = req
-		.project_root
-		.as_ref()
-		.map(|r| crate::extractors::absolutize_root(r));
-
-	let requested_agents: Vec<AgentType> = req
-		.agents
-		.iter()
-		.map(|a| {
-			a.parse::<AgentType>().map_err(|_| {
-				ApiError::new(
-					Status::BadRequest,
-					format!("Unknown agent '{a}'"),
-					"INVALID_PARAM",
-				)
-			})
-		})
-		.collect::<Result<Vec<AgentType>, _>>()?;
+	let requested_agents =
+		crate::extractors::resolve_agent_strings(&req.agents)?;
 
 	let raw_path = std::path::PathBuf::from(&req.source_path);
 	let expanded_path = expand_tilde_path(&req.source_path);
@@ -336,18 +316,25 @@ pub async fn prune_lock_route(
 	};
 	let req = body.into_inner();
 
-	let scope = match req.scope.as_str() {
-		"global" => PruneScope::Global,
-		"project" => PruneScope::Project,
-		other => {
+	let write_scope = match crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	) {
+		Ok(scope) => scope,
+		Err(err) => {
 			return Ok(Json(PruneLockResponse {
 				pruned: vec![],
 				dry_run: true,
-				error: Some(format!("Invalid scope: {other}")),
+				error: Some(err.body.error),
 			}));
 		}
 	};
-	let project_root = req.project_root.as_ref().map(std::path::PathBuf::from);
+	let (scope, project_root) = match write_scope {
+		aghub_core::WriteScope::Global => (PruneScope::Global, None),
+		aghub_core::WriteScope::Project { root } => {
+			(PruneScope::Project, Some(root))
+		}
+	};
 	let dry_run = !req.confirm.unwrap_or(false);
 
 	// A commit takes the mutation lock across scan + rewrite; the dry-run preview
@@ -743,16 +730,7 @@ pub async fn import_skill(
 	let resolved = scope.resolve()?;
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
-	require_writable_scope(&resolved)?;
-	let write_scope = match &resolved {
-		ResolvedScope::Global => aghub_core::WriteScope::Global,
-		ResolvedScope::Project { root } => {
-			aghub_core::WriteScope::project(root.clone())
-		}
-		ResolvedScope::All { .. } => {
-			unreachable!("guarded by require_writable_scope")
-		}
-	};
+	let write_scope = resolved.to_write_scope()?;
 	let request = body.into_inner();
 	let agent_type = agent.0;
 
@@ -2280,25 +2258,13 @@ pub async fn git_sync_skill(
 		));
 	}
 
-	let project_root = req.project_root.as_deref().map(PathBuf::from);
-	let resource_scope = match req.scope.as_str() {
-		"global" => ResourceScope::GlobalOnly,
-		"project" if project_root.is_some() => ResourceScope::ProjectOnly,
-		"project" => {
-			return Err(ApiError::new(
-				Status::BadRequest,
-				"project_root is required when scope is project",
-				"MISSING_PARAM",
-			));
-		}
-		_ => {
-			return Err(ApiError::new(
-				Status::BadRequest,
-				"scope must be global or project",
-				"INVALID_SCOPE",
-			));
-		}
-	};
+	let write_scope = crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	)?;
+	let resource_scope = write_scope.resource_scope();
+	let project_root =
+		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	let locked = match resource_scope {
 		ResourceScope::GlobalOnly => {
@@ -2780,11 +2746,8 @@ mod tests {
 		let err = block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
 			.unwrap_err();
 		assert_eq!(err.status, Status::BadRequest);
-		assert_eq!(err.body.code, "INVALID_CONFIG");
-		assert_eq!(
-			err.body.error,
-			"project_root is required when scope is 'project'"
-		);
+		assert_eq!(err.body.code, "PROJECT_ROOT_REQUIRED");
+		assert_eq!(err.body.error, "project scope requires project_root");
 	}
 
 	#[cfg(unix)]
@@ -5339,6 +5302,46 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn prune_lock_route_relative_project_root_is_absolutized() {
+		with_isolated_env(|home, _state| {
+			let home = home.canonicalize().unwrap();
+			let proj = home.join("proj");
+			std::fs::create_dir_all(&proj).unwrap();
+			let mut lock = skill::LocalSkillLockFile::default();
+			let entry = skill::LocalSkillLockEntry {
+				source: "owner/repo".to_string(),
+				source_url: None,
+				source_type: "github".to_string(),
+				ref_name: Some("main".to_string()),
+				skill_path: Some("orphan/SKILL.md".to_string()),
+				computed_hash: "deadbeef".to_string(),
+				ref_commit: None,
+			};
+			lock.skills.insert("orphan".into(), entry);
+			skill::write_local_lock(&lock, Some(&proj)).unwrap();
+
+			let resp = {
+				let _cwd = crate::routes::CwdGuard::change_to(&home);
+				let req = PruneLockRequest {
+					scope: "project".to_string(),
+					project_root: Some("proj".to_string()),
+					confirm: Some(true),
+				};
+				block_on(prune_lock_route(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler ok")
+					.into_inner()
+			};
+
+			assert_eq!(resp.error, None);
+			assert_eq!(resp.pruned, vec!["orphan".to_string()]);
+			let lock_after = skill::lock::local::read_local_lock(Some(&proj));
+			assert!(!lock_after.skills.contains_key("orphan"));
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn import_skill_smoke() {
 		with_isolated_env(|home, _state| {
 			let source_skill = home.join("source-skills/my-skill");
@@ -7103,23 +7106,7 @@ mod tests {
 	/// makes every later `std::env::current_dir()` caller in this binary
 	/// (e.g. `gix::init`) fail with NotFound.
 	#[cfg(unix)]
-	struct CwdGuard(std::path::PathBuf);
-
-	#[cfg(unix)]
-	impl CwdGuard {
-		fn change_to(dir: &std::path::Path) -> Self {
-			let prev = std::env::current_dir().unwrap();
-			std::env::set_current_dir(dir).unwrap();
-			Self(prev)
-		}
-	}
-
-	#[cfg(unix)]
-	impl Drop for CwdGuard {
-		fn drop(&mut self) {
-			let _ = std::env::set_current_dir(&self.0);
-		}
-	}
+	use crate::routes::CwdGuard;
 
 	#[cfg(unix)]
 	#[test]
@@ -8934,6 +8921,48 @@ mod tests {
 				serde_json::from_str(&response.into_string().unwrap()).unwrap();
 			assert_eq!(body["code"], "PROJECT_ROOT_REQUIRED");
 		}
+
+		#[test]
+		fn repair_relative_project_root_is_absolutized() {
+			let _guard = crate::routes::test_env_lock()
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let (temp, root) = legacy_project(&["alpha"]);
+			let temp_path = temp.path().canonicalize().unwrap();
+			let root_canon = root.canonicalize().unwrap();
+			let rel_root = root_canon.strip_prefix(&temp_path).unwrap();
+			let _cwd = crate::routes::CwdGuard::change_to(&temp_path);
+			let c = client();
+			with_pinned_data_dir(|_| {
+				let response = c
+					.post("/api/v1/skills/repair")
+					.json(&serde_json::json!({
+						"scope": "project",
+						"project_root": rel_root.to_str().unwrap(),
+						"dry_run": false,
+					}))
+					.dispatch();
+				assert_eq!(response.status(), Status::Ok);
+				let body: serde_json::Value =
+					serde_json::from_str(&response.into_string().unwrap())
+						.unwrap();
+				assert_eq!(body["refused"], false, "{body}");
+				assert_eq!(body["skills"][0]["outcome"], "migrated", "{body}");
+				assert!(
+					root_canon.join(".aghub/alpha/SKILL.md").exists(),
+					"Master must be materialized at absolutized project root"
+				);
+				assert!(
+					aghub_core::skills::linker::Linker::is_link(
+						&root_canon
+							.join(".agents")
+							.join("skills")
+							.join("alpha")
+					),
+					"alpha's shared slot must have become a referrer"
+				);
+			});
+		}
 	}
 
 	#[cfg(unix)]
@@ -9800,28 +9829,13 @@ pub async fn repair_skills_route(
 	body: Json<RepairRequest>,
 ) -> ApiResult<crate::dto::repair::RepairResponse> {
 	let req = body.into_inner();
-	let scope = match req.scope.as_str() {
-		"global" => ResourceScope::GlobalOnly,
-		"project" => ResourceScope::ProjectOnly,
-		other => {
-			return Err(ApiError::new(
-				Status::BadRequest,
-				format!(
-					"scope must be \"global\" or \"project\", got {other:?} — \
-					 repair resolves exactly one store"
-				),
-				"INVALID_SCOPE",
-			))
-		}
-	};
-	let project_root = req.project_root.clone().map(std::path::PathBuf::from);
-	if scope == ResourceScope::ProjectOnly && project_root.is_none() {
-		return Err(ApiError::new(
-			Status::BadRequest,
-			"project scope requires project_root",
-			"PROJECT_ROOT_REQUIRED",
-		));
-	}
+	let write_scope = crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	)?;
+	let scope = write_scope.resource_scope();
+	let project_root =
+		write_scope.project_root().map(std::path::Path::to_path_buf);
 	let name = req.name.clone();
 	let dry_run = req.dry_run;
 
