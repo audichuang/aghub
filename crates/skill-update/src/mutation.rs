@@ -367,29 +367,23 @@ pub enum LockedResyncError {
 }
 
 impl LockedResyncError {
-	/// Stable machine code for this locked resync failure.
+	/// Stable machine code for this locked resync failure, or `None` if this
+	/// error has no shared wire code.
 	pub fn code(&self) -> Option<&'static str> {
 		match self {
-			Self::UnsupportedScope(_) => Some("INVALID_PARAM"),
-			Self::ProjectRootRequired => Some("MISSING_PARAM"),
-			Self::LockEntryNotFound { .. } => {
-				Some("SKILL_LOCK_ENTRY_NOT_FOUND")
-			}
-			Self::MissingSkillPath => Some("SKILL_PATH_INVALID"),
-			Self::NotInstalled => Some("SKILL_NOT_INSTALLED"),
+			Self::NotInstalled => Some(
+				aghub_core::skills::resync::ResyncError::NotInstalled.code(),
+			),
 			Self::CredentialBackendUnavailable => Some("KEYCHAIN_UNAVAILABLE"),
-			Self::InvalidSkillPath => Some("SKILL_PATH_INVALID"),
-			Self::SourceSkillNotFound => Some("SKILL_PATH_NOT_FOUND"),
 			Self::SourceGroupMismatch => Some(SKILL_SOURCE_VIEW_STALE_CODE),
-			Self::Fetch(FetchError::BackendUnavailable) => {
-				Some("KEYCHAIN_UNAVAILABLE")
-			}
-			Self::Fetch(FetchError::Auth) => Some("AUTH"),
-			Self::Fetch(FetchError::Network(_)) => Some("NETWORK"),
-			Self::Resync(aghub_core::skills::resync::ResyncError::Locked(
-				_,
-			)) => Some(aghub_core::skills::lock::MUTATION_LOCK_BUSY_CODE),
 			Self::Resync(err) => Some(err.code()),
+			Self::UnsupportedScope(_)
+			| Self::ProjectRootRequired
+			| Self::LockEntryNotFound { .. }
+			| Self::MissingSkillPath
+			| Self::InvalidSkillPath
+			| Self::SourceSkillNotFound
+			| Self::Fetch(_) => None,
 		}
 	}
 
@@ -1333,26 +1327,18 @@ mod tests {
 		let locked_cases: Vec<(LockedResyncError, Option<&str>, bool)> = vec![
 			(
 				LockedResyncError::UnsupportedScope(ResourceScope::Both),
-				Some("INVALID_PARAM"),
+				None,
 				false,
 			),
-			(
-				LockedResyncError::ProjectRootRequired,
-				Some("MISSING_PARAM"),
-				false,
-			),
+			(LockedResyncError::ProjectRootRequired, None, false),
 			(
 				LockedResyncError::LockEntryNotFound {
 					scope: ResourceScope::GlobalOnly,
 				},
-				Some("SKILL_LOCK_ENTRY_NOT_FOUND"),
+				None,
 				false,
 			),
-			(
-				LockedResyncError::MissingSkillPath,
-				Some("SKILL_PATH_INVALID"),
-				false,
-			),
+			(LockedResyncError::MissingSkillPath, None, false),
 			(
 				LockedResyncError::NotInstalled,
 				Some("SKILL_NOT_INSTALLED"),
@@ -1363,16 +1349,8 @@ mod tests {
 				Some("KEYCHAIN_UNAVAILABLE"),
 				false,
 			),
-			(
-				LockedResyncError::InvalidSkillPath,
-				Some("SKILL_PATH_INVALID"),
-				false,
-			),
-			(
-				LockedResyncError::SourceSkillNotFound,
-				Some("SKILL_PATH_NOT_FOUND"),
-				false,
-			),
+			(LockedResyncError::InvalidSkillPath, None, false),
+			(LockedResyncError::SourceSkillNotFound, None, false),
 			(
 				LockedResyncError::SourceGroupMismatch,
 				Some("SKILL_SOURCE_VIEW_STALE"),
@@ -1380,19 +1358,15 @@ mod tests {
 			),
 			(
 				LockedResyncError::Fetch(FetchError::BackendUnavailable),
-				Some("KEYCHAIN_UNAVAILABLE"),
+				None,
 				false,
 			),
-			(
-				LockedResyncError::Fetch(FetchError::Auth),
-				Some("AUTH"),
-				false,
-			),
+			(LockedResyncError::Fetch(FetchError::Auth), None, false),
 			(
 				LockedResyncError::Fetch(FetchError::Network(
 					"conn reset".into(),
 				)),
-				Some("NETWORK"),
+				None,
 				false,
 			),
 			(

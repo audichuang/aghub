@@ -17510,7 +17510,29 @@ fn apply_update_outdated_and_source_sync_share_mutation_lock_busy_code_and_retry
 		"mutation lock contention must be flagged as retryable: {apply_row}"
 	);
 
-	// 2. source sync --update: failure action must carry the SAME code.
+	// 2. apply-update <name> --json: single-name path carries `code` and `retryable: true` in error envelope.
+	let apply_named_out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.env("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS", "100")
+		.args(["-g", "--json", "apply-update", "skills", "alpha", "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		!apply_named_out.status.success(),
+		"single-name apply-update must exit non-zero on failure"
+	);
+	let named_json: Value = serde_json::from_slice(&apply_named_out.stdout)
+		.expect("single-name apply-update stdout must be valid JSON");
+	assert_eq!(
+		named_json["error"]["code"], "SKILL_MUTATION_LOCK_BUSY",
+		"single-name failure envelope must carry SKILL_MUTATION_LOCK_BUSY: {named_json}"
+	);
+	assert_eq!(
+		named_json["error"]["retryable"], true,
+		"single-name failure envelope must mark lock contention as retryable: {named_json}"
+	);
+
+	// 3. source sync --update: failure action must carry the SAME code.
 	let sync_out = isolated_cli(home.path(), state.path())
 		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
 		.env("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS", "100")
@@ -17551,10 +17573,14 @@ fn apply_update_outdated_and_source_sync_share_mutation_lock_busy_code_and_retry
 		"source sync failure action must carry SKILL_MUTATION_LOCK_BUSY code: {sync_action}"
 	);
 
-	// 3. Parity assertion: both surfaces return the identical error code.
+	// 4. Parity assertion: all surfaces return the identical error code.
 	assert_eq!(
 		apply_row["code"], sync_action["errorCode"],
 		"apply-update and source sync must share the exact same error code under mutation lock contention"
+	);
+	assert_eq!(
+		named_json["error"]["code"], sync_action["errorCode"],
+		"single-name apply-update must share the exact same error code under mutation lock contention"
 	);
 
 	// Lock was not modified during failed updates.

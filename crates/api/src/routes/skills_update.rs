@@ -317,63 +317,52 @@ fn apply_locked_resync_error(
 	scope: &str,
 	error: &LockedResyncError,
 ) -> Result<ApplySkillUpdateResponse, ApiError> {
-	if matches!(error, LockedResyncError::CredentialBackendUnavailable) {
-		return Err(crate::credentials::CredentialStoreError::Unavailable(
-			"credential backend unreachable".to_string(),
-		)
-		.into());
-	}
 	let message = match error {
+		LockedResyncError::CredentialBackendUnavailable => {
+			return Err(crate::credentials::CredentialStoreError::Unavailable(
+				"credential backend unreachable".to_string(),
+			)
+			.into());
+		}
 		LockedResyncError::LockEntryNotFound {
 			scope: locked_scope,
 		} => {
 			if *locked_scope == ResourceScope::GlobalOnly {
-				"Skill is not in global lock"
+				"Skill is not in global lock".to_string()
 			} else {
-				"Skill is not in project lock"
+				"Skill is not in project lock".to_string()
 			}
 		}
-		LockedResyncError::MissingSkillPath => "Locked skill has no skillPath",
+		LockedResyncError::MissingSkillPath => {
+			"Locked skill has no skillPath".to_string()
+		}
 		LockedResyncError::NotInstalled => {
-			"Skill is locked but no installed copy was found"
+			"Skill is locked but no installed copy was found".to_string()
 		}
 		LockedResyncError::InvalidSkillPath => {
-			"Locked skillPath is not a valid skill folder"
+			"Locked skillPath is not a valid skill folder".to_string()
 		}
 		LockedResyncError::SourceSkillNotFound => {
-			"Locked skillPath was not found in fetched source"
+			"Locked skillPath was not found in fetched source".to_string()
 		}
 		LockedResyncError::SourceGroupMismatch => {
-			"Skill source changed; refresh Sources and retry"
+			"Skill source changed; refresh Sources and retry".to_string()
 		}
-		LockedResyncError::Fetch(error) => fetch_error_text(error),
+		LockedResyncError::Fetch(error) => fetch_error_text(error).to_string(),
 		LockedResyncError::Resync(
 			aghub_core::skills::resync::ResyncError::Renamed { new_name },
-		) => {
-			return Ok(apply_error_with_code(
-				name,
-				scope,
-				&skill_renamed_message(name, new_name),
-				error.code(),
-			));
-		}
+		) => skill_renamed_message(name, new_name),
 		LockedResyncError::Resync(resync_err) => {
-			return Ok(apply_error_with_code(
-				name,
-				scope,
-				safe_resync_error(resync_err).message,
-				error.code(),
-			));
+			safe_resync_error(resync_err).message.to_string()
 		}
 		LockedResyncError::ProjectRootRequired => {
-			"project_root is required when scope is project"
+			"project_root is required when scope is project".to_string()
 		}
 		LockedResyncError::UnsupportedScope(_) => {
-			"scope must be global or project"
+			"scope must be global or project".to_string()
 		}
-		LockedResyncError::CredentialBackendUnavailable => unreachable!(),
 	};
-	Ok(apply_error_with_code(name, scope, message, error.code()))
+	Ok(apply_error_with_code(name, scope, &message, error.code()))
 }
 
 fn apply_success(

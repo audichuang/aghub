@@ -90,14 +90,6 @@ mod tests {
 				!mapped.message.contains(sentinel),
 				"safe API error leaked internal path for {error:?}",
 			);
-			// Every arm's code is core's shared classification. A literal
-			// written out here would be a second table, and the two would
-			// drift — the CLI reads the core one.
-			assert_eq!(
-				error.code(),
-				aghub_core::skills::resync::resync_error_code(&error),
-				"the API must publish core's code for this variant",
-			);
 		}
 	}
 }

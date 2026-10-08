@@ -734,6 +734,21 @@ fn main() -> std::process::ExitCode {
 	}
 }
 
+#[derive(Debug)]
+pub(crate) struct CodedError {
+	pub message: String,
+	pub code: Option<&'static str>,
+	pub retryable: bool,
+}
+
+impl std::fmt::Display for CodedError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.message)
+	}
+}
+
+impl std::error::Error for CodedError {}
+
 /// Print a failure. Under `--json` it goes to STDOUT (where the success
 /// payload goes) as `{"error":{code,message,retryable}}`; the prose goes to
 /// stderr either way.
@@ -742,17 +757,22 @@ fn main() -> std::process::ExitCode {
 /// never has to match unstable prose. See docs/history/cli.md#json-failure-envelope
 fn report_failure(error: &anyhow::Error, json: bool) {
 	if json && !ANSWER_ON_STDOUT.load(Ordering::Relaxed) {
-		// `anyhow` erases the type, so recover the `ConfigError` when it is in
-		// the chain — that is where the shared code vocabulary applies. A
-		// CLI-authored `bail!` has no ConfigError and is reported as
-		// `CLI_ERROR`: still machine-readable, still exit 1, and honest about
-		// having no finer classification.
-		let (code, retryable) = match error.downcast_ref::<ConfigError>() {
-			Some(config_error) => (
+		// `anyhow` erases the type, so recover the `CodedError` or `ConfigError`
+		// when it is in the chain — that is where the shared code vocabulary applies.
+		// A CLI-authored `bail!` has neither and is reported as `CLI_ERROR`:
+		// still machine-readable, still exit 1, and honest about having no finer
+		// classification.
+		let (code, retryable) = if let Some(coded) =
+			error.downcast_ref::<CodedError>()
+		{
+			(coded.code.unwrap_or("CLI_ERROR"), coded.retryable)
+		} else if let Some(config_error) = error.downcast_ref::<ConfigError>() {
+			(
 				aghub_core::error_codes::wire_code(config_error),
 				aghub_core::error_codes::retryable(config_error),
-			),
-			None => ("CLI_ERROR", false),
+			)
+		} else {
+			("CLI_ERROR", false)
 		};
 		let payload = serde_json::json!({
 			"error": {

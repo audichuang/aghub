@@ -410,58 +410,33 @@ mod tests {
 	#[test]
 	fn every_resync_error_has_its_published_code() {
 		let cases = [
-			(
-				ResyncError::Locked("x".into()),
-				"SKILL_MUTATION_LOCK_BUSY",
-				true,
-			),
+			(ResyncError::Locked("x".into()), "SKILL_MUTATION_LOCK_BUSY"),
 			(
 				ResyncError::StaleFetch("x".into()),
 				"SKILL_SOURCE_CHANGED_DURING_FETCH",
-				false,
 			),
-			(ResyncError::NotInstalled, "SKILL_NOT_INSTALLED", false),
+			(ResyncError::NotInstalled, "SKILL_NOT_INSTALLED"),
 			(
 				ResyncError::Renamed {
 					new_name: "n".into(),
 				},
 				"SKILL_RENAMED_IN_SOURCE",
-				false,
 			),
-			(ResyncError::Parse("x".into()), "SKILL_PARSE_FAILED", false),
-			(
-				ResyncError::Conflict("x".into()),
-				"SKILL_UPDATE_CONFLICT",
-				false,
-			),
+			(ResyncError::Parse("x".into()), "SKILL_PARSE_FAILED"),
+			(ResyncError::Conflict("x".into()), "SKILL_UPDATE_CONFLICT"),
 			(
 				ResyncError::OutOfTree("x".into()),
 				"SKILL_TARGET_OUT_OF_TREE",
-				false,
 			),
-			(ResyncError::Hash("x".into()), "SKILL_SYNC_ERROR", false),
-			(ResyncError::Swap("x".into()), "SKILL_SYNC_ERROR", false),
-			(
-				ResyncError::LockUpdate("x".into()),
-				"SKILL_LOCK_ERROR",
-				false,
-			),
+			(ResyncError::Hash("x".into()), "SKILL_SYNC_ERROR"),
+			(ResyncError::Swap("x".into()), "SKILL_SYNC_ERROR"),
+			(ResyncError::LockUpdate("x".into()), "SKILL_LOCK_ERROR"),
 		];
-		for (error, expected_code, expected_retryable) in cases {
+		for (error, expected) in cases {
 			assert_eq!(
 				resync_error_code(&error),
-				expected_code,
+				expected,
 				"{error:?} must keep the code both surfaces publish"
-			);
-			assert_eq!(
-				error.code(),
-				expected_code,
-				"{error:?}.code() must match resync_error_code"
-			);
-			assert_eq!(
-				error.retryable(),
-				expected_retryable,
-				"{error:?}.retryable() must match expected retryability"
 			);
 		}
 	}

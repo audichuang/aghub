@@ -353,7 +353,14 @@ fn locked_resync_error(
 	name: &str,
 	error: skill_update::mutation::LockedResyncError,
 ) -> anyhow::Error {
-	anyhow!(locked_resync_error_message(name, &error))
+	let message = locked_resync_error_message(name, &error);
+	let code = error.code();
+	let retryable = error.retryable();
+	anyhow::Error::new(crate::CodedError {
+		message,
+		code,
+		retryable,
+	})
 }
 
 fn scope_name(scope: ResourceScope) -> &'static str {
