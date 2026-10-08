@@ -752,92 +752,17 @@ impl ConfigManager {
 			self.adapter
 				.get_skills_paths(project_root.as_deref(), scope)
 		};
-		let mut deleting: Vec<std::path::PathBuf> = plan.paths.clone();
-		deleting.extend(prior_deletions.iter().cloned());
-		let effect =
-			removal::read_effect_after(&read_dirs, &skill.name, &deleting);
-
-		if deleting.len() > plan.paths.len()
-			&& !effect.incomplete
-			&& (effect.changed || effect.survivors.is_empty())
-		{
-			plan.shared_master_kept = false;
-		}
-
-		// A removal that goes ahead while something else still serves the skill
-		// has to SAY so, through `skipped` ("present and deliberately not taken").
-		if effect.changed {
-			for survivor in &effect.survivors {
-				if !plan.skipped.contains(survivor) {
-					plan.skipped.push(survivor.clone());
-				}
-			}
-		}
-
-		let unmanaged_dirs = removal::unmanaged_skill_dirs(
+		let verdict = removal::evaluate_removal_verdict(
+			&mut plan,
+			&skill.name,
+			&read_dirs,
+			prior_deletions,
 			&all_agent_dirs,
+			scope,
 			project_root.as_deref(),
+			all_agents,
 			requested_agents,
 		);
-
-		let readers_outside_fn = || {
-			let mut readers_outside: Vec<&'static str> = Vec::new();
-			for path in effect.survivors.iter().chain(plan.skipped.iter()) {
-				if let Some(parent) = path.parent() {
-					for id in removal::skill_dir_readers_outside(
-						parent,
-						scope,
-						project_root.as_deref(),
-						requested_agents,
-					) {
-						if !readers_outside.contains(&id) {
-							readers_outside.push(id);
-						}
-					}
-				}
-			}
-			readers_outside
-		};
-
-		let git_refusal_fn = || {
-			effect.survivors.iter().chain(plan.skipped.iter()).find_map(
-				|path| {
-					let reason = if all_agents {
-						removal::shared_slot_git_keep(
-							path,
-							project_root.as_deref(),
-						)
-					} else {
-						removal::single_agent_keep_reason(
-							path,
-							&all_agent_dirs,
-							name,
-							project_root.as_deref(),
-							scope,
-							requested_agents,
-						)
-					}?;
-					removal::git_keep_hint(&reason, path)
-				},
-			)
-		};
-
-		let verdict = removal::Verdict::compute(removal::VerdictInputs {
-			plan_paths: &plan.paths,
-			plan_skipped: &plan.skipped,
-			initial_shared_master_kept: plan.shared_master_kept,
-			effect: &effect,
-			all_agents,
-			unmanaged_dirs: &unmanaged_dirs,
-			git_refusal: &git_refusal_fn,
-			readers_outside: &readers_outside_fn,
-		});
-
-		plan.shared_master_kept = verdict.shared_master_kept();
-		if matches!(verdict, removal::Verdict::Refused { .. }) {
-			plan.still_read_from =
-				removal::still_read_from(&effect.survivors, &plan.skipped);
-		}
 
 		if executed {
 			if let removal::Verdict::Refused { ref reason } = verdict {

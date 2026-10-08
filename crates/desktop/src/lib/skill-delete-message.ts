@@ -49,8 +49,8 @@ export function keptDeleteMessageFromError(
 	if (!isSharedMasterRefusal(error)) {
 		return null;
 	}
-	const message = error instanceof Error ? error.message : "";
-	if (message.includes("tracked by git") && sourcePath) {
+	const body = (error as { data?: { error?: string } }).data;
+	if (body?.error && sourcePath) {
 		return t("deleteSkillKeptGit", { name, path: sourcePath });
 	}
 	return t("deleteSkillKeptSharedMaster", { name });

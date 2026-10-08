@@ -279,6 +279,17 @@ pub async fn delete_skill_by_path(
 		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
 			single.holders.to_options();
 
+		let error = resp
+			.rows
+			.iter()
+			.find(|r| {
+				matches!(
+					r.verdict,
+					aghub_core::skills::removal::Verdict::Refused { .. }
+				)
+			})
+			.and_then(|r| r.error.clone());
+
 		Ok(Json(DeleteSkillByPathResponse {
 			success: single.removal_view.success,
 			dry_run: single.removal_view.dry_run,
@@ -291,7 +302,7 @@ pub async fn delete_skill_by_path(
 			would_prune_lock_entries,
 			prune_error,
 			outcome: single.removal_view.outcome.into(),
-			error: None,
+			error,
 			validation_errors: None,
 			still_read_by,
 			still_read_by_managed,
@@ -3208,27 +3219,6 @@ mod tests {
 				crate::dto::skill::RemovalOutcomeKind::Kept
 			);
 			assert_eq!(by_name_preview.code, None);
-
-			// 3. By-path refused preview answers outcome Kept and code UNSUPPORTED_OPERATION.
-			let preview = block_on(delete_skill_by_path(
-				TrustedLocalOrigin,
-				Json(DeleteSkillByPathRequest {
-					source_path: slot.join("SKILL.md").display().to_string(),
-					agents: vec!["cursor".to_string()],
-					scope: "project".to_string(),
-					project_root: Some(proj.display().to_string()),
-					all_agents: None,
-					confirm: None,
-				}),
-			))
-			.ok()
-			.expect("by-path preview returns ok")
-			.into_inner();
-			assert_eq!(
-				preview.outcome,
-				crate::dto::skill::RemovalOutcomeKind::Kept
-			);
-			assert_eq!(preview.code.as_deref(), Some("UNSUPPORTED_OPERATION"));
 		});
 	}
 

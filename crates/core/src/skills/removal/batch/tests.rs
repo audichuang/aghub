@@ -1543,6 +1543,73 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 
 	assert!(matches!(err_name, ConfigError::UnsupportedOperation { .. }));
 	assert!(matches!(err_path, ConfigError::UnsupportedOperation { .. }));
+
+	// 2. Non-Master copy referenced by an external referrer:
+	// A private copy under .codex/skills referenced by a symlink under .claude/skills.
+	let copy = root.join(".codex/skills/linked");
+	fs::create_dir_all(&copy).unwrap();
+	fs::write(
+		copy.join("SKILL.md"),
+		"---\nname: linked\ndescription: linked skill\n---\n",
+	)
+	.unwrap();
+	let claude_skills = root.join(".claude/skills");
+	fs::create_dir_all(&claude_skills).unwrap();
+	std::os::unix::fs::symlink(&copy, claude_skills.join("linked")).unwrap();
+
+	let req_name_ext = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName("linked".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Codex],
+		dry_run: true,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let res_name_ext = remove_skill_batch(&req_name_ext).unwrap();
+
+	let req_path_ext = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(copy.join("SKILL.md")),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Codex],
+		dry_run: true,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let res_path_ext = remove_skill_batch(&req_path_ext).unwrap();
+
+	assert_eq!(res_name_ext.rows.len(), 1);
+	assert_eq!(res_path_ext.rows.len(), 1);
+	assert_eq!(res_name_ext.rows[0].verdict, res_path_ext.rows[0].verdict);
+	assert!(
+		matches!(res_path_ext.rows[0].verdict, Verdict::Kept { .. }),
+		"verdict must be Kept, got {:?}",
+		res_path_ext.rows[0].verdict
+	);
+
+	// Both must succeed on commit with outcome Kept (kept never commits or fails)
+	let mut commit_name_ext = req_name_ext.clone();
+	commit_name_ext.dry_run = false;
+	let res_name_ext_commit = remove_skill_batch(&commit_name_ext).unwrap();
+
+	let mut commit_path_ext = req_path_ext.clone();
+	commit_path_ext.dry_run = false;
+	let res_path_ext_commit = remove_skill_batch(&commit_path_ext).unwrap();
+
+	assert_eq!(
+		res_name_ext_commit.rows[0].verdict,
+		res_path_ext_commit.rows[0].verdict
+	);
+	assert!(matches!(
+		res_path_ext_commit.rows[0].verdict,
+		Verdict::Kept { .. }
+	));
+	assert!(copy.join("SKILL.md").exists(), "copy dir must survive");
 }
 
 #[test]

@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-	agent_skill_dirs_in_scope, allowed_skill_roots, assemble_copy_release_plan,
-	assert_strictly_contained, by_path_skill_dir, by_path_skill_name,
-	expand_tilde_path, git_keep_hint, single_agent_keep_reason, KeepReason,
-	PruneStatus, RemovalOutcome, Verdict,
+	agent_skill_dirs_in_scope, allowed_skill_roots, assert_strictly_contained,
+	by_path_skill_dir, by_path_skill_name, evaluate_removal_verdict,
+	expand_tilde_path, git_keep_hint, plan_copy_removal,
+	single_agent_keep_reason, unmanaged_skill_dirs, PruneStatus,
+	RemovalOutcome, Verdict,
 };
 use crate::batch::{Backing, RemovalCredits};
 use crate::errors::{ConfigError, Result};
@@ -750,17 +751,18 @@ impl PreflightVerdict {
 pub fn remove_skill_batch(
 	request: &SkillRemovalRequest,
 ) -> Result<SkillRemovalResponse> {
-	if let Some(ref plugin_name) = request.plugin_owner {
-		return Err(ConfigError::InvalidConfig(format!(
-			"Cannot delete plugin-managed skill from plugin '{plugin_name}'"
-		)));
-	}
-
 	match &request.target {
 		SkillRemovalTarget::ByPath(raw_path) => {
 			remove_skill_by_path(request, raw_path)
 		}
-		SkillRemovalTarget::ByName(name) => remove_skill_by_name(request, name),
+		SkillRemovalTarget::ByName(name) => {
+			if let Some(ref plugin_name) = request.plugin_owner {
+				return Err(ConfigError::InvalidConfig(format!(
+					"Cannot delete plugin-managed skill from plugin '{plugin_name}'"
+				)));
+			}
+			remove_skill_by_name(request, name)
+		}
 	}
 }
 
@@ -835,24 +837,23 @@ fn remove_skill_by_path(
 		});
 	}
 
-	for agent in &target_agents {
-		let adapter = crate::create_adapter(*agent);
-		let skills_paths = adapter
-			.get_skills_paths(request.project_root.as_deref(), request.scope);
-		let is_valid = skills_paths
-			.iter()
-			.any(|sp| skill_dir.starts_with(sp) || &skill_dir == sp);
-		if !is_valid {
-			let valid_paths: Vec<String> = skills_paths
-				.iter()
-				.map(|p| p.display().to_string())
-				.collect();
-			return Err(ConfigError::InvalidConfig(format!(
-				"Path '{}' is not in agent's skills directories: {}",
-				skill_dir.display(),
-				valid_paths.join(", ")
-			)));
-		}
+	if let Some(ref plugin_name) = request.plugin_owner {
+		return Err(ConfigError::InvalidConfig(format!(
+			"Cannot delete plugin-managed skill from plugin '{plugin_name}'"
+		)));
+	}
+
+	if !agent_dirs
+		.iter()
+		.any(|sp| skill_dir.starts_with(sp) || &skill_dir == sp)
+	{
+		let valid_paths: Vec<String> =
+			agent_dirs.iter().map(|p| p.display().to_string()).collect();
+		return Err(ConfigError::InvalidConfig(format!(
+			"Path '{}' is not in agent's skills directories: {}",
+			skill_dir.display(),
+			valid_paths.join(", ")
+		)));
 	}
 
 	let _mutation_guard = if !request.dry_run {
@@ -899,172 +900,136 @@ fn remove_skill_by_path(
 		.is_some()
 		|| path_is_link;
 
-	if !canonical_layout {
+	let (outcome, git_hint) = if !canonical_layout {
 		let all_in_scope = agent_skill_dirs_in_scope(
 			request.scope,
 			request.project_root.as_deref(),
 		);
-		let keep_reason = single_agent_keep_reason(
+		let unmanaged = unmanaged_skill_dirs(
+			&all_in_scope,
+			request.project_root.as_deref(),
+			&target_agents,
+		);
+		let safe = skill::sanitize::sanitize_name(&skill_name);
+		let mut skill = manager
+			.get_skill(&skill_name)
+			.cloned()
+			.unwrap_or_else(|| crate::models::Skill::new(&skill_name));
+		skill.source_path = Some(skill_dir.to_string_lossy().to_string());
+
+		let mut plan = plan_copy_removal(
+			&skill,
+			&safe,
+			&all_in_scope,
+			&unmanaged,
+			&roots,
+			request.project_root.as_deref(),
+			request.scope,
+			false,
+			&target_agents,
+		);
+
+		let read_dirs = crate::create_adapter(first_agent)
+			.get_skills_paths(request.project_root.as_deref(), request.scope);
+
+		let verdict = evaluate_removal_verdict(
+			&mut plan,
+			&skill_name,
+			&read_dirs,
+			&[],
+			&all_in_scope,
+			request.scope,
+			request.project_root.as_deref(),
+			false,
+			&target_agents,
+		);
+
+		if !request.dry_run {
+			if let Verdict::Refused { ref reason } = verdict {
+				return Err(ConfigError::unsupported_operation(
+					"remove for this agent alone",
+					reason,
+					first_agent.as_str(),
+				));
+			}
+		}
+
+		let git_hint = single_agent_keep_reason(
 			&skill_dir,
 			&all_in_scope,
 			&skill_name,
 			request.project_root.as_deref(),
 			request.scope,
 			&target_agents,
-		);
+		)
+		.and_then(|reason| git_keep_hint(&reason, &skill_dir));
 
-		if let Some(reason) = keep_reason {
-			let error = git_keep_hint(&reason, &skill_dir);
-			match reason {
-				KeepReason::ExternalReferrer(ref referrer) => {
-					log::warn!(
-						"keeping {}: {} still references it",
-						skill_dir.display(),
-						referrer.display()
-					);
-				}
-				KeepReason::GitTracked | KeepReason::GitUndecided => {
-					if let Some(hint) = &error {
-						log::warn!("{hint}");
-					}
-				}
-				KeepReason::UniversalMaster => {}
-			}
-
-			let reason_str = match &reason {
-				KeepReason::GitTracked => error
-					.clone()
-					.unwrap_or_else(|| "tracked by git".to_string()),
-				KeepReason::GitUndecided => {
-					error.clone().unwrap_or_else(|| "git undecided".to_string())
-				}
-				KeepReason::ExternalReferrer(ref p) => {
-					format!("external referrer {}", p.display())
-				}
-				KeepReason::UniversalMaster => {
-					let readers =
-						crate::skills::removal::skill_dir_readers_outside(
-							&skill_dir,
-							request.scope,
-							request.project_root.as_deref(),
-							&target_agents,
-						);
-					let where_ = skill_dir.display().to_string();
-					let mut r = format!(
-						"skill it reads from a location shared with other agents; it is still served to this agent from: {where_}"
-					);
-					if !readers.is_empty() {
-						let formatted = readers.join(", ");
-						r.push_str(&format!(
-							". Also read there by agents not in this request: {formatted}. Include them in the same request, or delete for every agent (--all-agents, which also unlinks it for them)"
-						));
-					}
-					r
-				}
+		let outcome =
+			if matches!(verdict, Verdict::Kept { .. }) || request.dry_run {
+				RemovalOutcome::preview(
+					plan,
+					verdict,
+					request.scope,
+					request.project_root.as_deref(),
+					&skill_name,
+				)?
+			} else {
+				RemovalOutcome::commit(
+					plan,
+					&roots,
+					request.scope,
+					request.project_root.as_deref(),
+					&skill_name,
+				)?
 			};
+		(outcome, git_hint)
+	} else {
+		// By-path removes the targeted entry only; all_agents is ignored and stays false.
+		let outcome = manager.remove_skill_planned_at_dir_for_agents(
+			&skill_name,
+			&skill_dir,
+			false,
+			request.dry_run,
+			!request.dry_run,
+			&target_agents,
+		)?;
 
-			if !request.dry_run {
+		if !request.dry_run {
+			if let Verdict::Refused { ref reason } = outcome.verdict {
 				return Err(ConfigError::unsupported_operation(
 					"remove for this agent alone",
-					&reason_str,
+					reason,
 					first_agent.as_str(),
 				));
 			}
-
-			let verdict = Verdict::Refused { reason: reason_str };
-			let rows = target_agents
-				.into_iter()
-				.map(|agent| {
-					let mut row = SkillRemovalRow::noop(
-						agent,
-						verdict.clone(),
-						crate::dto::RemovalKind::Kept,
-					);
-					row.skipped = vec![skill_dir.clone()];
-					row.error = error.clone();
-					row
-				})
-				.collect();
-
-			return Ok(SkillRemovalResponse {
-				rows,
-				prune: PruneStatus::NotRun,
-				keepers: Vec::new(),
-				unreadable: Vec::new(),
-				master_reclaimed: false,
-				would_reclaim_master: false,
-			});
 		}
 
-		let plan = assemble_copy_release_plan(
-			skill_dir,
-			&roots,
+		let all_in_scope = agent_skill_dirs_in_scope(
+			request.scope,
+			request.project_root.as_deref(),
+		);
+		let git_hint = single_agent_keep_reason(
+			&skill_dir,
 			&all_in_scope,
 			&skill_name,
 			request.project_root.as_deref(),
 			request.scope,
 			&target_agents,
-		);
+		)
+		.and_then(|reason| git_keep_hint(&reason, &skill_dir));
 
-		let outcome = if request.dry_run {
-			RemovalOutcome::preview(
-				plan,
-				Verdict::Removed,
-				request.scope,
-				request.project_root.as_deref(),
-				&skill_name,
-			)?
-		} else {
-			RemovalOutcome::commit(
-				plan,
-				&roots,
-				request.scope,
-				request.project_root.as_deref(),
-				&skill_name,
-			)?
-		};
-
-		let rows = target_agents
-			.into_iter()
-			.map(|agent| {
-				SkillRemovalRow::from_outcome(agent, &outcome, request.dry_run)
-			})
-			.collect();
-
-		return Ok(SkillRemovalResponse {
-			rows,
-			prune: outcome.prune,
-			keepers: Vec::new(),
-			unreadable: Vec::new(),
-			master_reclaimed: false,
-			would_reclaim_master: false,
-		});
-	}
-
-	// By-path removes the targeted entry only; all_agents is ignored and stays false.
-	let outcome = manager.remove_skill_planned_at_dir_for_agents(
-		&skill_name,
-		&skill_dir,
-		false,
-		request.dry_run,
-		!request.dry_run,
-		&target_agents,
-	)?;
-
-	if !request.dry_run {
-		if let Verdict::Refused { ref reason } = outcome.verdict {
-			return Err(ConfigError::unsupported_operation(
-				"remove for this agent alone",
-				reason,
-				first_agent.as_str(),
-			));
-		}
-	}
+		(outcome, git_hint)
+	};
 
 	let rows = target_agents
 		.into_iter()
 		.map(|agent| {
-			SkillRemovalRow::from_outcome(agent, &outcome, request.dry_run)
+			let mut row =
+				SkillRemovalRow::from_outcome(agent, &outcome, request.dry_run);
+			if matches!(outcome.verdict, Verdict::Refused { .. }) {
+				row.error = git_hint.clone();
+			}
+			row
 		})
 		.collect();
 

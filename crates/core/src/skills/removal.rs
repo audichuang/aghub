@@ -889,7 +889,7 @@ fn chain_passes_through(link: &Path, links: &[PathBuf]) -> bool {
 /// Copy layout (no `canonical_path`): default removes only the targeted agent's
 /// copy (from `source_path`); `--all-agents` removes every same-named copy.
 #[allow(clippy::too_many_arguments)]
-fn plan_copy_removal(
+pub(crate) fn plan_copy_removal(
 	skill: &crate::models::Skill,
 	safe: &str,
 	all_agent_dirs: &[PathBuf],
@@ -1884,6 +1884,104 @@ pub fn agent_skill_dirs_in_scope(
 		}
 	}
 	dirs
+}
+
+/// Compute the removal verdict and update the removal plan in place.
+/// Single home for the removal verdict decision shared by by-name and by-path.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_removal_verdict(
+	plan: &mut RemovalPlan,
+	name: &str,
+	read_dirs: &[PathBuf],
+	prior_deletions: &[PathBuf],
+	all_agent_dirs: &[PathBuf],
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	all_agents: bool,
+	requested_agents: &[AgentType],
+) -> Verdict {
+	let mut deleting: Vec<PathBuf> = plan.paths.clone();
+	deleting.extend(prior_deletions.iter().cloned());
+	let effect = read_effect_after(read_dirs, name, &deleting);
+
+	if deleting.len() > plan.paths.len()
+		&& !effect.incomplete
+		&& (effect.changed || effect.survivors.is_empty())
+	{
+		plan.shared_master_kept = false;
+	}
+
+	// A removal that goes ahead while something else still serves the skill
+	// has to SAY so, through `skipped` ("present and deliberately not taken").
+	if effect.changed {
+		for survivor in &effect.survivors {
+			if !plan.skipped.contains(survivor) {
+				plan.skipped.push(survivor.clone());
+			}
+		}
+	}
+
+	let unmanaged_dirs =
+		unmanaged_skill_dirs(all_agent_dirs, project_root, requested_agents);
+
+	let readers_outside_fn = || {
+		let mut readers_outside: Vec<&'static str> = Vec::new();
+		for path in effect.survivors.iter().chain(plan.skipped.iter()) {
+			if let Some(parent) = path.parent() {
+				for id in skill_dir_readers_outside(
+					parent,
+					scope,
+					project_root,
+					requested_agents,
+				) {
+					if !readers_outside.contains(&id) {
+						readers_outside.push(id);
+					}
+				}
+			}
+		}
+		readers_outside
+	};
+
+	let git_refusal_fn =
+		|| {
+			effect.survivors.iter().chain(plan.skipped.iter()).find_map(
+				|path| {
+					let reason = if all_agents {
+						shared_slot_git_keep(path, project_root)
+					} else {
+						single_agent_keep_reason(
+							path,
+							all_agent_dirs,
+							name,
+							project_root,
+							scope,
+							requested_agents,
+						)
+					}?;
+					git_keep_hint(&reason, path)
+				},
+			)
+		};
+
+	let verdict = Verdict::compute(VerdictInputs {
+		plan_paths: &plan.paths,
+		plan_skipped: &plan.skipped,
+		initial_shared_master_kept: plan.shared_master_kept,
+		effect: &effect,
+		all_agents,
+		unmanaged_dirs: &unmanaged_dirs,
+		git_refusal: &git_refusal_fn,
+		readers_outside: &readers_outside_fn,
+	});
+
+	plan.shared_master_kept = verdict.shared_master_kept();
+	if matches!(verdict, Verdict::Refused { .. }) {
+		plan.still_read_from =
+			still_read_from(&effect.survivors, &plan.skipped);
+	}
+
+	verdict
 }
 
 #[cfg(test)]

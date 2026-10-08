@@ -60,10 +60,7 @@ test("keptDeleteMessageFromError formats localized shared master or git message 
 	);
 	errShared.data = {
 		code: "UNSUPPORTED_OPERATION",
-		error: "delete claude: remove for this agent alone is not supported",
 	};
-	errShared.message =
-		"delete claude: remove for this agent alone is not supported";
 
 	assert.equal(
 		keptDeleteMessageFromError(errShared, "foo", "/p/foo", t),
