@@ -19,15 +19,10 @@ import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import {
-	keptDeleteMessage,
-	keptDeleteMessageFromError,
-} from "../lib/skill-delete-message";
-import { splitDeleteTargets } from "../lib/skill-delete-targets";
-import {
-	failedReconcileRowsMessage,
-	isWholeBatchRefusal,
-} from "../lib/skill-reconcile-errors";
-import { invalidateSkillQueries } from "../requests/skills";
+	deleteSkill,
+	splitDeleteTargets,
+	type BackendHolders,
+} from "../requests/delete-skill";
 import type { LocationGroup, SkillGroup } from "./skill-detail-helpers";
 
 interface DeleteSkillLocationDialogProps {
@@ -56,76 +51,42 @@ export function DeleteSkillLocationDialog({
 	const agentName = useAgentName();
 	const api = useApi();
 	const queryClient = useQueryClient();
-	const deleteRequest =
-		item && item.installations.length > 0
-			? {
-					source_path: item.sourcePath,
-					// The by-path route gates on confirm (unwrap_or(false) =>
-					// dry-run returning success:true), so without this the
-					// delete silently no-ops yet the success check passes.
-					confirm: true,
-					agents: item.installations.map(
-						(installation) => installation.agent,
-					),
-					scope:
-						item.installations[0].source === "project"
-							? ("project" as const)
-							: ("global" as const),
-					project_root:
-						item.installations[0].source === "project"
-							? (projectPath ?? null)
-							: null,
-				}
-			: null;
-
 	const deleteMutation = useMutation({
 		mutationFn: async () => {
-			if (!deleteRequest) {
+			if (!item || item.installations.length === 0) {
 				return;
 			}
+			const res = await deleteSkill({
+				api,
+				queryClient,
+				skillName,
+				t,
+				scopes: [
+					{
+						scope:
+							item.installations[0].source === "project"
+								? "project"
+								: "global",
+						projectRoot:
+							item.installations[0].source === "project"
+								? (projectPath ?? null)
+								: null,
+						agents: item.installations.map((i) => i.agent),
+					},
+				],
+				intent: {
+					kind: "by-path",
+					sourcePath: item.sourcePath,
+					agents: item.installations.map((i) => i.agent),
+				},
+			});
 
-			try {
-				const result = await api.skills.deleteByPath(deleteRequest);
-
-				if (result.outcome === "kept") {
-					// The `.agents/skills` master is shared and another agent still
-					// reads it, so NOTHING was removed. `success` is true here (the
-					// request was understood), and reading only that closed this
-					// dialog and refreshed the list as if the skill were gone —
-					// while it was still installed and still visible.
-					//
-					// Never `result.error ||` here: that is English, set only by a
-					// git refusal, and it overrode the localized text.
-					throw new Error(keptDeleteMessage(result, skillName, t));
-				}
-				if (result.outcome === "partial") {
-					// Some paths went, some did not. Still an error for the user —
-					// the skill is not gone — but the list MUST be refreshed,
-					// because part of it really was removed. Throwing without
-					// invalidating would leave stale entries on screen.
-					await invalidateSkillQueries(queryClient);
-					throw new Error(
-						t("deleteSkillPartial", { name: skillName }),
-					);
-				}
-				if (
-					result.outcome !== "removed" &&
-					result.outcome !== "absent"
-				) {
-					// `absent` is a success for a delete: the post-condition
-					// ("the skill is gone") already holds.
-					throw new Error(result.error || t("failedToDeleteSkill"));
-				}
-			} catch (error) {
-				const keptMsg = keptDeleteMessageFromError(error, skillName, t);
-				if (keptMsg) {
-					throw new Error(keptMsg);
-				}
-				throw error;
+			if (!res.success) {
+				throw new Error(res.message || t("failedToDeleteSkill"));
 			}
+			return res;
 		},
-		onSuccess: async () => {
-			await invalidateSkillQueries(queryClient);
+		onSuccess: () => {
 			onClose();
 		},
 		onError: (error) => {
@@ -242,19 +203,20 @@ export function DeleteSkillDialog({
 	// `isUsable`: an enabled agent that is merely undetected is still a reader
 	// the server counts, and leaving it unnamed made the request refuse itself.
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
-	const managedAgentIds = useMemo(
-		() =>
-			new Set(
-				availableAgents
-					.filter((agent) => !agent.isDisabled)
-					.map((agent) => agent.id),
-			),
+	const backendHolders: BackendHolders = useMemo(
+		() => ({
+			still_read_by_managed: availableAgents
+				.filter((agent) => !agent.isDisabled)
+				.map((agent) => agent.id),
+			still_read_by_unmanaged: availableAgents
+				.filter((agent) => agent.isDisabled)
+				.map((agent) => agent.id),
+		}),
 		[availableAgents],
 	);
 	const targets = useMemo(
-		() =>
-			splitDeleteTargets(group.items, managedAgentIds, includeUnmanaged),
-		[group.items, managedAgentIds, includeUnmanaged],
+		() => splitDeleteTargets(group.items, backendHolders, includeUnmanaged),
+		[group.items, backendHolders, includeUnmanaged],
 	);
 
 	const deleteMutation = useMutation({
@@ -271,111 +233,58 @@ export function DeleteSkillDialog({
 				(item) => item.source === "project",
 			);
 
-			const results = [];
-
+			const scopes = [];
 			if (globalItems.length > 0) {
-				const result = await api.skills.reconcile({
-					source: {
-						agent: globalItems[0].agent,
-						scope: "global",
-						project_root: null,
-						name: skill.name,
-					},
-					added: null,
-					removed: globalItems.map((item) => item.agent),
-					// This dialog is the "remove from these agents" confirmation.
-					confirm: true,
+				scopes.push({
+					scope: "global" as const,
+					projectRoot: null,
+					agents: globalItems.map((item) => item.agent),
 				});
-				results.push(result);
 			}
-
 			if (projectItems.length > 0) {
-				const result = await api.skills.reconcile({
-					source: {
-						agent: projectItems[0].agent,
-						scope: "project",
-						project_root: projectPath ?? null,
-						name: skill.name,
-					},
-					added: null,
-					removed: projectItems.map((item) => item.agent),
-					// This dialog is the "remove from these agents" confirmation.
-					confirm: true,
+				scopes.push({
+					scope: "project" as const,
+					projectRoot: projectPath ?? null,
+					agents: projectItems.map((item) => item.agent),
 				});
-				results.push(result);
 			}
 
-			const totalFailed = results.reduce(
-				(sum, r) => sum + r.failed_count,
-				0,
-			);
-			const totalResults = results.reduce(
-				(sum, r) => sum + r.results.length,
-				0,
-			);
+			const unmanagedAgents = targets.unmanaged
+				.map((item) => item.agent)
+				.filter((agent): agent is string => !!agent);
 
-			if (totalFailed > 0) {
-				const allRows = results.flatMap((r) => r.results);
-				const message =
-					failedReconcileRowsMessage(allRows, agentName) ??
-					`${totalFailed} of ${totalResults} deletions failed`;
-				throw new Error(message);
+			const res = await deleteSkill({
+				api,
+				queryClient,
+				skillName: skill.name,
+				t,
+				scopes,
+				intent: {
+					kind: "all-agents",
+					includeUnmanaged,
+				},
+				unmanagedAgents,
+			});
+
+			if (!res.success) {
+				throw new Error(res.message || t("failedToDeleteSkill"));
 			}
+			return res;
 		},
-		onSuccess: async () => {
-			// A link the user did not ask us to touch may still keep the skill on
-			// disk — but it may not: a disabled agent's link in a shared slot goes
-			// once every enabled reader of that slot is named. Ask disk, not the
-			// request, before claiming the skill was kept.
-			if (targets.unmanaged.length > 0 && !includeUnmanaged) {
-				const unmanaged = new Set(
-					targets.unmanaged.map((item) => item.agent),
-				);
-				const scopes = new Set(
-					targets.unmanaged.map((item) => item.source),
-				);
-				try {
-					const lists = await Promise.all(
-						[...scopes].map((scope) =>
-							scope === "project"
-								? api.skills.listAll("project", projectPath)
-								: api.skills.listAll("global"),
-						),
-					);
-					if (
-						lists
-							.flat()
-							.some(
-								(item) =>
-									item.name === skill.name &&
-									unmanaged.has(item.agent),
-							)
-					) {
-						toast.info(t("deleteSkillKeptForUnmanaged"));
-					}
-				} catch {
-					// Cannot tell; say nothing rather than guess.
-				}
+		onSuccess: (res) => {
+			if (res?.unmanagedKept) {
+				toast.info(t("deleteSkillKeptForUnmanaged"));
 			}
-			await invalidateSkillQueries(queryClient);
 			setIncludeUnmanaged(false);
 			onClose();
 		},
-		onError: async (error) => {
+		onError: (error) => {
 			console.error("Skill delete mutation error:", error);
-			// An unticked unmanaged holder whose link sits in a slot the named
-			// agents read makes the server refuse the whole batch; the only way
-			// forward is the checkbox, so say that and keep the dialog open.
 			toast.danger(
-				isWholeBatchRefusal(error) &&
-					targets.unmanaged.length > 0 &&
-					!includeUnmanaged
-					? t("deleteSkillRetryWithUnmanaged")
-					: error instanceof Error
-						? error.message
-						: t("failedToDeleteSkill"),
+				error instanceof Error
+					? error.message
+					: t("failedToDeleteSkill"),
 			);
-			await invalidateSkillQueries(queryClient);
 		},
 	});
 

@@ -26,7 +26,7 @@ import { useApi } from "../hooks/use-api";
 import { useGitForwarding } from "../hooks/use-git-forwarding";
 import { useFavorites } from "../hooks/use-favorites";
 import { useCurrentCodeEditor } from "../hooks/use-integrations";
-import { isGoneSkillPath } from "../lib/skill-reconcile-errors";
+import { isGoneSkillPath } from "../requests/delete-skill";
 import { cn, filterItemsByAgentIds } from "../lib/utils";
 import { openWithEditorMutationOptions } from "../requests/integrations";
 import { queryKeys } from "../requests/keys";

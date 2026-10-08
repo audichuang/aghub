@@ -934,6 +934,7 @@ const zhHans: typeof en = {
 		"没有删除任何东西：未管理的代理仍持有所选代理读取的链接。请勾选“一并移除这些代理的链接”后再试一次。",
 	deleteSkillKeptForUnmanaged:
 		"已从管理中的代理移除；未管理代理的链接仍保留此技能。",
+	deleteSkillCrossScopePartial: "全局范围已删除，但项目范围失败：{{error}}",
 	deleteAll: "全部删除",
 	locations: "位置",
 	globalSkills: "全局技能",

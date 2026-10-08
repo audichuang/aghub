@@ -12,7 +12,10 @@ const items = [
 	{ agent: "opencode", source: "global" },
 	{ agent: null, source: "global" },
 ];
-const managed = new Set(["claude"]);
+const managed = {
+	still_read_by_managed: ["claude"],
+	still_read_by_unmanaged: ["cursor", "opencode"],
+};
 
 test("a disabled agent is not named unless the user opts in", () => {
 	const { named, unmanaged } = splitDeleteTargets(items, managed, false);
@@ -41,7 +44,10 @@ test("a row with no agent is never named", () => {
 		unmanaged,
 	} = splitDeleteTargets(
 		items,
-		new Set(["claude", "cursor", "opencode"]),
+		{
+			still_read_by_managed: ["claude", "cursor", "opencode"],
+			still_read_by_unmanaged: [],
+		},
 		true,
 	);
 	assert.equal(named.length, 3);
@@ -69,12 +75,15 @@ test("bulk delete: disabled agent is not named and its source_path delete is not
 			],
 		},
 	];
-	const managed = new Set(["claude"]);
+	const managed = {
+		still_read_by_managed: ["claude"],
+		still_read_by_unmanaged: ["cursor"],
+	};
 
 	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
 		groups,
 		resourceType: "skill",
-		managedAgentIds: managed,
+		backendHolders: managed,
 		includeUnmanaged: false,
 	});
 
@@ -114,12 +123,15 @@ test("bulk delete: disabled agent is named and its source_path delete is sent wh
 			],
 		},
 	];
-	const managed = new Set(["claude"]);
+	const managed = {
+		still_read_by_managed: ["claude"],
+		still_read_by_unmanaged: ["cursor"],
+	};
 
 	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
 		groups,
 		resourceType: "skill",
-		managedAgentIds: managed,
+		backendHolders: managed,
 		includeUnmanaged: true,
 	});
 
@@ -154,12 +166,15 @@ test("bulk delete: shared source_path is deduplicated but carries consented agen
 			],
 		},
 	];
-	const managed = new Set(["claude"]);
+	const managed = {
+		still_read_by_managed: ["claude"],
+		still_read_by_unmanaged: ["cursor"],
+	};
 
 	const withoutConsent = buildBulkDeleteRequests({
 		groups,
 		resourceType: "skill",
-		managedAgentIds: managed,
+		backendHolders: managed,
 		includeUnmanaged: false,
 	});
 	assert.equal(withoutConsent.requests.length, 1);
@@ -169,7 +184,7 @@ test("bulk delete: shared source_path is deduplicated but carries consented agen
 	const withConsent = buildBulkDeleteRequests({
 		groups,
 		resourceType: "skill",
-		managedAgentIds: managed,
+		backendHolders: managed,
 		includeUnmanaged: true,
 	});
 	assert.equal(withConsent.requests.length, 1);
@@ -191,13 +206,16 @@ test("bulk delete: a group held only by a disabled agent is skipped without cons
 			],
 		},
 	];
-	const managed = new Set(["claude"]);
+	const managed = {
+		still_read_by_managed: ["claude"],
+		still_read_by_unmanaged: ["cursor"],
+	};
 
 	// No consent: appears in skippedGroupKeys, produces no request
 	const withoutConsent = buildBulkDeleteRequests({
 		groups,
 		resourceType: "skill",
-		managedAgentIds: managed,
+		backendHolders: managed,
 		includeUnmanaged: false,
 	});
 	assert.equal(withoutConsent.requests.length, 0);
@@ -207,7 +225,7 @@ test("bulk delete: a group held only by a disabled agent is skipped without cons
 	const withConsent = buildBulkDeleteRequests({
 		groups,
 		resourceType: "skill",
-		managedAgentIds: managed,
+		backendHolders: managed,
 		includeUnmanaged: true,
 	});
 	assert.equal(withConsent.requests.length, 1);
@@ -253,12 +271,15 @@ test("bulk delete: mixed selection filters skill group but leaves mcp group unch
 			],
 		},
 	];
-	const managed = new Set(["claude"]);
+	const managed = {
+		still_read_by_managed: ["claude"],
+		still_read_by_unmanaged: ["cursor"],
+	};
 
 	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
 		groups,
 		resourceType: "mixed",
-		managedAgentIds: managed,
+		backendHolders: managed,
 		includeUnmanaged: false,
 	});
 
@@ -292,7 +313,10 @@ test("collectUnmanagedDeleteTargets returns unmanaged items across skill groups"
 			items: [{ name: "skill-2", agent: "opencode", source: "global" }],
 		},
 	];
-	const managed = new Set(["claude"]);
+	const managed = {
+		still_read_by_managed: ["claude"],
+		still_read_by_unmanaged: ["cursor", "opencode"],
+	};
 	const unmanaged = collectUnmanagedDeleteTargets(groups, managed, "skill");
 	assert.deepEqual(
 		unmanaged.map((item) => item.agent),

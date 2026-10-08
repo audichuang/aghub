@@ -59,14 +59,30 @@ test("failedReconcileRowsMessage formats only failed rows", () => {
 });
 
 test("isWholeBatchRefusal matches only the preflight refusal", () => {
-	assert.equal(
-		isWholeBatchRefusal(
-			new Error(
-				"skill reconcile preflight failed; nothing was written: delete codex (global): ...",
-			),
-		),
-		true,
+	const errUnsupported = new HTTPError(
+		new Response(null, { status: 422 }),
+		new Request("http://x"),
+		{} as any,
 	);
+	errUnsupported.data = { code: "UNSUPPORTED_OPERATION" };
+	assert.equal(isWholeBatchRefusal(errUnsupported), true);
+
+	const errInvalidConfig = new HTTPError(
+		new Response(null, { status: 422 }),
+		new Request("http://x"),
+		{} as any,
+	);
+	errInvalidConfig.data = { code: "INVALID_CONFIG" };
+	assert.equal(isWholeBatchRefusal(errInvalidConfig), true);
+
+	const errOtherCode = new HTTPError(
+		new Response(null, { status: 500 }),
+		new Request("http://x"),
+		{} as any,
+	);
+	errOtherCode.data = { code: "INTERNAL_ERROR" };
+	assert.equal(isWholeBatchRefusal(errOtherCode), false);
+
 	assert.equal(
 		isWholeBatchRefusal(
 			new Error("Cursor: 1 path(s) could not be deleted: /x/demo"),

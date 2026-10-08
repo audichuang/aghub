@@ -7,7 +7,7 @@ import type { SkillResponse } from "../generated/dto";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { supportsSkillMutation } from "../lib/agent-capabilities";
-import { cleanVerdict } from "../lib/clean-outcome";
+import { deleteSkill } from "../requests/delete-skill";
 import { queryKeys } from "../requests/keys";
 import {
 	invalidateSkillQueries,
@@ -182,17 +182,20 @@ function WithheldSkillItem({
 		if (!agentId) return;
 		setBusy("delete");
 		try {
-			const result = await api.skills.delete(
-				agentId,
-				skill.name,
+			const res = await deleteSkill({
+				api,
+				queryClient,
+				skillName: skill.name,
+				t,
 				scope,
-				projectPath,
-				true,
-			);
-			// `outcome`, never `success`: a skill still on disk answers
-			// success too (see `lib/clean-outcome.ts`).
-			if (result.error || cleanVerdict(result.outcome) !== "cleaned") {
-				throw new Error(result.error ?? String(result.outcome));
+				projectRoot: projectPath,
+				agent: agentId,
+				intent: {
+					kind: "all-agents",
+				},
+			});
+			if (!res.success) {
+				throw new Error(res.message || t("failedToDeleteSkill"));
 			}
 			toast.success(t("withheldSkillsDeleted", { name: skill.name }));
 		} catch (error) {

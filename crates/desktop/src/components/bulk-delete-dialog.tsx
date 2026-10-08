@@ -10,8 +10,10 @@ import { BulkOperationError, bulkFailureItemsLabel } from "../lib/bulk-errors";
 import {
 	buildBulkDeleteRequests,
 	collectUnmanagedDeleteTargets,
+	deleteSkill,
+	type BackendHolders,
 	type BulkDeleteGroup,
-} from "../lib/skill-delete-targets";
+} from "../requests/delete-skill";
 import { invalidateMcpQueries } from "../requests/mcps";
 import { invalidateSkillQueries } from "../requests/skills";
 
@@ -39,24 +41,22 @@ export function BulkDeleteDialog({
 	const { availableAgents } = useAgentAvailability();
 
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
-	const managedAgentIds = useMemo(
-		() =>
-			new Set(
-				availableAgents
-					.filter((agent) => !agent.isDisabled)
-					.map((agent) => agent.id),
-			),
+	const backendHolders: BackendHolders = useMemo(
+		() => ({
+			still_read_by_managed: availableAgents
+				.filter((agent) => !agent.isDisabled)
+				.map((agent) => agent.id),
+			still_read_by_unmanaged: availableAgents
+				.filter((agent) => agent.isDisabled)
+				.map((agent) => agent.id),
+		}),
 		[availableAgents],
 	);
 
 	const unmanagedItems = useMemo(
 		() =>
-			collectUnmanagedDeleteTargets(
-				groups,
-				managedAgentIds,
-				resourceType,
-			),
-		[groups, managedAgentIds, resourceType],
+			collectUnmanagedDeleteTargets(groups, backendHolders, resourceType),
+		[groups, backendHolders, resourceType],
 	);
 
 	const unmanagedAgents = useMemo(
@@ -81,11 +81,11 @@ export function BulkDeleteDialog({
 			buildBulkDeleteRequests({
 				groups,
 				resourceType,
-				managedAgentIds,
+				backendHolders,
 				includeUnmanaged,
 				projectPath,
 			}),
-		[groups, resourceType, managedAgentIds, includeUnmanaged, projectPath],
+		[groups, resourceType, backendHolders, includeUnmanaged, projectPath],
 	);
 
 	const deleteMutation = useMutation({
@@ -110,32 +110,30 @@ export function BulkDeleteDialog({
 					);
 				} else {
 					promises.push(
-						api.skills
-							.delete(
-								req.agent,
-								req.groupKey,
-								req.scope,
-								req.projectRoot,
-								false,
-								req.agents,
-							)
-							.then((result) => {
-								// HTTP 200 is not "deleted": `kept` removed
-								// nothing and `partial` left paths behind.
-								// See docs/history/desktop-frontend.md#bulk-delete-counted-kept-as-deleted
-								if (
-									result.outcome === "kept" ||
-									result.outcome === "partial"
-								) {
-									throw new Error(
-										t(
-											result.outcome === "kept"
-												? "bulkDeleteKept"
-												: "bulkDeletePartial",
-										),
-									);
-								}
-							}),
+						deleteSkill({
+							api,
+							queryClient,
+							skillName: req.groupKey,
+							t,
+							scope: req.scope,
+							projectRoot: req.projectRoot,
+							agent: req.agent,
+							intent: {
+								kind: "from-agents",
+								agents: req.agents,
+							},
+						}).then((res) => {
+							if (!res.success) {
+								throw new Error(
+									res.verdict === "kept"
+										? t("bulkDeleteKept")
+										: res.verdict === "partial"
+											? t("bulkDeletePartial")
+											: res.message ||
+												t("failedToDeleteSkill"),
+								);
+							}
+						}),
 					);
 				}
 				deleteInfo.push({

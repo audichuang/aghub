@@ -984,6 +984,8 @@ export default {
 		'Nothing was deleted. Agents aghub does not manage still hold links the selected agents read through. Tick "Also remove these agents\' links" and try again.',
 	deleteSkillKeptForUnmanaged:
 		"Removed from managed agents; unmanaged agents still keep the skill.",
+	deleteSkillCrossScopePartial:
+		"Global scope was deleted, but project scope failed: {{error}}",
 	deleteAll: "Delete All",
 	locations: "Locations",
 	globalSkills: "Global Skills",

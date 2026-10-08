@@ -30,7 +30,7 @@ import {
 } from "../lib/agent-capabilities";
 import { bulkFailureItemsLabel } from "../lib/bulk-errors";
 import { describeRequestFailure } from "../lib/request-failure";
-import { cleanVerdict } from "../lib/clean-outcome";
+import { deleteSkill } from "../requests/delete-skill";
 import {
 	allSkillPaths,
 	selectedSkills,
@@ -512,25 +512,22 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		if (installableAgentIds.length === 0) {
 			throw new Error(t("sourceRemoveNoAgents"));
 		}
-		const result = await api.skills.delete(
-			installableAgentIds[0],
-			name,
-			updateScope,
-			updateProjectRoot ?? undefined,
-			true,
-		);
-		if (result.error) {
-			throw new Error(result.error);
-		}
-		// The three-way verdict lives in `lib/clean-outcome.ts` so it can be
-		// tested — this decision IS the reported bug ("cleaned" on a skill that
-		// never goes away), and it is unreachable from a test while it sits
-		// inline in a component closure.
-		const verdict = cleanVerdict(result.outcome);
-		if (verdict === "lock-only") {
+		const res = await deleteSkill({
+			api,
+			queryClient,
+			skillName: name,
+			t,
+			scope: updateScope,
+			projectRoot: updateProjectRoot ?? undefined,
+			agent: installableAgentIds[0],
+			intent: {
+				kind: "clean-lock",
+			},
+		});
+		if (res.verdict === "lock-only") {
 			throw new Error(t("sourceRemovedCleanLockOnly", { name }));
 		}
-		if (verdict !== "cleaned") {
+		if (res.verdict !== "removed") {
 			throw new Error(t("sourceRemovedCleanFailed", { name }));
 		}
 	};

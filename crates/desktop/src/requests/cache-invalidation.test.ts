@@ -15,6 +15,7 @@ import {
 	applySkillUpdateMutationOptions,
 	invalidateSkillQueries,
 } from "./skills.ts";
+import { deleteSkill } from "./delete-skill.ts";
 
 /** A client whose queries never refetch on their own, so staleness is visible. */
 function freshClient() {
@@ -207,4 +208,93 @@ test("the git-credential probe is keyed per connection and outside the skills na
 		"skills",
 		"parked under `skills`, every skill mutation would sweep it stale and re-run `git credential fill`",
 	);
+});
+
+test("deleteSkill centralizes invalidation in the request layer and refetches non-blocking", async () => {
+	const client = freshClient();
+	const list = seedActive(client, queryKeys.skills.list("global"));
+	const withheld = seedActive(client, queryKeys.skills.withheld("global"));
+	await list.settled;
+	await withheld.settled;
+	const before = {
+		list: list.state.fetches,
+		withheld: withheld.state.fetches,
+	};
+
+	const api = {
+		skills: {
+			deleteByPath: async () => ({
+				success: true,
+				dry_run: false,
+				executed: true,
+				needs_confirm: false,
+				paths: ["/path"],
+				skipped: [],
+				deleted_path: "/path",
+				outcome: "removed",
+			}),
+		},
+	} as any;
+
+	await deleteSkill({
+		api,
+		queryClient: client,
+		name: "my-skill",
+		sourcePath: "/path",
+		intent: { kind: "by-path", sourcePath: "/path", agents: ["claude"] },
+	});
+
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	assert.ok(
+		list.state.fetches > before.list,
+		"the skill list must refetch after deleteSkill",
+	);
+	assert.ok(
+		withheld.state.fetches > before.withheld,
+		"the withheld list must refetch after deleteSkill",
+	);
+	list.unsubscribe();
+	withheld.unsubscribe();
+});
+
+test("deleteSkill invalidates queries even on partial deletion failure", async () => {
+	const client = freshClient();
+	const list = seedActive(client, queryKeys.skills.list("global"));
+	await list.settled;
+	const before = list.state.fetches;
+
+	const api = {
+		skills: {
+			deleteByPath: async () => ({
+				success: false,
+				dry_run: false,
+				executed: true,
+				needs_confirm: false,
+				paths: ["/path1"],
+				skipped: ["/path2"],
+				deleted_path: "/path1",
+				outcome: "partial",
+			}),
+		},
+	} as any;
+
+	const result = await deleteSkill({
+		api,
+		queryClient: client,
+		name: "my-skill",
+		sourcePath: "/path",
+		intent: { kind: "by-path", sourcePath: "/path", agents: ["claude"] },
+	});
+
+	assert.equal(result.success, false);
+	assert.equal(result.verdict, "partial");
+
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	assert.ok(
+		list.state.fetches > before,
+		"skill queries must be invalidated on partial delete to reflect partially removed paths",
+	);
+	list.unsubscribe();
 });
