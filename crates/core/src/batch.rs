@@ -12,6 +12,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+use crate::errors::ConfigError;
 use crate::models::{AgentType, McpServer, ResourceScope};
 use crate::registry;
 
@@ -121,6 +122,15 @@ impl fmt::Display for BatchUnsupported {
 
 impl std::error::Error for BatchUnsupported {}
 
+impl From<BatchUnsupported> for ConfigError {
+	fn from(err: BatchUnsupported) -> Self {
+		ConfigError::UnsupportedOperation {
+			message: err.to_string(),
+			rejected_targets: None,
+		}
+	}
+}
+
 fn scope_word(scope: ResourceScope) -> &'static str {
 	match scope {
 		ResourceScope::GlobalOnly => "global",
@@ -180,7 +190,7 @@ fn skill_agent_preflight(
 pub fn skill_batch_preflight(
 	agents: &[AgentType],
 	write_scope: ResourceScope,
-) -> Result<(), BatchUnsupported> {
+) -> Result<(), ConfigError> {
 	let unsupported = agents
 		.iter()
 		.filter_map(|agent| {
@@ -192,7 +202,10 @@ pub fn skill_batch_preflight(
 	if unsupported.is_empty() {
 		Ok(())
 	} else {
-		Err(BatchUnsupported::new("skill", unsupported))
+		Err(ConfigError::from(BatchUnsupported::new(
+			"skill",
+			unsupported,
+		)))
 	}
 }
 
@@ -490,13 +503,14 @@ pub fn run_mcp_agent_mutation(
 	toggle: bool,
 	transport: Option<&crate::models::McpTransport>,
 	mutate: impl FnMut(AgentType) -> Result<serde_json::Value, String>,
-) -> Result<AgentBatchView, BatchUnsupported> {
+) -> Result<AgentBatchView, ConfigError> {
 	run_agent_mutation_with_preflight(
 		agents,
 		"MCP",
 		|agent| mcp_agent_preflight(agent, write_scope, toggle, transport),
 		mutate,
 	)
+	.map_err(ConfigError::from)
 }
 
 /// Run one skill mutation across agents with scope capability preflight owned
@@ -505,9 +519,10 @@ pub fn run_skill_agent_mutation(
 	agents: &[AgentType],
 	write_scope: ResourceScope,
 	mutate: impl FnMut(AgentType) -> Result<serde_json::Value, String>,
-) -> Result<AgentBatchView, BatchUnsupported> {
+) -> Result<AgentBatchView, ConfigError> {
 	skill_batch_preflight(agents, write_scope)?;
 	run_agent_mutation_with_preflight(agents, "skill", |_| Ok(()), mutate)
+		.map_err(ConfigError::from)
 }
 
 /// A plain `canonicalize` fails on a missing leaf and falls back to the literal
@@ -992,5 +1007,80 @@ mod tests {
 			!root.path().join(".cursor").exists(),
 			"failed row created config dir"
 		);
+	}
+
+	#[test]
+	fn batch_preflight_rejections_convert_to_unsupported_operation() {
+		struct Case {
+			name: &'static str,
+			error: ConfigError,
+		}
+		let cases = vec![
+			Case {
+				name: "mcp wrong scope",
+				error: ConfigError::from(
+					mcp_batch_preflight(
+						&[AgentType::Claude, AgentType::AugmentCode],
+						ResourceScope::ProjectOnly,
+						false,
+						None,
+					)
+					.unwrap_err(),
+				),
+			},
+			Case {
+				name: "skill wrong scope",
+				error: skill_batch_preflight(
+					&[AgentType::Claude, AgentType::JetBrainsAi],
+					ResourceScope::GlobalOnly,
+				)
+				.unwrap_err(),
+			},
+			Case {
+				name: "toggle",
+				error: ConfigError::from(
+					mcp_batch_preflight(
+						&[AgentType::Hermes, AgentType::Windsurf],
+						ResourceScope::GlobalOnly,
+						true,
+						None,
+					)
+					.unwrap_err(),
+				),
+			},
+			Case {
+				name: "transport",
+				error: ConfigError::from(
+					mcp_batch_preflight(
+						&[AgentType::Claude, AgentType::OpenCode],
+						ResourceScope::ProjectOnly,
+						false,
+						Some(&crate::models::McpTransport::sse(
+							"https://example.com/v1/messages",
+						)),
+					)
+					.unwrap_err(),
+				),
+			},
+		];
+
+		for case in cases {
+			assert_eq!(
+				crate::error_codes::wire_code(&case.error),
+				"UNSUPPORTED_OPERATION",
+				"{}: wire code must be UNSUPPORTED_OPERATION",
+				case.name
+			);
+			assert!(
+				!crate::error_codes::retryable(&case.error),
+				"{}: batch preflight rejection must not be retryable",
+				case.name
+			);
+			assert!(
+				case.error.to_string().contains("nothing was written"),
+				"{}: error message must promise nothing was written",
+				case.name
+			);
+		}
 	}
 }

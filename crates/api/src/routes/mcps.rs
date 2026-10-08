@@ -28,13 +28,11 @@ fn check_mcp_supported(
 ) -> Result<(), ApiError> {
 	let descriptor = aghub_core::registry::get(agent.0);
 	if !descriptor.supports_mcp_scope(scope) {
-		return Err(ApiError::new(
-			Status::UnprocessableEntity,
-			format!(
+		return Err(ApiError::from(
+			aghub_core::errors::ConfigError::unsupported_op(format!(
 				"Agent '{}' does not support MCP servers in {:?} scope",
 				descriptor.id, scope
-			),
-			"UNSUPPORTED_OPERATION",
+			)),
 		));
 	}
 	Ok(())
@@ -272,13 +270,7 @@ fn batch_create_mcp_inner(
 				.map_err(|error| error.body.error)
 		},
 	)
-	.map_err(|e| {
-		ApiError::new(
-			Status::UnprocessableEntity,
-			e.to_string(),
-			"UNSUPPORTED_OPERATION",
-		)
-	})?;
+	.map_err(ApiError::from)?;
 	Ok(Json(view.into()))
 }
 

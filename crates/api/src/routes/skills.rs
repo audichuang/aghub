@@ -726,14 +726,10 @@ fn check_skills_supported(
 ) -> Result<(), ApiError> {
 	let descriptor = registry::get(agent.0);
 	if !descriptor.supports_skill_scope(scope) {
-		return Err(ApiError::new(
-			Status::UnprocessableEntity,
-			format!(
-				"Agent '{}' does not support skills in {:?} scope",
-				descriptor.id, scope
-			),
-			"UNSUPPORTED_OPERATION",
-		));
+		return Err(ApiError::from(ConfigError::unsupported_op(format!(
+			"Agent '{}' does not support skills in {:?} scope",
+			descriptor.id, scope
+		))));
 	}
 	Ok(())
 }
@@ -2237,8 +2233,6 @@ type InstallAgentPartition = (Vec<(String, AgentType)>, Vec<(String, String)>);
 /// Invalid means an unknown raw agent id.
 fn partition_install_agents_in_request_order(
 	agents: &[String],
-	_scope: ResourceScope,
-	_project_root: Option<&std::path::Path>,
 ) -> InstallAgentPartition {
 	let mut valid: Vec<(String, AgentType)> = Vec::new();
 	let mut invalid: Vec<(String, String)> = Vec::new();
@@ -2315,11 +2309,7 @@ pub async fn git_install_skills(
 	let mut results = Vec::new();
 
 	let (valid_agents, invalid_agents) =
-		partition_install_agents_in_request_order(
-			&req.agents,
-			resource_scope,
-			project_root.as_deref(),
-		);
+		partition_install_agents_in_request_order(&req.agents);
 
 	if !invalid_agents.is_empty() {
 		for skill_path in &req.skill_paths {
@@ -7824,18 +7814,14 @@ mod tests {
 		let req_agents = vec!["claude".to_string(), "opencode".to_string()];
 		let resource_scope = ResourceScope::ProjectOnly;
 
-		let (valid, invalid) = partition_install_agents_in_request_order(
-			&req_agents,
-			resource_scope,
-			Some(project_root.as_path()),
-		);
+		let (valid, invalid) =
+			partition_install_agents_in_request_order(&req_agents);
 
 		// also verify unknown agents go to invalid
-		let (v2, inv2) = partition_install_agents_in_request_order(
-			&["claude".to_string(), "not-a-real-agent".to_string()],
-			resource_scope,
-			Some(project_root.as_path()),
-		);
+		let (v2, inv2) = partition_install_agents_in_request_order(&[
+			"claude".to_string(),
+			"not-a-real-agent".to_string(),
+		]);
 		assert_eq!(v2.len(), 1, "only claude is valid");
 		assert_eq!(inv2.len(), 1, "not-a-real-agent is invalid");
 		assert!(

@@ -110,6 +110,9 @@ line** — don't reword it). Pass `--port N` to pin one.
 - Batch routes answer HTTP 200 for a handled batch whose rows failed — the row's
   `error` is the answer, and failed rows are also logged (never the source URL
   or a forwarded token).
+- `POST /skills/updates/check` deliberately reads the lock fail-OPEN (a corrupted
+  or unreadable lock is treated as empty/missing; the CLI `check` is fail-closed,
+  because CLI check presents lock contents as its answer and probes first).
 
 ## ANTI-PATTERNS
 
@@ -122,4 +125,8 @@ line** — don't reword it). Pass `--port N` to pin one.
   deletes against a held lock took `GET /agents` from 0.00s to a 30s timeout).
   There is no compile-time guard; the awaits (git fetch, plugin detection) stay
   OUTSIDE the closure, which is also where they belong relative to the lock.
+- NEVER orchestrate two or more core mutation steps within a handler to form a
+  single action — orchestration belongs in core behind one entry point.
+- NEVER write an error-code string literal in API route code — error codes come
+  directly from core errors via `aghub_core::error_codes` (or `ApiError::from`).
 - (path/ConfigManager rules: see root AGENTS.md Anti-Patterns — errors here use machine codes + safe messages)

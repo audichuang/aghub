@@ -250,3 +250,5 @@ read-only — it never mutates a lock — and its JSON shape is pinned by
 
 - **Don't** `println!` diagnostics — use `eprintln_verbose!`
 - **Don't** hardcode agent id strings — use `AgentType`
+- **Don't** orchestrate two or more core mutation steps within the CLI to form a single action — orchestration belongs in core behind one entry point
+- **Don't** write error-code string literals in CLI code — error codes come directly from core errors via `aghub_core::error_codes`

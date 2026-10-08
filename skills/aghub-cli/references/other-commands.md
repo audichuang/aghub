@@ -33,6 +33,9 @@ is accepted by `get` only.
 - `delete mcps` judges sharing against the WHOLE `-a` list.
   `delete mcps X -a claude -p` refuses because copilot reads the same
   `<root>/.mcp.json`; `-a claude,copilot` removes it.
+- Multi-agent MCP mutations (`-a a,b`) preflight scope, toggle, and transport
+  capabilities before writing; preflight rejection exits 1 with top-level
+  `error.code: "UNSUPPORTED_OPERATION"` under `--json` (nothing written).
 
 ## Sub-agents
 

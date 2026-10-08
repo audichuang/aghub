@@ -2125,8 +2125,7 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 							None => result,
 						}
 					},
-				)
-				.map_err(|e| anyhow::anyhow!("{e}"))?
+				)?
 			} else if matches!(resource, ResourceType::Skills)
 				&& matches!(cli.command, Commands::Delete { .. })
 			{
@@ -2182,8 +2181,7 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 							// the row well-formed if that invariant ever slips.
 							.and_then(row_from_payload)
 					},
-				)
-				.map_err(|e| anyhow::anyhow!("{e}"))?
+				)?
 			};
 			if cli.json {
 				println!("{}", serde_json::to_string_pretty(&view)?);

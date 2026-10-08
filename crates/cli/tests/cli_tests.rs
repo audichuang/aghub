@@ -1145,6 +1145,9 @@ fn add_mcp_agent_list_preflight_rejects_unsupported_agent() {
 		!out.status.success(),
 		"unsupported agent must fail the batch"
 	);
+	let json: Value =
+		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+	assert_eq!(json["error"]["code"], "UNSUPPORTED_OPERATION", "{json}");
 	let stderr = String::from_utf8_lossy(&out.stderr);
 	assert!(
 		stderr.contains("pi") && stderr.contains("nothing was written"),
@@ -1171,6 +1174,7 @@ fn add_mcp_agent_list_preflight_rejects_wrong_scope() {
 	let out = isolated_cli(home.path(), state.path())
 		.current_dir(&proj)
 		.args([
+			"--json",
 			"-p",
 			"-a",
 			"claude,augmentcode",
@@ -1187,6 +1191,9 @@ fn add_mcp_agent_list_preflight_rejects_wrong_scope() {
 		!out.status.success(),
 		"global-only agent must fail -p batch"
 	);
+	let json: Value =
+		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+	assert_eq!(json["error"]["code"], "UNSUPPORTED_OPERATION", "{json}");
 	let stderr = String::from_utf8_lossy(&out.stderr);
 	assert!(
 		stderr.contains("augmentcode")
