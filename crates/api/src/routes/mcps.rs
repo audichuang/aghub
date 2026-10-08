@@ -117,21 +117,22 @@ fn reconcile_mcp_route_inner(
 /// CALLER's contract: the per-agent route checks `check_mcp_supported`
 /// first (preserving its error precedence: capability → validate →
 /// writable), and the batch route preflights every agent via
-/// `aghub_core::batch::run_mcp_agent_mutation` before any write.
+/// `aghub_core::batch::run_mcp_create_batch` before any write.
 fn create_mcp_for_agent(
 	agent: &AgentParam,
 	resolved: &crate::extractors::ResolvedScope,
 	req: CreateMcpRequest,
-) -> Result<McpResponse, ApiError> {
-	let mut manager = build_manager_from_resolved(agent, resolved)?;
+) -> Result<McpResponse, ConfigError> {
+	let mut manager = build_manager_from_resolved(agent, resolved)
+		.map_err(|e| ConfigError::InvalidConfig(e.body.error))?;
 	match manager.load() {
 		Ok(_) => {}
 		Err(ConfigError::NotFound { .. }) => manager.init_empty_config(),
-		Err(e) => return Err(ApiError::from(e)),
+		Err(e) => return Err(e),
 	}
 	let mcp = McpServer::from(req);
 	let response = McpResponse::from(&mcp);
-	manager.add_mcp_exact(mcp).map_err(ApiError::from)?;
+	manager.add_mcp_exact(mcp)?;
 	Ok(response)
 }
 
@@ -158,7 +159,8 @@ fn create_mcp_inner(
 	check_mcp_supported(&agent, resource_scope)?;
 	body.validate()?;
 	require_writable_scope(&resolved)?;
-	let response = create_mcp_for_agent(&agent, &resolved, body.into_inner())?;
+	let response = create_mcp_for_agent(&agent, &resolved, body.into_inner())
+		.map_err(ApiError::from)?;
 	Ok((Status::Created, Json(response)))
 }
 
@@ -183,9 +185,8 @@ fn batch_create_mcp_inner(
 ) -> ApiResult<AgentBatchResponse> {
 	let req = body.into_inner();
 	let resolved = scope.resolve()?;
-	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
 	req.mcp.validate()?;
-	require_writable_scope(&resolved)?;
+	let write_scope = resolved.to_write_scope()?;
 	if req.agents.is_empty() {
 		return Err(ApiError::new(
 			Status::BadRequest,
@@ -194,42 +195,19 @@ fn batch_create_mcp_inner(
 		));
 	}
 	let agents = crate::extractors::resolve_agent_strings(&req.agents)?;
-	// Preflight also has to know the transport: a dialect with no word for it
-	// refuses the write, and finding that out mid-batch leaves the agents that
-	// already succeeded holding the server.
-	let probe_transport =
-		aghub_core::models::McpTransport::from(req.mcp.transport.clone());
-	let mut attribution =
-		aghub_core::batch::McpCreateAttribution::new(&req.mcp.name);
-	let view = aghub_core::batch::run_mcp_agent_mutation(
+	let server = McpServer::from(req.mcp.clone());
+	let view = aghub_core::batch::run_mcp_create_batch(
 		&agents,
-		resource_scope,
-		false,
-		Some(&probe_transport),
+		&write_scope,
+		&server,
 		|agent| {
-			let result = create_mcp_for_agent(
+			let response = create_mcp_for_agent(
 				&AgentParam(agent),
 				&resolved,
 				req.mcp.clone(),
-			);
-			let duplicate = result
-				.as_ref()
-				.err()
-				.is_some_and(|error| error.body.code == "RESOURCE_EXISTS");
-			let response = attribution.attribute(
-				agent,
-				project_root.as_deref(),
-				resource_scope,
-				result,
-				duplicate,
-				|mcp| McpResponse::from(mcp),
-			);
-			response
-				.map(|response| {
-					serde_json::to_value(&response)
-						.unwrap_or(serde_json::Value::Null)
-				})
-				.map_err(|error| error.body.error)
+			)?;
+			Ok(serde_json::to_value(&response)
+				.unwrap_or(serde_json::Value::Null))
 		},
 	)
 	.map_err(ApiError::from)?;
@@ -1458,5 +1436,48 @@ mod tests {
 		assert_eq!(response.success_count, 0);
 		assert_eq!(response.failed_count, 2);
 		assert!(response.results.iter().all(|row| !row.ok));
+	}
+
+	#[test]
+	fn batch_create_mcp_already_exists_attribution_smoke() {
+		let project = tempfile::tempdir().unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Claude),
+			scope(),
+			Json(stdio_req("conflict-srv")),
+		)
+		.ok()
+		.expect("seed MCP");
+
+		let response = batch_create_mcp(
+			TrustedLocalOrigin,
+			scope(),
+			Json(BatchCreateMcpRequest {
+				agents: vec!["claude".to_string(), "cursor".to_string()],
+				mcp: stdio_req("conflict-srv"),
+			}),
+		)
+		.ok()
+		.expect("batch creates with attribution")
+		.into_inner();
+
+		assert_eq!(response.failed_count, 1);
+		assert_eq!(response.success_count, 1);
+		assert_eq!(response.results.len(), 2);
+		assert_eq!(response.results[0].agent, "claude");
+		assert!(!response.results[0].ok);
+		assert!(response.results[0]
+			.error
+			.as_deref()
+			.unwrap_or_default()
+			.contains("conflict-srv"));
+		assert_eq!(response.results[1].agent, "cursor");
+		assert!(response.results[1].ok);
+		assert!(response.results[1].output.is_some());
 	}
 }

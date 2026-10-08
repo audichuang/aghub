@@ -1328,6 +1328,50 @@ fn add_mcp_agent_list_reports_partial_failure_and_continues() {
 	);
 }
 
+/// Smoke test: `--json -a x,y` add MCP where one already exists -> parse stdout, attribution rows.
+#[cfg(unix)]
+#[test]
+fn add_mcp_agent_list_already_exists_attribution_smoke() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	seed_mcp(home.path(), state.path(), "conflict-srv");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"--json",
+			"-a",
+			"claude,opencode",
+			"add",
+			"mcps",
+			"--name",
+			"conflict-srv",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "a failed agent must exit non-zero");
+
+	let envelope: Value = serde_json::from_slice(&out.stdout)
+		.expect("batch stdout must be a single valid JSON document");
+	assert_eq!(envelope["failed_count"], 1, "{envelope}");
+	assert_eq!(envelope["success_count"], 1, "{envelope}");
+	let rows = envelope["results"].as_array().expect("results array");
+	assert_eq!(rows.len(), 2);
+	assert_eq!(rows[0]["agent"], "claude");
+	assert_eq!(rows[0]["ok"], false);
+	assert!(
+		rows[0]["error"]
+			.as_str()
+			.unwrap_or_default()
+			.contains("conflict-srv"),
+		"claude row must carry the conflict error: {envelope}"
+	);
+	assert_eq!(rows[1]["agent"], "opencode");
+	assert_eq!(rows[1]["ok"], true);
+	assert!(!rows[1]["output"].is_null());
+}
+
 // ================= source sync: agent list + dry-run fan-out =================
 
 /// Write a minimal source-repo layout (one skill dir with SKILL.md) that the

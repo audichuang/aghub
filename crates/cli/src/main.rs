@@ -8,7 +8,7 @@ use aghub_core::{
 	errors::ConfigError,
 	load_all_agents,
 	manager::ConfigManager,
-	models::{AgentSelection, AgentType, ResourceScope},
+	models::{AgentSelection, AgentType, McpServer, ResourceScope},
 	paths::find_project_root,
 };
 
@@ -2077,73 +2077,72 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 			// lives in core; MCPs share it with the API's /mcps/batch.
 			let view = if matches!(resource, ResourceType::Mcps) {
 				let resolved = resolve_cli_scope(cli)?;
-				let write_scope = resolved.resource_scope();
-				let actual_write_scope = if resolved.writes_global() {
-					ResourceScope::GlobalOnly
-				} else {
-					ResourceScope::ProjectOnly
-				};
-				let mut attribution = match &cli.command {
-					Commands::Add {
-						name: Some(name), ..
-					} => {
-						Some(aghub_core::batch::McpCreateAttribution::new(name))
-					}
-					_ => None,
-				};
-				let is_toggle = matches!(
-					cli.command,
-					Commands::Enable { .. } | Commands::Disable { .. }
-				);
-				// Give preflight the transport too: some dialects have a word
-				// for only one remote transport and refuse the other, and a
-				// refusal discovered mid-batch leaves the earlier agents
-				// already written. A malformed transport stays None — its real
-				// error belongs to `run_for_agent`, not to the preflight.
-				let transport = mcp_transport_for_preflight(&cli.command);
-				aghub_core::batch::run_mcp_agent_mutation(
-					agents,
-					write_scope,
-					is_toggle,
-					transport.as_ref(),
-					|agent| {
-						eprintln_verbose!(
-							"Running for agent: {}",
-							agent.as_str()
-						);
-						let result = run_for_agent(cli, agent, agents)
-							.and_then(|payload| {
-								row_from_payload(payload)
-									.map_err(anyhow::Error::msg)
-							});
-						let duplicate =
-							result.as_ref().err().is_some_and(|error| {
-								error.chain().any(|cause| {
-									matches!(
-										cause.downcast_ref::<ConfigError>(),
-										Some(
-											ConfigError::ResourceExists { .. }
-										)
+				if matches!(cli.command, Commands::Add { .. }) {
+					let write_scope = resolved.write_scope()?;
+					let Commands::Add { name, timeout, .. } = &cli.command
+					else {
+						unreachable!()
+					};
+					let server_name = name.clone().unwrap_or_default();
+					let transport = mcp_transport_for_preflight(&cli.command)
+						.unwrap_or_else(|| {
+							aghub_core::models::McpTransport::stdio("", vec![])
+						});
+					let mut server = McpServer::new(server_name, transport);
+					server.timeout = *timeout;
+
+					aghub_core::batch::run_mcp_create_batch(
+						agents,
+						&write_scope,
+						&server,
+						|agent| {
+							eprintln_verbose!(
+								"Running for agent: {}",
+								agent.as_str()
+							);
+							run_for_agent(cli, agent, agents)
+								.and_then(|payload| {
+									row_from_payload(payload)
+										.map_err(anyhow::Error::msg)
+								})
+								.map_err(|e| {
+									// Preserve ConfigError for core duplicate detection, or stringify.
+									e.downcast::<ConfigError>().unwrap_or_else(
+										|e| {
+											ConfigError::InvalidConfig(format!(
+												"{e:#}"
+											))
+										},
 									)
 								})
-							});
-						let result = result.map_err(|e| format!("{e:#}"));
-						match attribution.as_mut() {
-							Some(attribution) => attribution.attribute(
-								agent,
-								resolved.project_root(),
-								actual_write_scope,
-								result,
-								duplicate,
-								|mcp| {
-									serde_json::to_value(mcp)
-										.unwrap_or(serde_json::Value::Null)
-								},
-							),
-							None => result,
-						}
-					},
-				)?
+						},
+					)?
+				} else {
+					let write_scope = resolved.resource_scope();
+					let is_toggle = matches!(
+						cli.command,
+						Commands::Enable { .. } | Commands::Disable { .. }
+					);
+					let transport = mcp_transport_for_preflight(&cli.command);
+					aghub_core::batch::run_mcp_agent_mutation(
+						agents,
+						write_scope,
+						is_toggle,
+						transport.as_ref(),
+						|agent| {
+							eprintln_verbose!(
+								"Running for agent: {}",
+								agent.as_str()
+							);
+							run_for_agent(cli, agent, agents)
+								.and_then(|payload| {
+									row_from_payload(payload)
+										.map_err(anyhow::Error::msg)
+								})
+								.map_err(|e| format!("{e:#}"))
+						},
+					)?
+				}
 			} else if matches!(resource, ResourceType::Skills)
 				&& matches!(cli.command, Commands::Delete { .. })
 			{

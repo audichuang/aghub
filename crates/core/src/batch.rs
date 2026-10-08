@@ -15,33 +15,32 @@ use std::{
 use crate::errors::ConfigError;
 use crate::models::{AgentType, McpServer, ResourceScope};
 use crate::registry;
+use crate::scope::WriteScope;
 
 /// Attribute one MCP create to every selected agent that reads the same
 /// physical config. A duplicate counts as this batch's success only when an
 /// earlier row wrote that backing and both agents can read the same complete
 /// persisted server. A server present before the batch remains a conflict.
-pub struct McpCreateAttribution {
+struct McpCreateAttribution {
 	name: String,
-	written_backings: HashMap<PathBuf, McpServer>,
+	written_backings: HashMap<PathBuf, (McpServer, serde_json::Value)>,
 }
 
 impl McpCreateAttribution {
-	pub fn new(name: impl Into<String>) -> Self {
+	fn new(name: impl Into<String>) -> Self {
 		Self {
 			name: name.into(),
 			written_backings: HashMap::new(),
 		}
 	}
 
-	pub fn attribute<O, E>(
+	fn attribute(
 		&mut self,
 		agent: AgentType,
 		project_root: Option<&Path>,
 		write_scope: ResourceScope,
-		result: Result<O, E>,
-		is_resource_exists: bool,
-		credited_output: impl FnOnce(&McpServer) -> O,
-	) -> Result<O, E> {
+		result: Result<serde_json::Value, ConfigError>,
+	) -> Result<serde_json::Value, ConfigError> {
 		let adapter = crate::create_adapter(agent);
 		// mcp_backing_path creates the parent dir, so only rows whose write
 		// reached disk may resolve it.
@@ -62,28 +61,27 @@ impl McpCreateAttribution {
 			Ok(output) => {
 				if let Some(backing) = backing() {
 					if let Some(persisted) = read() {
-						let output = credited_output(&persisted);
-						self.written_backings.insert(backing, persisted);
+						self.written_backings
+							.insert(backing, (persisted, output.clone()));
 						return Ok(output);
 					}
 				}
 				Ok(output)
 			}
-			Err(error) => {
-				if is_resource_exists {
-					if let Some(persisted) = backing()
-						.as_ref()
-						.and_then(|path| self.written_backings.get(path))
-					{
-						if let Some(observed) = read() {
-							if &observed == persisted {
-								return Ok(credited_output(&observed));
-							}
+			Err(err @ ConfigError::ResourceExists { .. }) => {
+				if let Some((persisted, credited_output)) = backing()
+					.as_ref()
+					.and_then(|path| self.written_backings.get(path))
+				{
+					if let Some(observed) = read() {
+						if &observed == persisted {
+							return Ok(credited_output.clone());
 						}
 					}
 				}
-				Err(error)
+				Err(err)
 			}
+			Err(error) => Err(error),
 		}
 	}
 }
@@ -511,6 +509,81 @@ pub fn run_mcp_agent_mutation(
 		mutate,
 	)
 	.map_err(ConfigError::from)
+}
+
+/// Create one MCP server across multiple agents with predictable transport
+/// capability preflight, single-agent write execution, duplicate detection
+/// by error type ([`ConfigError::ResourceExists`]), and physical-backing dedup
+/// attribution.
+pub fn run_mcp_create_batch(
+	agents: &[AgentType],
+	scope: &WriteScope,
+	server: &McpServer,
+	mut mutate: impl FnMut(AgentType) -> Result<serde_json::Value, ConfigError>,
+) -> Result<AgentBatchView, ConfigError> {
+	let write_scope = scope.resource_scope();
+	let project_root = scope.project_root();
+
+	let unsupported: Vec<(String, String)> = agents
+		.iter()
+		.filter_map(|agent| {
+			mcp_agent_preflight(
+				*agent,
+				write_scope,
+				false,
+				Some(&server.transport),
+			)
+			.err()
+			.map(|reason| (agent.as_str().to_string(), reason))
+		})
+		.collect();
+
+	if !unsupported.is_empty() {
+		return Err(ConfigError::from(BatchUnsupported::new(
+			"MCP",
+			unsupported,
+		)));
+	}
+
+	let mut attribution = McpCreateAttribution::new(&server.name);
+	let mut results = Vec::with_capacity(agents.len());
+
+	for agent in agents {
+		let res = mutate(*agent);
+		let attributed =
+			attribution.attribute(*agent, project_root, write_scope, res);
+		match attributed {
+			Ok(output) => {
+				results.push(AgentOpResultView {
+					agent: agent.as_str().to_string(),
+					ok: true,
+					outcome: None,
+					code: None,
+					output: Some(output),
+					error: None,
+				});
+			}
+			Err(error) => {
+				results.push(AgentOpResultView {
+					agent: agent.as_str().to_string(),
+					ok: false,
+					outcome: None,
+					code: None,
+					output: None,
+					error: Some(error.to_string()),
+				});
+			}
+		}
+	}
+
+	let success_count = results.iter().filter(|r| r.ok).count();
+	let failed_count = results.len() - success_count;
+
+	Ok(AgentBatchView {
+		success_count,
+		failed_count,
+		results,
+	})
 }
 
 /// Run one skill mutation across agents with scope capability preflight owned
@@ -991,21 +1064,321 @@ mod tests {
 		assert_eq!(error.failures[0].target, "pi");
 	}
 
+	struct EnvVarGuard(&'static str, Option<std::ffi::OsString>);
+
+	impl EnvVarGuard {
+		fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
+			let old = std::env::var_os(key);
+			std::env::set_var(key, val);
+			Self(key, old)
+		}
+	}
+
+	impl Drop for EnvVarGuard {
+		fn drop(&mut self) {
+			match self.1.take() {
+				Some(value) => std::env::set_var(self.0, value),
+				None => std::env::remove_var(self.0),
+			}
+		}
+	}
+
 	#[test]
 	fn mcp_create_attribution_failed_row_creates_no_config_dir() {
 		let root = tempfile::tempdir().unwrap();
-		let result = McpCreateAttribution::new("x").attribute(
-			AgentType::Cursor,
-			Some(root.path()),
-			ResourceScope::ProjectOnly,
-			Err::<(), _>("bad header"),
-			false,
-			|_| (),
+		let scope = WriteScope::project(root.path());
+		let server = McpServer::new(
+			"x",
+			crate::models::McpTransport::stdio("echo", vec![]),
 		);
-		assert!(result.is_err());
+		let view = run_mcp_create_batch(
+			&[AgentType::Cursor],
+			&scope,
+			&server,
+			|_agent| {
+				Err(ConfigError::ValidationFailed("bad header".to_string()))
+			},
+		)
+		.expect("preflight passes");
+		assert_eq!(view.failed_count, 1);
+		assert!(!view.results[0].ok);
 		assert!(
 			!root.path().join(".cursor").exists(),
 			"failed row created config dir"
+		);
+	}
+
+	#[test]
+	fn mcp_create_batch_all_succeed() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let home = tempfile::tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _aghub =
+			EnvVarGuard::set("AGHUB_DATA_DIR", home.path().join("data"));
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", home.path().join(".config"));
+		let _state =
+			EnvVarGuard::set("XDG_STATE_HOME", home.path().join(".state"));
+
+		let project = tempfile::tempdir().unwrap();
+		let scope = WriteScope::project(project.path());
+		let server = McpServer::new(
+			"echo-server",
+			crate::models::McpTransport::stdio("echo", vec!["hi".to_string()]),
+		);
+
+		let view = run_mcp_create_batch(
+			&[AgentType::Claude, AgentType::Cursor],
+			&scope,
+			&server,
+			|agent| {
+				let mut manager = crate::ConfigManager::for_write(
+					crate::create_adapter(agent),
+					scope.clone(),
+				);
+				if let Err(ConfigError::NotFound { .. }) = manager.load() {
+					manager.init_empty_config();
+				}
+				manager.add_mcp_exact(server.clone())?;
+				Ok(serde_json::to_value(&server).unwrap())
+			},
+		)
+		.expect("batch creation succeeds");
+
+		assert_eq!(view.success_count, 2);
+		assert_eq!(view.failed_count, 0);
+		assert_eq!(view.results.len(), 2);
+		assert_eq!(view.results[0].agent, "claude");
+		assert!(view.results[0].ok);
+		assert_eq!(view.results[1].agent, "cursor");
+		assert!(view.results[1].ok);
+
+		let claude_mcps = crate::create_adapter(AgentType::Claude)
+			.load_mcps(scope.project_root(), scope.resource_scope())
+			.unwrap();
+		assert!(claude_mcps.iter().any(|s| s.name == "echo-server"));
+
+		let cursor_mcps = crate::create_adapter(AgentType::Cursor)
+			.load_mcps(scope.project_root(), scope.resource_scope())
+			.unwrap();
+		assert!(cursor_mcps.iter().any(|s| s.name == "echo-server"));
+	}
+
+	#[test]
+	fn mcp_create_batch_partial_already_exists() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let home = tempfile::tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _aghub =
+			EnvVarGuard::set("AGHUB_DATA_DIR", home.path().join("data"));
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", home.path().join(".config"));
+		let _state =
+			EnvVarGuard::set("XDG_STATE_HOME", home.path().join(".state"));
+
+		let project = tempfile::tempdir().unwrap();
+		let scope = WriteScope::project(project.path());
+		let server = McpServer::new(
+			"test-server",
+			crate::models::McpTransport::stdio(
+				"echo",
+				vec!["test".to_string()],
+			),
+		);
+
+		// Pre-seed Cursor with test-server BEFORE the batch runs
+		{
+			let mut manager = crate::ConfigManager::for_write(
+				crate::create_adapter(AgentType::Cursor),
+				scope.clone(),
+			);
+			if let Err(ConfigError::NotFound { .. }) = manager.load() {
+				manager.init_empty_config();
+			}
+			manager.add_mcp_exact(server.clone()).unwrap();
+		}
+
+		// Cursor already has it before batch (conflict).
+		// Claude writes .mcp.json in batch.
+		// Copilot shares .mcp.json with Claude and is credited as already present.
+		let view = run_mcp_create_batch(
+			&[AgentType::Cursor, AgentType::Claude, AgentType::Copilot],
+			&scope,
+			&server,
+			|agent| {
+				let mut manager = crate::ConfigManager::for_write(
+					crate::create_adapter(agent),
+					scope.clone(),
+				);
+				if let Err(ConfigError::NotFound { .. }) = manager.load() {
+					manager.init_empty_config();
+				}
+				manager.add_mcp_exact(server.clone())?;
+				Ok(serde_json::to_value(&server).unwrap())
+			},
+		)
+		.expect("batch completes with per-agent attribution");
+
+		assert_eq!(view.success_count, 2);
+		assert_eq!(view.failed_count, 1);
+		assert_eq!(view.results.len(), 3);
+
+		assert_eq!(view.results[0].agent, "cursor");
+		assert!(!view.results[0].ok);
+		assert!(
+			view.results[0]
+				.error
+				.as_deref()
+				.unwrap_or_default()
+				.contains("test-server"),
+			"Cursor error must name test-server: {:?}",
+			view.results[0].error
+		);
+
+		assert_eq!(view.results[1].agent, "claude");
+		assert!(view.results[1].ok);
+
+		assert_eq!(view.results[2].agent, "copilot");
+		assert!(view.results[2].ok);
+		assert_eq!(
+			view.results[2].output, view.results[1].output,
+			"credited duplicate must preserve the writing row's exact output"
+		);
+
+		// Assert config file contents
+		let cursor_mcps = crate::create_adapter(AgentType::Cursor)
+			.load_mcps(scope.project_root(), scope.resource_scope())
+			.unwrap();
+		assert!(cursor_mcps.iter().any(|s| s.name == "test-server"));
+
+		let claude_mcps = crate::create_adapter(AgentType::Claude)
+			.load_mcps(scope.project_root(), scope.resource_scope())
+			.unwrap();
+		assert!(claude_mcps.iter().any(|s| s.name == "test-server"));
+
+		let copilot_mcps = crate::create_adapter(AgentType::Copilot)
+			.load_mcps(scope.project_root(), scope.resource_scope())
+			.unwrap();
+		assert!(copilot_mcps.iter().any(|s| s.name == "test-server"));
+	}
+
+	#[test]
+	fn mcp_create_batch_partial_failure() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let home = tempfile::tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _aghub =
+			EnvVarGuard::set("AGHUB_DATA_DIR", home.path().join("data"));
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", home.path().join(".config"));
+		let _state =
+			EnvVarGuard::set("XDG_STATE_HOME", home.path().join(".state"));
+
+		let project = tempfile::tempdir().unwrap();
+		let scope = WriteScope::project(project.path());
+		let server = McpServer::new(
+			"partial-server",
+			crate::models::McpTransport::stdio(
+				"echo",
+				vec!["test".to_string()],
+			),
+		);
+
+		let view = run_mcp_create_batch(
+			&[AgentType::Claude, AgentType::Cursor],
+			&scope,
+			&server,
+			|agent| {
+				if agent == AgentType::Cursor {
+					return Err(ConfigError::InvalidConfig(
+						"simulated cursor failure".to_string(),
+					));
+				}
+				let mut manager = crate::ConfigManager::for_write(
+					crate::create_adapter(agent),
+					scope.clone(),
+				);
+				if let Err(ConfigError::NotFound { .. }) = manager.load() {
+					manager.init_empty_config();
+				}
+				manager.add_mcp_exact(server.clone())?;
+				Ok(serde_json::to_value(&server).unwrap())
+			},
+		)
+		.expect("batch completes");
+
+		assert_eq!(view.success_count, 1);
+		assert_eq!(view.failed_count, 1);
+		assert_eq!(view.results[0].agent, "claude");
+		assert!(view.results[0].ok);
+		assert_eq!(view.results[1].agent, "cursor");
+		assert!(!view.results[1].ok);
+		assert!(view.results[1]
+			.error
+			.as_deref()
+			.unwrap_or_default()
+			.contains("simulated cursor failure"));
+
+		let claude_mcps = crate::create_adapter(AgentType::Claude)
+			.load_mcps(scope.project_root(), scope.resource_scope())
+			.unwrap();
+		assert!(claude_mcps.iter().any(|s| s.name == "partial-server"));
+
+		assert!(
+			!project.path().join(".cursor/mcp.json").exists(),
+			"failed Cursor config must not be created"
+		);
+	}
+
+	#[test]
+	fn mcp_create_batch_transport_preflight_reject_writes_nothing() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let home = tempfile::tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _aghub =
+			EnvVarGuard::set("AGHUB_DATA_DIR", home.path().join("data"));
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", home.path().join(".config"));
+		let _state =
+			EnvVarGuard::set("XDG_STATE_HOME", home.path().join(".state"));
+
+		let project = tempfile::tempdir().unwrap();
+		let scope = WriteScope::project(project.path());
+		let server = McpServer::new(
+			"sse-server",
+			crate::models::McpTransport::sse("https://example.com/sse"),
+		);
+
+		let writes = std::cell::Cell::new(0);
+		let err = run_mcp_create_batch(
+			&[AgentType::Claude, AgentType::OpenCode],
+			&scope,
+			&server,
+			|_agent| {
+				writes.set(writes.get() + 1);
+				Ok(serde_json::to_value(&server).unwrap())
+			},
+		)
+		.expect_err("preflight must reject the batch");
+
+		assert_eq!(
+			crate::error_codes::wire_code(&err),
+			"UNSUPPORTED_OPERATION"
+		);
+		assert!(err.to_string().contains("nothing was written"));
+		assert_eq!(writes.get(), 0, "closure must never be invoked");
+
+		assert!(
+			!project.path().join(".mcp.json").exists(),
+			"preflight rejection must not create config file"
 		);
 	}
 
