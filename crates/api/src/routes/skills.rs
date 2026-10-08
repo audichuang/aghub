@@ -757,8 +757,10 @@ pub async fn update_skill(
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	let write_scope = resolved.to_write_scope()?;
-	let mut manager =
-		super::build_manager_from_write_scope(&agent, &write_scope);
+	let mut manager = super::build_manager_from_resolved(
+		&agent,
+		&write_scope.clone().into(),
+	)?;
 	manager.load().map_err(ApiError::from)?;
 	let existing = manager
 		.get_skill(name)
@@ -792,8 +794,10 @@ pub async fn delete_skill(
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	let write_scope = resolved.to_write_scope()?;
-	let mut manager =
-		super::build_manager_from_write_scope(&agent, &write_scope);
+	let mut manager = super::build_manager_from_resolved(
+		&agent,
+		&write_scope.clone().into(),
+	)?;
 	// No `ConfigError::NotFound` arm: nothing constructs that variant; a missing
 	// config surfaces as `Io(NotFound)` and takes the normal error path.
 	manager.load().map_err(ApiError::from)?;
@@ -867,8 +871,10 @@ pub async fn enable_skill(
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_skills_supported(&agent, resource_scope)?;
 	let write_scope = resolved.to_write_scope()?;
-	let mut manager =
-		super::build_manager_from_write_scope(&agent, &write_scope);
+	let mut manager = super::build_manager_from_resolved(
+		&agent,
+		&write_scope.clone().into(),
+	)?;
 	manager.load().map_err(ApiError::from)?;
 	if let Some(skill) = manager.get_skill(name) {
 		ensure_skill_not_plugin_managed(skill, "enable").await?;
@@ -891,8 +897,10 @@ pub async fn disable_skill(
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_skills_supported(&agent, resource_scope)?;
 	let write_scope = resolved.to_write_scope()?;
-	let mut manager =
-		super::build_manager_from_write_scope(&agent, &write_scope);
+	let mut manager = super::build_manager_from_resolved(
+		&agent,
+		&write_scope.clone().into(),
+	)?;
 	manager.load().map_err(ApiError::from)?;
 	if let Some(skill) = manager.get_skill(name) {
 		ensure_skill_not_plugin_managed(skill, "disable").await?;

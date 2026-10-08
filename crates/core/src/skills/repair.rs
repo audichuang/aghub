@@ -134,15 +134,12 @@ fn io_err(context: &str, e: std::io::Error) -> ConfigError {
 ///
 /// `grant_to` is computed here, not passed in, so it is answered against the
 /// layout as it stands and under the same lock as the plan.
-///
-/// `Ok(None)` when the scope names no single store (`Both`), matching
-/// [`plan_repair`].
 pub fn repair_skill(
 	scope: &WriteScope,
 	name: &str,
 	in_lock: bool,
 	dry_run: bool,
-) -> Result<Option<RepairReport>> {
+) -> Result<RepairReport> {
 	let _guard = if dry_run {
 		None
 	} else {
@@ -160,23 +157,23 @@ pub fn repair_skill(
 		scope.project_root(),
 		name,
 	);
-	let Some(plan) = crate::skills::shape::plan_repair(
+	// Invariant: a WriteScope always names a single store.
+	let plan = crate::skills::shape::plan_repair(
 		scope.resource_scope(),
 		scope.project_root(),
 		name,
 		in_lock,
 		&grant_to,
-	) else {
-		return Ok(None);
-	};
+	)
+	.expect("a WriteScope always names a single store");
 	// Bulk worklists hold only lock names, so this fires only for a NAMED,
 	// unlocked name that exists nowhere (a typo). A locked name with nothing
 	// on disk stays Conformant on purpose: the desktop migration banner must
 	// not start refusing.
 	if !in_lock && grant_to.is_empty() && plan.finds_nothing() {
-		return Ok(Some(not_found_report(&plan, dry_run)));
+		return Ok(not_found_report(&plan, dry_run));
 	}
-	execute_repair(&plan, dry_run).map(Some)
+	execute_repair(&plan, dry_run)
 }
 
 /// The refusal for a name that is in no lock and that no agent reads.
@@ -266,9 +263,7 @@ pub fn repair_all(
 			in_lock.contains(skill_name),
 			dry_run,
 		) {
-			// `Ok(None)` = the scope names no single store; nothing to say.
-			Ok(None) => continue,
-			Ok(Some(report)) => {
+			Ok(report) => {
 				// Bulk runs stay quiet about conformant skills; a named one reports.
 				if report.outcome == RepairOutcome::Conformant && name.is_none()
 				{
@@ -730,7 +725,6 @@ mod tests {
 				false,
 				dry_run,
 			)
-			.unwrap()
 			.unwrap();
 			match &report.outcome {
 				RepairOutcome::Refused { reason, fix } => {
@@ -751,7 +745,6 @@ mod tests {
 			true,
 			true,
 		)
-		.unwrap()
 		.unwrap();
 		assert!(matches!(locked.outcome, RepairOutcome::Conformant));
 	}
@@ -764,7 +757,6 @@ mod tests {
 		write_skill(&root.join(".clinerules/skills/foo"), "foo", "compat");
 		let report =
 			repair_skill(&WriteScope::project(&root), "foo", false, true)
-				.unwrap()
 				.unwrap();
 		if let RepairOutcome::Refused { reason, .. } = &report.outcome {
 			assert!(!reason.contains("no skill named"), "{reason}");
@@ -781,14 +773,12 @@ mod tests {
 		Linker::symlink(&master, &shared).unwrap();
 		let preview =
 			repair_skill(&WriteScope::project(&root), "demo", true, true)
-				.unwrap()
 				.unwrap();
 		assert_eq!(preview.outcome, RepairOutcome::Relinked);
 		assert!(preview.referrers.contains(&root.join(".codex/skills/demo")));
 		assert!(!root.join(".codex/skills/demo").exists());
 		let committed =
 			repair_skill(&WriteScope::project(&root), "demo", true, false)
-				.unwrap()
 				.unwrap();
 		assert_eq!(committed.outcome, RepairOutcome::Relinked);
 		assert_eq!(

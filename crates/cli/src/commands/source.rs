@@ -267,15 +267,6 @@ pub(crate) fn read_scopes(scope: &Scope) -> Vec<WriteScope> {
 	}
 }
 
-/// The single writing scope for `sync` / `accept-rename`.
-///
-/// `--all` and an unscoped invocation are refused by their scope policies in
-/// `main`; [`Scope::write_scope`] refuses anything else — never a silent
-/// GLOBAL fallback.
-fn write_scope(scope: &Scope) -> Result<WriteScope> {
-	scope.write_scope()
-}
-
 /// [`crate::commands::read_locks_checked`] for a resolved read-scope list.
 ///
 /// `source list` / `source diff` / `doctor` all report the lock's contents as
@@ -781,7 +772,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 
 	// Scope was resolved and validated ONCE, in `main` — `--all`, an unscoped
 	// run and `-p` with no project root were all refused there.
-	let write_scope = write_scope(args.scope)?;
+	let write_scope = args.scope.write_scope()?;
 	let scope_label = args.scope.label();
 
 	// Parse the agent selection BEFORE any network work, so an invalid

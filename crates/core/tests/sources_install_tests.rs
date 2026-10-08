@@ -203,7 +203,6 @@ fn imported_skill_does_not_overwrite_same_named_openclaw_skill() {
 		true,
 		false,
 	)
-	.unwrap()
 	.unwrap();
 	assert!(matches!(repaired.outcome, RepairOutcome::Refused { .. }));
 	assert_eq!(std::fs::read(&existing).unwrap(), before);

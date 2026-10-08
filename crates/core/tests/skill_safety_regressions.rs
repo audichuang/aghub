@@ -366,10 +366,10 @@ fn project_store_symlink_cannot_redirect_repair_adoption() {
 	assert!(
 		!matches!(
 			result,
-			Ok(Some(aghub_core::skills::repair::RepairReport {
+			Ok(aghub_core::skills::repair::RepairReport {
 				outcome: aghub_core::skills::repair::RepairOutcome::Migrated,
 				..
-			}))
+			})
 		),
 		"repair adopted through project/.aghub: {result:?}"
 	);
