@@ -287,12 +287,6 @@ fn locked_resync_error_message(
 	use skill_update::mutation::LockedResyncError;
 
 	match error {
-		LockedResyncError::UnsupportedScope(_) => {
-			"apply-update requires --global or --project, not --all".to_string()
-		}
-		LockedResyncError::ProjectRootRequired => {
-			"project root is required".to_string()
-		}
 		LockedResyncError::LockEntryNotFound { scope } => match scope {
 			ResourceScope::GlobalOnly => {
 				format!("skill '{name}' is not in global lock")
@@ -552,10 +546,6 @@ mod tests {
 			(
 				LockedResyncError::Resync(ResyncError::NotInstalled),
 				"skill 'keep' is locked but no installed copy was found",
-			),
-			(
-				LockedResyncError::UnsupportedScope(ResourceScope::Both),
-				"apply-update requires --global or --project, not --all",
 			),
 			(
 				LockedResyncError::SourceSkillNotFound,

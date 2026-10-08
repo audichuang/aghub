@@ -754,8 +754,9 @@ pub async fn update_skill(
 	body: Json<UpdateSkillRequest>,
 ) -> ApiResult<SkillResponse> {
 	let resolved = scope.resolve()?;
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	check_skills_mutable(&agent, resource_scope)?;
 	let write_scope = resolved.to_write_scope()?;
-	check_skills_mutable(&agent, write_scope.resource_scope())?;
 	let mut manager =
 		super::build_manager_from_write_scope(&agent, &write_scope);
 	manager.load().map_err(ApiError::from)?;
@@ -788,8 +789,9 @@ pub async fn delete_skill(
 	params: DeleteSkillParams,
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let resolved = params.resolve_scope()?;
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	check_skills_mutable(&agent, resource_scope)?;
 	let write_scope = resolved.to_write_scope()?;
-	check_skills_mutable(&agent, write_scope.resource_scope())?;
 	let mut manager =
 		super::build_manager_from_write_scope(&agent, &write_scope);
 	// No `ConfigError::NotFound` arm: nothing constructs that variant; a missing
@@ -862,8 +864,9 @@ pub async fn enable_skill(
 	scope: ScopeParams,
 ) -> ApiResult<SkillResponse> {
 	let resolved = scope.resolve()?;
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	check_skills_supported(&agent, resource_scope)?;
 	let write_scope = resolved.to_write_scope()?;
-	check_skills_supported(&agent, write_scope.resource_scope())?;
 	let mut manager =
 		super::build_manager_from_write_scope(&agent, &write_scope);
 	manager.load().map_err(ApiError::from)?;
@@ -885,8 +888,9 @@ pub async fn disable_skill(
 	scope: ScopeParams,
 ) -> ApiResult<SkillResponse> {
 	let resolved = scope.resolve()?;
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	check_skills_supported(&agent, resource_scope)?;
 	let write_scope = resolved.to_write_scope()?;
-	check_skills_supported(&agent, write_scope.resource_scope())?;
 	let mut manager =
 		super::build_manager_from_write_scope(&agent, &write_scope);
 	manager.load().map_err(ApiError::from)?;
@@ -3040,6 +3044,31 @@ mod tests {
 				);
 			});
 		});
+	}
+
+	/// Error precedence is public contract: an unsupported agent answers
+	/// UNSUPPORTED_OPERATION even when the scope is read-only (`all`) —
+	/// capability is checked BEFORE the writable-scope gate.
+	#[test]
+	fn delete_skill_capability_beats_readonly_scope() {
+		let err = block_on(delete_skill(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::JetBrainsAi),
+			"any-skill",
+			DeleteSkillParams {
+				scope: Some("all".to_string()),
+				project_root: None,
+				confirm: None,
+				all_agents: None,
+				agents: None,
+			},
+		))
+		.expect_err(
+			"agent without skill support must fail capability check first",
+		);
+
+		assert_eq!(err.status, Status::UnprocessableEntity);
+		assert_eq!(err.body.code, "UNSUPPORTED_OPERATION");
 	}
 
 	#[cfg(unix)]

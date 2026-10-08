@@ -353,8 +353,6 @@ pub struct LockedSkillResyncResult {
 
 #[derive(Debug)]
 pub enum LockedResyncError {
-	UnsupportedScope(ResourceScope),
-	ProjectRootRequired,
 	LockEntryNotFound { scope: ResourceScope },
 	MissingSkillPath,
 	NotInstalled,
@@ -370,8 +368,6 @@ impl LockedResyncError {
 	/// Stable machine code for this locked resync failure.
 	pub fn code(&self) -> &'static str {
 		match self {
-			Self::UnsupportedScope(_) => INVALID_SCOPE_CODE,
-			Self::ProjectRootRequired => MISSING_PARAM_CODE,
 			Self::LockEntryNotFound { .. } => SKILL_LOCK_ENTRY_NOT_FOUND_CODE,
 			Self::MissingSkillPath
 			| Self::InvalidSkillPath
@@ -820,9 +816,9 @@ mod tests {
 		resync_locked_skill, FetchMutationError, FetchedRenameRequest,
 		FetchedResyncRequest, FetchedSource, FetchedSourceRequest,
 		LockedResyncError, LockedResyncRequest, ResyncMutationError,
-		INVALID_SCOPE_CODE, KEYCHAIN_UNAVAILABLE_CODE, MISSING_PARAM_CODE,
-		SKILL_LOCK_ENTRY_NOT_FOUND_CODE, SKILL_PATH_NOT_FOUND_CODE,
-		SKILL_SOURCE_VIEW_STALE_CODE, SOURCE_FETCH_FAILED_CODE,
+		KEYCHAIN_UNAVAILABLE_CODE, SKILL_LOCK_ENTRY_NOT_FOUND_CODE,
+		SKILL_PATH_NOT_FOUND_CODE, SKILL_SOURCE_VIEW_STALE_CODE,
+		SOURCE_FETCH_FAILED_CODE,
 	};
 
 	struct NoToken;
@@ -1291,16 +1287,6 @@ mod tests {
 
 		// Table asserting code and retryable for every variant of LockedResyncError
 		let locked_cases: Vec<(LockedResyncError, &'static str, bool)> = vec![
-			(
-				LockedResyncError::UnsupportedScope(ResourceScope::Both),
-				INVALID_SCOPE_CODE,
-				false,
-			),
-			(
-				LockedResyncError::ProjectRootRequired,
-				MISSING_PARAM_CODE,
-				false,
-			),
 			(
 				LockedResyncError::LockEntryNotFound {
 					scope: ResourceScope::GlobalOnly,

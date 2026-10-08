@@ -3146,9 +3146,9 @@ fn source_sync_already_linked_exits_zero() {
 #[test]
 fn source_sync_project_scope_without_project_root_errors() {
 	// Finding 3 (project-scope, no root): `source sync -p` from a directory
-	// with no agent marker has no project root to write to. The shared
-	// `write_scope` mapper rejects it (`ProjectRootRequired`) and the CLI
-	// must surface that as a failure — not silently fall back to global.
+	// with no agent marker has no project root to write to. The resolver
+	// refuses Both and a rootless -p, and the CLI must surface that as a
+	// failure — not silently fall back to global.
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
 	// A bare cwd with NO agent marker => `find_project_root` returns None.

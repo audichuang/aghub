@@ -355,12 +355,6 @@ fn apply_locked_resync_error(
 		LockedResyncError::Resync(resync_err) => {
 			safe_resync_error(resync_err).message.to_string()
 		}
-		LockedResyncError::ProjectRootRequired => {
-			"project_root is required when scope is project".to_string()
-		}
-		LockedResyncError::UnsupportedScope(_) => {
-			"scope must be global or project".to_string()
-		}
 	};
 	Ok(apply_error_with_code(
 		name,

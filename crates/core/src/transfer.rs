@@ -179,13 +179,25 @@ fn build_manager(target: &InstallTarget) -> ConfigManager {
 	}
 }
 
-fn validate_target(target: &InstallTarget) -> Result<()> {
-	if target.scope == InstallScope::Project && target.project_root.is_none() {
-		return Err(ConfigError::InvalidConfig(
-			"project_root is required for project targets".to_string(),
-		));
+fn target_write_scope(
+	scope: InstallScope,
+	project_root: Option<&Path>,
+) -> Result<WriteScope> {
+	match scope {
+		InstallScope::Global => Ok(WriteScope::Global),
+		InstallScope::Project => {
+			let root = project_root.ok_or_else(|| {
+				ConfigError::InvalidConfig(
+					"project_root is required for project targets".to_string(),
+				)
+			})?;
+			Ok(WriteScope::project(root))
+		}
 	}
-	Ok(())
+}
+
+fn validate_target(target: &InstallTarget) -> Result<()> {
+	target_write_scope(target.scope, target.project_root.as_deref()).map(|_| ())
 }
 
 fn target_resource_scope(
@@ -1906,13 +1918,8 @@ fn plan_reconcile_skill(
 	// Output rows follow request order; the entry sorts only internally.
 	// See docs/history/core-transfer.md#reconcile-delete-rows-preserve-request-order
 
-	let write_scope = match source.scope {
-		InstallScope::Global => WriteScope::Global,
-		InstallScope::Project => {
-			let root = source.project_root.clone().unwrap_or_default();
-			WriteScope::project(root)
-		}
-	};
+	let write_scope =
+		target_write_scope(source.scope, source.project_root.as_deref())?;
 	let scope = match source.scope {
 		InstallScope::Global => ResourceScope::GlobalOnly,
 		InstallScope::Project => ResourceScope::ProjectOnly,
@@ -2360,17 +2367,10 @@ pub fn reconcile_skill(
 							})
 							.map(|r| r.target.agent)
 							.collect();
-						let scope = match row.target.scope {
-							InstallScope::Global => WriteScope::Global,
-							InstallScope::Project => {
-								let root = row
-									.target
-									.project_root
-									.clone()
-									.unwrap_or_default();
-								WriteScope::project(root)
-							}
-						};
+						let scope = target_write_scope(
+							row.target.scope,
+							row.target.project_root.as_deref(),
+						)?;
 						let req = crate::skills::removal::SkillRemovalRequest {
 							target: crate::skills::removal::SkillRemovalTarget::ByName(
 								plan.skill.name.clone(),
@@ -2500,6 +2500,30 @@ mod tests {
 	#[cfg(unix)]
 	use crate::testing::master_with_claude_referrer;
 	use tempfile::tempdir;
+
+	#[test]
+	fn target_write_scope_rejects_rootless_project_target() {
+		let err = target_write_scope(InstallScope::Project, None)
+			.expect_err("rootless project must be rejected");
+		match err {
+			ConfigError::InvalidConfig(msg) => {
+				assert_eq!(msg, "project_root is required for project targets");
+			}
+			other => panic!("expected InvalidConfig, got {other:?}"),
+		}
+
+		assert_eq!(
+			target_write_scope(InstallScope::Global, None).unwrap(),
+			WriteScope::Global
+		);
+
+		let temp = tempdir().unwrap();
+		assert_eq!(
+			target_write_scope(InstallScope::Project, Some(temp.path()))
+				.unwrap(),
+			WriteScope::project(temp.path())
+		);
+	}
 
 	/// A reconcile deletes a sub-agent's source only while every copy still
 	/// holds what was copied; a copy edited or removed in between keeps it.

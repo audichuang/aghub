@@ -1424,9 +1424,8 @@ const SOURCE_SYNC_SCOPE: ScopePolicy = ScopePolicy {
 	rootless_project_passthrough: false,
 };
 
-/// `apply-update` REWRITES the skill on disk and core
-/// (`LockedResyncError::UnsupportedScope`) refuses `Both`. Rejecting it here,
-/// with core's sentence verbatim, keeps the refusal before the cwd is touched.
+/// `apply-update` REWRITES the skill on disk and the resolver refuses `Both`
+/// and a rootless `-p`. Rejecting it here keeps the refusal before the cwd is touched.
 const APPLY_UPDATE_SCOPE: ScopePolicy = ScopePolicy {
 	reject_all: Some("apply-update requires --global or --project, not --all"),
 	reject_project: None,

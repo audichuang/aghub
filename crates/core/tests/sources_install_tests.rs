@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use aghub_core::adapter::set_skills_path_override;
-use aghub_core::models::ResourceScope;
 use aghub_core::skills::install_fetched::{
 	install_fetched_skill_and_lock, preflight_fetched_install,
 	FetchedSkillInstallRequest,
@@ -1646,30 +1645,6 @@ fn install_attributes_the_referrer_dir_it_created_never_the_master() {
 			.any(|d| d == master.parent().unwrap()),
 		"the Master's own dir must never be attributed as a referrer dir"
 	);
-}
-
-#[test]
-#[cfg(unix)]
-fn unsupported_scope_rejected_before_any_write() {
-	// A mutation entry takes WriteScope, where Both and missing project root
-	// are unrepresentable by construction.
-	let g = GlobalLockGuard::new();
-	let home = g.home();
-	let project = tempdir().unwrap();
-	let project_root = project.path().to_path_buf();
-
-	let global_scope = WriteScope::Global;
-	assert_eq!(global_scope.resource_scope(), ResourceScope::GlobalOnly);
-	assert_eq!(global_scope.project_root(), None);
-
-	let project_scope = WriteScope::project(&project_root);
-	assert_eq!(project_scope.resource_scope(), ResourceScope::ProjectOnly);
-	assert_eq!(project_scope.project_root(), Some(project_root.as_path()));
-
-	let home_canonical = home.join(".aghub/alpha");
-	let home_agents = home.join(".agents");
-	assert!(!home_canonical.exists());
-	assert!(!home_agents.exists());
 }
 
 #[test]
