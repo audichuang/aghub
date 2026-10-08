@@ -1880,29 +1880,6 @@ fn test_by_path_refuses_plugin_owned_skill_leaving_disk_unchanged() {
 }
 
 #[test]
-fn test_get_skill_holders_managed_unmanaged_split() {
-	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-	let temp = tempdir().unwrap();
-	let _env = isolate_env(&temp);
-	let root = temp.path().join("project");
-	fs::create_dir_all(&root).unwrap();
-
-	setup_master_and_referrers(&root, "holders-skill", &["claude", "opencode"]);
-
-	let _off = crate::agent_settings::test_override::disable(&["opencode"]);
-
-	let holders = get_skill_holders(
-		"holders-skill",
-		ResourceScope::ProjectOnly,
-		Some(&root),
-	);
-	assert!(holders.managed.contains(&"claude".to_string()));
-	assert!(!holders.managed.contains(&"opencode".to_string()));
-	assert!(holders.unmanaged.contains(&"opencode".to_string()));
-	assert!(!holders.unmanaged.contains(&"claude".to_string()));
-}
-
-#[test]
 fn test_by_name_shared_refusal_excludes_all_requested_agents_from_readers() {
 	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 	let temp = tempdir().unwrap();

@@ -9950,6 +9950,84 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn reconcile_route_shared_slot_refusal_carries_kind_and_readers() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let project = home.join("proj");
+				let shared_slot = project.join(".agents/skills/notebooklm");
+				std::fs::create_dir_all(&shared_slot).unwrap();
+				std::fs::write(
+					shared_slot.join("SKILL.md"),
+					"---\nname: notebooklm\ndescription: test\n---\n",
+				)
+				.unwrap();
+
+				let cursor_slot = project.join(".cursor/skills/notebooklm");
+				std::fs::create_dir_all(cursor_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&shared_slot, &cursor_slot).unwrap();
+
+				let opencode_slot = project.join(".opencode/skills/notebooklm");
+				std::fs::create_dir_all(opencode_slot.parent().unwrap())
+					.unwrap();
+				std::os::unix::fs::symlink(&shared_slot, &opencode_slot)
+					.unwrap();
+
+				let response = client
+					.post("/api/v1/skills/reconcile")
+					.header(rocket::http::ContentType::JSON)
+					.body(
+						serde_json::to_string(&serde_json::json!({
+							"source": {
+								"agent": "opencode",
+								"scope": "project",
+								"project_root": project.display().to_string(),
+								"name": "notebooklm"
+							},
+							"removed": ["opencode"],
+							"confirm": true
+						}))
+						.unwrap(),
+					)
+					.dispatch();
+
+				assert_eq!(
+					response.status(),
+					rocket::http::Status::UnprocessableEntity
+				);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				assert_eq!(body["code"], "UNSUPPORTED_OPERATION");
+				let rejected = body["rejected_targets"]
+					.as_array()
+					.expect("rejected_targets array");
+				assert_eq!(rejected.len(), 1);
+				assert_eq!(rejected[0]["agent"], "opencode");
+				assert_eq!(rejected[0]["kind"], "shared");
+				let readers = rejected[0]["readers"]
+					.as_array()
+					.expect("readers must be present and an array");
+				assert!(!readers.is_empty(), "readers must be non-empty");
+				assert!(
+					readers.iter().any(|r| r["agent"] == "cursor"),
+					"readers must contain cursor: {readers:?}"
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn delete_by_name_preflight_rejection_on_planner_error_carries_rejected_targets(
 	) {
 		with_isolated_env(|home, _state| {

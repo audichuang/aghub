@@ -3,7 +3,7 @@ use crate::{
 	create_adapter,
 	errors::{ConfigError, Result},
 	manager::{sub_agent::same_sub_agent_content, ConfigManager},
-	models::{AgentType, McpServer, Skill, SubAgent},
+	models::{AgentType, McpServer, ResourceScope, Skill, SubAgent},
 	registry,
 };
 use log::{info, warn};
@@ -1270,12 +1270,33 @@ fn batch_preflight_error(
 	let rejected_targets: Vec<crate::errors::RejectedTarget> = error
 		.failures
 		.iter()
-		.map(|failure| crate::errors::RejectedTarget {
-			agent: failure.target.target.agent.as_str().to_string(),
-			reason: failure.reason.to_string(),
-			kind: None,
-			path: None,
-			readers: None,
+		.flat_map(|failure| {
+			if let Some(targets) = failure.reason.rejected_targets() {
+				if !targets.is_empty() {
+					return targets
+						.iter()
+						.map(|target| {
+							let mut t = target.clone();
+							if t.agent.is_empty() {
+								t.agent = failure
+									.target
+									.target
+									.agent
+									.as_str()
+									.to_string();
+							}
+							t
+						})
+						.collect::<Vec<_>>();
+				}
+			}
+			vec![crate::errors::RejectedTarget {
+				agent: failure.target.target.agent.as_str().to_string(),
+				reason: failure.reason.to_string(),
+				kind: None,
+				path: None,
+				readers: None,
+			}]
 		})
 		.collect();
 	let failures = error
@@ -1799,6 +1820,8 @@ struct ReconcileSkillPlan {
 	deletes: Vec<OperationPlan>,
 	dry_run_delete_response:
 		Option<crate::skills::removal::SkillRemovalResponse>,
+	scope: ResourceScope,
+	project_root: Option<PathBuf>,
 }
 
 /// Load the skill for reconcile: uses the caller's source if present, or
@@ -1883,12 +1906,13 @@ fn plan_reconcile_skill(
 	// Output rows follow request order; the entry sorts only internally.
 	// See docs/history/core-transfer.md#reconcile-delete-rows-preserve-request-order
 
+	let scope = match source.scope {
+		InstallScope::Global => ResourceScope::GlobalOnly,
+		InstallScope::Project => ResourceScope::ProjectOnly,
+	};
+
 	let (keepers, unreadable, dry_run_delete_response) = if !deletes.is_empty()
 	{
-		let scope = match source.scope {
-			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-		};
 		let req = crate::skills::removal::SkillRemovalRequest {
 			target: crate::skills::removal::SkillRemovalTarget::ByName(
 				skill.name.clone(),
@@ -1925,6 +1949,8 @@ fn plan_reconcile_skill(
 		copies,
 		deletes,
 		dry_run_delete_response,
+		scope,
+		project_root: source.project_root.clone(),
 	})
 }
 
@@ -1961,8 +1987,9 @@ impl ReconcileSkillPlan {
 			row.map(|r| r.still_read_from.as_slice()).unwrap_or(&[]);
 
 		if verdict.shared_master_kept() || self.a_copy_restores_it(target) {
-			return Err(self
-				.refuse_shared_master(target.agent.as_str(), still_read_from));
+			return Err(
+				self.refuse_shared_master(target.agent, still_read_from)
+			);
 		}
 
 		if let Some(r) = row {
@@ -2058,14 +2085,14 @@ impl ReconcileSkillPlan {
 	/// takes nothing away" — naming WHO keeps the master, so the user can act.
 	fn refuse_shared_master(
 		&self,
-		agent: &str,
+		agent: AgentType,
 		still_read_from: &[PathBuf],
 	) -> ConfigError {
 		let ConfigError::UnsupportedOperation { mut message, .. } =
 			ConfigError::unsupported_operation(
 				"remove for this agent alone",
 				"skill it reads from a location shared with other agents",
-				agent,
+				agent.as_str(),
 			)
 		else {
 			unreachable!("unsupported_operation builds UnsupportedOperation")
@@ -2074,7 +2101,7 @@ impl ReconcileSkillPlan {
 			.keepers
 			.iter()
 			.copied()
-			.filter(|k| *k != agent)
+			.filter(|k| *k != agent.as_str())
 			.collect();
 		if !other_keepers.is_empty() {
 			message.push_str(&format!(
@@ -2108,7 +2135,22 @@ impl ReconcileSkillPlan {
 				self.unreadable.join("', '")
 			));
 		}
-		ConfigError::unsupported_op(message)
+		let excluding: Vec<AgentType> =
+			self.deletes.iter().map(|d| d.target.agent).collect();
+		let rejected_targets =
+			crate::skills::removal::batch::build_rejected_targets(
+				&[agent],
+				&message,
+				Some("shared"),
+				still_read_from.first().map(|p| p.as_path()),
+				self.scope,
+				self.project_root.as_deref(),
+				&excluding,
+			);
+		ConfigError::UnsupportedOperation {
+			message,
+			rejected_targets: Some(rejected_targets),
+		}
 	}
 }
 
@@ -2372,7 +2414,7 @@ pub fn reconcile_skill(
 							} => {
 								if !r.still_read_from.is_empty() {
 									Err(plan.refuse_shared_master(
-										row.target.agent.as_str(),
+										row.target.agent,
 										&r.still_read_from,
 									))
 								} else {
@@ -5932,6 +5974,8 @@ mod tests {
 				.collect(),
 			deletes: vec![],
 			dry_run_delete_response: None,
+			scope: ResourceScope::GlobalOnly,
+			project_root: None,
 		}
 	}
 

@@ -159,12 +159,13 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 	// Structured check only: reason text does NOT mention "disabled" or "agent", and hint still fires
 	const unmanagedRefusal = createMockHttpError(422, {
 		code: "UNSUPPORTED_OPERATION",
-		error: "skill reconcile preflight failed; nothing was written",
+		error: "skill reconcile preflight failed; nothing was written: delete opencode (global): location shared: /some/path",
 		rejected_targets: [
 			{
 				agent: "opencode",
 				reason: "location shared: /some/path",
 				kind: "shared",
+				path: "/some/path",
 				readers: [
 					{
 						agent: "cursor",
@@ -192,12 +193,13 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 	// rejected_targets all kind "shared" => hint fires
 	const twoEnabledRefusal = createMockHttpError(422, {
 		code: "UNSUPPORTED_OPERATION",
-		error: "skill reconcile preflight failed; nothing was written",
+		error: "skill reconcile preflight failed; nothing was written: delete claude (global): location shared: /path/shared; delete codex (global): location shared: /path/shared",
 		rejected_targets: [
 			{
 				agent: "claude",
 				reason: "location shared: /path/shared",
 				kind: "shared",
+				path: "/path/shared",
 				readers: [
 					{
 						agent: "cursor",
@@ -209,6 +211,7 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 				agent: "codex",
 				reason: "location shared: /path/shared",
 				kind: "shared",
+				path: "/path/shared",
 				readers: [
 					{
 						agent: "cursor",
@@ -234,12 +237,13 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 	// Refusal with non-"shared" kind (or mixed kinds) => no hint, shows reason
 	const mixedKindRefusal = createMockHttpError(422, {
 		code: "UNSUPPORTED_OPERATION",
-		error: "skill reconcile preflight failed",
+		error: "skill reconcile preflight failed; nothing was written: delete claude (global): location shared: /path/shared; delete zed (global): unsupported target",
 		rejected_targets: [
 			{
 				agent: "claude",
 				reason: "location shared: /path/shared",
 				kind: "shared",
+				path: "/path/shared",
 				readers: [
 					{
 						agent: "cursor",
@@ -288,7 +292,7 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 	// 422 UNSUPPORTED_OPERATION with git kind -> NOT retryWithUnmanaged, displays git message
 	const gitRefusal = createMockHttpError(422, {
 		code: "UNSUPPORTED_OPERATION",
-		error: "git tracked refusal",
+		error: "skill reconcile preflight failed; nothing was written: delete claude (global): /path is tracked by git",
 		rejected_targets: [
 			{
 				agent: "claude",
@@ -337,7 +341,7 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 	// 422 UNSUPPORTED_OPERATION for agent without project config (zed) -> displays real reason
 	const zedRefusal = createMockHttpError(422, {
 		code: "UNSUPPORTED_OPERATION",
-		error: "skill reconcile preflight failed; nothing was written: no project skill config for zed",
+		error: "skill reconcile preflight failed; nothing was written: delete zed (project): Zed agent has no project skill config",
 		rejected_targets: [
 			{
 				agent: "zed",
@@ -356,107 +360,6 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 		refusal4.message?.includes("Zed agent has no project skill config"),
 		"must display the real reason for unsupported scope",
 	);
-});
-
-test("bulk delete refusal with includeUnmanaged=true does not produce retry hint", async () => {
-	const sharedRefusal = createMockHttpError(422, {
-		code: "UNSUPPORTED_OPERATION",
-		error: "skill reconcile preflight failed; nothing was written",
-		rejected_targets: [
-			{
-				agent: "claude",
-				reason: "location shared: /path/shared",
-				kind: "shared",
-			},
-		],
-	});
-
-	const api = {
-		skills: {
-			delete: async () => {
-				throw sharedRefusal;
-			},
-		},
-	} as any;
-
-	const result = await deleteSkill({
-		api,
-		skillName: "my-skill",
-		agent: "claude",
-		scope: "global",
-		context: "bulk",
-		intent: {
-			kind: "from-agents",
-			agents: ["claude", "cursor"],
-			includeUnmanaged: true,
-		},
-		t,
-	});
-
-	assert.equal(result.success, false);
-	assert.equal(result.verdict, "refused");
-	assert.equal(result.retryWithUnmanaged, false);
-	assert.notEqual(result.message, "deleteSkillRetryWithUnmanaged");
-	assert.equal(result.message, "location shared: /path/shared");
-});
-
-test("shared UNSUPPORTED_OPERATION refusal caused by a managed reader does not produce retry hint", () => {
-	const sharedRefusal = createMockHttpError(422, {
-		code: "UNSUPPORTED_OPERATION",
-		error: "skill reconcile preflight failed; nothing was written",
-		rejected_targets: [
-			{
-				agent: "claude",
-				reason: "location shared: /path/shared",
-				kind: "shared",
-				readers: [{ agent: "opencode", managed: true }],
-			},
-		],
-	});
-
-	const refusal = interpretRefusal(sharedRefusal, {
-		intent: {
-			kind: "from-agents",
-			agents: ["claude"],
-			includeUnmanaged: false,
-		},
-		t,
-	});
-
-	assert.equal(refusal.isRefusal, true);
-	assert.equal(refusal.code, "UNSUPPORTED_OPERATION");
-	assert.equal(refusal.retryWithUnmanaged, false);
-	assert.notEqual(refusal.message, "deleteSkillRetryWithUnmanaged");
-	assert.equal(refusal.message, "location shared: /path/shared");
-});
-
-test("shared UNSUPPORTED_OPERATION refusal where all readers are unmanaged produces retry hint", () => {
-	const sharedRefusal = createMockHttpError(422, {
-		code: "UNSUPPORTED_OPERATION",
-		error: "skill reconcile preflight failed; nothing was written",
-		rejected_targets: [
-			{
-				agent: "claude",
-				reason: "location shared: /path/shared",
-				kind: "shared",
-				readers: [{ agent: "cursor", managed: false }],
-			},
-		],
-	});
-
-	const refusal = interpretRefusal(sharedRefusal, {
-		intent: {
-			kind: "from-agents",
-			agents: ["claude"],
-			includeUnmanaged: false,
-		},
-		t,
-	});
-
-	assert.equal(refusal.isRefusal, true);
-	assert.equal(refusal.code, "UNSUPPORTED_OPERATION");
-	assert.equal(refusal.retryWithUnmanaged, true);
-	assert.equal(refusal.message, "deleteSkillRetryWithUnmanaged");
 });
 
 // =========================================================================

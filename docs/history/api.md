@@ -256,11 +256,13 @@ Pinned by: `delete_by_path_rejects_trailing_dotdot_project_agents_slot`,
 `DELETE /agents/<agent>/skills/<name>` and `POST /skills/reconcile` deletion rows now share the core batch removal entry (`remove_skill_batch`).
 Removal rows in both endpoints now project the core-decided `outcome` and partition surviving holders into `still_read_by_managed` and `still_read_by_unmanaged` (while deriving `still_read_by` for compatibility).
 In addition, whole-batch preflight rejection preserves the HTTP 422 status and `UNSUPPORTED_OPERATION` code, while providing a structured `rejected_targets: [{agent, reason}]` payload; configuration or planner errors similarly preserve HTTP 400 `INVALID_CONFIG` with structured `rejected_targets`.
+`RejectedTarget.readers` exists on `rejected_targets` (CLI JSON errors + API) and is populated only when `kind == "shared"`, listing the other agents still reading the shared slot; reconcile now preserves the inner kind/path/readers.
 
 Pinned by: `reconcile_skill_removal_row_reports_outcome_and_managed_holders`,
 `delete_by_name_preview_and_commit_carry_outcome_and_managed_holders`,
 `delete_by_name_preflight_rejection_carries_structured_rejected_targets`,
-`delete_by_name_preflight_rejection_on_planner_error_carries_rejected_targets`
+`delete_by_name_preflight_rejection_on_planner_error_carries_rejected_targets`,
+`reconcile_route_shared_slot_refusal_carries_kind_and_readers`
 (`crates/api/src/routes/skills.rs`).
 
 ## delete-by-path wire convergence

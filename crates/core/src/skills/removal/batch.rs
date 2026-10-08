@@ -646,7 +646,6 @@ pub fn find_readers_of_kept_path(
 	.collect()
 }
 
-/// Build a [`RejectedTarget`] for a refused agent, populating `readers` when `kind == "shared"`.
 /// Build [`RejectedTarget`]s for a set of rejected agents, sharing the populated `readers`.
 /// Readers come from the first kept path only.
 pub fn build_rejected_targets(
