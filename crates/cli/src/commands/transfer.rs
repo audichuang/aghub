@@ -122,7 +122,7 @@ fn parse_agent(value: &str) -> Result<AgentType, String> {
 ///
 /// `--all` is refused by `TRANSFER_SCOPE` in `main`'s policy table.
 ///
-/// Maps the scope itself rather than calling [`crate::Scope::write_target`]:
+/// Maps the scope itself rather than calling [`crate::Scope::write_scope`]:
 /// this is the one `rootless_project_passthrough` policy, so a rootless `-p`
 /// must reach core and get a typed `RESOURCE_NOT_FOUND`. Total match, never a
 /// `_ => Global` catch-all.

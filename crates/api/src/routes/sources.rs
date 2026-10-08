@@ -22,25 +22,26 @@ use crate::dto::sources::{
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
+use aghub_core::WriteScope;
 use skill_update::sources::{
-	self, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome, SourceScope,
-	SourceScopeKind, SourceSkillDiff as DomainSkillDiff, SourceSummary,
+	self, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome, SourceScopeKind,
+	SourceSkillDiff as DomainSkillDiff, SourceSummary,
 };
 use skill_update::{FetchError, FetchedRepo, Fetcher, GitFetcher, SourceRef};
 
 /// Resolve a request scope into the domain's per-scope list: `Global` →
 /// `[Global]`, `Project` → `[Project]`, `All` → `[Global]` plus the project
 /// scope when a project root is known.
-fn scopes_for(resolved: &ResolvedScope) -> Vec<SourceScope> {
+fn scopes_for(resolved: &ResolvedScope) -> Vec<WriteScope> {
 	match resolved {
-		ResolvedScope::Global => vec![SourceScope::Global],
+		ResolvedScope::Global => vec![WriteScope::Global],
 		ResolvedScope::Project { root } => {
-			vec![SourceScope::Project { root: root.clone() }]
+			vec![WriteScope::project(root.clone())]
 		}
 		ResolvedScope::All { project_root } => {
-			let mut scopes = vec![SourceScope::Global];
+			let mut scopes = vec![WriteScope::Global];
 			if let Some(root) = project_root {
-				scopes.push(SourceScope::Project { root: root.clone() });
+				scopes.push(WriteScope::project(root.clone()));
 			}
 			scopes
 		}

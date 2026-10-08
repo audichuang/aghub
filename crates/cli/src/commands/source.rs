@@ -9,16 +9,16 @@
 //! hook for tests, dry-run/`--yes` gating, and output rendering.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use aghub_core::models::{AgentSelection, AgentType, ResourceScope};
 
 use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::update::UncheckableReason;
+use aghub_core::WriteScope;
 use anyhow::{bail, Result};
 use serde::Serialize;
 use skill_update::sources::{
-	self, SourceScope, SourceScopeKind, SourceSkillDiff, SourceSummary,
+	self, SourceScopeKind, SourceSkillDiff, SourceSummary,
 };
 use skill_update::{FetchError, FetchSelection, SourceRef};
 use tabled::builder::Builder;
@@ -249,22 +249,18 @@ impl skill_update::Fetcher for MemoFetcher<'_> {
 /// The `source`-flavoured view of an already-resolved [`Scope`].
 ///
 /// TOTAL — it cannot fail: every rejection happened in `main`'s ONE resolver.
-pub(crate) fn read_scopes(scope: &Scope) -> Vec<SourceScope> {
+pub(crate) fn read_scopes(scope: &Scope) -> Vec<WriteScope> {
 	match (scope.resource_scope(), scope.project_root()) {
-		(ResourceScope::GlobalOnly, _) => vec![SourceScope::Global],
+		(ResourceScope::GlobalOnly, _) => vec![WriteScope::Global],
 		(ResourceScope::ProjectOnly, Some(root)) => {
-			vec![SourceScope::Project {
-				root: root.to_path_buf(),
-			}]
+			vec![WriteScope::project(root)]
 		}
 		// `ProjectOnly` always carries a root — the resolver bails otherwise.
 		(ResourceScope::ProjectOnly, None) => Vec::new(),
 		(ResourceScope::Both, root) => {
-			let mut scopes = vec![SourceScope::Global];
+			let mut scopes = vec![WriteScope::Global];
 			if let Some(root) = root {
-				scopes.push(SourceScope::Project {
-					root: root.to_path_buf(),
-				});
+				scopes.push(WriteScope::project(root));
 			}
 			scopes
 		}
@@ -274,15 +270,10 @@ pub(crate) fn read_scopes(scope: &Scope) -> Vec<SourceScope> {
 /// The single writing scope for `sync` / `accept-rename`.
 ///
 /// `--all` and an unscoped invocation are refused by their scope policies in
-/// `main`; [`Scope::write_target`] refuses anything else — never a silent
+/// `main`; [`Scope::write_scope`] refuses anything else — never a silent
 /// GLOBAL fallback.
-fn write_scope(scope: &Scope) -> Result<SourceScope> {
-	Ok(match scope.write_target()? {
-		Some(root) => SourceScope::Project {
-			root: root.to_path_buf(),
-		},
-		None => SourceScope::Global,
-	})
+fn write_scope(scope: &Scope) -> Result<WriteScope> {
+	scope.write_scope()
 }
 
 /// [`crate::commands::read_locks_checked`] for a resolved read-scope list.
@@ -296,12 +287,12 @@ fn write_scope(scope: &Scope) -> Result<SourceScope> {
 /// snapshot injection point, so they keep only the fail-closed CHECK and the
 /// narrow re-read window. Honest partial, not an oversight.
 pub(crate) fn read_scope_locks_checked(
-	scopes: &[SourceScope],
+	scopes: &[WriteScope],
 ) -> Result<crate::commands::LockSnapshot> {
-	let want_global = scopes.iter().any(|s| matches!(s, SourceScope::Global));
+	let want_global = scopes.iter().any(|s| matches!(s, WriteScope::Global));
 	let project_root = scopes.iter().find_map(|s| match s {
-		SourceScope::Project { root } => Some(root.as_path()),
-		SourceScope::Global => None,
+		WriteScope::Project { root } => Some(root.as_path()),
+		WriteScope::Global => None,
 	});
 	crate::commands::read_locks_checked(want_global, project_root)
 }
@@ -313,10 +304,10 @@ fn scope_kind_str(kind: SourceScopeKind) -> &'static str {
 	}
 }
 
-pub(crate) fn scope_label(scope: &SourceScope) -> &'static str {
+pub(crate) fn scope_label(scope: &WriteScope) -> &'static str {
 	match scope {
-		SourceScope::Global => "global",
-		SourceScope::Project { .. } => "project",
+		WriteScope::Global => "global",
+		WriteScope::Project { .. } => "project",
 	}
 }
 
@@ -506,7 +497,7 @@ fn diff(
 fn diff_with(
 	source: &str,
 	git_ref: Option<&str>,
-	scopes: &[SourceScope],
+	scopes: &[WriteScope],
 	json: bool,
 	inner: &dyn skill_update::Fetcher,
 	resolver: &dyn skill_update::TokenResolver,
@@ -518,7 +509,7 @@ fn diff_with(
 	// `/sources/diff` does). The shared memo makes N scopes one round trip.
 	let fetcher = MemoFetcher::new(inner);
 
-	let mut per_scope: Vec<(&SourceScope, String, Vec<SourceSkillDiff>)> =
+	let mut per_scope: Vec<(&WriteScope, String, Vec<SourceSkillDiff>)> =
 		Vec::new();
 	for scope in scopes {
 		let outcome = sources::diff_source(
@@ -790,9 +781,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 
 	// Scope was resolved and validated ONCE, in `main` — `--all`, an unscoped
 	// run and `-p` with no project root were all refused there.
-	let scope = args.scope.resource_scope();
-	let project_root = args.scope.project_root().map(Path::to_path_buf);
-	let source_scope = write_scope(args.scope)?;
+	let write_scope = write_scope(args.scope)?;
 	let scope_label = args.scope.label();
 
 	// Parse the agent selection BEFORE any network work, so an invalid
@@ -820,7 +809,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 		sources::SourceSyncInput {
 			source: source.clone(),
 			git_ref: args.git_ref.map(str::to_string),
-			scope: source_scope.clone(),
+			scope: write_scope.clone(),
 		},
 		sources::SourceDiffDeps {
 			fetcher: &inner,
@@ -898,7 +887,11 @@ fn sync(args: SyncArgs) -> Result<()> {
 				.filter(|d| !disabled.contains(d.id))
 				.filter(|d| {
 					!matches!(
-						agent_link_need(d, scope, project_root.as_deref()),
+						agent_link_need(
+							d,
+							write_scope.resource_scope(),
+							write_scope.project_root()
+						),
 						LinkNeed::Unsupported
 					)
 				})
@@ -984,8 +977,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 			&PreviewContext {
 				fetched: &fetched,
 				lock_source: &lock_source,
-				scope,
-				project_root: project_root.as_deref(),
+				scope: &write_scope,
 			},
 		);
 	}
@@ -997,24 +989,25 @@ fn sync(args: SyncArgs) -> Result<()> {
 			if *kind != "install" {
 				return Ok(());
 			}
-			aghub_core::batch::skill_batch_preflight(&target_agents, scope)
-				.map_err(|error| error.to_string())
+			aghub_core::batch::skill_batch_preflight(
+				&target_agents,
+				write_scope.resource_scope(),
+			)
+			.map_err(|error| error.to_string())
 		},
 		|(kind, d)| {
 			Ok::<SyncActionView, String>(match *kind {
 				"install" => apply_install(
 					&fetched,
 					d,
-					scope,
-					project_root.as_deref(),
+					&write_scope,
 					&target_agents,
 					&lock_source,
 				),
 				"update" => apply_update_row(
 					&fetched,
 					d,
-					scope,
-					project_root.as_deref(),
+					&write_scope,
 					&pre_fetch_identities,
 				),
 				_ => unreachable!(),
@@ -1199,8 +1192,7 @@ fn print_no_action_plan(
 struct PreviewContext<'a> {
 	fetched: &'a skill_update::mutation::FetchedSource,
 	lock_source: &'a skill::InstallLockSource,
-	scope: ResourceScope,
-	project_root: Option<&'a Path>,
+	scope: &'a WriteScope,
 }
 
 fn print_dry_run(
@@ -1225,7 +1217,6 @@ fn print_dry_run(
 							d,
 							ctx.lock_source,
 							ctx.scope,
-							ctx.project_root,
 							target_agents,
 						),
 					)
@@ -1306,16 +1297,14 @@ fn preview_verdict(would_fail: bool) -> Result<()> {
 fn install_request<'a>(
 	d: &'a SourceSkillDiff,
 	lock_source: &'a skill::InstallLockSource,
-	scope: ResourceScope,
-	project_root: Option<&'a Path>,
+	scope: &WriteScope,
 	target_agents: &'a [AgentType],
 ) -> skill_update::mutation::FetchedInstallRequest<'a> {
 	skill_update::mutation::FetchedInstallRequest {
 		source: lock_source,
 		lock_skill_path: &d.skill_path,
 		expected_name: Some(&d.name),
-		scope,
-		project_root,
+		scope: scope.clone(),
 		target_agents,
 	}
 }
@@ -1335,15 +1324,13 @@ fn install_error_message(
 fn apply_install(
 	fetched: &skill_update::mutation::FetchedSource,
 	d: &SourceSkillDiff,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	target_agents: &[AgentType],
 	lock_source: &skill::InstallLockSource,
 ) -> SyncActionView {
 	use skill_update::mutation::install_fetched_source;
 
-	let req =
-		install_request(d, lock_source, scope, project_root, target_agents);
+	let req = install_request(d, lock_source, scope, target_agents);
 
 	match install_fetched_source(fetched, req) {
 		Ok(report) => {
@@ -1388,8 +1375,7 @@ fn apply_install(
 fn apply_update_row(
 	fetched: &skill_update::mutation::FetchedSource,
 	d: &SourceSkillDiff,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	pre_fetch: &std::collections::BTreeMap<String, EntryIdentity>,
 ) -> SyncActionView {
 	use skill_update::mutation::{resync_fetched_source, FetchedResyncRequest};
@@ -1423,8 +1409,7 @@ fn apply_update_row(
 		FetchedResyncRequest {
 			skill_path: &d.skill_path,
 			name: &d.name,
-			scope,
-			project_root,
+			scope: scope.clone(),
 			expected,
 		},
 	) {
@@ -1487,21 +1472,15 @@ struct AcceptRenameArgs<'a> {
 /// core), then hands the fetched tree to `rename::accept_rename`.
 fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	use aghub_core::skills::rename::{self, RenameRequest};
-	use aghub_core::WriteScope;
 	use skill_update::mutation::{
 		accept_fetched_rename, fetch_for_rename, FetchRenameError,
 		FetchedRenameRequest,
 	};
 
-	// Scope was resolved and validated ONCE, in `main`; `write_target` refuses
+	// Scope was resolved and validated ONCE, in `main`; `write_scope` refuses
 	// anything that is not a single write target instead of defaulting to
 	// global.
-	let scope = match args.scope.write_target()? {
-		Some(root) => WriteScope::Project {
-			root: root.to_path_buf(),
-		},
-		None => WriteScope::Global,
-	};
+	let scope = args.scope.write_scope()?;
 	let scope_label = args.scope.label();
 
 	// Refuse a degenerate rename (and, below, a name not in the lock) BEFORE
@@ -1654,9 +1633,8 @@ mod tests {
 		select_env_token, FetchError, SyncActionView,
 	};
 	use aghub_core::models::AgentType;
-	use skill_update::sources::{
-		SourceScope, SourceSkillDiff, SourceSkillState,
-	};
+	use aghub_core::WriteScope;
+	use skill_update::sources::{SourceSkillDiff, SourceSkillState};
 	use std::path::PathBuf;
 
 	fn s(v: &str) -> Option<String> {
@@ -1737,10 +1715,10 @@ mod tests {
 		// Scope B has no lock, so it falls back to the raw `owner/repo` argument.
 		let bare = tempfile::tempdir().unwrap();
 		let scopes = [
-			SourceScope::Project {
+			WriteScope::Project {
 				root: locked.path().to_path_buf(),
 			},
-			SourceScope::Project {
+			WriteScope::Project {
 				root: bare.path().to_path_buf(),
 			},
 		];

@@ -3,24 +3,18 @@
 //! injected via [`crate::Fetcher`] / [`crate::TokenResolver`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::{
 	FetchError, FetchSelection, Fetcher, SourceRef, TokenResolution,
 	TokenResolver,
 };
-use aghub_core::models::ResourceScope;
 use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::update::{
 	compare_known_hashes, detect_rename, precheck_source, SkillUpdateStatus,
 	UncheckableReason,
 };
-
-#[derive(Clone, Debug)]
-pub enum SourceScope {
-	Global,
-	Project { root: PathBuf },
-}
+use aghub_core::WriteScope;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceScopeKind {
@@ -154,13 +148,13 @@ pub enum SourceDiffOutcome {
 }
 
 pub struct SourceListInput {
-	pub scopes: Vec<SourceScope>,
+	pub scopes: Vec<WriteScope>,
 }
 
 pub struct SourceDiffInput {
 	pub source: String,
 	pub git_ref: Option<String>,
-	pub scopes: Vec<SourceScope>,
+	pub scopes: Vec<WriteScope>,
 }
 
 pub struct SourceDiffDeps<'a> {
@@ -172,8 +166,8 @@ pub fn list_sources(input: SourceListInput) -> Vec<SourceSummary> {
 	let mut sources = Vec::new();
 	for scope in &input.scopes {
 		match scope {
-			SourceScope::Global => sources.extend(global_sources()),
-			SourceScope::Project { root } => {
+			WriteScope::Global => sources.extend(global_sources()),
+			WriteScope::Project { root } => {
 				sources.extend(project_sources(root))
 			}
 		}
@@ -569,7 +563,7 @@ fn insert_scope_entries(
 	baseline: &mut Baseline,
 	source_type: &mut String,
 	recorded_ref: &mut Option<String>,
-	scope: &SourceScope,
+	scope: &WriteScope,
 	want: &str,
 ) {
 	// The agent scan is loaded at most ONCE per scope, and only if a matching
@@ -577,7 +571,7 @@ fn insert_scope_entries(
 	// must not pay for a scan it never reads.
 	let mut agents: Option<Vec<aghub_core::AgentResources>> = None;
 	match scope {
-		SourceScope::Global => {
+		WriteScope::Global => {
 			for (name, entry) in skill::get_all_locked_skills() {
 				if !source_matches(
 					want,
@@ -596,10 +590,7 @@ fn insert_scope_entries(
 				if let Some(skill_path) = entry.skill_path.clone() {
 					let hash = entry.content_hash.clone().unwrap_or_default();
 					let agents = agents.get_or_insert_with(|| {
-						crate::mutation::scan_agents(
-							ResourceScope::GlobalOnly,
-							None,
-						)
+						crate::mutation::scan_agents(scope)
 					});
 					let local_comparison_hashes =
 						local_hashes_for_installed(agents, &name);
@@ -616,7 +607,7 @@ fn insert_scope_entries(
 				}
 			}
 		}
-		SourceScope::Project { root } => {
+		WriteScope::Project { root } => {
 			for (name, entry) in skill::read_local_lock(Some(root)).skills {
 				if !source_matches(
 					want,
@@ -634,10 +625,7 @@ fn insert_scope_entries(
 				}
 				if let Some(skill_path) = entry.skill_path.clone() {
 					let agents = agents.get_or_insert_with(|| {
-						crate::mutation::scan_agents(
-							ResourceScope::ProjectOnly,
-							Some(root),
-						)
+						crate::mutation::scan_agents(scope)
 					});
 					let local_comparison_hashes =
 						local_hashes_for_installed(agents, &name);
@@ -661,7 +649,7 @@ fn insert_scope_entries(
 /// `skill_path` (project shadows global on a duplicate), and classify once.
 /// Returns `(baseline, source_type, recorded_ref)`.
 pub(crate) fn merged_baseline_for_source(
-	scopes: &[SourceScope],
+	scopes: &[WriteScope],
 	source: &str,
 ) -> (Baseline, String, Option<String>) {
 	// Counts baseline sweeps on THIS thread. The sweep folder-hashes every
@@ -678,7 +666,7 @@ pub(crate) fn merged_baseline_for_source(
 	// Global first, then project, so project entries shadow global on a
 	// duplicate `skill_path`.
 	for scope in scopes {
-		if matches!(scope, SourceScope::Global) {
+		if matches!(scope, WriteScope::Global) {
 			insert_scope_entries(
 				&mut baseline,
 				&mut source_type,
@@ -689,7 +677,7 @@ pub(crate) fn merged_baseline_for_source(
 		}
 	}
 	for scope in scopes {
-		if matches!(scope, SourceScope::Project { .. }) {
+		if matches!(scope, WriteScope::Project { .. }) {
 			insert_scope_entries(
 				&mut baseline,
 				&mut source_type,
@@ -705,7 +693,7 @@ pub(crate) fn merged_baseline_for_source(
 /// CLI path: build the baseline for a SINGLE scope only.
 /// Returns `(baseline, source_type, recorded_ref)`.
 pub(crate) fn baseline_for_scope(
-	scope: &SourceScope,
+	scope: &WriteScope,
 	source: &str,
 ) -> (Baseline, String, Option<String>) {
 	let mut baseline = Baseline::new();
@@ -1230,7 +1218,7 @@ fn reason_str(reason: UncheckableReason) -> String {
 /// so the CLI reuses one `FetchedRepo` for every scope and for install.
 pub(crate) fn classify_scope(
 	root: &Path,
-	scope: &SourceScope,
+	scope: &WriteScope,
 	source: &str,
 	upstream_commit_time: Option<String>,
 ) -> Vec<SourceSkillDiff> {
@@ -1263,14 +1251,12 @@ thread_local! {
 		const { std::cell::Cell::new(0) };
 }
 
-fn read_scope_lock(scope: &SourceScope) -> ScopeLock {
+fn read_scope_lock(scope: &WriteScope) -> ScopeLock {
 	#[cfg(test)]
 	SCOPE_LOCK_READS.with(|c| c.set(c.get() + 1));
 	match scope {
-		SourceScope::Global => {
-			ScopeLock::Global(skill::get_all_locked_skills())
-		}
-		SourceScope::Project { root } => {
+		WriteScope::Global => ScopeLock::Global(skill::get_all_locked_skills()),
+		WriteScope::Project { root } => {
 			ScopeLock::Project(skill::read_local_lock(Some(root)))
 		}
 	}
@@ -1388,7 +1374,7 @@ enum PrepareRefusal {
 /// AGENTS.md anti-patterns).
 fn prepare(
 	source: &str,
-	scopes: &[SourceScope],
+	scopes: &[WriteScope],
 	explicit_ref: Option<&str>,
 ) -> Result<PreparedFetch, PrepareRefusal> {
 	let locks: Vec<ScopeLock> = scopes.iter().map(read_scope_lock).collect();
@@ -1478,7 +1464,7 @@ pub struct SourceSyncInput {
 	/// The ONE scope this sync writes to. A sync resolves exactly one write
 	/// scope (the CLI refuses `--all` long before here), which is why the tree
 	/// it fetches has to serve that scope alone.
-	pub scope: SourceScope,
+	pub scope: WriteScope,
 }
 
 /// A sync classifies a whole scope against ONE fetched tree, so it must first
@@ -1973,7 +1959,7 @@ mod list_tests {
 	#[test]
 	fn list_sources_global_only_all_global_scope() {
 		let out = list_sources(SourceListInput {
-			scopes: vec![SourceScope::Global],
+			scopes: vec![WriteScope::Global],
 		});
 		assert!(out.iter().all(|s| s.scope == SourceScopeKind::Global));
 	}
@@ -2630,7 +2616,7 @@ mod diff_tests {
 	/// tests that do not care about the snapshot seam.
 	fn resolve_source_meta(
 		source: &str,
-		scopes: &[SourceScope],
+		scopes: &[WriteScope],
 		explicit_ref: Option<&str>,
 	) -> ResolvedSourceMeta {
 		let locks: Vec<ScopeLock> =
@@ -2700,7 +2686,7 @@ mod diff_tests {
 			lock.skills.insert(name.to_string(), entry);
 		}
 		skill::write_local_lock(&lock, Some(project.path())).unwrap();
-		let scope = SourceScope::Project {
+		let scope = WriteScope::Project {
 			root: project.path().to_path_buf(),
 		};
 
@@ -2735,7 +2721,7 @@ mod diff_tests {
 
 		assert!(assert_one_tree_can_serve(
 			"owner/repo",
-			&read_scope_lock(&SourceScope::Project {
+			&read_scope_lock(&WriteScope::Project {
 				root: project.path().to_path_buf(),
 			}),
 			None,
@@ -2763,7 +2749,7 @@ mod diff_tests {
 			SourceDiffInput {
 				source: "owner/repo".to_string(),
 				git_ref: None,
-				scopes: vec![SourceScope::Project {
+				scopes: vec![WriteScope::Project {
 					root: TempDir::new().unwrap().path().to_path_buf(),
 				}],
 			},
@@ -2802,7 +2788,7 @@ mod diff_tests {
 				SourceDiffInput {
 					source: "owner/repo".to_string(),
 					git_ref: None,
-					scopes: vec![SourceScope::Project {
+					scopes: vec![WriteScope::Project {
 						root: TempDir::new().unwrap().path().to_path_buf(),
 					}],
 				},
@@ -2936,7 +2922,7 @@ mod diff_tests {
 			SourceDiffInput {
 				source: "owner/repo".to_string(),
 				git_ref: None,
-				scopes: vec![SourceScope::Project {
+				scopes: vec![WriteScope::Project {
 					root: project.path().to_path_buf(),
 				}],
 			},
@@ -3027,7 +3013,7 @@ mod diff_tests {
 			SourceDiffInput {
 				source: "owner/repo".to_string(),
 				git_ref: None,
-				scopes: vec![SourceScope::Project {
+				scopes: vec![WriteScope::Project {
 					root: project.path().to_path_buf(),
 				}],
 			},
@@ -3109,7 +3095,7 @@ mod diff_tests {
 				// baseline is empty and `alpha` resolves to NotInstalled.
 				source: "test-owner/diff-source-not-installed".to_string(),
 				git_ref: None,
-				scopes: vec![SourceScope::Global],
+				scopes: vec![WriteScope::Global],
 			},
 			SourceDiffDeps {
 				fetcher: &fetcher,
@@ -3156,7 +3142,7 @@ mod diff_tests {
 			SourceDiffInput {
 				source: "owner/private-source".to_string(),
 				git_ref: None,
-				scopes: vec![SourceScope::Global],
+				scopes: vec![WriteScope::Global],
 			},
 			SourceDiffDeps {
 				fetcher: &fetcher,
@@ -3210,7 +3196,7 @@ mod diff_tests {
 		crate::mutation::AGENT_SCANS.with(|scans| scans.set(0));
 		let (baseline, _source_type, _recorded_ref) =
 			merged_baseline_for_source(
-				&[SourceScope::Project {
+				&[WriteScope::Project {
 					root: project.path().to_path_buf(),
 				}],
 				source,
@@ -3240,7 +3226,7 @@ mod diff_tests {
 
 		let (_baseline, _source_type, recorded_ref) =
 			merged_baseline_for_source(
-				&[SourceScope::Project {
+				&[WriteScope::Project {
 					root: project.path().to_path_buf(),
 				}],
 				source,
@@ -3270,7 +3256,7 @@ mod diff_tests {
 			SourceDiffInput {
 				source: source.to_string(),
 				git_ref: None,
-				scopes: vec![SourceScope::Project {
+				scopes: vec![WriteScope::Project {
 					root: project.path().to_path_buf(),
 				}],
 			},
@@ -3307,7 +3293,7 @@ mod diff_tests {
 
 		let meta = resolve_source_meta(
 			source,
-			&[SourceScope::Project {
+			&[WriteScope::Project {
 				root: project.path().to_path_buf(),
 			}],
 			Some("feature-x"),
@@ -3326,7 +3312,7 @@ mod diff_tests {
 
 		let meta = resolve_source_meta(
 			source,
-			&[SourceScope::Project {
+			&[WriteScope::Project {
 				root: project.path().to_path_buf(),
 			}],
 			None,
@@ -3347,7 +3333,7 @@ mod diff_tests {
 
 		let meta = resolve_source_meta(
 			source,
-			&[SourceScope::Project {
+			&[WriteScope::Project {
 				root: project.path().to_path_buf(),
 			}],
 			None,
@@ -3366,7 +3352,7 @@ mod diff_tests {
 
 		let meta = resolve_source_meta(
 			source,
-			&[SourceScope::Project {
+			&[WriteScope::Project {
 				root: project.path().to_path_buf(),
 			}],
 			None,
@@ -3397,7 +3383,7 @@ mod diff_tests {
 			},
 		);
 		skill::write_local_lock(&lock, Some(project.path())).unwrap();
-		let scopes = [SourceScope::Project {
+		let scopes = [WriteScope::Project {
 			root: project.path().to_path_buf(),
 		}];
 
@@ -3441,7 +3427,7 @@ mod diff_tests {
 			);
 		}
 		skill::write_local_lock(&lock, Some(project.path())).unwrap();
-		let scopes = [SourceScope::Project {
+		let scopes = [WriteScope::Project {
 			root: project.path().to_path_buf(),
 		}];
 
@@ -3502,7 +3488,7 @@ mod diff_tests {
 		// `precheck_source`).
 		let meta = resolve_source_meta(
 			"owner/meta-absent",
-			&[SourceScope::Global],
+			&[WriteScope::Global],
 			None,
 		);
 
@@ -3521,7 +3507,7 @@ mod diff_tests {
 
 		let meta = resolve_source_meta(
 			source,
-			&[SourceScope::Project {
+			&[WriteScope::Project {
 				root: project.path().to_path_buf(),
 			}],
 			None,
@@ -3604,7 +3590,7 @@ mod snapshot_tests {
 				entry("owner/repo", "github", Some("main"), "s/SKILL.md"),
 			)],
 		);
-		let scope = SourceScope::Project {
+		let scope = WriteScope::Project {
 			root: project.path().to_path_buf(),
 		};
 
@@ -3669,7 +3655,7 @@ mod snapshot_tests {
 			SourceSyncInput {
 				source: "git@github.com:owner/repo.git".to_string(),
 				git_ref: None,
-				scope: SourceScope::Project {
+				scope: WriteScope::Project {
 					root: project.path().to_path_buf(),
 				},
 			},
@@ -3725,7 +3711,7 @@ mod snapshot_tests {
 			SourceSyncInput {
 				source: "git@github.com:owner/repo.git".to_string(),
 				git_ref: None,
-				scope: SourceScope::Project {
+				scope: WriteScope::Project {
 					root: project.path().to_path_buf(),
 				},
 			},
@@ -3770,7 +3756,7 @@ mod snapshot_tests {
 			SourceDiffInput {
 				source: "git@github.com:owner/repo.git".to_string(),
 				git_ref: None,
-				scopes: vec![SourceScope::Project {
+				scopes: vec![WriteScope::Project {
 					root: project.path().to_path_buf(),
 				}],
 			},

@@ -358,8 +358,7 @@ fn project_store_symlink_cannot_redirect_repair_adoption() {
 	write_skill(&project.join(".agents/skills/legacy"), "legacy");
 
 	let result = aghub_core::skills::repair::repair_skill(
-		aghub_core::models::ResourceScope::ProjectOnly,
-		Some(&project),
+		&aghub_core::WriteScope::project(&project),
 		"legacy",
 		true,
 		false,

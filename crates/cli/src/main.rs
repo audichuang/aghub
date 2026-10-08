@@ -868,11 +868,11 @@ fn run(cli: Cli) -> Result<()> {
 	} = &cli.command
 	{
 		let resolved = resolve_cli_scope(&cli)?;
+		let write_scope = resolved.write_scope()?;
 		// clap guarantees exactly one of NAME / --outdated.
 		let Some(name) = name else {
 			return commands::apply_update::execute_outdated(
-				resolved.resource_scope(),
-				resolved.project_root(),
+				write_scope,
 				*yes,
 				cli.json,
 			);
@@ -880,8 +880,7 @@ fn run(cli: Cli) -> Result<()> {
 		return commands::apply_update::execute(
 			(*resource).into(),
 			name.clone(),
-			resolved.resource_scope(),
-			resolved.project_root(),
+			write_scope,
 			*yes,
 			cli.json,
 		);
@@ -1006,13 +1005,8 @@ fn run(cli: Cli) -> Result<()> {
 	if let Commands::Repair { name, yes } = &cli.command {
 		reject_agent_all(&cli.agent)?;
 		let resolved = resolve_cli_scope(&cli)?;
-		return repair::execute(
-			resolved.resource_scope(),
-			resolved.project_root(),
-			name.as_deref(),
-			!*yes,
-			cli.json,
-		);
+		let write_scope = resolved.write_scope()?;
+		return repair::execute(&write_scope, name.as_deref(), !*yes, cli.json);
 	}
 	if let Commands::PruneLock { dry_run, yes } = &cli.command {
 		reject_agent_all(&cli.agent)?;
@@ -1554,31 +1548,36 @@ mod scope {
 			}
 		}
 
-		/// THE single write target for the commands that have exactly one:
-		/// `Some(root)` = that project's store, `None` = the global one.
+		/// THE single write scope for the commands that have exactly one write
+		/// target: [`aghub_core::WriteScope::project`] = that project's store,
+		/// [`aghub_core::WriteScope::Global`] = the global one.
 		///
 		/// Fails for a scope no writing policy should produce — never a
 		/// `_ => Global` fallback, which once made a slipped scope a silent
 		/// write to the GLOBAL lock (crates/cli/AGENTS.md "Two dispatch
-		/// funnels").
-		pub fn write_target(&self) -> Result<Option<&std::path::Path>> {
+		/// funnels"). A rootless `-p` is unreachable through `resolve_scope`
+		/// for every policy that calls this (they bail first); only
+		/// `TRANSFER_SCOPE` lets it through, and `transfer` maps the scope
+		/// itself instead of calling here. This is the ONE place core's
+		/// mutation entries get their scope validated — they take a
+		/// `WriteScope` and never see `Both` or a rootless project.
+		pub fn write_scope(&self) -> Result<aghub_core::WriteScope> {
 			match (self.scope, self.project_root.as_deref()) {
-				(ResourceScope::GlobalOnly, _) => Ok(None),
-				(ResourceScope::ProjectOnly, Some(root)) => Ok(Some(root)),
-				// Unreachable through `resolve_scope` for every policy that
-				// calls this: they reject `--all`, and a rootless `-p` bails.
-				// (`TRANSFER_SCOPE` lets a rootless `-p` through, and for that
-				// reason `transfer` maps the scope itself instead of calling
-				// here.) That is exactly why it must not fall back to "global".
-				(ResourceScope::ProjectOnly, None)
-				| (ResourceScope::Both, _) => {
-					anyhow::bail!(
+				(ResourceScope::GlobalOnly, _) => {
+					Ok(aghub_core::WriteScope::Global)
+				}
+				(ResourceScope::ProjectOnly, Some(root)) => {
+					Ok(aghub_core::WriteScope::project(root))
+				}
+				(ResourceScope::ProjectOnly, None) => {
+					anyhow::bail!("{NO_PROJECT_ROOT}")
+				}
+				(ResourceScope::Both, _) => anyhow::bail!(
 					"internal: a single-write command resolved '{}' scope, which \
 					 is not one write target — the scope policy table should have \
 					 refused it",
 					self.label()
-				)
-				}
+				),
 			}
 		}
 	}
@@ -1875,10 +1874,7 @@ fn run_for_agent(
 				dry_run,
 				yes,
 				requested_agents: batch.to_vec(),
-				scope,
-				project_root: resolved
-					.project_root()
-					.map(std::path::Path::to_path_buf),
+				scope: resolved.write_scope()?,
 			},
 		)
 		.map(Some),
@@ -2167,10 +2163,7 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 							aghub_core::skills::removal::SkillRemovalTarget::ByName(
 								name.clone(),
 							),
-						scope: resolved.resource_scope(),
-						project_root: resolved
-							.project_root()
-							.map(std::path::Path::to_path_buf),
+						scope: resolved.write_scope()?,
 						agents: agents.to_vec(),
 						dry_run: is_dry_run,
 						all_agents,
@@ -2712,32 +2705,50 @@ mod tests {
 		}
 	}
 
-	/// `write_target` is the ONE answer to "which store does this write?".
+	/// `write_scope` is the ONE answer to "which store does this write?".
 	/// `source`'s `write_scope`, `accept-rename`'s `WriteScope` and
 	/// `transfer`'s `install_scope` each used to close this match with
 	/// `_ => …::Global`, so a scope that got past the policy table became a
-	/// silent write to the GLOBAL lock.
-	///
-	/// `ProjectOnly` with no root is not constructible through `resolve_scope`
-	/// (the guard bails first), so only the `Both` arm is reachable here.
+	/// silent write to the GLOBAL lock. Core's mutation entries take the
+	/// resulting `WriteScope` and no longer reject anything themselves, so
+	/// this is where `Both` is refused.
 	#[test]
-	fn write_target_refuses_a_scope_that_is_not_one_store() {
-		let (out, _) = resolve(GLOBAL, READ_ANY_SCOPE, Some("/p"));
-		assert_eq!(out.unwrap().write_target().unwrap(), None);
-
-		let (out, _) = resolve(PROJECT, READ_ANY_SCOPE, Some("/p"));
+	fn write_scope_resolves_global_and_project() {
+		let (out, _) = resolve(GLOBAL, SINGLE_WRITE_SCOPE, Some("/p"));
 		assert_eq!(
-			out.unwrap().write_target().unwrap(),
-			Some(std::path::Path::new("/p"))
+			out.unwrap().write_scope().unwrap(),
+			aghub_core::WriteScope::Global
+		);
+
+		let (out, _) = resolve(PROJECT, SINGLE_WRITE_SCOPE, Some("/p"));
+		assert_eq!(
+			out.unwrap().write_scope().unwrap(),
+			aghub_core::WriteScope::project(std::path::Path::new("/p"))
 		);
 
 		let (out, _) = resolve(ALL, READ_ANY_SCOPE, Some("/p"));
 		let err = out
 			.unwrap()
-			.write_target()
-			.expect_err("'both' is not a single write target")
+			.write_scope()
+			.expect_err("'both' is not a single write scope")
 			.to_string();
 		assert!(err.contains("not one write target"), "{err}");
+	}
+
+	/// A project scope without a root is refused at the resolver layer, never
+	/// inside a core entry. `TRANSFER_SCOPE` is the one policy whose
+	/// `resolve_scope` lets a rootless `-p` through, so it is the only way to
+	/// obtain such a `Scope` without forging its private fields — and
+	/// `write_scope` must still refuse to turn it into a `WriteScope`.
+	#[test]
+	fn write_scope_refuses_project_scope_without_root() {
+		let (out, _) = resolve(PROJECT, TRANSFER_SCOPE, None);
+		let err = out
+			.expect("transfer lets a rootless -p through the resolver")
+			.write_scope()
+			.expect_err("rootless project must fail")
+			.to_string();
+		assert_eq!(err, NO_PROJECT_ROOT);
 	}
 
 	/// `read_scopes` is the read-side counterpart, and nothing pinned it: a
@@ -2746,15 +2757,14 @@ mod tests {
 	#[test]
 	fn read_scopes_spans_exactly_the_resolved_scopes() {
 		use crate::commands::source::read_scopes;
-		use skill_update::sources::SourceScope;
+		use aghub_core::WriteScope;
 
-		// `SourceScope` has no `PartialEq`; describe it instead.
-		fn describe(scopes: &[SourceScope]) -> Vec<String> {
+		fn describe(scopes: &[WriteScope]) -> Vec<String> {
 			scopes
 				.iter()
 				.map(|s| match s {
-					SourceScope::Global => "global".to_string(),
-					SourceScope::Project { root } => {
+					WriteScope::Global => "global".to_string(),
+					WriteScope::Project { root } => {
 						format!("project:{}", root.display())
 					}
 				})

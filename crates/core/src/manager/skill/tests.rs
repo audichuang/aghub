@@ -3808,7 +3808,7 @@ fn ensure_single_agent_installed_covers_every_branch() {
 #[test]
 fn cli_add_and_fetched_install_produce_identical_master_and_link() {
 	use crate::create_adapter;
-	use crate::models::{AgentType, ResourceScope};
+	use crate::models::AgentType;
 	use crate::skills::install_fetched::{
 		install_fetched_skill_and_lock, FetchedSkillInstallRequest,
 	};
@@ -3851,8 +3851,7 @@ fn cli_add_and_fetched_install_produce_identical_master_and_link() {
 		source: &lock_source,
 		lock_skill_path: "parity-skill/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&fetched_root),
+		scope: crate::WriteScope::project(&fetched_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,

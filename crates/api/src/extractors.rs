@@ -379,9 +379,17 @@ mod tests {
 
 	#[test]
 	fn resolve_write_scope_unknown_scope_returns_invalid_scope() {
-		let err = unwrap_err(resolve_write_scope("unknown", None));
-		assert_eq!(err.status, Status::BadRequest);
-		assert_eq!(err.body.code, skill_update::mutation::INVALID_SCOPE_CODE);
+		// `both` / `all` are read scopes, not write targets: core's mutation
+		// entries take a `WriteScope`, so the resolver is where they stop.
+		for scope in ["unknown", "both", "all"] {
+			let err = unwrap_err(resolve_write_scope(scope, None));
+			assert_eq!(err.status, Status::BadRequest, "{scope}");
+			assert_eq!(
+				err.body.code,
+				skill_update::mutation::INVALID_SCOPE_CODE,
+				"{scope}"
+			);
+		}
 	}
 
 	#[test]
@@ -417,5 +425,15 @@ mod tests {
 		let agents =
 			unwrap_ok(resolve_agent_strings(&["claude", "claude", "grok"]));
 		assert_eq!(agents, vec![AgentType::Claude, AgentType::Grok]);
+	}
+
+	/// `to_write_scope` refuses `all` through `require_writable_scope`, so the
+	/// wire answer is that guard's existing 405 `READ_ONLY_SCOPE`.
+	#[test]
+	fn to_write_scope_rejects_all() {
+		let scope = ResolvedScope::All { project_root: None };
+		let err = unwrap_err(scope.to_write_scope());
+		assert_eq!(err.status, Status::MethodNotAllowed);
+		assert_eq!(err.body.code, "READ_ONLY_SCOPE");
 	}
 }

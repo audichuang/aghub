@@ -192,10 +192,13 @@ with a typed `ResourceNotFound`. Bailing early instead rewrites `--json`'s
 `error.code` to `CLI_ERROR` with nothing else visibly different — pinned by
 `rootless_project_transfer_keeps_resource_not_found_code`. That is also why
 `transfer::install_scope` maps the scope itself rather than calling
-`write_target()`.
+`write_scope()`.
 
-**`Scope::write_target()`** is the ONE answer to "which store does this write?"
-(`Some(root)` = project, `None` = global) and it ERRORS on anything else.
+**`Scope::write_scope()`** is the ONE answer to "which store does this write?"
+(`WriteScope::project(root)` = project, `WriteScope::Global` = global) and it
+ERRORS on anything else. Core's skill mutation entries take that `WriteScope`
+and carry no `Both` / missing-root rejection of their own — this resolver is
+where they are refused.
 `source`'s `write_scope`, `accept-rename`'s `WriteScope` and `transfer`'s
 `install_scope` each used to close that match with `_ => …::Global`, so a scope
 the table let through became a silent write to the GLOBAL lock. Never reopen

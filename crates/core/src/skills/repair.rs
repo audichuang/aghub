@@ -27,6 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::errors::{ConfigError, Result};
+use crate::scope::WriteScope;
 use crate::skills::linker::Linker;
 use crate::skills::shape::{
 	compat_unlink_permitted, ReferrerAction, RefuseReason, RepairPlan,
@@ -137,8 +138,7 @@ fn io_err(context: &str, e: std::io::Error) -> ConfigError {
 /// `Ok(None)` when the scope names no single store (`Both`), matching
 /// [`plan_repair`].
 pub fn repair_skill(
-	scope: crate::models::ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	name: &str,
 	in_lock: bool,
 	dry_run: bool,
@@ -149,16 +149,20 @@ pub fn repair_skill(
 		Some(
 			crate::skills::lock::mutation_guard(
 				"skill repair",
-				scope,
-				project_root,
+				scope.resource_scope(),
+				scope.project_root(),
 			)
 			.map_err(|e| io_err("acquire the mutation lock", e))?,
 		)
 	};
-	let grant_to = crate::skills::shape::readers_of(scope, project_root, name);
+	let grant_to = crate::skills::shape::readers_of(
+		scope.resource_scope(),
+		scope.project_root(),
+		name,
+	);
 	let Some(plan) = crate::skills::shape::plan_repair(
-		scope,
-		project_root,
+		scope.resource_scope(),
+		scope.project_root(),
 		name,
 		in_lock,
 		&grant_to,
@@ -205,8 +209,7 @@ fn not_found_report(plan: &RepairPlan, dry_run: bool) -> RepairReport {
 /// [`RepairOutcome::Failed`] row, so the answer is always a complete receipt.
 /// See docs/history/core-repair-rename.md#repair-batch-loop-lived-in-each-surface
 pub fn repair_all(
-	scope: crate::models::ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	name: Option<&str>,
 	dry_run: bool,
 ) -> Result<Vec<RepairReport>> {
@@ -220,8 +223,8 @@ pub fn repair_all(
 		Some(
 			crate::skills::lock::mutation_guard(
 				"skill repair (bulk)",
-				scope,
-				project_root,
+				scope.resource_scope(),
+				scope.project_root(),
 			)
 			.map_err(|e| io_err("acquire the mutation lock", e))?,
 		)
@@ -230,16 +233,16 @@ pub fn repair_all(
 	// Fail CLOSED: an unreadable lock must not read as "nothing to repair".
 	let mut in_lock: std::collections::BTreeSet<String> =
 		std::collections::BTreeSet::new();
-	if matches!(scope, crate::models::ResourceScope::GlobalOnly) {
-		in_lock.extend(
-			skill::lock::read_global_lock_checked()
-				.map_err(|e| io_err("read the global skill lock", e))?
-				.skills
-				.into_keys(),
-		);
-	}
-	if matches!(scope, crate::models::ResourceScope::ProjectOnly) {
-		if let Some(root) = project_root {
+	match scope {
+		WriteScope::Global => {
+			in_lock.extend(
+				skill::lock::read_global_lock_checked()
+					.map_err(|e| io_err("read the global skill lock", e))?
+					.skills
+					.into_keys(),
+			);
+		}
+		WriteScope::Project { root } => {
 			in_lock.extend(
 				skill::lock::local::read_local_lock_checked(Some(root))
 					.map_err(|e| io_err("read the project skill lock", e))?
@@ -259,7 +262,6 @@ pub fn repair_all(
 	for skill_name in &worklist {
 		match repair_skill(
 			scope,
-			project_root,
 			skill_name,
 			in_lock.contains(skill_name),
 			dry_run,
@@ -723,8 +725,7 @@ mod tests {
 		let (_tmp, root) = fixture();
 		for dry_run in [true, false] {
 			let report = repair_skill(
-				ResourceScope::ProjectOnly,
-				Some(&root),
+				&WriteScope::project(&root),
 				"no-such-skill",
 				false,
 				dry_run,
@@ -745,8 +746,7 @@ mod tests {
 		assert!(!root.join(".claude/skills/no-such-skill").exists());
 
 		let locked = repair_skill(
-			ResourceScope::ProjectOnly,
-			Some(&root),
+			&WriteScope::project(&root),
 			"locked-gone",
 			true,
 			true,
@@ -762,15 +762,10 @@ mod tests {
 	fn a_skill_held_only_by_a_compat_dir_is_not_reported_as_not_found() {
 		let (_tmp, root) = fixture();
 		write_skill(&root.join(".clinerules/skills/foo"), "foo", "compat");
-		let report = repair_skill(
-			ResourceScope::ProjectOnly,
-			Some(&root),
-			"foo",
-			false,
-			true,
-		)
-		.unwrap()
-		.unwrap();
+		let report =
+			repair_skill(&WriteScope::project(&root), "foo", false, true)
+				.unwrap()
+				.unwrap();
 		if let RepairOutcome::Refused { reason, .. } = &report.outcome {
 			assert!(!reason.contains("no skill named"), "{reason}");
 		}
@@ -784,27 +779,17 @@ mod tests {
 		let shared = root.join(".agents/skills/demo");
 		fs::create_dir_all(shared.parent().unwrap()).unwrap();
 		Linker::symlink(&master, &shared).unwrap();
-		let preview = repair_skill(
-			ResourceScope::ProjectOnly,
-			Some(&root),
-			"demo",
-			true,
-			true,
-		)
-		.unwrap()
-		.unwrap();
+		let preview =
+			repair_skill(&WriteScope::project(&root), "demo", true, true)
+				.unwrap()
+				.unwrap();
 		assert_eq!(preview.outcome, RepairOutcome::Relinked);
 		assert!(preview.referrers.contains(&root.join(".codex/skills/demo")));
 		assert!(!root.join(".codex/skills/demo").exists());
-		let committed = repair_skill(
-			ResourceScope::ProjectOnly,
-			Some(&root),
-			"demo",
-			true,
-			false,
-		)
-		.unwrap()
-		.unwrap();
+		let committed =
+			repair_skill(&WriteScope::project(&root), "demo", true, false)
+				.unwrap()
+				.unwrap();
 		assert_eq!(committed.outcome, RepairOutcome::Relinked);
 		assert_eq!(
 			fs::canonicalize(root.join(".codex/skills/demo")).unwrap(),
@@ -1552,8 +1537,7 @@ mod tests {
 		fs::set_permissions(&beta, fs::Permissions::from_mode(0o000)).unwrap();
 
 		let reports =
-			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
-				.unwrap();
+			repair_all(&WriteScope::project(&root), None, false).unwrap();
 
 		fs::set_permissions(&beta, fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -1615,8 +1599,7 @@ mod tests {
 		fs::set_permissions(&slot, fs::Permissions::from_mode(0o000)).unwrap();
 
 		let first =
-			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
-				.unwrap();
+			repair_all(&WriteScope::project(&root), None, false).unwrap();
 		assert!(matches!(first[0].outcome, RepairOutcome::Failed { .. }));
 		assert!(
 			!root.join(".aghub").join(name).exists(),
@@ -1628,8 +1611,7 @@ mod tests {
 		// simply migrate.
 		fs::set_permissions(&slot, fs::Permissions::from_mode(0o755)).unwrap();
 		let second =
-			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
-				.unwrap();
+			repair_all(&WriteScope::project(&root), None, false).unwrap();
 		assert_eq!(
 			second[0].outcome,
 			RepairOutcome::Migrated,
@@ -1650,13 +1632,11 @@ mod tests {
 		seed_project_lock(&root, &["alpha", "beta"]);
 
 		let first =
-			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
-				.unwrap();
+			repair_all(&WriteScope::project(&root), None, false).unwrap();
 		assert_eq!(first.len(), 2);
 
 		let second =
-			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
-				.unwrap();
+			repair_all(&WriteScope::project(&root), None, false).unwrap();
 		assert!(
 			second.is_empty(),
 			"a conformant bulk re-run must say nothing, got {second:?}"
@@ -1753,13 +1733,7 @@ mod tests {
 		let global_master = fake_home.join(".aghub").join(name);
 		assert!(!global_master.exists());
 
-		let reports = repair_all(
-			ResourceScope::GlobalOnly,
-			Some(&project_root),
-			None,
-			false,
-		)
-		.unwrap();
+		let reports = repair_all(&WriteScope::Global, None, false).unwrap();
 
 		assert!(
 			!global_master.exists(),
@@ -1779,13 +1753,8 @@ mod tests {
 			 lock entry, got {reports:?}"
 		);
 
-		let named_reports = repair_all(
-			ResourceScope::GlobalOnly,
-			Some(&project_root),
-			Some(name),
-			false,
-		)
-		.unwrap();
+		let named_reports =
+			repair_all(&WriteScope::Global, Some(name), false).unwrap();
 
 		assert!(
 			!global_master.exists(),

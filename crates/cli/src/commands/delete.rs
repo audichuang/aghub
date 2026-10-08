@@ -13,8 +13,7 @@ pub struct DeleteOptions {
 	pub yes: bool,
 	/// Every agent this command deletes from; always contains the manager's.
 	pub requested_agents: Vec<aghub_core::models::AgentType>,
-	pub scope: aghub_core::models::ResourceScope,
-	pub project_root: Option<std::path::PathBuf>,
+	pub scope: aghub_core::WriteScope,
 }
 
 /// Delete a resource.
@@ -47,7 +46,6 @@ pub fn execute(
 			let request = SkillRemovalRequest {
 				target: SkillRemovalTarget::ByName(name.clone()),
 				scope: options.scope,
-				project_root: options.project_root,
 				agents: options.requested_agents.clone(),
 				dry_run: is_dry_run,
 				all_agents: options.all_agents,

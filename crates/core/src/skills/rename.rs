@@ -441,14 +441,12 @@ pub fn accept_rename(
 			source: &install_source,
 			lock_skill_path: fetched.source.skill_path.clone(),
 			ref_commit: Some(fetched.oid.to_string()),
-			scope: resource_scope,
-			project_root,
+			scope: req.scope.clone(),
 			target_agents: &target_agents,
 			expected_name: Some(req.new_name),
-			target: if matches!(resource_scope, ResourceScope::ProjectOnly) {
-				LinkTarget::Relative
-			} else {
-				LinkTarget::Absolute
+			target: match req.scope {
+				WriteScope::Project { .. } => LinkTarget::Relative,
+				WriteScope::Global => LinkTarget::Absolute,
 			},
 		};
 	let install_report =

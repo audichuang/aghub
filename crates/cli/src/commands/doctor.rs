@@ -18,10 +18,10 @@ use aghub_core::{
 		},
 		shape::{classify_shape, SkillShape, ViolationKind},
 	},
+	WriteScope,
 };
 use anyhow::{anyhow, Result};
 use serde::Serialize;
-use skill_update::sources::SourceScope;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -649,12 +649,12 @@ pub fn execute_with_options(
 	let mut rows: Vec<DoctorRow> = Vec::new();
 	for scope in &scopes {
 		let (root, resource_scope, locked) = match scope {
-			SourceScope::Global => (
+			WriteScope::Global => (
 				None,
 				ResourceScope::GlobalOnly,
 				global_locked(locks.global.take().unwrap_or_default()),
 			),
-			SourceScope::Project { root } => (
+			WriteScope::Project { root } => (
 				Some(root.as_path()),
 				ResourceScope::ProjectOnly,
 				project_locked(locks.project.take().unwrap_or_default()),

@@ -32,41 +32,28 @@ pub struct LocalSkillInstallReport {
 
 fn write_local_install_lock(
 	skill_name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	source: &skill::InstallLockSource,
 	source_dir: &Path,
 ) -> Result<(), ConfigError> {
 	match scope {
-		ResourceScope::GlobalOnly => skill::write_global_install_lock(
+		WriteScope::Global => skill::write_global_install_lock(
 			skill_name, source, None, source_dir, None,
 		)
 		.map(|_| ())
 		.map_err(ConfigError::Io),
-		ResourceScope::ProjectOnly => {
-			let cwd = project_root.ok_or_else(|| {
-				ConfigError::InvalidConfig(
-					"project root is required for project skill installs"
-						.to_string(),
-				)
-			})?;
-			skill::write_project_install_lock(
-				skill_name, source, None, source_dir, cwd, None,
-			)
-			.map(|_| ())
-			.map_err(ConfigError::Io)
-		}
-		ResourceScope::Both => Err(ConfigError::InvalidConfig(
-			"Combined skill scope is not supported for installs".to_string(),
-		)),
+		WriteScope::Project { root } => skill::write_project_install_lock(
+			skill_name, source, None, source_dir, root, None,
+		)
+		.map(|_| ())
+		.map_err(ConfigError::Io),
 	}
 }
 
 fn all_targets_already_linked(
 	canonical: &Path,
 	safe_name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	target_agents: &[AgentType],
 ) -> bool {
 	if target_agents.is_empty() || !canonical.exists() {
@@ -79,8 +66,8 @@ fn all_targets_already_linked(
 	for &agent in target_agents {
 		let link_need = crate::skills::linker::agent_link_need(
 			agent.descriptor(),
-			scope,
-			project_root,
+			scope.resource_scope(),
+			scope.project_root(),
 		);
 		match link_need {
 			crate::skills::linker::LinkNeed::NeedsLink { referrer_dir } => {
@@ -147,8 +134,7 @@ pub fn install_local_skill(
 			all_targets_already_linked(
 				c,
 				&safe_name,
-				resource_scope,
-				project_root,
+				&req.scope,
 				req.target_agents,
 			)
 		})
@@ -157,8 +143,7 @@ pub fn install_local_skill(
 	let adoption = crate::skills::adoption::adoption_guard(
 		effective_name,
 		&source_root,
-		resource_scope,
-		project_root,
+		&req.scope,
 		&lock_source,
 		is_already_installed,
 	)?;
@@ -308,8 +293,7 @@ pub fn install_local_skill(
 		};
 		if let Err(error) = write_local_install_lock(
 			effective_name,
-			resource_scope,
-			project_root,
+			&req.scope,
 			&lock_source,
 			lock_source_dir,
 		) {

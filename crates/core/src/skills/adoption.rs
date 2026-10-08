@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::errors::ConfigError;
-use crate::models::ResourceScope;
+use crate::scope::WriteScope;
 use crate::skills::linker::{master_store_dir, Linker};
 use skill::sanitize::sanitize_name;
 
@@ -17,11 +17,10 @@ pub struct LockedSourceOwner {
 
 pub fn skill_lock_source(
 	skill_name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 ) -> Option<LockedSourceOwner> {
 	match scope {
-		ResourceScope::GlobalOnly => {
+		WriteScope::Global => {
 			skill::lock::global::get_skill_from_lock(skill_name).map(|entry| {
 				LockedSourceOwner {
 					source: entry.source,
@@ -33,7 +32,7 @@ pub fn skill_lock_source(
 				}
 			})
 		}
-		ResourceScope::ProjectOnly => project_root.and_then(|root| {
+		WriteScope::Project { root } => {
 			skill::lock::local::read_local_lock(Some(root))
 				.skills
 				.get(skill_name)
@@ -45,8 +44,7 @@ pub fn skill_lock_source(
 					skill_path: entry.skill_path.clone(),
 					ref_commit: entry.ref_commit.clone(),
 				})
-		}),
-		ResourceScope::Both => None,
+		}
 	}
 }
 
@@ -185,8 +183,7 @@ pub struct AdoptionCheck {
 pub fn adoption_guard(
 	name: &str,
 	source_root: &Path,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	source: &skill::InstallLockSource,
 	is_already_installed: bool,
 ) -> Result<AdoptionCheck, ConfigError> {
@@ -195,14 +192,10 @@ pub fn adoption_guard(
 		.map_err(|e| {
 			ConfigError::InvalidConfig(format!("Failed to hash skill: {e}"))
 		})?;
-	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
-		project_root
-	} else {
-		None
-	};
+	let canonical_root = scope.project_root();
 	let canonical = master_store_dir(canonical_root)
 		.map(|skills_dir| skills_dir.join(&safe_name));
-	let existing_owner = skill_lock_source(name, scope, project_root);
+	let existing_owner = skill_lock_source(name, scope);
 	if let Some(existing_owner) = existing_owner.as_ref() {
 		let is_regranting_canonical = source.source_type == "local"
 			&& canonical

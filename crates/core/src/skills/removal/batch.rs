@@ -16,6 +16,7 @@ use crate::batch::{Backing, RemovalCredits};
 use crate::errors::{ConfigError, Result};
 use crate::models::{AgentType, ResourceScope};
 use crate::registry;
+use crate::scope::WriteScope;
 use crate::ConfigManager;
 
 /// Target for a batch skill removal.
@@ -29,8 +30,7 @@ pub enum SkillRemovalTarget {
 #[derive(Debug, Clone)]
 pub struct SkillRemovalRequest {
 	pub target: SkillRemovalTarget,
-	pub scope: ResourceScope,
-	pub project_root: Option<PathBuf>,
+	pub scope: WriteScope,
 	pub agents: Vec<AgentType>,
 	pub dry_run: bool,
 	pub all_agents: bool,
@@ -841,22 +841,14 @@ fn remove_skill_by_path(
 		));
 	}
 
-	if request.scope == ResourceScope::ProjectOnly
-		&& request.project_root.is_none()
-	{
-		return Err(ConfigError::InvalidConfig(
-			"project_root is required when scope is 'project'".to_string(),
-		));
-	}
+	let scope = request.scope.resource_scope();
+	let project_root = request.scope.project_root();
 
 	let target_agents = request.agents.clone();
 	let agent_dirs: Vec<PathBuf> = target_agents
 		.iter()
 		.flat_map(|agent| {
-			crate::create_adapter(*agent).get_skills_paths(
-				request.project_root.as_deref(),
-				request.scope,
-			)
+			crate::create_adapter(*agent).get_skills_paths(project_root, scope)
 		})
 		.collect();
 
@@ -903,8 +895,7 @@ fn remove_skill_by_path(
 		});
 	}
 
-	let roots =
-		allowed_skill_roots(&agent_dirs, request.project_root.as_deref());
+	let roots = allowed_skill_roots(&agent_dirs, project_root);
 
 	if assert_strictly_contained(&skill_dir, &roots).is_none() {
 		return Err(ConfigError::InvalidConfig(
@@ -920,8 +911,8 @@ fn remove_skill_by_path(
 	}
 
 	for agent in &target_agents {
-		let paths = crate::create_adapter(*agent)
-			.get_skills_paths(request.project_root.as_deref(), request.scope);
+		let paths =
+			crate::create_adapter(*agent).get_skills_paths(project_root, scope);
 		if !paths
 			.iter()
 			.any(|sp| skill_dir.starts_with(sp) || &skill_dir == sp)
@@ -940,8 +931,8 @@ fn remove_skill_by_path(
 		Some(
 			crate::skills::lock::mutation_guard(
 				"delete skill by path",
-				request.scope,
-				request.project_root.as_deref(),
+				scope,
+				project_root,
 			)
 			.map_err(ConfigError::Io)?,
 		)
@@ -962,11 +953,7 @@ fn remove_skill_by_path(
 
 	let first_agent = target_agents[0];
 
-	let mut manager = create_manager(
-		first_agent,
-		request.scope,
-		request.project_root.as_deref(),
-	);
+	let mut manager = create_manager(first_agent, scope, project_root);
 	if let Err(error) = manager.load() {
 		return Err(ConfigError::InvalidConfig(format!(
 			"Failed to load agent skills: {error}"
@@ -981,15 +968,9 @@ fn remove_skill_by_path(
 		|| path_is_link;
 
 	let outcome = if !canonical_layout {
-		let all_in_scope = agent_skill_dirs_in_scope(
-			request.scope,
-			request.project_root.as_deref(),
-		);
-		let unmanaged = unmanaged_skill_dirs(
-			&all_in_scope,
-			request.project_root.as_deref(),
-			&target_agents,
-		);
+		let all_in_scope = agent_skill_dirs_in_scope(scope, project_root);
+		let unmanaged =
+			unmanaged_skill_dirs(&all_in_scope, project_root, &target_agents);
 		let safe = skill::sanitize::sanitize_name(&skill_name);
 		let mut skill = manager
 			.get_skill(&skill_name)
@@ -1003,14 +984,14 @@ fn remove_skill_by_path(
 			&all_in_scope,
 			&unmanaged,
 			&roots,
-			request.project_root.as_deref(),
-			request.scope,
+			project_root,
+			scope,
 			false,
 			&target_agents,
 		);
 
 		let read_dirs = crate::create_adapter(first_agent)
-			.get_skills_paths(request.project_root.as_deref(), request.scope);
+			.get_skills_paths(project_root, scope);
 
 		let verdict = evaluate_removal_verdict(
 			&mut plan,
@@ -1018,8 +999,8 @@ fn remove_skill_by_path(
 			&read_dirs,
 			&[],
 			&all_in_scope,
-			request.scope,
-			request.project_root.as_deref(),
+			scope,
+			project_root,
 			false,
 			&target_agents,
 		);
@@ -1036,8 +1017,8 @@ fn remove_skill_by_path(
 					reason,
 					Some(kind),
 					path.as_deref(),
-					request.scope,
-					request.project_root.as_deref(),
+					scope,
+					project_root,
 					&target_agents,
 				);
 				return Err(ConfigError::unsupported_operation_with_targets(
@@ -1053,16 +1034,16 @@ fn remove_skill_by_path(
 			RemovalOutcome::preview(
 				plan,
 				verdict,
-				request.scope,
-				request.project_root.as_deref(),
+				scope,
+				project_root,
 				&skill_name,
 			)?
 		} else {
 			RemovalOutcome::commit(
 				plan,
 				&roots,
-				request.scope,
-				request.project_root.as_deref(),
+				scope,
+				project_root,
 				&skill_name,
 			)?
 		}
@@ -1101,16 +1082,12 @@ fn remove_skill_by_path(
 		}
 		find_skill_holders_crediting(
 			&skill_name,
-			request.scope,
-			request.project_root.as_deref(),
+			scope,
+			project_root,
 			&planned_deletions,
 		)
 	} else {
-		find_skill_holders(
-			&skill_name,
-			request.scope,
-			request.project_root.as_deref(),
-		)
+		find_skill_holders(&skill_name, scope, project_root)
 	};
 
 	Ok(SkillRemovalResponse {
@@ -1127,12 +1104,15 @@ fn remove_skill_by_name(
 	request: &SkillRemovalRequest,
 	name: &str,
 ) -> Result<SkillRemovalResponse> {
+	let scope = request.scope.resource_scope();
+	let project_root = request.scope.project_root();
+
 	let target_agents = request.agents.clone();
 
 	let (holders, unreadable) = if request.keeps_master {
 		(Vec::new(), Vec::new())
 	} else {
-		find_skill_holders(name, request.scope, request.project_root.as_deref())
+		find_skill_holders(name, scope, project_root)
 	};
 
 	let target_agents: Vec<AgentType> = if request.agents.is_empty()
@@ -1156,8 +1136,8 @@ fn remove_skill_by_name(
 		name,
 		is_exhaustive,
 		&unreadable,
-		request.scope,
-		request.project_root.as_deref(),
+		scope,
+		project_root,
 	)?;
 
 	if target_agents.is_empty() {
@@ -1171,11 +1151,8 @@ fn remove_skill_by_name(
 		});
 	}
 
-	let execution_order = shared_first_order(
-		&target_agents,
-		request.scope,
-		request.project_root.as_deref(),
-	);
+	let execution_order =
+		shared_first_order(&target_agents, scope, project_root);
 
 	// Whole-batch dry-run preflight
 	// Prior-row credit applies only to non-exhaustive runs; an exhaustive run
@@ -1193,8 +1170,8 @@ fn remove_skill_by_name(
 
 	for &agent in &execution_order {
 		let descriptor = registry::get(agent);
-		if !descriptor.supports_skill_scope(request.scope) {
-			let scope_word = scope_to_word(request.scope);
+		if !descriptor.supports_skill_scope(scope) {
+			let scope_word = scope_to_word(scope);
 			let reason = format!("no {} skill config", scope_word);
 			preflight_failures.push((
 				agent,
@@ -1207,11 +1184,7 @@ fn remove_skill_by_name(
 			continue;
 		}
 
-		let mut manager = create_manager(
-			agent,
-			request.scope,
-			request.project_root.as_deref(),
-		);
+		let mut manager = create_manager(agent, scope, project_root);
 		if let Err(e) = manager.load() {
 			preflight_load_failures.push((agent, Arc::new(e)));
 			continue;
@@ -1275,8 +1248,8 @@ fn remove_skill_by_name(
 						reason,
 						Some(kind),
 						path.as_deref(),
-						request.scope,
-						request.project_root.as_deref(),
+						scope,
+						project_root,
 						&request.agents,
 					)
 					.remove(0);
@@ -1321,13 +1294,10 @@ fn remove_skill_by_name(
 
 	// Preview (dry-run): does not acquire write lock, returns verdicts.
 	if request.dry_run {
-		let master_p = crate::skills::shape::master_path(
-			request.scope,
-			request.project_root.as_deref(),
-			name,
-		);
+		let master_p =
+			crate::skills::shape::master_path(scope, project_root, name);
 		let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
-		let scope_str = scope_to_word(request.scope);
+		let scope_str = scope_to_word(scope);
 		let rows: Vec<SkillRemovalRow> = target_agents
 			.iter()
 			.map(|agent| {
@@ -1363,8 +1333,8 @@ fn remove_skill_by_name(
 				}
 			}
 			crate::skills::prune::preview_prune_for_removal(
-				request.scope,
-				request.project_root.as_deref(),
+				scope,
+				project_root,
 				&union_paths,
 			)
 		};
@@ -1378,8 +1348,8 @@ fn remove_skill_by_name(
 		}
 		let (keepers, _) = find_skill_holders_crediting(
 			name,
-			request.scope,
-			request.project_root.as_deref(),
+			scope,
+			project_root,
 			&planned_deletions,
 		);
 		return Ok(SkillRemovalResponse {
@@ -1421,7 +1391,7 @@ fn remove_skill_by_name(
 					}
 				})
 				.collect();
-		let scope_str = scope_to_word(request.scope);
+		let scope_str = scope_to_word(scope);
 		let failures_str = preflight_failures
 			.into_iter()
 			.map(|(agent, err)| {
@@ -1453,22 +1423,18 @@ fn remove_skill_by_name(
 	// Commit re-plans inside the mutation write lock
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"remove skill batch",
-		request.scope,
-		request.project_root.as_deref(),
+		scope,
+		project_root,
 	)
 	.map_err(ConfigError::Io)?;
 
-	let master_p = crate::skills::shape::master_path(
-		request.scope,
-		request.project_root.as_deref(),
-		name,
-	);
+	let master_p = crate::skills::shape::master_path(scope, project_root, name);
 	let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
 
 	let (holders, unreadable) = if request.keeps_master {
 		(Vec::new(), Vec::new())
 	} else {
-		find_skill_holders(name, request.scope, request.project_root.as_deref())
+		find_skill_holders(name, scope, project_root)
 	};
 
 	let in_lock_target_agents: Vec<AgentType> = if request.agents.is_empty()
@@ -1483,11 +1449,8 @@ fn remove_skill_by_name(
 		target_agents
 	};
 
-	let execution_order = shared_first_order(
-		&in_lock_target_agents,
-		request.scope,
-		request.project_root.as_deref(),
-	);
+	let execution_order =
+		shared_first_order(&in_lock_target_agents, scope, project_root);
 
 	let is_exhaustive = !request.keeps_master
 		&& (request.all_agents
@@ -1500,17 +1463,13 @@ fn remove_skill_by_name(
 		name,
 		is_exhaustive,
 		&unreadable,
-		request.scope,
-		request.project_root.as_deref(),
+		scope,
+		project_root,
 	)?;
 
 	let mut credits =
 		RemovalCredits::new(in_lock_target_agents.clone(), |agent| {
-			let mut mgr = create_manager(
-				*agent,
-				request.scope,
-				request.project_root.as_deref(),
-			);
+			let mut mgr = create_manager(*agent, scope, project_root);
 			if mgr.load().is_err() {
 				return None;
 			}
@@ -1524,11 +1483,7 @@ fn remove_skill_by_name(
 	let mut all_pruned_keys: Vec<String> = Vec::new();
 
 	for &agent in &execution_order {
-		let mut manager = create_manager(
-			agent,
-			request.scope,
-			request.project_root.as_deref(),
-		);
+		let mut manager = create_manager(agent, scope, project_root);
 		if let Err(e) = manager.load() {
 			execution_results.push(SkillRemovalRow::error_row(agent, e, true));
 			continue;
@@ -1676,10 +1631,8 @@ fn remove_skill_by_name(
 					matches!(**err, ConfigError::ResourceNotFound { .. })
 				})
 		}) {
-		batch_prune = crate::skills::prune::prune_lock_for_scope(
-			request.scope,
-			request.project_root.as_deref(),
-		);
+		batch_prune =
+			crate::skills::prune::prune_lock_for_scope(scope, project_root);
 	}
 
 	let master_reclaimed = is_exhaustive
@@ -1688,11 +1641,7 @@ fn remove_skill_by_name(
 		&& execution_results
 			.iter()
 			.all(|r| r.verdict != Verdict::Partial);
-	let (keepers, _) = find_skill_holders(
-		name,
-		request.scope,
-		request.project_root.as_deref(),
-	);
+	let (keepers, _) = find_skill_holders(name, scope, project_root);
 
 	Ok(SkillRemovalResponse {
 		rows,

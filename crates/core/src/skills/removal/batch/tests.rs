@@ -3,6 +3,7 @@ use crate::models::{AgentType, ResourceScope};
 use crate::skills::prune::test_lock::env_lock;
 #[cfg(unix)]
 use crate::skills::removal;
+use crate::WriteScope;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -159,8 +160,7 @@ fn test_removal_ordering_independence() {
 		setup_shared_fixture(&root_a, "notebooklm");
 		let req_a = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root_a.clone()),
+			scope: WriteScope::project(&root_a),
 			agents: order_shared_first.clone(),
 			dry_run: false,
 			all_agents: false,
@@ -180,8 +180,7 @@ fn test_removal_ordering_independence() {
 		setup_shared_fixture(&root_b, "notebooklm");
 		let req_b = SkillRemovalRequest {
 			target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(root_b.clone()),
+			scope: WriteScope::project(&root_b),
 			agents: order_private_first.clone(),
 			dry_run: false,
 			all_agents: false,
@@ -274,8 +273,7 @@ fn test_prior_row_credit_turns_refused_into_removed() {
 
 	let req_without_credit = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::OpenCode],
 		dry_run: true,
 		all_agents: false,
@@ -292,8 +290,7 @@ fn test_prior_row_credit_turns_refused_into_removed() {
 
 	let req_with_credit = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::OpenCode],
 		dry_run: true,
 		all_agents: false,
@@ -330,8 +327,7 @@ fn test_internal_accumulation_credits_later_row() {
 	// When asked alone, OpenCode (private reader) is Refused because .agents/skills/notebooklm still exists.
 	let req_alone = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::OpenCode],
 		dry_run: true,
 		all_agents: false,
@@ -351,8 +347,7 @@ fn test_internal_accumulation_credits_later_row() {
 	// without caller-supplied prior_removed_paths.
 	let req_batch = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Amp, AgentType::OpenCode],
 		dry_run: true,
 		all_agents: false,
@@ -397,8 +392,7 @@ fn test_whole_batch_preflight_rejection_writes_nothing() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude, AgentType::OpenCode],
 		dry_run: false,
 		all_agents: false,
@@ -452,8 +446,7 @@ fn test_disabled_agent_removal_behavior() {
 
 	let req_unnamed = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -472,8 +465,7 @@ fn test_disabled_agent_removal_behavior() {
 	// Its Referrer AND the Master must stay.
 	let req_all_disabled = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: Vec::new(),
 		dry_run: false,
 		all_agents: true,
@@ -513,8 +505,7 @@ fn test_disabled_agent_removal_behavior() {
 
 	let req_named = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::OpenCode],
 		dry_run: false,
 		all_agents: false,
@@ -535,8 +526,7 @@ fn test_disabled_agent_removal_behavior() {
 
 	let req_all_enabled = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: Vec::new(),
 		dry_run: false,
 		all_agents: true,
@@ -571,8 +561,7 @@ fn test_master_gc_and_prune_failure_reported_independently() {
 
 	let req1 = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -594,8 +583,7 @@ fn test_master_gc_and_prune_failure_reported_independently() {
 
 	let req2 = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Cursor],
 		dry_run: false,
 		all_agents: false,
@@ -648,8 +636,7 @@ fn test_preview_does_not_take_write_lock() {
 
 	let req_preview = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::OpenCode],
 		dry_run: true,
 		all_agents: false,
@@ -677,8 +664,7 @@ fn test_preview_does_not_take_write_lock() {
 
 	let req_commit = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -725,8 +711,7 @@ fn test_commit_follows_replan_after_disk_state_changes() {
 
 	let req_commit = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -818,8 +803,7 @@ fn test_in_lock_replan_refuses_when_holder_becomes_unreadable() {
 
 	let req_commit = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("mover".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Codex],
 		dry_run: false,
 		all_agents: true,
@@ -882,8 +866,7 @@ fn test_dry_run_reports_preflight_failure_in_row_error() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::JetBrainsAi],
 		dry_run: true,
 		all_agents: false,
@@ -926,8 +909,7 @@ fn test_commit_mode_ignores_prior_removed_paths() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::OpenCode],
 		dry_run: false,
 		all_agents: false,
@@ -961,8 +943,7 @@ fn test_keeps_master_skips_unreadable_holder_scan_refusal() {
 	// With keeps_master: false, it would be exhaustive and fail because Windsurf is unreadable.
 	let req_false = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("mover".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Codex, AgentType::Windsurf],
 		dry_run: true,
 		all_agents: false,
@@ -975,8 +956,7 @@ fn test_keeps_master_skips_unreadable_holder_scan_refusal() {
 	// With keeps_master: true, scan is skipped, so it does NOT fail wholesale.
 	let req_true = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("mover".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Codex, AgentType::Windsurf],
 		dry_run: true,
 		all_agents: false,
@@ -1022,8 +1002,7 @@ fn test_in_lock_replan_holder_appearing_with_all_agents() {
 
 	let req_commit = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: Vec::new(),
 		dry_run: false,
 		all_agents: true,
@@ -1252,8 +1231,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 	// Master is NOT reclaimed (nothing written), but would_reclaim_master is reported in batch view.
 	let req_preview = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("reclaim-test".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude, AgentType::Cursor],
 		dry_run: true,
 		all_agents: false,
@@ -1276,8 +1254,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 	// Master survives because Claude still holds it.
 	let req_non_exhaustive = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("reclaim-test".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Cursor],
 		dry_run: false,
 		all_agents: false,
@@ -1304,8 +1281,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 	// Master is reclaimed on disk, master_reclaimed is true.
 	let req_exhaustive = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("reclaim-test".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -1363,8 +1339,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 	// 1. Without all_agents: orphan master must be kept
 	let req_without = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName(name.to_string()),
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
+		scope: WriteScope::Global,
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -1382,8 +1357,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 	// 2. Preview with all_agents: orphan master must be planned for removal
 	let req_preview = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName(name.to_string()),
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
+		scope: WriteScope::Global,
 		agents: vec![AgentType::Claude],
 		dry_run: true,
 		all_agents: true,
@@ -1406,8 +1380,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 	// 3. Commit with all_agents: orphan master must be reclaimed
 	let req_with = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName(name.to_string()),
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
+		scope: WriteScope::Global,
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: true,
@@ -1516,8 +1489,7 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 	// Cursor and OpenCode both read .agents/skills in project scope.
 	let req_name = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("shared".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Cursor],
 		dry_run: true,
 		all_agents: false,
@@ -1529,8 +1501,7 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 
 	let req_path = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(slot.join("SKILL.md")),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Cursor],
 		dry_run: true,
 		all_agents: false,
@@ -1600,8 +1571,7 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 
 	let req_name_ext = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("linked".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Codex],
 		dry_run: true,
 		all_agents: false,
@@ -1613,8 +1583,7 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 
 	let req_path_ext = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(copy.join("SKILL.md")),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Codex],
 		dry_run: true,
 		all_agents: false,
@@ -1669,8 +1638,7 @@ fn test_by_path_refuses_dir_outside_allowed_roots() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(outside.join("SKILL.md")),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -1709,8 +1677,7 @@ fn test_by_path_removes_contained_dir() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(foo.join("SKILL.md")),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -1744,8 +1711,7 @@ fn test_by_path_repeated_delete_returns_absent_outcome() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(foo.join("SKILL.md")),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -1810,8 +1776,7 @@ fn test_by_path_unlinks_junction_keeps_master() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(claude_link.join("SKILL.md")),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -1851,8 +1816,7 @@ fn test_by_path_refuses_dotdot_escape() {
 		target: SkillRemovalTarget::ByPath(
 			skills.join("../../../outside/foo/SKILL.md"),
 		),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -1893,8 +1857,7 @@ fn test_by_path_refuses_skills_root_itself() {
 
 	let mut req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(skills.clone()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: true,
 		all_agents: false,
@@ -1950,8 +1913,7 @@ fn test_by_path_refuses_plugin_owned_skill_leaving_disk_unchanged() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(plugin_skill.join("SKILL.md")),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -1991,8 +1953,7 @@ fn test_by_name_shared_refusal_excludes_all_requested_agents_from_readers() {
 	// Request by-name delete for both managed agents (Cursor and OpenCode)
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("shared-skill".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Cursor, AgentType::OpenCode],
 		dry_run: false,
 		all_agents: false,
@@ -2033,8 +1994,7 @@ fn test_lock_only_skill_removal_prune_preview_and_commit_parity() {
 	// 1. Preview: lock has 'orphan-skill', nothing on disk.
 	let preview_req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("orphan-skill".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: true,
 		all_agents: false,
@@ -2071,8 +2031,7 @@ fn test_lock_only_skill_removal_prune_preview_and_commit_parity() {
 	// 2. Commit: execute removal on the same lock-only skill.
 	let commit_req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("orphan-skill".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude],
 		dry_run: false,
 		all_agents: false,
@@ -2129,8 +2088,7 @@ fn test_by_name_multi_agent_removed_and_kept_folds_to_partial() {
 
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName(name.to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(root.clone()),
+		scope: WriteScope::project(&root),
 		agents: vec![AgentType::Claude, AgentType::Cursor],
 		dry_run: false,
 		all_agents: false,

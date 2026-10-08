@@ -4,7 +4,7 @@ use crate::{
 	errors::{ConfigError, Result},
 	manager::{sub_agent::same_sub_agent_content, ConfigManager},
 	models::{AgentType, McpServer, ResourceScope, Skill, SubAgent},
-	registry,
+	registry, WriteScope,
 };
 use log::{info, warn};
 use std::collections::HashSet;
@@ -1906,6 +1906,13 @@ fn plan_reconcile_skill(
 	// Output rows follow request order; the entry sorts only internally.
 	// See docs/history/core-transfer.md#reconcile-delete-rows-preserve-request-order
 
+	let write_scope = match source.scope {
+		InstallScope::Global => WriteScope::Global,
+		InstallScope::Project => {
+			let root = source.project_root.clone().unwrap_or_default();
+			WriteScope::project(root)
+		}
+	};
 	let scope = match source.scope {
 		InstallScope::Global => ResourceScope::GlobalOnly,
 		InstallScope::Project => ResourceScope::ProjectOnly,
@@ -1917,8 +1924,7 @@ fn plan_reconcile_skill(
 			target: crate::skills::removal::SkillRemovalTarget::ByName(
 				skill.name.clone(),
 			),
-			scope,
-			project_root: source.project_root.clone(),
+			scope: write_scope,
 			agents: removed.to_vec(),
 			dry_run: true,
 			all_agents: false,
@@ -2354,13 +2360,22 @@ pub fn reconcile_skill(
 							})
 							.map(|r| r.target.agent)
 							.collect();
-						let scope = target_resource_scope(&row.target);
+						let scope = match row.target.scope {
+							InstallScope::Global => WriteScope::Global,
+							InstallScope::Project => {
+								let root = row
+									.target
+									.project_root
+									.clone()
+									.unwrap_or_default();
+								WriteScope::project(root)
+							}
+						};
 						let req = crate::skills::removal::SkillRemovalRequest {
 							target: crate::skills::removal::SkillRemovalTarget::ByName(
 								plan.skill.name.clone(),
 							),
 							scope,
-							project_root: row.target.project_root.clone(),
 							agents: delete_agents,
 							dry_run: false,
 							all_agents: false,

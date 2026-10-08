@@ -10,15 +10,13 @@
 //! Dry-run unless `--yes`; the preview is the same code path with writes
 //! withheld (`dry_run`), never a parallel implementation.
 
-use aghub_core::models::ResourceScope;
 use aghub_core::skills::repair::{repair_all, RepairOutcome, RepairReport};
+use aghub_core::WriteScope;
 use anyhow::Result;
 use serde_json::json;
-use std::path::Path;
 
 pub fn execute(
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	name: Option<&str>,
 	dry_run: bool,
 	json_out: bool,
@@ -27,7 +25,7 @@ pub fn execute(
 	// per-skill error capture all live in `repair_all`. This used to be a
 	// hand-written copy of the loop the API route also carried, and the two had
 	// already drifted apart — see that function's docs.
-	let reports = repair_all(scope, project_root, name, dry_run)?;
+	let reports = repair_all(scope, name, dry_run)?;
 
 	let unresolved = reports.iter().any(|r| {
 		matches!(
@@ -42,8 +40,8 @@ pub fn execute(
 			serde_json::to_string_pretty(&json!({
 				"dry_run": dry_run,
 				"scope": match scope {
-					ResourceScope::ProjectOnly => "project",
-					_ => "global",
+					WriteScope::Project { .. } => "project",
+					WriteScope::Global => "global",
 				},
 				"skills": reports,
 			}))?

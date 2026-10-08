@@ -6,7 +6,7 @@ use aghub_core::{
 	load_all_agents,
 	manager::skill::SkillPatch,
 	models::{AgentType, ResourceScope, Skill},
-	registry, transfer,
+	registry, transfer, WriteScope,
 };
 use rocket::http::Status;
 use rocket::serde::json::Json;
@@ -196,9 +196,6 @@ pub async fn delete_skill_by_path(
 		&req.scope,
 		req.project_root.as_deref(),
 	)?;
-	let resource_scope = write_scope.resource_scope();
-	let project_root =
-		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	let requested_agents =
 		crate::extractors::resolve_agent_strings(&req.agents)?;
@@ -216,8 +213,7 @@ pub async fn delete_skill_by_path(
 			target: aghub_core::skills::removal::SkillRemovalTarget::ByPath(
 				raw_path,
 			),
-			scope: resource_scope,
-			project_root,
+			scope: write_scope,
 			agents: requested_agents,
 			dry_run,
 			all_agents: false,
@@ -758,10 +754,10 @@ pub async fn update_skill(
 	body: Json<UpdateSkillRequest>,
 ) -> ApiResult<SkillResponse> {
 	let resolved = scope.resolve()?;
-	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
-	check_skills_mutable(&agent, resource_scope)?;
-	require_writable_scope(&resolved)?;
-	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
+	let write_scope = resolved.to_write_scope()?;
+	check_skills_mutable(&agent, write_scope.resource_scope())?;
+	let mut manager =
+		super::build_manager_from_write_scope(&agent, &write_scope);
 	manager.load().map_err(ApiError::from)?;
 	let existing = manager
 		.get_skill(name)
@@ -792,10 +788,10 @@ pub async fn delete_skill(
 	params: DeleteSkillParams,
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let resolved = params.resolve_scope()?;
-	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
-	check_skills_mutable(&agent, resource_scope)?;
-	require_writable_scope(&resolved)?;
-	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
+	let write_scope = resolved.to_write_scope()?;
+	check_skills_mutable(&agent, write_scope.resource_scope())?;
+	let mut manager =
+		super::build_manager_from_write_scope(&agent, &write_scope);
 	// No `ConfigError::NotFound` arm: nothing constructs that variant; a missing
 	// config surfaces as `Io(NotFound)` and takes the normal error path.
 	manager.load().map_err(ApiError::from)?;
@@ -816,8 +812,7 @@ pub async fn delete_skill(
 			target: aghub_core::skills::removal::SkillRemovalTarget::ByName(
 				name.clone(),
 			),
-			scope: resource_scope,
-			project_root,
+			scope: write_scope,
 			agents: requested,
 			dry_run,
 			all_agents,
@@ -867,10 +862,10 @@ pub async fn enable_skill(
 	scope: ScopeParams,
 ) -> ApiResult<SkillResponse> {
 	let resolved = scope.resolve()?;
-	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
-	check_skills_supported(&agent, resource_scope)?;
-	require_writable_scope(&resolved)?;
-	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
+	let write_scope = resolved.to_write_scope()?;
+	check_skills_supported(&agent, write_scope.resource_scope())?;
+	let mut manager =
+		super::build_manager_from_write_scope(&agent, &write_scope);
 	manager.load().map_err(ApiError::from)?;
 	if let Some(skill) = manager.get_skill(name) {
 		ensure_skill_not_plugin_managed(skill, "enable").await?;
@@ -890,10 +885,10 @@ pub async fn disable_skill(
 	scope: ScopeParams,
 ) -> ApiResult<SkillResponse> {
 	let resolved = scope.resolve()?;
-	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
-	check_skills_supported(&agent, resource_scope)?;
-	require_writable_scope(&resolved)?;
-	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
+	let write_scope = resolved.to_write_scope()?;
+	check_skills_supported(&agent, write_scope.resource_scope())?;
+	let mut manager =
+		super::build_manager_from_write_scope(&agent, &write_scope);
 	manager.load().map_err(ApiError::from)?;
 	if let Some(skill) = manager.get_skill(name) {
 		ensure_skill_not_plugin_managed(skill, "disable").await?;
@@ -1124,8 +1119,7 @@ fn install_test_clone(
 	ref_commit: Option<&str>,
 	lock_skill_path: &str,
 	source: &skill::InstallLockSource,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: WriteScope,
 	target_agents: &[AgentType],
 ) -> Result<
 	aghub_core::skills::install_fetched::FetchedSkillInstallReport,
@@ -1134,6 +1128,12 @@ fn install_test_clone(
 	let skill_file =
 		aghub_core::skills::update::sanitize_skill_path(root, lock_skill_path)
 			.ok_or_else(|| INVALID_FETCHED_SKILL_PATH.to_string())?;
+	let target = match scope {
+		WriteScope::Project { .. } => {
+			aghub_core::skills::linker::LinkTarget::Relative
+		}
+		WriteScope::Global => aghub_core::skills::linker::LinkTarget::Absolute,
+	};
 	aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
 		aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
 			skill_file: &skill_file,
@@ -1141,14 +1141,9 @@ fn install_test_clone(
 			lock_skill_path: lock_skill_path.to_string(),
 			ref_commit: ref_commit.map(str::to_string),
 			scope,
-			project_root,
 			target_agents,
 			expected_name: None,
-			target: if matches!(scope, ResourceScope::ProjectOnly) {
-				aghub_core::skills::linker::LinkTarget::Relative
-			} else {
-				aghub_core::skills::linker::LinkTarget::Absolute
-			},
+			target,
 		},
 	)
 	.map_err(|error| ApiError::from(error).body.error)
@@ -1169,8 +1164,6 @@ pub(crate) async fn install_skill_with_repo(
 		req.project_path.as_deref(),
 	)?;
 	let resource_scope = write_scope.resource_scope();
-	let project_root =
-		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	// Raw agent ids are part of the predictable target preflight. If any id is
 	// unknown, attribute the rejection to every requested agent in request order
@@ -1405,8 +1398,7 @@ pub(crate) async fn install_skill_with_repo(
 							source: &lock_source,
 							lock_skill_path,
 							expected_name: None,
-							scope: resource_scope,
-							project_root: project_root.as_deref(),
+							scope: write_scope.clone(),
 							target_agents: &agent_types,
 						},
 					)
@@ -1421,8 +1413,7 @@ pub(crate) async fn install_skill_with_repo(
 					ref_commit.as_deref(),
 					lock_skill_path,
 					&lock_source,
-					resource_scope,
-					project_root.as_deref(),
+					write_scope.clone(),
 					&agent_types,
 				),
 			};
@@ -2017,8 +2008,6 @@ pub async fn git_install_skills(
 		req.project_root.as_deref(),
 	)?;
 	let resource_scope = write_scope.resource_scope();
-	let project_root =
-		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	// Reject absolute / `..` paths BEFORE any fetch or install write.
 	// Security: out-of-tree paths must fail with 400 without I/O.
@@ -2096,8 +2085,7 @@ pub async fn git_install_skills(
 					source: &source,
 					lock_skill_path: &lock_skill_path,
 					expected_name: None,
-					scope: resource_scope,
-					project_root: project_root.as_deref(),
+					scope: write_scope.clone(),
 					target_agents: &target_agents,
 				},
 			) {
@@ -2187,14 +2175,10 @@ pub async fn git_sync_skill(
 		&req.scope,
 		req.project_root.as_deref(),
 	)?;
-	let resource_scope = write_scope.resource_scope();
-	let project_root =
-		write_scope.project_root().map(std::path::Path::to_path_buf);
-
 	let pre_fetch_identity = aghub_core::skills::lock::EntryIdentity::capture(
 		&req.name,
-		resource_scope,
-		project_root.as_deref(),
+		write_scope.resource_scope(),
+		write_scope.project_root(),
 	);
 	// Fetch only the selected skill folder.
 	let fetched = session
@@ -2224,19 +2208,15 @@ pub async fn git_sync_skill(
 		));
 	}
 
-	let locked = match resource_scope {
-		ResourceScope::GlobalOnly => {
+	let locked = match &write_scope {
+		WriteScope::Global => {
 			skill::lock::global::get_skill_from_lock(&req.name).is_some()
 		}
-		ResourceScope::ProjectOnly => {
-			let root = project_root
-				.as_deref()
-				.expect("project root validated for project scope");
+		WriteScope::Project { root } => {
 			skill::lock::local::read_local_lock(Some(root))
 				.skills
 				.contains_key(&req.name)
 		}
-		ResourceScope::Both => false,
 	};
 	if !locked {
 		return Err(ApiError::new(
@@ -2300,8 +2280,7 @@ pub async fn git_sync_skill(
 			FetchedResyncRequest {
 				skill_path: &skill_path,
 				name: &name,
-				scope: resource_scope,
-				project_root: project_root.as_deref(),
+				scope: write_scope,
 				// Captured before the fetch above, and proven present as of then
 				// by the check directly above.
 				expected: pre_fetch_identity,
@@ -7261,8 +7240,7 @@ mod tests {
 				source: &lock_source,
 				lock_skill_path: skill::lock_skill_file_path("hello-skill"),
 				ref_commit: None,
-				scope: resource_scope,
-				project_root: Some(project_root.as_path()),
+				scope: WriteScope::project(&project_root),
 				target_agents: &target_agents,
 				expected_name: None,
 				target: aghub_core::skills::linker::LinkTarget::Relative,
@@ -9860,9 +9838,6 @@ pub async fn repair_skills_route(
 		&req.scope,
 		req.project_root.as_deref(),
 	)?;
-	let scope = write_scope.resource_scope();
-	let project_root =
-		write_scope.project_root().map(std::path::Path::to_path_buf);
 	let name = req.name.clone();
 	let dry_run = req.dry_run;
 
@@ -9875,8 +9850,7 @@ pub async fn repair_skills_route(
 		// mutations, and it aborted on the first error with no report of the
 		// skills already migrated.
 		let reports = aghub_core::skills::repair::repair_all(
-			scope,
-			project_root.as_deref(),
+			&write_scope,
 			name.as_deref(),
 			dry_run,
 		)

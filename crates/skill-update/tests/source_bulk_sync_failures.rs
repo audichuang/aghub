@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use aghub_core::models::ResourceScope;
+use aghub_core::WriteScope;
 use skill_update::mutation::{
 	resync_locked_skills, LockedResyncError, LockedSkillsResyncRequest,
 };
@@ -151,8 +152,7 @@ fn changed_source_fails_its_rows_without_fetching_anything() {
 		LockedSkillsResyncRequest {
 			source_group: Some("other/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&PanicFetcher,
 		&NoToken,
@@ -190,8 +190,7 @@ fn missing_fetched_skill_fails_only_its_own_row() {
 		LockedSkillsResyncRequest {
 			source_group: Some("owner/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -238,8 +237,7 @@ fn unresolvable_entry_fails_only_its_own_row() {
 		LockedSkillsResyncRequest {
 			source_group: Some("owner/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -285,8 +283,7 @@ fn one_groups_fetch_failure_leaves_the_other_group_updatable() {
 		LockedSkillsResyncRequest {
 			source_group: Some("owner/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		// `main` is the SECOND group fetched, so a regression that fetched
 		// lazily per row would have swapped beta before this failure and the
@@ -333,8 +330,7 @@ fn repeated_name_is_attempted_once() {
 		LockedSkillsResyncRequest {
 			source_group: Some("owner/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -361,8 +357,7 @@ fn stale_first_entry_does_not_prevent_later_runtime_attempts() {
 		LockedSkillsResyncRequest {
 			source_group: Some("owner/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -414,8 +409,7 @@ fn repointed_entry_fails_without_costing_its_sibling() {
 		LockedSkillsResyncRequest {
 			source_group: Some("owner/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -465,8 +459,7 @@ fn a_locked_but_uninstalled_name_fails_before_any_fetch() {
 		LockedSkillsResyncRequest {
 			source_group: Some("owner/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&PanicFetcher,
 		&NoToken,

@@ -9,7 +9,7 @@
 //! backups until the lock commits; any swap or lock failure rolls every replaced
 //! target back, so disk content and the lock advance together.
 
-use crate::models::ResourceScope;
+use crate::scope::WriteScope;
 use std::path::{Path, PathBuf};
 
 /// Inputs for [`resync_installed_skill`]. `source_dir` is an already-sanitized
@@ -18,8 +18,7 @@ use std::path::{Path, PathBuf};
 pub struct ResyncRequest<'a> {
 	pub source_dir: &'a Path,
 	pub name: &'a str,
-	pub scope: ResourceScope,
-	pub project_root: Option<&'a Path>,
+	pub scope: WriteScope,
 	pub ref_commit: Option<&'a str>,
 	/// The entry's identity as [`captured`](crate::skills::lock::EntryIdentity::capture)
 	/// BEFORE the fetch, re-verified under the mutation lock before anything is
@@ -134,20 +133,11 @@ pub fn resync_error_code(error: &ResyncError) -> &'static str {
 pub fn resync_targets_in(
 	agents: &[crate::AgentResources],
 	name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 ) -> Result<Vec<PathBuf>, ResyncError> {
 	let mut targets =
 		crate::skills::removal::installed_skill_roots_in(agents, name);
-	let root = match scope {
-		ResourceScope::GlobalOnly => None,
-		ResourceScope::ProjectOnly if project_root.is_some() => project_root,
-		_ => {
-			return Err(ResyncError::Conflict(
-				"resync requires one resolved scope".into(),
-			))
-		}
-	};
+	let root = scope.project_root();
 	if let Some(master) = stored_master_root(name, root)? {
 		if !targets.contains(&master) {
 			targets.push(master);
@@ -205,31 +195,19 @@ pub fn resync_installed_skill(
 	// about to record (nor be rolled back over by ours).
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"resync skill",
-		req.scope,
-		req.project_root,
+		req.scope.resource_scope(),
+		req.scope.project_root(),
 	)
 	.map_err(|e| ResyncError::Locked(e.to_string()))?;
-	let store_root = match req.scope {
-		ResourceScope::GlobalOnly => None,
-		ResourceScope::ProjectOnly => {
-			Some(req.project_root.ok_or_else(|| {
-				ResyncError::Conflict(
-					"resync requires one resolved scope".into(),
-				)
-			})?)
-		}
-		ResourceScope::Both => {
-			return Err(ResyncError::Conflict(
-				"resync requires one resolved scope".into(),
-			))
-		}
-	};
+	let store_root = req.scope.project_root();
 	crate::skills::linker::reject_linked_master_store(store_root)
 		.map_err(|e| ResyncError::OutOfTree(e.to_string()))?;
 
-	let agents = crate::load_managed_agents(req.scope, req.project_root);
-	let targets =
-		resync_targets_in(&agents, req.name, req.scope, req.project_root)?;
+	let agents = crate::load_managed_agents(
+		req.scope.resource_scope(),
+		req.scope.project_root(),
+	);
+	let targets = resync_targets_in(&agents, req.name, &req.scope)?;
 	if targets.is_empty() {
 		return Err(ResyncError::NotInstalled);
 	}
@@ -240,7 +218,11 @@ pub fn resync_installed_skill(
 	// After the disk check, which is cheaper and a more specific answer when there
 	// is simply nothing installed to resync.
 	req.expected
-		.ensure_unchanged(req.name, req.scope, req.project_root)
+		.ensure_unchanged(
+			req.name,
+			req.scope.resource_scope(),
+			req.scope.project_root(),
+		)
 		.map_err(ResyncError::StaleFetch)?;
 
 	// Rename guard: refuse to overwrite when the upstream frontmatter `name`
@@ -260,16 +242,16 @@ pub fn resync_installed_skill(
 	// unknown history. The copy may be identical (safe) or the only
 	// installed layout with no Master (legacy, safe); only a differing copy
 	// beside an existing Master is ambiguous and is refused before staging.
-	refuse_conflicting_copy(req.name, req.scope, req.project_root, &agents)?;
+	refuse_conflicting_copy(req.name, &req.scope, &agents)?;
 
 	let agent_dirs = crate::skills::removal::agent_skill_dirs_in_scope(
-		req.scope,
-		req.project_root,
+		req.scope.resource_scope(),
+		req.scope.project_root(),
 	);
 	crate::skills::removal::assert_targets_strictly_contained(
 		&targets,
 		&agent_dirs,
-		req.project_root,
+		req.scope.project_root(),
 	)
 	.map_err(|e| ResyncError::OutOfTree(e.to_string()))?;
 
@@ -294,8 +276,7 @@ pub fn resync_installed_skill(
 
 	if let Err(error) = crate::skills::lock::update_lock_hash(
 		req.name,
-		req.scope,
-		req.project_root,
+		&req.scope,
 		&updated_hash,
 		req.ref_commit,
 	) {
@@ -317,17 +298,12 @@ pub fn resync_installed_skill(
 
 fn refuse_conflicting_copy(
 	name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	agents: &[crate::AgentResources],
 ) -> Result<(), ResyncError> {
-	let Some(store) = crate::skills::linker::master_store_dir(
-		if scope == ResourceScope::ProjectOnly {
-			project_root
-		} else {
-			None
-		},
-	) else {
+	let Some(store) =
+		crate::skills::linker::master_store_dir(scope.project_root())
+	else {
 		return Ok(());
 	};
 	let store = match store.canonicalize() {
@@ -403,6 +379,7 @@ fn refuse_conflicting_copy(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::models::ResourceScope;
 
 	/// Every variant has a code, they are distinct where the surfaces treat them
 	/// differently, and the two that carry a documented wire contract are
@@ -499,8 +476,7 @@ mod tests {
 		ResyncRequest {
 			source_dir: source,
 			name,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(project),
+			scope: WriteScope::project(project),
 			ref_commit: Some(commit),
 			expected: captured(name, project),
 		}
@@ -588,8 +564,7 @@ mod tests {
 		let report = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "sync-me",
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 			ref_commit: Some("deadbeefcafef00d"),
 			expected: captured("sync-me", &project),
 		})
@@ -843,8 +818,7 @@ mod tests {
 		let err = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "sync-me",
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 			ref_commit: Some("new-commit"),
 			expected: captured("sync-me", &project),
 		})
@@ -866,12 +840,7 @@ mod tests {
 		let master = tmp.path().join(".aghub/sync-me");
 		write_skill(&master, "different-skill", "keep");
 		assert!(matches!(
-			resync_targets_in(
-				&[],
-				"sync-me",
-				ResourceScope::ProjectOnly,
-				Some(tmp.path())
-			),
+			resync_targets_in(&[], "sync-me", &WriteScope::project(tmp.path()),),
 			Err(ResyncError::Conflict(_))
 		));
 	}
@@ -886,12 +855,7 @@ mod tests {
 		std::os::unix::fs::symlink(&foreign, tmp.path().join(".aghub/sync-me"))
 			.unwrap();
 		assert!(matches!(
-			resync_targets_in(
-				&[],
-				"sync-me",
-				ResourceScope::ProjectOnly,
-				Some(tmp.path())
-			),
+			resync_targets_in(&[], "sync-me", &WriteScope::project(tmp.path()),),
 			Err(ResyncError::Conflict(_))
 		));
 	}
@@ -910,8 +874,7 @@ mod tests {
 		let err = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "ghost",
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 			ref_commit: None,
 			expected: captured("ghost", &project),
 		})
@@ -934,8 +897,7 @@ mod tests {
 		let err = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "keep",
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 			ref_commit: None,
 			expected: captured("keep", &project),
 		})
@@ -978,8 +940,7 @@ mod tests {
 		let err = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "sync-me",
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 			ref_commit: Some("newoid"),
 			// What WE fetched, captured before the entry was repointed.
 			expected,
@@ -1043,8 +1004,7 @@ mod tests {
 			let err = resync_installed_skill(ResyncRequest {
 				source_dir: &source,
 				name: "sync-me",
-				scope: ResourceScope::ProjectOnly,
-				project_root: Some(&project),
+				scope: WriteScope::project(&project),
 				ref_commit: Some("newoid"),
 				expected,
 			})
@@ -1116,8 +1076,7 @@ mod tests {
 		let err = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "sync-me",
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 			ref_commit: Some("newoid"),
 			expected: captured("sync-me", &project),
 		})
@@ -1190,8 +1149,7 @@ mod tests {
 		let err = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "locked",
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 			ref_commit: Some("newoid"),
 			expected: captured("locked", &project),
 		})

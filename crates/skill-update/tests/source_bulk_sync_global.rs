@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use aghub_core::models::ResourceScope;
+use aghub_core::WriteScope;
 use skill_update::mutation::{resync_locked_skills, LockedSkillsResyncRequest};
 use skill_update::{
 	FetchError, FetchSelection, FetchedRepo, Fetcher, SourceRef,
@@ -178,8 +178,7 @@ fn global_source_row_covers_only_its_own_origin() {
 			LockedSkillsResyncRequest {
 				source_group: Some("https://github.com/owner/repo.git"),
 				names: &names,
-				scope: ResourceScope::GlobalOnly,
-				project_root: None,
+				scope: WriteScope::Global,
 			},
 			&fetcher,
 			&PerSourceToken,
@@ -253,7 +252,7 @@ fn two_forges_serving_one_path_are_two_source_rows() {
 
 		let rows = skill_update::sources::list_sources(
 			skill_update::sources::SourceListInput {
-				scopes: vec![skill_update::sources::SourceScope::Global],
+				scopes: vec![aghub_core::WriteScope::Global],
 			},
 		);
 
@@ -326,7 +325,7 @@ fn project_two_forges_serving_one_path_are_two_source_rows() {
 
 	let rows = skill_update::sources::list_sources(
 		skill_update::sources::SourceListInput {
-			scopes: vec![skill_update::sources::SourceScope::Project {
+			scopes: vec![aghub_core::WriteScope::Project {
 				root: project.path().to_path_buf(),
 			}],
 		},
@@ -387,7 +386,7 @@ fn relative_source_keeps_a_row_separate_from_github_shorthand() {
 
 		let rows = skill_update::sources::list_sources(
 			skill_update::sources::SourceListInput {
-				scopes: vec![skill_update::sources::SourceScope::Global],
+				scopes: vec![aghub_core::WriteScope::Global],
 			},
 		);
 
@@ -431,7 +430,7 @@ fn source_type_selects_forge_when_project_source_url_is_missing() {
 
 	let rows = skill_update::sources::list_sources(
 		skill_update::sources::SourceListInput {
-			scopes: vec![skill_update::sources::SourceScope::Project {
+			scopes: vec![aghub_core::WriteScope::Project {
 				root: project.path().to_path_buf(),
 			}],
 		},

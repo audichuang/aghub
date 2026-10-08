@@ -21,6 +21,7 @@ use aghub_core::skills::linker::LinkTarget;
 #[cfg(unix)]
 use aghub_core::skills::repair::{repair_all, repair_skill, RepairOutcome};
 use aghub_core::AgentType;
+use aghub_core::WriteScope;
 use tempfile::{tempdir, TempDir};
 
 /// Serializes environment access and isolates the GLOBAL lock + Master by
@@ -141,8 +142,7 @@ fn imported_skill_does_not_overwrite_same_named_openclaw_skill() {
 		source: &sample_source(),
 		lock_skill_path: "agent-reach/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -163,8 +163,7 @@ fn imported_skill_does_not_overwrite_same_named_openclaw_skill() {
 			source: &sample_source(),
 			lock_skill_path: "agent-reach/SKILL.md".to_string(),
 			ref_commit: None,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project_root),
+			scope: WriteScope::project(&project_root),
 			target_agents: &[AgentType::Openclaw],
 			expected_name: None,
 			target: LinkTarget::Relative,
@@ -200,8 +199,7 @@ fn imported_skill_does_not_overwrite_same_named_openclaw_skill() {
 	let legacy_before = std::fs::read(&legacy_md).unwrap();
 
 	let repaired = repair_skill(
-		ResourceScope::ProjectOnly,
-		Some(&project_root),
+		&WriteScope::project(&project_root),
 		"agent-reach",
 		true,
 		false,
@@ -212,13 +210,8 @@ fn imported_skill_does_not_overwrite_same_named_openclaw_skill() {
 	assert_eq!(std::fs::read(&existing).unwrap(), before);
 	assert!(project_root.join(".aghub/agent-reach/SKILL.md").is_file());
 
-	let reports = repair_all(
-		ResourceScope::ProjectOnly,
-		Some(&project_root),
-		None,
-		false,
-	)
-	.unwrap();
+	let reports =
+		repair_all(&WriteScope::project(&project_root), None, false).unwrap();
 	assert!(reports.iter().any(|r| {
 		r.name == "agent-reach"
 			&& matches!(r.outcome, RepairOutcome::Refused { .. })
@@ -263,8 +256,7 @@ fn project_existing_different_master_rejects_before_native_or_link_mutation() {
 		source: &sample_source(),
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeef".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -320,8 +312,7 @@ fn preflight_reports_the_refusal_the_install_makes() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeef".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -373,8 +364,7 @@ fn preflight_accepts_an_exact_byte_untracked_master() {
 		source: &sample_source(),
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeef".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -411,8 +401,7 @@ fn global_existing_different_master_rejects_before_native_or_link_mutation() {
 		source: &sample_source(),
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeef".to_string()),
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
+		scope: WriteScope::Global,
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Absolute,
@@ -479,8 +468,7 @@ fn exact_byte_untracked_master_is_adopted_for_native_and_link_targets() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeef".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -542,8 +530,7 @@ fn exact_byte_untracked_master_with_existing_referrer_is_adopted() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeef".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -595,8 +582,7 @@ fn symlink_master_is_rejected_before_referrer_or_lock_mutation() {
 		source: &sample_source(),
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeef".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -660,8 +646,7 @@ fn master_with_nested_symlink_is_rejected_before_referrer_or_lock_mutation() {
 		source: &sample_source(),
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeef".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -731,8 +716,7 @@ fn matching_master_with_different_project_source_owner_is_not_reassigned() {
 		source: &requested_source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("newcommit".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -809,8 +793,7 @@ fn matching_master_with_same_repo_path_on_another_host_is_not_reassigned() {
 		source: &requested_source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("newcommit".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -875,8 +858,7 @@ fn legacy_remote_lock_without_host_identity_is_not_reassigned() {
 		source: &requested_source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("newcommit".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -930,8 +912,7 @@ fn matching_master_with_different_global_source_owner_is_not_reassigned() {
 		source: &requested_source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("newcommit".to_string()),
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
+		scope: WriteScope::Global,
 		target_agents: &[AgentType::Codex, AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Absolute,
@@ -975,8 +956,7 @@ fn isolated_copy_installs_writes_global_lock_and_per_agent_result() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("deadbeefcafef00d".to_string()),
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
+		scope: WriteScope::Global,
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Absolute,
@@ -1044,8 +1024,7 @@ fn universal_writes_master_to_canonical_and_links_agent() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: Some("cafef00ddeadbeef".to_string()),
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1117,8 +1096,7 @@ fn universal_returns_results_in_input_target_order() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &target_agents,
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1179,8 +1157,7 @@ fn universal_install_universal_error_fails_all_agents() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &target_agents,
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1237,8 +1214,7 @@ fn project_scope_writes_project_lock() {
 		source: &source,
 		lock_skill_path: "beta/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1277,8 +1253,7 @@ fn all_unsupported_targets_preflight_before_master_or_lock_write() {
 		source: &source,
 		lock_skill_path: "gamma/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::JetBrainsAi],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1311,8 +1286,7 @@ fn mixed_supported_and_unsupported_targets_preflight_before_master_write() {
 		source: &sample_source(),
 		lock_skill_path: "mixed/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude, AgentType::JetBrainsAi],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1365,8 +1339,7 @@ fn shared_master_failure_is_attributed_to_every_agent() {
 		source: &sample_source(),
 		lock_skill_path: "blocked/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude, AgentType::Codex],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1411,8 +1384,7 @@ fn universal_idempotent_rerun_does_not_rewrite_lock() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1481,8 +1453,7 @@ fn same_owner_reinstall_heals_stale_update_coordinates() {
 			source,
 			lock_skill_path: skill_path.to_string(),
 			ref_commit: commit,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(project_root),
+			scope: WriteScope::project(project_root),
 			target_agents: agents,
 			expected_name: None,
 			target: LinkTarget::Relative,
@@ -1638,8 +1609,7 @@ fn install_attributes_the_referrer_dir_it_created_never_the_master() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Codex],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1681,50 +1651,25 @@ fn install_attributes_the_referrer_dir_it_created_never_the_master() {
 #[test]
 #[cfg(unix)]
 fn unsupported_scope_rejected_before_any_write() {
-	// Bug C: `ResourceScope::Both` is unsupported and must be rejected at the TOP
-	// of the function, before the universal master is copied — no partial side
-	// effect. For a non-Project scope the universal canonical resolves under the
-	// HOME dir (`~/.agents/skills`), so we isolate HOME to a temp dir (the
-	// GlobalLockGuard mutex serializes env mutation) and assert that path stays
-	// untouched. Before the fix the master is copied THERE before the Err.
+	// A mutation entry takes WriteScope, where Both and missing project root
+	// are unrepresentable by construction.
 	let g = GlobalLockGuard::new();
 	let home = g.home();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
 
-	let fetched = tempdir().unwrap();
-	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+	let global_scope = WriteScope::Global;
+	assert_eq!(global_scope.resource_scope(), ResourceScope::GlobalOnly);
+	assert_eq!(global_scope.project_root(), None);
 
-	let source = sample_source();
-	let err = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
-		skill_file: &skill_md,
-		source: &source,
-		lock_skill_path: "alpha/SKILL.md".to_string(),
-		ref_commit: None,
-		scope: ResourceScope::Both,
-		project_root: None,
-		target_agents: &[AgentType::Claude],
-		expected_name: None,
-		target: LinkTarget::Absolute,
-	})
-	.expect_err("Combined scope must be refused");
+	let project_scope = WriteScope::project(&project_root);
+	assert_eq!(project_scope.resource_scope(), ResourceScope::ProjectOnly);
+	assert_eq!(project_scope.project_root(), Some(project_root.as_path()));
 
 	let home_canonical = home.join(".aghub/alpha");
 	let home_agents = home.join(".agents");
-
-	assert!(
-		err.to_string().contains("scope")
-			|| err.to_string().contains("Combined"),
-		"error should be the unsupported-scope message, got: {err}"
-	);
-
-	// No partial master was written to the universal canonical dir.
-	assert!(
-		!home_canonical.exists(),
-		"no partial universal master should be written before the scope check"
-	);
-	assert!(
-		!home_agents.exists(),
-		"the .agents dir must not be created at all on a rejected scope"
-	);
+	assert!(!home_canonical.exists());
+	assert!(!home_agents.exists());
 }
 
 #[test]
@@ -1745,8 +1690,7 @@ fn rename_guard_rejects_mismatch_and_writes_nothing() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
+		scope: WriteScope::Global,
 		target_agents: &[AgentType::Claude],
 		expected_name: Some("alpha"),
 		target: LinkTarget::Absolute,
@@ -1807,8 +1751,7 @@ fn lock_written_when_master_written_but_all_agent_links_fail() {
 		source: &source,
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1874,8 +1817,7 @@ fn conflict_fold_real_dir_and_foreign_link_are_not_clobbered() {
 		source: &source,
 		lock_skill_path: "my-skill/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root_a),
+		scope: WriteScope::project(&project_root_a),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1915,8 +1857,7 @@ fn conflict_fold_real_dir_and_foreign_link_are_not_clobbered() {
 		source: &source,
 		lock_skill_path: "my-skill/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root_b),
+		scope: WriteScope::project(&project_root_b),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -1968,8 +1909,7 @@ fn corrupt_lock_refuses_before_materializing_anything() {
 		source: &sample_source(),
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
@@ -2051,8 +1991,7 @@ fn lock_write_failure_rolls_back_master_and_referrer() {
 		source: &sample_source(),
 		lock_skill_path: "alpha/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::ProjectOnly,
-		project_root: Some(&project_root),
+		scope: WriteScope::project(&project_root),
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,

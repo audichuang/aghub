@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use aghub_core::models::{AgentType, ResourceScope};
+use aghub_core::WriteScope;
 
 use crate::{
 	skill_folder_from_lock_path, FetchError, FetchSelection, FetchedRepo,
@@ -103,8 +104,7 @@ pub struct FetchedInstallRequest<'a> {
 	pub source: &'a skill::InstallLockSource,
 	pub lock_skill_path: &'a str,
 	pub expected_name: Option<&'a str>,
-	pub scope: ResourceScope,
-	pub project_root: Option<&'a Path>,
+	pub scope: WriteScope,
 	pub target_agents: &'a [AgentType],
 }
 
@@ -162,14 +162,12 @@ fn core_install_request<'a>(
 		source: request.source,
 		lock_skill_path: request.lock_skill_path.to_string(),
 		ref_commit: Some(fetched.oid().to_string()),
-		scope: request.scope,
-		project_root: request.project_root,
+		scope: request.scope.clone(),
 		target_agents: request.target_agents,
 		expected_name: request.expected_name,
-		target: if matches!(request.scope, ResourceScope::ProjectOnly) {
-			LinkTarget::Relative
-		} else {
-			LinkTarget::Absolute
+		target: match request.scope {
+			WriteScope::Project { .. } => LinkTarget::Relative,
+			WriteScope::Global => LinkTarget::Absolute,
 		},
 	}
 }
@@ -261,8 +259,7 @@ pub fn fetch_for_rename(
 pub struct FetchedResyncRequest<'a> {
 	pub skill_path: &'a str,
 	pub name: &'a str,
-	pub scope: aghub_core::models::ResourceScope,
-	pub project_root: Option<&'a Path>,
+	pub scope: WriteScope,
 	/// The entry's identity CAPTURED before this fetch
 	/// (`aghub_core::skills::lock::EntryIdentity::capture`), re-verified under the
 	/// mutation guard so a repointed entry cannot be overwritten with a stale
@@ -318,7 +315,6 @@ pub fn resync_fetched_source(
 			source_dir,
 			name: request.name,
 			scope: request.scope,
-			project_root: request.project_root,
 			ref_commit: Some(fetched.oid()),
 			expected: request.expected,
 		},
@@ -328,8 +324,7 @@ pub fn resync_fetched_source(
 
 pub struct LockedResyncRequest<'a> {
 	pub name: &'a str,
-	pub scope: ResourceScope,
-	pub project_root: Option<&'a Path>,
+	pub scope: WriteScope,
 }
 
 pub struct LockedSkillsResyncRequest<'a> {
@@ -346,8 +341,7 @@ pub struct LockedSkillsResyncRequest<'a> {
 	/// docs/history/skill-update.md#source-membership-has-one-definition).
 	pub source_group: Option<&'a str>,
 	pub names: &'a [String],
-	pub scope: ResourceScope,
-	pub project_root: Option<&'a Path>,
+	pub scope: WriteScope,
 }
 
 #[derive(Debug)]
@@ -508,35 +502,27 @@ thread_local! {
 /// point — a scan that bypassed it would be invisible to the tests pinning
 /// one-scan-per-batch.
 pub(crate) fn scan_agents(
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 ) -> Vec<aghub_core::AgentResources> {
 	#[cfg(test)]
 	AGENT_SCANS.with(|scans| scans.set(scans.get() + 1));
-	aghub_core::load_managed_agents(scope, project_root)
+	aghub_core::load_managed_agents(
+		scope.resource_scope(),
+		scope.project_root(),
+	)
 }
 
 impl ScopeLock {
-	fn read(
-		scope: ResourceScope,
-		project_root: Option<&Path>,
-	) -> Result<Self, LockedResyncError> {
+	fn read(scope: &WriteScope) -> Result<Self, LockedResyncError> {
 		#[cfg(test)]
 		LOCK_READS.with(|reads| reads.set(reads.get() + 1));
 		match scope {
-			ResourceScope::GlobalOnly => {
+			WriteScope::Global => {
 				Ok(Self::Global(skill::get_all_locked_skills()))
 			}
-			ResourceScope::ProjectOnly => {
-				let root = project_root
-					.ok_or(LockedResyncError::ProjectRootRequired)?;
-				Ok(Self::Project(
-					skill::lock::local::read_local_lock(Some(root)).skills,
-				))
-			}
-			ResourceScope::Both => {
-				Err(LockedResyncError::UnsupportedScope(ResourceScope::Both))
-			}
+			WriteScope::Project { root } => Ok(Self::Project(
+				skill::lock::local::read_local_lock(Some(root)).skills,
+			)),
 		}
 	}
 }
@@ -545,8 +531,7 @@ fn prepare_locked_resync(
 	name: &str,
 	lock: &ScopeLock,
 	agents: &[aghub_core::AgentResources],
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 ) -> Result<(EntrySource, PreparedLockedResync), LockedResyncError> {
 	// Coordinates and identity must come from the SAME entry observation. A
 	// second lookup could straddle another process's repoint and let a stale
@@ -618,14 +603,9 @@ fn prepare_locked_resync(
 
 	// Advisory only: the transaction resolves targets again under the lock.
 	// Include withheld Masters, but skip fetching when no copy exists at all.
-	if aghub_core::skills::resync::resync_targets_in(
-		agents,
-		name,
-		scope,
-		project_root,
-	)
-	.map_err(LockedResyncError::Resync)?
-	.is_empty()
+	if aghub_core::skills::resync::resync_targets_in(agents, name, scope)
+		.map_err(LockedResyncError::Resync)?
+		.is_empty()
 	{
 		return Err(LockedResyncError::NotInstalled);
 	}
@@ -664,24 +644,11 @@ pub fn resync_locked_skills(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<Vec<LockedSkillResyncResult>, LockedSkillsResyncError> {
-	match request.scope {
-		ResourceScope::Both => {
-			return Err(LockedSkillsResyncError::Preflight(
-				LockedResyncError::UnsupportedScope(ResourceScope::Both),
-			));
-		}
-		ResourceScope::ProjectOnly if request.project_root.is_none() => {
-			return Err(LockedSkillsResyncError::Preflight(
-				LockedResyncError::ProjectRootRequired,
-			));
-		}
-		_ => {}
-	}
 	if request.names.is_empty() {
 		return Err(LockedSkillsResyncError::EmptyRequest);
 	}
 
-	let lock = match ScopeLock::read(request.scope, request.project_root) {
+	let lock = match ScopeLock::read(&request.scope) {
 		Ok(lock) => lock,
 		Err(error) => {
 			return Err(LockedSkillsResyncError::Preflight(error));
@@ -689,60 +656,55 @@ pub fn resync_locked_skills(
 	};
 	// ONE agent scan for the whole batch, next to the ONE lock read: the answer
 	// does not vary by name.
-	let agents = scan_agents(request.scope, request.project_root);
+	let agents = scan_agents(&request.scope);
 	let mut groups: Vec<PreparedFetchGroup> = Vec::new();
 	let names = unique_in_order(request.names);
 	let mut rows = Vec::with_capacity(names.len());
 
 	for name in names {
-		let prepared = prepare_locked_resync(
-			name,
-			&lock,
-			&agents,
-			request.scope,
-			request.project_root,
-		)
-		.and_then(|(entry, mut item)| {
-			let EntrySource {
-				source_ref,
-				grouping_source,
-				source_type,
-			} = entry;
-			if request.source_group.is_some_and(|group| {
-				!crate::sources::source_matches(
-					group,
-					&grouping_source,
-					Some(&source_ref.source),
-					&source_type,
-				)
-			}) {
-				return Err(LockedResyncError::SourceGroupMismatch);
-			}
-			let folder = skill_folder_from_lock_path(&item.skill_path)
-				.ok_or(LockedResyncError::InvalidSkillPath)?;
-			let group_index = if let Some(index) = groups
-				.iter()
-				.position(|group| group.source_ref == source_ref)
-			{
-				index
-			} else {
-				groups.push(PreparedFetchGroup {
-					source_ref,
-					folders: Vec::new(),
+		let prepared =
+			prepare_locked_resync(name, &lock, &agents, &request.scope)
+				.and_then(|(entry, mut item)| {
+					let EntrySource {
+						source_ref,
+						grouping_source,
+						source_type,
+					} = entry;
+					if request.source_group.is_some_and(|group| {
+						!crate::sources::source_matches(
+							group,
+							&grouping_source,
+							Some(&source_ref.source),
+							&source_type,
+						)
+					}) {
+						return Err(LockedResyncError::SourceGroupMismatch);
+					}
+					let folder = skill_folder_from_lock_path(&item.skill_path)
+						.ok_or(LockedResyncError::InvalidSkillPath)?;
+					let group_index = if let Some(index) = groups
+						.iter()
+						.position(|group| group.source_ref == source_ref)
+					{
+						index
+					} else {
+						groups.push(PreparedFetchGroup {
+							source_ref,
+							folders: Vec::new(),
+						});
+						groups.len() - 1
+					};
+					let group = &mut groups[group_index];
+					if !group
+						.folders
+						.iter()
+						.any(|seen| seen.as_str() == folder.as_str())
+					{
+						group.folders.push(folder);
+					}
+					item.group_index = group_index;
+					Ok(item)
 				});
-				groups.len() - 1
-			};
-			let group = &mut groups[group_index];
-			if !group
-				.folders
-				.iter()
-				.any(|seen| seen.as_str() == folder.as_str())
-			{
-				group.folders.push(folder);
-			}
-			item.group_index = group_index;
-			Ok(item)
-		});
 		rows.push(ResyncRow {
 			name: name.clone(),
 			prepared,
@@ -796,8 +758,7 @@ pub fn resync_locked_skills(
 					FetchedResyncRequest {
 						skill_path: &item.skill_path,
 						name: &name,
-						scope: request.scope,
-						project_root: request.project_root,
+						scope: request.scope.clone(),
 						expected: item.expected,
 					},
 				)
@@ -825,7 +786,6 @@ pub fn resync_locked_skill(
 			source_group: None,
 			names: &names,
 			scope: request.scope,
-			project_root: request.project_root,
 		},
 		fetcher,
 		resolver,
@@ -853,6 +813,7 @@ mod tests {
 		TokenResolver,
 	};
 	use aghub_core::models::ResourceScope;
+	use aghub_core::WriteScope;
 
 	use super::{
 		fetch_for_mutation, fetch_for_rename, resync_fetched_source,
@@ -1033,8 +994,7 @@ mod tests {
 				FetchedResyncRequest {
 					skill_path,
 					name: "sync-me",
-					scope: ResourceScope::ProjectOnly,
-					project_root: Some(&project),
+					scope: WriteScope::project(&project),
 					// The lock entry has no `source_url`, so its effective source is
 					// `source` — the verbatim value a real caller's pre-fetch read
 					// would have returned.
@@ -1136,8 +1096,7 @@ mod tests {
 			super::LockedSkillsResyncRequest {
 				source_group: None,
 				names: &owned,
-				scope: ResourceScope::ProjectOnly,
-				project_root: Some(&project),
+				scope: WriteScope::project(&project),
 			},
 			&StubFetcher { root: fetched_root },
 			&NoToken,
@@ -1230,8 +1189,7 @@ mod tests {
 			let report = resync_locked_skill(
 				LockedResyncRequest {
 					name: "sync-me",
-					scope: ResourceScope::ProjectOnly,
-					project_root: Some(&project),
+					scope: WriteScope::project(&project),
 				},
 				&fetcher,
 				&Token,

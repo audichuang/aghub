@@ -16,6 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::models::ResourceScope;
+use crate::scope::WriteScope;
 use crate::skills::linker::classify::{classify_agent, LinkNeed};
 use crate::skills::linker::{install_universal, master_store_dir, LinkTarget};
 use crate::skills::skill_source_root;
@@ -45,9 +46,8 @@ pub struct FetchedSkillInstallRequest<'a> {
 	pub lock_skill_path: String,
 	/// Repo tip OID for the lock `refCommit` heal (best-effort).
 	pub ref_commit: Option<String>,
-	/// Install scope. Only `GlobalOnly` / `ProjectOnly` are supported.
-	pub scope: ResourceScope,
-	pub project_root: Option<&'a Path>,
+	/// Install scope.
+	pub scope: WriteScope,
 	pub target_agents: &'a [AgentType],
 	/// Rename guard: when `Some(n)`, the fetched frontmatter name MUST equal `n`
 	/// or the install is refused before any write.
@@ -121,15 +121,14 @@ struct LockWriteReceipt {
 
 fn write_install_lock(
 	skill_name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 	source: &skill::InstallLockSource,
 	lock_skill_path: String,
 	source_dir: &Path,
 	ref_commit: Option<String>,
 ) -> Result<LockWriteReceipt, crate::ConfigError> {
 	match scope {
-		ResourceScope::GlobalOnly => skill::write_global_install_lock(
+		WriteScope::Global => skill::write_global_install_lock(
 			skill_name,
 			source,
 			Some(lock_skill_path),
@@ -141,35 +140,24 @@ fn write_install_lock(
 			replaced_project: None,
 		})
 		.map_err(crate::ConfigError::Io),
-		ResourceScope::ProjectOnly => {
-			let cwd = project_root.ok_or_else(|| {
-				crate::ConfigError::InvalidConfig(
-					"project root is required for project skill installs"
-						.to_string(),
-				)
-			})?;
-			skill::write_project_install_lock(
-				skill_name,
-				source,
-				Some(lock_skill_path),
-				source_dir,
-				cwd,
-				ref_commit,
-			)
-			.map(|replaced_project| LockWriteReceipt {
-				replaced_global: None,
-				replaced_project,
-			})
-			.map_err(crate::ConfigError::Io)
-		}
-		ResourceScope::Both => Err(crate::ConfigError::InvalidConfig(
-			"Combined skill scope is not supported for installs".to_string(),
-		)),
+		WriteScope::Project { root } => skill::write_project_install_lock(
+			skill_name,
+			source,
+			Some(lock_skill_path),
+			source_dir,
+			root,
+			ref_commit,
+		)
+		.map(|replaced_project| LockWriteReceipt {
+			replaced_global: None,
+			replaced_project,
+		})
+		.map_err(crate::ConfigError::Io),
 	}
 }
 
-/// Parse + rename guard + scope guard. Pure reads; runs BEFORE the mutation
-/// lock so an unsupported request creates nothing. Returns the skill name.
+/// Parse + rename guard. Pure reads; runs BEFORE the mutation lock so an
+/// unsupported request creates nothing. Returns the skill name.
 fn precheck_request(
 	req: &FetchedSkillInstallRequest<'_>,
 ) -> Result<String, crate::ConfigError> {
@@ -187,18 +175,6 @@ fn precheck_request(
 		}
 	}
 
-	// Scope guard: only Global / Project installs are supported. Reject BEFORE
-	// any source-root resolution / copy / link / lock work so an unsupported
-	// scope can never leave a partial side effect (e.g. a written universal
-	// master). The API rejects `Both` at the same point via `resource_scope`.
-	if !matches!(
-		req.scope,
-		ResourceScope::GlobalOnly | ResourceScope::ProjectOnly
-	) {
-		return Err(crate::ConfigError::InvalidConfig(
-			"Combined skill scope is not supported for installs".to_string(),
-		));
-	}
 	Ok(name)
 }
 
@@ -212,8 +188,7 @@ fn adoption_guard(
 	crate::skills::adoption::adoption_guard(
 		name,
 		&source_root,
-		req.scope,
-		req.project_root,
+		&req.scope,
 		req.source,
 		false,
 	)
@@ -247,8 +222,8 @@ pub fn install_fetched_skill_and_lock(
 	// aghub process can invalidate a guard between checking it and acting on it.
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"install skill",
-		req.scope,
-		req.project_root,
+		req.scope.resource_scope(),
+		req.scope.project_root(),
 	)
 	.map_err(crate::ConfigError::Io)?;
 
@@ -264,19 +239,16 @@ pub fn install_fetched_skill_and_lock(
 	// the END would leave an untracked partial install. Refuse while there is
 	// nothing to roll back.
 	skill::lock::ensure_locks_writable(
-		req.scope != ResourceScope::ProjectOnly,
-		match req.scope {
-			ResourceScope::GlobalOnly => None,
-			_ => req.project_root,
-		},
+		req.scope.resource_scope() != ResourceScope::ProjectOnly,
+		req.scope.project_root(),
 	)
 	.map_err(crate::ConfigError::Io)?;
 
 	let materialized = materialize_universal_master(
 		&source_root,
 		&safe_name,
-		req.scope,
-		req.project_root,
+		req.scope.resource_scope(),
+		req.scope.project_root(),
 		req.target_agents,
 		req.target,
 	)?;
@@ -348,8 +320,7 @@ pub fn install_fetched_skill_and_lock(
 		// untracked install the caller was told failed.
 		receipt = match write_install_lock(
 			&name,
-			req.scope,
-			req.project_root,
+			&req.scope,
 			&effective_source,
 			req.lock_skill_path.clone(),
 			&source_root,
@@ -359,8 +330,8 @@ pub fn install_fetched_skill_and_lock(
 			Err(error) => {
 				crate::skills::rename::rollback_materialized_install(
 					&name,
-					req.scope,
-					req.project_root,
+					req.scope.resource_scope(),
+					req.scope.project_root(),
 					&created_referrer_dirs,
 					wrote_master,
 				);
@@ -633,8 +604,7 @@ mod nocopy_tests {
 			source: &lock_source,
 			lock_skill_path: "my-skill/SKILL.md".to_string(),
 			ref_commit: None,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&root),
+			scope: WriteScope::project(&root),
 			target_agents: &[AgentType::Claude],
 			expected_name: None,
 			target: LinkTarget::Relative,
@@ -686,8 +656,7 @@ mod nocopy_tests {
 			source: &lock_source,
 			lock_skill_path: "my-skill/SKILL.md".to_string(),
 			ref_commit: None,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&root),
+			scope: WriteScope::project(&root),
 			target_agents: &[AgentType::Claude],
 			expected_name: None,
 			target: LinkTarget::Relative,

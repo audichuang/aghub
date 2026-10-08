@@ -1,16 +1,15 @@
 use crate::commands::check::{self, SkillUpdateView, StatusView};
 use crate::ResourceType;
 use aghub_core::models::ResourceScope;
+use aghub_core::WriteScope;
 use anyhow::{anyhow, bail, Result};
 use serde_json::json;
 use skill_update::mutation::LockedSkillsResyncError;
-use std::path::Path;
 
 pub fn execute(
 	resource: ResourceType,
 	name: String,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: WriteScope,
 	yes: bool,
 	json: bool,
 ) -> Result<()> {
@@ -28,8 +27,7 @@ pub fn execute(
 	let report = skill_update::mutation::resync_locked_skill(
 		skill_update::mutation::LockedResyncRequest {
 			name: &name,
-			scope,
-			project_root,
+			scope: scope.clone(),
 		},
 		&crate::commands::source::CliFetcher::new(),
 		&crate::commands::source::EnvTokenResolver,
@@ -43,7 +41,7 @@ pub fn execute(
 			serde_json::to_string_pretty(&json!({
 				"success": true,
 				"name": name,
-				"scope": scope_name(scope),
+				"scope": scope_name(&scope),
 				"updatedHash": updated_hash,
 				"paths": paths
 					.iter()
@@ -54,7 +52,7 @@ pub fn execute(
 		);
 		return Ok(());
 	}
-	println!("updated skill '{name}' ({} scope)", scope_name(scope));
+	println!("updated skill '{name}' ({} scope)", scope_name(&scope));
 	for path in &paths {
 		println!("  {}", path.display());
 	}
@@ -96,18 +94,13 @@ fn outdated_plan(views: &[SkillUpdateView]) -> OutdatedPlan {
 /// locked skill in ONE scope online, then resync the outdated ones through the
 /// same batch seam the desktop's update-all uses. Without `--yes` it previews.
 pub fn execute_outdated(
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: WriteScope,
 	yes: bool,
 	json: bool,
 ) -> Result<()> {
-	let want_global = match scope {
-		ResourceScope::GlobalOnly => true,
-		ResourceScope::ProjectOnly => false,
-		// The scope table rejects --all before dispatch.
-		ResourceScope::Both => {
-			bail!("apply-update requires --global or --project, not --all")
-		}
+	let (want_global, project_root) = match &scope {
+		WriteScope::Global => (true, None),
+		WriteScope::Project { root } => (false, Some(root.as_path())),
 	};
 	let locks = crate::commands::read_locks_checked(
 		want_global,
@@ -132,7 +125,7 @@ pub fn execute_outdated(
 				"{}",
 				serde_json::to_string_pretty(&json!({
 					"dryRun": !yes,
-					"scope": scope_name(scope),
+					"scope": scope_name(&scope),
 					"skills": plan.names,
 					"renamed": renamed_json,
 					"uncheckable": uncheckable_json,
@@ -143,11 +136,11 @@ pub fn execute_outdated(
 		}
 		if plan.names.is_empty() {
 			if plan.renamed.is_empty() && plan.uncheckable.is_empty() {
-				println!("Nothing to update ({} scope).", scope_name(scope));
+				println!("Nothing to update ({} scope).", scope_name(&scope));
 			} else {
 				println!(
 					"No update candidates confirmed ({} scope).",
-					scope_name(scope)
+					scope_name(&scope)
 				);
 			}
 		} else {
@@ -155,7 +148,7 @@ pub fn execute_outdated(
 				"{} skill(s) can be updated ({} scope; pass --yes to apply — \
 				 this OVERWRITES local edits to them):",
 				plan.names.len(),
-				scope_name(scope)
+				scope_name(&scope)
 			);
 			for name in &plan.names {
 				println!("  would update: {name}");
@@ -172,8 +165,7 @@ pub fn execute_outdated(
 			// independent Sources row to assert against.
 			source_group: None,
 			names: &plan.names,
-			scope,
-			project_root,
+			scope: scope.clone(),
 		},
 		&crate::commands::source::CliFetcher::new(),
 		&crate::commands::source::EnvTokenResolver,
@@ -240,7 +232,7 @@ pub fn execute_outdated(
 			"{}",
 			serde_json::to_string_pretty(&json!({
 				"dryRun": false,
-				"scope": scope_name(scope),
+				"scope": scope_name(&scope),
 				"skills": plan.names,
 				"renamed": renamed_json,
 				"uncheckable": uncheckable_json,
@@ -259,7 +251,7 @@ pub fn execute_outdated(
 		println!(
 			"{} updated, {failed} failed ({} scope)",
 			rows.len() - failed,
-			scope_name(scope)
+			scope_name(&scope)
 		);
 		print_renamed_note(&plan.renamed);
 		print_uncheckable_note(&plan.uncheckable);
@@ -363,11 +355,10 @@ fn locked_resync_error(
 	})
 }
 
-fn scope_name(scope: ResourceScope) -> &'static str {
+fn scope_name(scope: &WriteScope) -> &'static str {
 	match scope {
-		ResourceScope::GlobalOnly => "global",
-		ResourceScope::ProjectOnly => "project",
-		ResourceScope::Both => "all",
+		WriteScope::Global => "global",
+		WriteScope::Project { .. } => "project",
 	}
 }
 
@@ -433,14 +424,8 @@ mod tests {
 		skill::lock::global::add_skill_to_lock("legacy", global_entry())
 			.unwrap();
 
-		update_lock_hash(
-			"legacy",
-			ResourceScope::GlobalOnly,
-			None,
-			"content-v2",
-			None,
-		)
-		.unwrap();
+		update_lock_hash("legacy", &WriteScope::Global, "content-v2", None)
+			.unwrap();
 
 		let lock = skill::lock::global::read_skill_lock();
 		let entry = &lock.skills["legacy"];
@@ -456,8 +441,7 @@ mod tests {
 
 		update_lock_hash(
 			"legacy",
-			ResourceScope::GlobalOnly,
-			None,
+			&WriteScope::Global,
 			"content-v2",
 			Some("deadbeefcafef00d"),
 		)
@@ -489,8 +473,7 @@ mod tests {
 
 		update_lock_hash(
 			"legacy",
-			ResourceScope::ProjectOnly,
-			Some(project.path()),
+			&WriteScope::project(project.path()),
 			"content-v2",
 			Some("deadbeefcafef00d"),
 		)

@@ -254,13 +254,12 @@ impl EntryIdentity {
 /// skip the next fetch).
 pub fn update_lock_hash(
 	name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	scope: &crate::scope::WriteScope,
 	hash: &str,
 	ref_commit: Option<&str>,
 ) -> Result<(), String> {
 	match scope {
-		ResourceScope::GlobalOnly => {
+		crate::scope::WriteScope::Global => {
 			skill::lock::global::modify_skill_lock(|lock| {
 				let Some(entry) = lock.skills.get_mut(name) else {
 					return Err("skill is not in global lock".to_string());
@@ -272,11 +271,7 @@ pub fn update_lock_hash(
 			})
 			.map_err(|e| format!("Failed to update global lock: {e}"))?
 		}
-		ResourceScope::ProjectOnly => {
-			let Some(root) = project_root else {
-				return Err("project_root is required when scope is project"
-					.to_string());
-			};
+		crate::scope::WriteScope::Project { root } => {
 			skill::lock::local::modify_local_lock(Some(root), |lock| {
 				let Some(entry) = lock.skills.get_mut(name) else {
 					return Err("skill is not in project lock".to_string());
@@ -286,9 +281,6 @@ pub fn update_lock_hash(
 				Ok(())
 			})
 			.map_err(|e| format!("Failed to update project lock: {e}"))?
-		}
-		ResourceScope::Both => {
-			Err("update requires global or project scope, not both".to_string())
 		}
 	}
 }

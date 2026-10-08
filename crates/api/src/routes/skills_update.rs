@@ -583,9 +583,6 @@ pub(crate) async fn apply_skill_update_inner(
 			)));
 		}
 	};
-	let resource_scope = write_scope.resource_scope();
-	let project_root =
-		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	// `resync_locked_skill` is synchronous but does BOTH the network fetch and the
 	// lock-holding transaction, so it must not run on an async worker.
@@ -595,8 +592,7 @@ pub(crate) async fn apply_skill_update_inner(
 		let outcome = resync_locked_skill(
 			LockedResyncRequest {
 				name: &name,
-				scope: resource_scope,
-				project_root: project_root.as_deref(),
+				scope: write_scope,
 			},
 			fetcher,
 			resolver,
@@ -660,9 +656,6 @@ pub(crate) async fn apply_skill_updates_inner(
 		&req.scope,
 		req.project_root.as_deref(),
 	)?;
-	let resource_scope = write_scope.resource_scope();
-	let project_root =
-		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	let names = req.names;
 	let scope = req.scope;
@@ -675,8 +668,7 @@ pub(crate) async fn apply_skill_updates_inner(
 			LockedSkillsResyncRequest {
 				source_group: Some(&req.source),
 				names: &names,
-				scope: resource_scope,
-				project_root: project_root.as_deref(),
+				scope: write_scope,
 			},
 			fetcher,
 			resolver,
@@ -2246,8 +2238,7 @@ mod tests {
 
 			update_lock_hash(
 				"legacy",
-				ResourceScope::GlobalOnly,
-				None,
+				&aghub_core::WriteScope::Global,
 				"content-v2",
 				None,
 			)
@@ -2304,8 +2295,7 @@ mod tests {
 
 			update_lock_hash(
 				"legacy",
-				ResourceScope::GlobalOnly,
-				None,
+				&aghub_core::WriteScope::Global,
 				"content-v2",
 				Some("deadbeefcafef00d"),
 			)
@@ -2332,8 +2322,7 @@ mod tests {
 			// would let a later ls-refs preflight falsely skip the fetch.
 			update_lock_hash(
 				"legacy",
-				ResourceScope::GlobalOnly,
-				None,
+				&aghub_core::WriteScope::Global,
 				"content-v2",
 				None,
 			)

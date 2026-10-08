@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use aghub_core::models::ResourceScope;
+use aghub_core::WriteScope;
 use skill_update::mutation::{resync_locked_skills, LockedSkillsResyncRequest};
 use skill_update::{
 	FetchError, FetchSelection, FetchedRepo, Fetcher, SourceRef,
@@ -106,8 +106,7 @@ fn locked_multi_resync_fetches_one_source_and_updates_every_skill() {
 		LockedSkillsResyncRequest {
 			source_group: Some("https://git.example/owner/repo.git"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&fetcher,
 		&Token,
@@ -190,8 +189,7 @@ fn locked_multi_resync_fetches_each_source_ref_once_and_preserves_order() {
 		LockedSkillsResyncRequest {
 			source_group: Some("https://git.example/owner/repo.git"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&fetcher,
 		&Token,
@@ -272,8 +270,7 @@ fn a_source_row_covers_only_its_own_origin() {
 		LockedSkillsResyncRequest {
 			source_group: Some("https://github.com/owner/repo.git"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&fetcher,
 		&PerSourceToken,
@@ -349,8 +346,7 @@ fn each_group_carries_only_its_own_sources_token() {
 		LockedSkillsResyncRequest {
 			source_group: None,
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&fetcher,
 		&PerSourceToken,
@@ -386,7 +382,7 @@ fn listed_source_url_matches_a_shorthand_only_entry() {
 	let names = vec!["alpha".to_string()];
 	let rows = skill_update::sources::list_sources(
 		skill_update::sources::SourceListInput {
-			scopes: vec![skill_update::sources::SourceScope::Project {
+			scopes: vec![aghub_core::WriteScope::Project {
 				root: project.clone(),
 			}],
 		},
@@ -405,8 +401,7 @@ fn listed_source_url_matches_a_shorthand_only_entry() {
 		LockedSkillsResyncRequest {
 			source_group: Some(&rows[0].source_url),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: aghub_core::WriteScope::project(&project),
 		},
 		&fetcher,
 		&Token,
@@ -454,7 +449,7 @@ fn a_provider_typed_entry_applies_from_the_forge_the_row_advertises() {
 
 	let rows = skill_update::sources::list_sources(
 		skill_update::sources::SourceListInput {
-			scopes: vec![skill_update::sources::SourceScope::Project {
+			scopes: vec![aghub_core::WriteScope::Project {
 				root: project.clone(),
 			}],
 		},
@@ -470,8 +465,7 @@ fn a_provider_typed_entry_applies_from_the_forge_the_row_advertises() {
 		LockedSkillsResyncRequest {
 			source_group: Some(&rows[0].source_url),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: aghub_core::WriteScope::project(&project),
 		},
 		&fetcher,
 		&Token,
@@ -521,8 +515,7 @@ fn tfs_style_source_identifier_matches_its_own_entry() {
 		LockedSkillsResyncRequest {
 			source_group: Some("Coll/_git/repo"),
 			names: &names,
-			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&project),
+			scope: WriteScope::project(&project),
 		},
 		&RecordingFetcher {
 			root: fetched_root,
