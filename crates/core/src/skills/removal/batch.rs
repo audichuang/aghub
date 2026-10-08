@@ -9,8 +9,7 @@ use std::sync::Arc;
 use super::{
 	agent_skill_dirs_in_scope, allowed_skill_roots, assert_strictly_contained,
 	by_path_skill_dir, by_path_skill_name, evaluate_removal_verdict,
-	expand_tilde_path, git_keep_hint, plan_copy_removal,
-	single_agent_keep_reason, unmanaged_skill_dirs, PruneStatus,
+	expand_tilde_path, plan_copy_removal, unmanaged_skill_dirs, PruneStatus,
 	RemovalOutcome, Verdict,
 };
 use crate::batch::{Backing, RemovalCredits};
@@ -769,6 +768,14 @@ fn remove_skill_by_path(
 		));
 	}
 
+	if request.scope == ResourceScope::ProjectOnly
+		&& request.project_root.is_none()
+	{
+		return Err(ConfigError::InvalidConfig(
+			"project_root is required when scope is 'project'".to_string(),
+		));
+	}
+
 	let target_agents = request.agents.clone();
 	let agent_dirs: Vec<PathBuf> = target_agents
 		.iter()
@@ -836,17 +843,21 @@ fn remove_skill_by_path(
 		)));
 	}
 
-	if !agent_dirs
-		.iter()
-		.any(|sp| skill_dir.starts_with(sp) || &skill_dir == sp)
-	{
-		let valid_paths: Vec<String> =
-			agent_dirs.iter().map(|p| p.display().to_string()).collect();
-		return Err(ConfigError::InvalidConfig(format!(
-			"Path '{}' is not in agent's skills directories: {}",
-			skill_dir.display(),
-			valid_paths.join(", ")
-		)));
+	for agent in &target_agents {
+		let paths = crate::create_adapter(*agent)
+			.get_skills_paths(request.project_root.as_deref(), request.scope);
+		if !paths
+			.iter()
+			.any(|sp| skill_dir.starts_with(sp) || &skill_dir == sp)
+		{
+			let valid_paths: Vec<String> =
+				paths.iter().map(|p| p.display().to_string()).collect();
+			return Err(ConfigError::InvalidConfig(format!(
+				"Path '{}' is not in agent's skills directories: {}",
+				skill_dir.display(),
+				valid_paths.join(", ")
+			)));
+		}
 	}
 
 	let _mutation_guard = if !request.dry_run {
@@ -893,7 +904,7 @@ fn remove_skill_by_path(
 		.is_some()
 		|| path_is_link;
 
-	let (outcome, git_hint) = if !canonical_layout {
+	let outcome = if !canonical_layout {
 		let all_in_scope = agent_skill_dirs_in_scope(
 			request.scope,
 			request.project_root.as_deref(),
@@ -938,70 +949,57 @@ fn remove_skill_by_path(
 		);
 
 		if !request.dry_run {
-			if let Verdict::Refused { ref reason } = verdict {
-				return Err(ConfigError::unsupported_operation(
+			if let Verdict::Refused {
+				ref reason,
+				ref kind,
+				ref path,
+			} = verdict
+			{
+				let rejected_targets = target_agents
+					.iter()
+					.map(|agent| crate::errors::RejectedTarget {
+						agent: agent.as_str().to_string(),
+						reason: reason.clone(),
+						kind: Some(kind.clone()),
+						path: path.as_ref().map(|p| p.display().to_string()),
+					})
+					.collect();
+				return Err(ConfigError::unsupported_operation_with_targets(
 					"remove for this agent alone",
 					reason,
 					crate::create_adapter(first_agent).name(),
+					Some(rejected_targets),
 				));
 			}
 		}
 
-		let git_hint = single_agent_keep_reason(
-			&skill_dir,
-			&all_in_scope,
-			&skill_name,
-			request.project_root.as_deref(),
-			request.scope,
-			&target_agents,
-		)
-		.and_then(|reason| git_keep_hint(&reason, &skill_dir));
-
-		let outcome =
-			if matches!(verdict, Verdict::Kept { .. }) || request.dry_run {
-				RemovalOutcome::preview(
-					plan,
-					verdict,
-					request.scope,
-					request.project_root.as_deref(),
-					&skill_name,
-				)?
-			} else {
-				RemovalOutcome::commit(
-					plan,
-					&roots,
-					request.scope,
-					request.project_root.as_deref(),
-					&skill_name,
-				)?
-			};
-		(outcome, git_hint)
+		if matches!(verdict, Verdict::Kept { .. }) || request.dry_run {
+			RemovalOutcome::preview(
+				plan,
+				verdict,
+				request.scope,
+				request.project_root.as_deref(),
+				&skill_name,
+			)?
+		} else {
+			RemovalOutcome::commit(
+				plan,
+				&roots,
+				request.scope,
+				request.project_root.as_deref(),
+				&skill_name,
+			)?
+		}
 	} else {
 		// By-path removes the targeted entry only; all_agents is ignored and stays false.
-		let outcome = manager.remove_skill_planned_at_dir_for_agents(
+		manager.remove_skill_planned_at_dir_for_agents(
 			&skill_name,
 			&skill_dir,
 			false,
 			request.dry_run,
 			!request.dry_run,
 			&target_agents,
-		)?;
-
-		let all_in_scope = agent_skill_dirs_in_scope(
-			request.scope,
-			request.project_root.as_deref(),
-		);
-		let git_hint = single_agent_keep_reason(
-			&skill_dir,
-			&all_in_scope,
-			&skill_name,
-			request.project_root.as_deref(),
-			request.scope,
-			&target_agents,
-		)
-		.and_then(|reason| git_keep_hint(&reason, &skill_dir));
-
-		(outcome, git_hint)
+		)?
 	};
 
 	let rows = target_agents
@@ -1009,8 +1007,8 @@ fn remove_skill_by_path(
 		.map(|agent| {
 			let mut row =
 				SkillRemovalRow::from_outcome(agent, &outcome, request.dry_run);
-			if matches!(outcome.verdict, Verdict::Refused { .. }) {
-				row.error = git_hint.clone();
+			if let Verdict::Refused { ref reason, .. } = outcome.verdict {
+				row.error = Some(reason.clone());
 			}
 			row
 		})
@@ -1162,19 +1160,33 @@ fn remove_skill_by_name(
 					outcome: kind,
 					needs_confirm,
 				});
-				if let Verdict::Refused { ref reason } = outcome.verdict {
+				if let Verdict::Refused {
+					ref reason,
+					ref kind,
+					ref path,
+				} = outcome.verdict
+				{
 					let op = if request.all_agents {
 						"remove from every agent"
 					} else {
 						"remove for this agent alone"
 					};
+					let rejected_target = crate::errors::RejectedTarget {
+						agent: agent.as_str().to_string(),
+						reason: reason.clone(),
+						kind: Some(kind.clone()),
+						path: path.as_ref().map(|p| p.display().to_string()),
+					};
 					preflight_failures.push((
 						agent,
-						Arc::new(ConfigError::unsupported_operation(
-							op,
-							reason,
-							agent.as_str(),
-						)),
+						Arc::new(
+							ConfigError::unsupported_operation_with_targets(
+								op,
+								reason,
+								agent.as_str(),
+								Some(vec![rejected_target]),
+							),
+						),
 					));
 				} else if can_credit_prior {
 					accumulated_deletions
@@ -1285,9 +1297,23 @@ fn remove_skill_by_name(
 		let rejected_targets: Vec<crate::errors::RejectedTarget> =
 			preflight_failures
 				.iter()
-				.map(|(agent, err)| crate::errors::RejectedTarget {
-					agent: agent.as_str().to_string(),
-					reason: err.to_string(),
+				.map(|(agent, err)| {
+					if let Some(targets) = err.rejected_targets() {
+						if let Some(target) = targets.first() {
+							return crate::errors::RejectedTarget {
+								agent: agent.as_str().to_string(),
+								reason: err.to_string(),
+								kind: target.kind.clone(),
+								path: target.path.clone(),
+							};
+						}
+					}
+					crate::errors::RejectedTarget {
+						agent: agent.as_str().to_string(),
+						reason: err.to_string(),
+						kind: None,
+						path: None,
+					}
 				})
 				.collect();
 		let scope_str = scope_to_word(request.scope);

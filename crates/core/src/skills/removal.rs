@@ -1019,10 +1019,9 @@ pub(crate) fn plan_copy_removal(
 
 /// The plan for releasing a REAL directory the keep rule already let through:
 /// its owned inbound links plus the directory itself, with the
-/// `needs_confirm` contract of a shared-root release. One producer for the
-/// by-name copy planner and the API by-path route, so the two cannot report
-/// different `needs_confirm` for the same directory.
-pub fn assemble_copy_release_plan(
+/// `needs_confirm` contract of a shared-root release. Used by the copy removal
+/// planner so released directories report consistent `needs_confirm`.
+pub(crate) fn assemble_copy_release_plan(
 	root: PathBuf,
 	roots: &[PathBuf],
 	all_agent_dirs: &[PathBuf],
@@ -1943,26 +1942,27 @@ pub fn evaluate_removal_verdict(
 		readers_outside
 	};
 
-	let git_refusal_fn =
-		|| {
-			effect.survivors.iter().chain(plan.skipped.iter()).find_map(
-				|path| {
-					let reason = if all_agents {
-						shared_slot_git_keep(path, project_root)
-					} else {
-						single_agent_keep_reason(
-							path,
-							all_agent_dirs,
-							name,
-							project_root,
-							scope,
-							requested_agents,
-						)
-					}?;
-					git_keep_hint(&reason, path)
-				},
-			)
-		};
+	let git_refusal_fn = || {
+		effect
+			.survivors
+			.iter()
+			.chain(plan.skipped.iter())
+			.find_map(|path| {
+				let reason = if all_agents {
+					shared_slot_git_keep(path, project_root)
+				} else {
+					single_agent_keep_reason(
+						path,
+						all_agent_dirs,
+						name,
+						project_root,
+						scope,
+						requested_agents,
+					)
+				}?;
+				git_keep_hint(&reason, path).map(|hint| (hint, path.clone()))
+			})
+	};
 
 	let verdict = Verdict::compute(VerdictInputs {
 		plan_paths: &plan.paths,

@@ -262,3 +262,14 @@ Pinned by: `reconcile_skill_removal_row_reports_outcome_and_managed_holders`,
 `delete_by_name_preflight_rejection_carries_structured_rejected_targets`,
 `delete_by_name_preflight_rejection_on_planner_error_carries_rejected_targets`
 (`crates/api/src/routes/skills.rs`).
+
+## delete-by-path wire convergence
+
+`DELETE /skills/by-path` now routes through the unified core batch removal entry (`remove_skill_batch`).
+Invalid scope or unknown agent query parameters now answer HTTP 400 `INVALID_PARAM` (consistent with by-name endpoints), with missing project root when scope is project returning `"project_root is required when scope is 'project'"`.
+Executed refusal of a shared slot or git-tracked directory now answers HTTP 422 `UNSUPPORTED_OPERATION` carrying structured `rejected_targets` with machine-readable `kind` ("git" | "shared") and `path`.
+
+Pinned by: `delete_by_path_git_tracked_is_kept_untracked_is_deleted`,
+`delete_by_path_keeps_shared_slot_read_by_other_agents`,
+`delete_by_path_rejects_missing_project_root_when_scope_is_project`
+(`crates/api/src/routes/skills.rs`).

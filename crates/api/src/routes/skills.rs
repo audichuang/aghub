@@ -2942,6 +2942,26 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn delete_by_path_rejects_missing_project_root_when_scope_is_project() {
+		let req = DeleteSkillByPathRequest {
+			source_path: "/some/path/SKILL.md".to_string(),
+			agents: vec!["claude".to_string()],
+			scope: "project".to_string(),
+			project_root: None,
+			all_agents: None,
+			confirm: Some(false),
+		};
+		let err = block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+			.unwrap_err();
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_CONFIG");
+		assert_eq!(
+			err.body.error,
+			"project_root is required when scope is 'project'"
+		);
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn delete_by_path_dry_run_default_lists_paths_and_keeps_dir() {
@@ -3115,6 +3135,20 @@ mod tests {
 				(by_name.status, by_name.body.code),
 				"by-path and by-name must answer one slot with one status and code"
 			);
+			let targets = refusal
+				.body
+				.rejected_targets
+				.as_deref()
+				.expect("rejected_targets on by-path");
+			assert_eq!(targets.len(), 1);
+			assert_eq!(targets[0].kind.as_deref(), Some("shared"));
+			let by_name_targets = by_name
+				.body
+				.rejected_targets
+				.as_deref()
+				.expect("rejected_targets on by-name");
+			assert_eq!(by_name_targets.len(), 1);
+			assert_eq!(by_name_targets[0].kind.as_deref(), Some("shared"));
 
 			assert!(
 				slot.join("SKILL.md").exists(),
@@ -3548,6 +3582,16 @@ mod tests {
 						&& error.contains("git rm -r --cached")
 						&& error.contains(&tracked_slot.display().to_string()),
 					"error must include the tracked path and escape command: {error}"
+				);
+				let targets =
+					refusal.body.rejected_targets.as_deref().expect(
+						"rejected_targets must be present on git refusal",
+					);
+				assert_eq!(targets.len(), 1);
+				assert_eq!(targets[0].kind.as_deref(), Some("git"));
+				assert_eq!(
+					targets[0].path.as_deref(),
+					Some(tracked_slot.display().to_string().as_str())
 				);
 
 				// 2. Untracked skill: deleted

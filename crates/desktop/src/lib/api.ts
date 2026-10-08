@@ -98,17 +98,28 @@ export function bulkApplyTimeoutMs(count: number): number {
 	return Math.min(120_000 + count * 30_000, 900_000);
 }
 
+export interface RejectedTarget {
+	agent: string;
+	reason: string;
+	kind?: string;
+	path?: string;
+}
+
 export interface ApiErrorBody {
 	error?: string;
 	code?: string;
+	rejected_targets?: RejectedTarget[];
+}
+
+export function getApiErrorBody(error: unknown): ApiErrorBody | undefined {
+	if (isHTTPError(error) && error.data && typeof error.data === "object") {
+		return error.data as ApiErrorBody;
+	}
+	return undefined;
 }
 
 export function getApiErrorCode(error: unknown): string | undefined {
-	if (isHTTPError(error) && error.data && typeof error.data === "object") {
-		const body = error.data as ApiErrorBody;
-		return body.code;
-	}
-	return undefined;
+	return getApiErrorBody(error)?.code;
 }
 
 /**

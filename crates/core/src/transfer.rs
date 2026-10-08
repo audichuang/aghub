@@ -1273,6 +1273,8 @@ fn batch_preflight_error(
 		.map(|failure| crate::errors::RejectedTarget {
 			agent: failure.target.target.agent.as_str().to_string(),
 			reason: failure.reason.to_string(),
+			kind: None,
+			path: None,
 		})
 		.collect();
 	let failures = error
@@ -2365,6 +2367,7 @@ pub fn reconcile_skill(
 							} => Ok(false),
 							crate::skills::removal::Verdict::Refused {
 								reason,
+								..
 							} => {
 								if !r.still_read_from.is_empty() {
 									Err(plan.refuse_shared_master(

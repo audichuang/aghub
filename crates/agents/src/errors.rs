@@ -7,6 +7,10 @@ use thiserror::Error;
 pub struct RejectedTarget {
 	pub agent: String,
 	pub reason: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub kind: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub path: Option<String>,
 }
 
 /// Errors that can occur in the core library
@@ -84,6 +88,23 @@ impl ConfigError {
 				agent.into()
 			),
 			rejected_targets: None,
+		}
+	}
+
+	pub fn unsupported_operation_with_targets(
+		operation: impl Into<String>,
+		resource_type: impl Into<String>,
+		agent: impl Into<String>,
+		rejected_targets: Option<Vec<RejectedTarget>>,
+	) -> Self {
+		Self::UnsupportedOperation {
+			message: format!(
+				"Cannot {} {} for {} agent",
+				operation.into(),
+				resource_type.into(),
+				agent.into()
+			),
+			rejected_targets,
 		}
 	}
 

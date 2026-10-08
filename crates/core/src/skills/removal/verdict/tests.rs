@@ -90,7 +90,7 @@ fn write_test_project_lock_entry(project_root: &Path, name: &str) {
 
 #[test]
 fn test_verdict_table() {
-	let no_refusal: &dyn Fn() -> Option<String> = &|| None;
+	let no_refusal: &dyn Fn() -> Option<(String, PathBuf)> = &|| None;
 	let no_readers: &dyn Fn() -> Vec<&'static str> = &|| Vec::new();
 
 	// Row 1: Removed (single-agent planned paths)
@@ -193,7 +193,7 @@ fn test_verdict_table() {
 			readers_outside: no_readers,
 		});
 		match verdict {
-			Verdict::Refused { reason } => {
+			Verdict::Refused { reason, .. } => {
 				assert!(
 					reason.contains("skill still discoverable afterwards in:")
 				);
@@ -284,7 +284,7 @@ fn test_all_agents_refuses_any_survivor_with_locations() {
 	});
 
 	match verdict {
-		Verdict::Refused { reason } => {
+		Verdict::Refused { reason, .. } => {
 			assert!(
 				reason.contains("skill still discoverable afterwards in:"),
 				"Must report discoverable locations"
@@ -540,7 +540,9 @@ fn test_remove_skill_planned_refused_shared_slot() {
 		.remove_skill_planned("shared-skill", false, true, false)
 		.unwrap();
 	match &preview.verdict {
-		Verdict::Refused { reason } => {
+		Verdict::Refused { reason, kind, path } => {
+			assert_eq!(kind, "shared");
+			assert!(path.is_some());
 			assert!(
 				reason.contains(
 					"skill it reads from a location shared with other agents"
@@ -623,7 +625,7 @@ fn test_remove_skill_planned_refused_disabled_agent() {
 		.remove_skill_planned("disabled-holder", true, true, false)
 		.unwrap();
 	match &preview.verdict {
-		Verdict::Refused { reason } => {
+		Verdict::Refused { reason, .. } => {
 			assert!(
 				reason.contains(
 					"Read only by disabled agent(s), which --all-agents never touches:"

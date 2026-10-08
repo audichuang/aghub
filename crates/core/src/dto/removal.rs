@@ -350,6 +350,8 @@ mod tests {
 			},
 			verdict: Verdict::Refused {
 				reason: "still served".to_string(),
+				kind: "shared".to_string(),
+				path: None,
 			},
 			..kept.clone()
 		};

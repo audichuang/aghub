@@ -52,7 +52,32 @@ test("isSharedMasterRefusal matches 422 UNSUPPORTED_OPERATION HTTP error", () =>
 	assert.equal(isSharedMasterRefusal(new Error("generic")), false);
 });
 
-test("keptDeleteMessageFromError formats localized shared master message from 422 error", () => {
+test("keptDeleteMessageFromError formats localized git message from git-kind 422 error", () => {
+	const errGit = new HTTPError(
+		new Response(null, { status: 422 }),
+		new Request("http://x"),
+		{} as any,
+	);
+	errGit.data = {
+		code: "UNSUPPORTED_OPERATION",
+		error: "/p/.agents/skills/foo is tracked by git, so deleting it is refused",
+		rejected_targets: [
+			{
+				agent: "claude-code",
+				reason: "/p/.agents/skills/foo is tracked by git, so deleting it is refused",
+				kind: "git",
+				path: "/p/.agents/skills/foo",
+			},
+		],
+	};
+
+	assert.equal(
+		keptDeleteMessageFromError(errGit, "foo", t),
+		"deleteSkillKeptGit|foo|/p/.agents/skills/foo",
+	);
+});
+
+test("keptDeleteMessageFromError formats localized shared master message from shared-kind 422 error", () => {
 	const errShared = new HTTPError(
 		new Response(null, { status: 422 }),
 		new Request("http://x"),
@@ -61,6 +86,13 @@ test("keptDeleteMessageFromError formats localized shared master message from 42
 	errShared.data = {
 		code: "UNSUPPORTED_OPERATION",
 		error: "Cannot remove for this agent alone shared slot .agents/skills/foo is also read by other agents for Cursor agent",
+		rejected_targets: [
+			{
+				agent: "cursor",
+				reason: "Cannot remove for this agent alone shared slot .agents/skills/foo is also read by other agents",
+				kind: "shared",
+			},
+		],
 	};
 
 	assert.equal(

@@ -1,5 +1,5 @@
 import { isHTTPError } from "ky";
-import { getApiErrorCode } from "./api.ts";
+import { getApiErrorBody, getApiErrorCode } from "./api.ts";
 
 /**
  * The localized text for a `kept` delete answer.
@@ -47,6 +47,13 @@ export function keptDeleteMessageFromError(
 ): string | null {
 	if (!isSharedMasterRefusal(error)) {
 		return null;
+	}
+	const body = getApiErrorBody(error);
+	const target =
+		body?.rejected_targets?.find((t) => t.kind === "git") ??
+		body?.rejected_targets?.[0];
+	if (target?.kind === "git") {
+		return t("deleteSkillKeptGit", { name, path: target.path });
 	}
 	return t("deleteSkillKeptSharedMaster", { name });
 }

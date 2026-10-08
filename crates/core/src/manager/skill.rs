@@ -765,16 +765,31 @@ impl ConfigManager {
 		);
 
 		if executed {
-			if let removal::Verdict::Refused { ref reason } = verdict {
+			if let removal::Verdict::Refused {
+				ref reason,
+				ref kind,
+				ref path,
+			} = verdict
+			{
 				let operation = if all_agents {
 					"remove from every agent"
 				} else {
 					"remove for this agent alone"
 				};
-				return Err(ConfigError::unsupported_operation(
+				let rejected_targets = requested_agents
+					.iter()
+					.map(|agent| crate::errors::RejectedTarget {
+						agent: agent.as_str().to_string(),
+						reason: reason.clone(),
+						kind: Some(kind.clone()),
+						path: path.as_ref().map(|p| p.display().to_string()),
+					})
+					.collect();
+				return Err(ConfigError::unsupported_operation_with_targets(
 					operation,
 					reason,
 					self.adapter.name(),
+					Some(rejected_targets),
 				));
 			}
 		}

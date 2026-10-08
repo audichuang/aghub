@@ -32,8 +32,14 @@ pub struct Holder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
 	Removed,
-	Kept { still_read_from: Vec<Holder> },
-	Refused { reason: String },
+	Kept {
+		still_read_from: Vec<Holder>,
+	},
+	Refused {
+		reason: String,
+		kind: String,
+		path: Option<PathBuf>,
+	},
 	Partial,
 	LockOnly,
 	Absent,
@@ -61,7 +67,7 @@ pub struct VerdictInputs<'a> {
 	pub effect: &'a crate::skills::removal::ReadEffect,
 	pub all_agents: bool,
 	pub unmanaged_dirs: &'a [PathBuf],
-	pub git_refusal: &'a dyn Fn() -> Option<String>,
+	pub git_refusal: &'a dyn Fn() -> Option<(String, PathBuf)>,
 	pub readers_outside: &'a dyn Fn() -> Vec<&'static str>,
 }
 
@@ -141,6 +147,10 @@ impl Verdict {
 			// preview so preview and commit yield identical Verdict. Dry-run and
 			// transfer preflight pay this probe cost deliberately.
 			let git_refusal = (inputs.git_refusal)();
+			let (kind, path) = match git_refusal {
+				Some((_, ref p)) => ("git".to_string(), Some(p.clone())),
+				None => ("shared".to_string(), still.first().cloned()),
+			};
 			let reason = if inputs.all_agents {
 				let held_by_disabled = still
 					.iter()
@@ -153,7 +163,7 @@ impl Verdict {
 					.map(|path| path.display().to_string())
 					.collect::<Vec<_>>();
 				let mut r = match git_refusal {
-					Some(hint) => hint,
+					Some((hint, _)) => hint,
 					None => format!(
 						"skill still discoverable afterwards in: {where_}"
 					),
@@ -171,7 +181,7 @@ impl Verdict {
 				// Referrer in this agent's own second read dir is what the user
 				// can act on.
 				// See docs/history/core-skills-shape.md#antigravity-write-slot-moved-and-left-a-compat-link
-				let mut r = if let Some(hint) = git_refusal {
+				let mut r = if let Some((hint, _)) = git_refusal {
 					hint
 				} else if where_.is_empty() {
 					"skill it reads from a location shared with other agents"
@@ -196,7 +206,7 @@ impl Verdict {
 				}
 				r
 			};
-			return Verdict::Refused { reason };
+			return Verdict::Refused { reason, kind, path };
 		}
 
 		// The second disjunct is the planner's OWN keep, which `blocks` cannot

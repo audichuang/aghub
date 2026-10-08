@@ -1543,6 +1543,14 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 
 	assert!(matches!(err_name, ConfigError::UnsupportedOperation { .. }));
 	assert!(matches!(err_path, ConfigError::UnsupportedOperation { .. }));
+	let name_targets = err_name
+		.rejected_targets()
+		.expect("rejected_targets on by-name");
+	assert_eq!(name_targets[0].kind.as_deref(), Some("shared"));
+	let path_targets = err_path
+		.rejected_targets()
+		.expect("rejected_targets on by-path");
+	assert_eq!(path_targets[0].kind.as_deref(), Some("shared"));
 
 	// 2. Non-Master copy referenced by an external referrer:
 	// A private copy under .codex/skills referenced by a symlink under .claude/skills.
