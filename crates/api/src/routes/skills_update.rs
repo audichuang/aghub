@@ -2895,6 +2895,99 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn apply_skill_update_relative_project_root_is_absolutized() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let home_path = home.path().canonicalize().unwrap();
+			let _home = HomeGuard::set(&home_path);
+			prepare_global_batch(&home_path);
+
+			let project = home_path.join("proj");
+			std::fs::create_dir_all(&project).unwrap();
+			let installed = project.join(".claude/skills/alpha");
+			std::fs::create_dir_all(&installed).unwrap();
+			std::fs::write(
+				installed.join("SKILL.md"),
+				"---\nname: alpha\ndescription: old\n---\nold\n",
+			)
+			.unwrap();
+
+			let mut lock = skill::LocalSkillLockFile::default();
+			lock.skills.insert(
+				"alpha".to_string(),
+				skill::LocalSkillLockEntry {
+					source_url: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("skills/alpha/SKILL.md".to_string()),
+					ref_commit: None,
+				},
+			);
+			skill::lock::local::write_local_lock(&lock, Some(&project))
+				.unwrap();
+
+			let fetched = tempfile::tempdir().unwrap();
+			let directory = fetched.path().join("skills/alpha");
+			std::fs::create_dir_all(&directory).unwrap();
+			std::fs::write(
+				directory.join("SKILL.md"),
+				"---\nname: alpha\ndescription: new\n---\nnew\n",
+			)
+			.unwrap();
+
+			let fetcher = LocalRepoFetcher {
+				root: fetched.path().to_path_buf(),
+			};
+			let resolver = empty_keyring_resolver();
+
+			let _guard = crate::routes::CwdGuard::change_to(&home_path);
+
+			let req = ApplySkillUpdateRequest {
+				name: "alpha".to_string(),
+				scope: "project".to_string(),
+				project_root: Some("proj".to_string()),
+				confirm: Some(true),
+			};
+			let result = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap()
+				.block_on(apply_skill_update_inner(req, &fetcher, &resolver));
+
+			let resp = match result {
+				Ok(json) => json.into_inner(),
+				Err(error) => {
+					panic!("apply should return Ok: {}", error.body.error)
+				}
+			};
+			assert!(resp.success, "apply should succeed: {:?}", resp.error);
+			assert!(!resp.paths.is_empty(), "swapped paths must not be empty");
+			for p in &resp.paths {
+				let path = std::path::Path::new(p);
+				assert!(
+					path.is_absolute(),
+					"swapped path must be absolute: {p}"
+				);
+				assert!(
+					path.starts_with(&project),
+					"swapped path must start with canonical project root: {p}"
+				);
+			}
+			assert!(std::fs::read_to_string(installed.join("SKILL.md"))
+				.unwrap()
+				.contains("new"));
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert_ne!(
+				lock.skills["alpha"].computed_hash, "old",
+				"project lock hash must advance after a successful apply"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn accept_rename_inner_rejects_without_confirm() {
 		use crate::dto::skill::AcceptRenameRequest;
 		let req = AcceptRenameRequest {

@@ -8882,6 +8882,83 @@ mod tests {
 				serde_json::from_str(&response.into_string().unwrap()).unwrap();
 			assert_eq!(body["code"], "PROJECT_ROOT_REQUIRED");
 		}
+
+		#[cfg(unix)]
+		#[test]
+		fn repair_relative_project_root_is_absolutized() {
+			let _guard = crate::routes::test_env_lock()
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let (temp, root) = legacy_project(&["alpha"]);
+			let temp_path = temp.path().canonicalize().unwrap();
+			let root_canon = root.canonicalize().unwrap();
+			let rel_root = root_canon.strip_prefix(&temp_path).unwrap();
+			let _cwd = crate::routes::CwdGuard::change_to(&temp_path);
+			let c = client();
+			with_pinned_data_dir(|_| {
+				let response = c
+					.post("/api/v1/skills/repair")
+					.json(&serde_json::json!({
+						"scope": "project",
+						"project_root": rel_root.to_str().unwrap(),
+						"dry_run": false,
+					}))
+					.dispatch();
+				assert_eq!(response.status(), Status::Ok);
+				let body: serde_json::Value =
+					serde_json::from_str(&response.into_string().unwrap())
+						.unwrap();
+				assert_eq!(body["refused"], false, "{body}");
+				assert_eq!(body["skills"][0]["outcome"], "migrated", "{body}");
+
+				let master_str = body["skills"][0]["master"]
+					.as_str()
+					.expect("master path present");
+				let master = Path::new(master_str);
+				assert!(
+					master.is_absolute(),
+					"master path in receipt must be absolute: {master_str}"
+				);
+				assert!(
+					master.starts_with(&root_canon),
+					"master path in receipt must start with canonical project root: {master_str}"
+				);
+
+				let referrers = body["skills"][0]["referrers"]
+					.as_array()
+					.expect("referrers list present");
+				assert!(
+					!referrers.is_empty(),
+					"referrers list must not be empty"
+				);
+				for r in referrers {
+					let ref_str = r.as_str().expect("referrer path string");
+					let ref_path = Path::new(ref_str);
+					assert!(
+						ref_path.is_absolute(),
+						"referrer path in receipt must be absolute: {ref_str}"
+					);
+					assert!(
+						ref_path.starts_with(&root_canon),
+						"referrer path in receipt must start with canonical project root: {ref_str}"
+					);
+				}
+
+				assert!(
+					root_canon.join(".aghub/alpha/SKILL.md").exists(),
+					"Master must be materialized at absolutized project root"
+				);
+				assert!(
+					aghub_core::skills::linker::Linker::is_link(
+						&root_canon
+							.join(".agents")
+							.join("skills")
+							.join("alpha")
+					),
+					"alpha's shared slot must have become a referrer"
+				);
+			});
+		}
 	}
 
 	#[cfg(unix)]
