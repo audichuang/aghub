@@ -1100,7 +1100,7 @@ pub async fn delete_skill(
 			still_read_by,
 			still_read_by_managed,
 			still_read_by_unmanaged,
-			code: None,
+			code: single.code.map(|s| s.to_string()),
 		}))
 	})
 	.await
@@ -3215,7 +3215,7 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn delete_by_name_answers_carry_no_code() {
+	fn delete_by_name_and_by_path_preview_parity() {
 		with_isolated_env(|home, _state| {
 			let proj = home;
 			let slot = proj.join(".agents/skills/shared");
@@ -3248,7 +3248,23 @@ mod tests {
 			);
 			assert_eq!(absent.code, None);
 
-			// 2. By-name refused preview answers outcome Kept and code None.
+			// 2. Parity on refused shared-slot preview: both by-path and by-name
+			// answer outcome Kept and code UNSUPPORTED_OPERATION.
+			let by_path_preview = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(DeleteSkillByPathRequest {
+					source_path: slot.join("SKILL.md").display().to_string(),
+					agents: vec!["cursor".to_string()],
+					scope: "project".to_string(),
+					project_root: Some(proj.display().to_string()),
+					all_agents: None,
+					confirm: None,
+				}),
+			))
+			.ok()
+			.expect("by-path preview returns ok")
+			.into_inner();
+
 			let by_name_preview = block_on(delete_skill(
 				TrustedLocalOrigin,
 				AgentParam(AgentType::Cursor),
@@ -3264,11 +3280,17 @@ mod tests {
 			.ok()
 			.expect("by-name preview returns ok")
 			.into_inner();
+
 			assert_eq!(
 				by_name_preview.outcome,
 				crate::dto::skill::RemovalOutcomeKind::Kept
 			);
-			assert_eq!(by_name_preview.code, None);
+			assert_eq!(by_name_preview.outcome, by_path_preview.outcome);
+			assert_eq!(
+				by_name_preview.code.as_deref(),
+				Some("UNSUPPORTED_OPERATION")
+			);
+			assert_eq!(by_name_preview.code, by_path_preview.code);
 		});
 	}
 

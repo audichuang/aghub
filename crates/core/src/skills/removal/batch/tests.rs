@@ -1929,3 +1929,92 @@ fn test_by_name_shared_refusal_excludes_all_requested_agents_from_readers() {
 		assert!(readers.iter().any(|r| r.agent == "codex" && !r.managed));
 	}
 }
+
+#[test]
+fn test_lock_only_skill_removal_prune_preview_and_commit_parity() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+
+	let lock_path = root.join("skills-lock.json");
+	let lock_content = r#"{"version":1,"skills":{"orphan-skill":{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}"#;
+	fs::write(&lock_path, lock_content).unwrap();
+
+	// 1. Preview: lock has 'orphan-skill', nothing on disk.
+	let preview_req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName("orphan-skill".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: true,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let preview_res =
+		remove_skill_batch(&preview_req).expect("preview removal must succeed");
+
+	let single_preview = preview_res
+		.to_single_view(true)
+		.expect("to_single_view on preview");
+	let mut preview_payload =
+		serde_json::to_value(&single_preview.removal_view).unwrap();
+	apply_prune_fields(&mut preview_payload, &single_preview.prune);
+
+	assert_eq!(
+		preview_payload["would_prune_lock_entries"],
+		serde_json::json!(["orphan-skill"]),
+		"preview must advertise would_prune_lock_entries"
+	);
+	assert!(
+		preview_payload.get("pruned_lock_entries").is_none(),
+		"preview must not set pruned_lock_entries"
+	);
+
+	let lock_bytes_before = fs::read_to_string(&lock_path).unwrap();
+	assert!(
+		lock_bytes_before.contains("orphan-skill"),
+		"preview must not mutate the lock file"
+	);
+
+	// 2. Commit: execute removal on the same lock-only skill.
+	let commit_req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName("orphan-skill".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let commit_res =
+		remove_skill_batch(&commit_req).expect("commit removal must succeed");
+
+	let single_commit = commit_res
+		.to_single_view(false)
+		.expect("to_single_view on commit");
+	let mut commit_payload =
+		serde_json::to_value(&single_commit.removal_view).unwrap();
+	apply_prune_fields(&mut commit_payload, &single_commit.prune);
+
+	assert_eq!(
+		commit_payload["pruned_lock_entries"],
+		serde_json::json!(["orphan-skill"]),
+		"commit must report pruned_lock_entries"
+	);
+	assert!(
+		commit_payload.get("would_prune_lock_entries").is_none(),
+		"commit must not set would_prune_lock_entries"
+	);
+
+	let lock_bytes_after = fs::read_to_string(&lock_path).unwrap();
+	assert!(
+		!lock_bytes_after.contains("orphan-skill"),
+		"commit must prune orphan-skill from the lock file"
+	);
+}

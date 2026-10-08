@@ -1686,6 +1686,7 @@ impl RemovalOutcome {
 			log::warn!("failed removal of '{}': {}", path.display(), error);
 		}
 		// Reflect what actually happened on disk in the returned plan.
+		let execution_skipped = !report.skipped.is_empty();
 		plan.paths = report.removed;
 		plan.skipped.extend(report.skipped);
 		// Kept separately as well as folded into `skipped`: `skipped` also holds
@@ -1697,7 +1698,7 @@ impl RemovalOutcome {
 			.extend(report.failed.into_iter().map(|(path, _)| path));
 		let prune =
 			crate::skills::prune::prune_lock_for_scope(scope, project_root);
-		let verdict = if !failed_paths.is_empty() {
+		let verdict = if !failed_paths.is_empty() || execution_skipped {
 			Verdict::Partial
 		} else {
 			Verdict::Removed
@@ -2898,6 +2899,50 @@ pub(crate) mod tests {
 			 nowhere else"
 		);
 		assert!(master.join("SKILL.md").is_file());
+	}
+
+	#[test]
+	fn commit_downgrades_to_partial_when_executor_skips_path() {
+		let root = tempfile::tempdir().unwrap();
+		let name = "skipped-skill";
+		let skill_dir = root.path().join("skills").join(name);
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: skipped-skill\n---\n",
+		)
+		.unwrap();
+
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			paths: vec![skill_dir.clone()],
+			skipped: vec![],
+			needs_confirm: false,
+			shared_master_kept: false,
+			still_read_from: Vec::new(),
+			incomplete: false,
+		};
+
+		// Provide a disjoint root so assert_strictly_contained fails at delete time (simulating an executor containment skip)
+		let other_root = tempfile::tempdir().unwrap();
+		let outcome = RemovalOutcome::commit(
+			plan,
+			&[other_root.path().to_path_buf()],
+			crate::models::ResourceScope::ProjectOnly,
+			Some(root.path()),
+			name,
+		)
+		.expect("commit should return outcome");
+
+		assert_eq!(outcome.verdict, Verdict::Partial);
+		assert!(outcome.executed);
+		assert!(outcome.plan.paths.is_empty(), "no paths were removed");
+		assert_eq!(
+			outcome.plan.skipped,
+			vec![skill_dir.clone()],
+			"skipped path is recorded in plan.skipped"
+		);
+		assert!(skill_dir.exists(), "skipped path must remain on disk");
 	}
 
 	#[test]

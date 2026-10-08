@@ -1620,7 +1620,7 @@ fn remove_skill_by_name(
 		}
 	}
 
-	let rows = in_lock_target_agents
+	let rows: Vec<SkillRemovalRow> = in_lock_target_agents
 		.iter()
 		.map(|agent| {
 			execution_results
@@ -1630,6 +1630,20 @@ fn remove_skill_by_name(
 				.unwrap_or_else(|| SkillRemovalRow::absent(*agent))
 		})
 		.collect();
+
+	if !request.keeps_master
+		&& !rows.is_empty()
+		&& rows.iter().all(|r| {
+			matches!(r.verdict, Verdict::Absent | Verdict::LockOnly)
+				&& r.typed_error.as_ref().is_none_or(|err| {
+					matches!(**err, ConfigError::ResourceNotFound { .. })
+				})
+		}) {
+		batch_prune = crate::skills::prune::prune_lock_for_scope(
+			request.scope,
+			request.project_root.as_deref(),
+		);
+	}
 
 	let master_reclaimed = is_exhaustive
 		&& had_master
