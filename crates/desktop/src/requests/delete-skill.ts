@@ -211,68 +211,16 @@ export function isGoneSkillPath(error: unknown): boolean {
 	return isHTTPError(error) && error.response.status === 404;
 }
 
-export interface GetSkillHoldersOptions {
-	api: ApiClient;
-	skillName: string;
-	agent: string;
-	scope?: "global" | "project";
-	projectRoot?: string | null;
-}
-
 /**
- * Runs a by-name dry-run preview against the backend to retrieve the authoritative
- * holder classification (`still_read_by_managed` and `still_read_by_unmanaged`),
- * replacing frontend heuristics like `isDisabled`.
+ * Retrieves the disabled-agent list from the backend to identify unmanaged agents,
+ * avoiding frontend heuristics and crediting dry-run preview calls.
  */
-export async function getSkillHolders(
-	options: GetSkillHoldersOptions,
-): Promise<BackendHolders> {
-	const { api, skillName, agent, scope = "global", projectRoot } = options;
-	const res = await api.skills.delete(
-		agent,
-		skillName,
-		scope,
-		projectRoot ?? undefined,
-		true,
-		[],
-		false,
-	);
-	return {
-		still_read_by_managed: res.still_read_by_managed ?? [],
-		still_read_by_unmanaged: res.still_read_by_unmanaged ?? [],
-	};
-}
-
-export async function getBulkSkillHolders(
+export async function getUnmanagedAgents(
 	api: ApiClient,
-	groups: readonly BulkDeleteGroup[],
-	resourceType: "mcp" | "skill" | "mixed",
-	projectPath?: string,
 ): Promise<BackendHolders> {
-	const skillGroups = groups.filter(
-		(g) => (g.resourceType ?? resourceType) === "skill",
-	);
-	const unmanagedSet = new Set<string>();
-
-	await Promise.all(
-		skillGroups.map(async (group) => {
-			const firstItem = group.items.find((i) => !!i.agent);
-			if (!firstItem || !firstItem.agent) return;
-			const res = await getSkillHolders({
-				api,
-				agent: firstItem.agent,
-				skillName: group.key,
-				scope: firstItem.source === "project" ? "project" : "global",
-				projectRoot: projectPath,
-			});
-			for (const a of res.still_read_by_unmanaged ?? []) {
-				unmanagedSet.add(a);
-			}
-		}),
-	);
-
+	const dto = await api.agents.disabled();
 	return {
-		still_read_by_unmanaged: [...unmanagedSet],
+		still_read_by_unmanaged: dto.agents ?? [],
 	};
 }
 
@@ -323,7 +271,6 @@ export interface RefusalInterpretation {
 export interface InterpretRefusalOptions {
 	intent?: DeleteSkillIntent;
 	unmanagedAgents?: readonly string[];
-	managedSurvivors?: readonly string[];
 	skillName?: string;
 	t?: TranslateFn;
 }
@@ -368,18 +315,22 @@ export function interpretRefusal(
 		};
 	}
 
-	// 2. Check if refusal was genuinely caused by unticked unmanaged (disabled) agents
+	// 2. Check if refusal was caused by unticked unmanaged (disabled) agents
 	const unmanagedList = options?.unmanagedAgents ?? [];
-	const managedSurvivors = options?.managedSurvivors ?? [];
-	const hasShared = rejectedTargets.some((tgt) => tgt.kind === "shared");
+	const allShared =
+		rejectedTargets.length > 0 &&
+		rejectedTargets.every((tgt) => tgt.kind === "shared");
 
+	// ponytail: The API wire format reports rejected_targets with structured kind ("shared", "git", etc.)
+	// but does not carry a path->holder mapping. Without knowing which agents hold each shared path,
+	// checking that all rejected targets are "shared" and that unticked unmanaged agents exist is the
+	// tightest structured condition possible without string-matching on error reasons or paths.
 	const retryWithUnmanaged =
 		code === "UNSUPPORTED_OPERATION" &&
 		!includeUnmanaged &&
 		!gitTarget &&
-		hasShared &&
-		unmanagedList.length > 0 &&
-		managedSurvivors.length === 0;
+		allShared &&
+		unmanagedList.length > 0;
 
 	let message: string | undefined;
 	if (retryWithUnmanaged) {
@@ -406,7 +357,6 @@ export function interpretRefusal(
 export interface FormatDeleteMessageOptions {
 	name: string;
 	path?: string;
-	isGit?: boolean;
 	error?: unknown;
 	t: TranslateFn;
 	retryWithUnmanaged?: boolean;
@@ -417,7 +367,7 @@ export function formatDeleteMessage(
 	verdict: DeleteSkillVerdict,
 	options: FormatDeleteMessageOptions,
 ): string {
-	const { name, path, isGit, t, retryWithUnmanaged, context } = options;
+	const { name, t, retryWithUnmanaged, context } = options;
 
 	if (retryWithUnmanaged) {
 		return t("deleteSkillRetryWithUnmanaged");
@@ -430,9 +380,6 @@ export function formatDeleteMessage(
 
 	switch (verdict) {
 		case "kept":
-			if (isGit && path) {
-				return t("deleteSkillKeptGit", { name, path });
-			}
 			return t("deleteSkillKeptSharedMaster", { name });
 		case "partial":
 			return t("deleteSkillPartial", { name });
@@ -461,12 +408,8 @@ export interface DeleteSkillResult {
 	message?: string;
 	error?: Error | null;
 	unmanagedKept?: boolean;
-	stillReadByManaged?: string[];
 	stillReadByUnmanaged?: string[];
 	retryWithUnmanaged?: boolean;
-	refusalCode?: string;
-	rejectedTargets?: RejectedTarget[];
-	scopeResults?: ScopeDeleteResult[];
 }
 
 export interface DeleteSkillOptions {
@@ -479,7 +422,6 @@ export interface DeleteSkillOptions {
 	scopes?: readonly ScopeTarget[];
 	intent: DeleteSkillIntent;
 	unmanagedAgents?: readonly string[];
-	managedSurvivors?: readonly string[];
 	context?: "single" | "bulk";
 	t?: TranslateFn;
 }
@@ -529,12 +471,10 @@ export async function deleteSkill(
 			await invalidate();
 
 			if (verdict === "kept") {
-				const isGit = Boolean(res.error && res.skipped.length > 0);
 				const msg = t
 					? formatDeleteMessage("kept", {
 							name,
 							path: res.skipped[0],
-							isGit,
 							t,
 							context: options.context,
 						})
@@ -544,7 +484,6 @@ export async function deleteSkill(
 					success: false,
 					message: msg,
 					unmanagedKept,
-					stillReadByManaged: res.still_read_by_managed,
 					stillReadByUnmanaged: res.still_read_by_unmanaged,
 				};
 			}
@@ -562,7 +501,6 @@ export async function deleteSkill(
 					success: false,
 					message: msg,
 					unmanagedKept,
-					stillReadByManaged: res.still_read_by_managed,
 					stillReadByUnmanaged: res.still_read_by_unmanaged,
 				};
 			}
@@ -571,7 +509,6 @@ export async function deleteSkill(
 				verdict,
 				success: verdict === "removed" || verdict === "absent",
 				unmanagedKept,
-				stillReadByManaged: res.still_read_by_managed,
 				stillReadByUnmanaged: res.still_read_by_unmanaged,
 			};
 		} catch (error) {
@@ -580,7 +517,6 @@ export async function deleteSkill(
 			const refusal = interpretRefusal(error, {
 				intent,
 				unmanagedAgents: options.unmanagedAgents,
-				managedSurvivors: options.managedSurvivors,
 				skillName: name,
 				t,
 			});
@@ -592,8 +528,6 @@ export async function deleteSkill(
 				error:
 					error instanceof Error ? error : new Error(String(error)),
 				retryWithUnmanaged: refusal.retryWithUnmanaged,
-				refusalCode: refusal.code,
-				rejectedTargets: refusal.rejectedTargets,
 			};
 		}
 	}
@@ -601,7 +535,6 @@ export async function deleteSkill(
 	// 2. Cross-scope or multi-scope deletion
 	if (options.scopes && options.scopes.length > 0) {
 		const scopeResults: ScopeDeleteResult[] = [];
-		const allStillReadByManaged: string[] = [];
 		const allStillReadByUnmanaged: string[] = [];
 
 		for (let i = 0; i < options.scopes.length; i++) {
@@ -632,9 +565,6 @@ export async function deleteSkill(
 					(r) => r.action === "delete",
 				);
 				for (const r of deleteRows) {
-					if (r.still_read_by_managed) {
-						allStillReadByManaged.push(...r.still_read_by_managed);
-					}
 					if (r.still_read_by_unmanaged) {
 						allStillReadByUnmanaged.push(
 							...r.still_read_by_unmanaged,
@@ -731,7 +661,6 @@ export async function deleteSkill(
 				const refusal = interpretRefusal(error, {
 					intent,
 					unmanagedAgents: options.unmanagedAgents,
-					managedSurvivors: options.managedSurvivors,
 					skillName: name,
 					t,
 				});
@@ -786,9 +715,7 @@ export async function deleteSkill(
 				verdict: anyWritten ? "partial" : "refused",
 				success: false,
 				message: msg,
-				scopeResults,
 				unmanagedKept: allStillReadByUnmanaged.length > 0,
-				stillReadByManaged: allStillReadByManaged,
 				stillReadByUnmanaged: allStillReadByUnmanaged,
 			};
 		}
@@ -800,9 +727,7 @@ export async function deleteSkill(
 		return {
 			verdict: allScopesAbsent ? "absent" : "removed",
 			success: true,
-			scopeResults,
 			unmanagedKept: allStillReadByUnmanaged.length > 0,
-			stillReadByManaged: allStillReadByManaged,
 			stillReadByUnmanaged: allStillReadByUnmanaged,
 		};
 	}
@@ -820,27 +745,12 @@ export async function deleteSkill(
 	const agents = intent.kind === "from-agents" ? [...intent.agents] : [];
 
 	let unmanagedAgents = options.unmanagedAgents;
-	let managedSurvivors = options.managedSurvivors;
-	if (
-		intent.kind === "all-agents" &&
-		(!unmanagedAgents || !managedSurvivors)
-	) {
+	if (intent.kind === "all-agents" && !unmanagedAgents) {
 		try {
-			const preview = await getSkillHolders({
-				api,
-				skillName: name,
-				agent,
-				scope,
-				projectRoot,
-			});
-			if (!unmanagedAgents) {
-				unmanagedAgents = preview.still_read_by_unmanaged;
-			}
-			if (!managedSurvivors) {
-				managedSurvivors = preview.still_read_by_managed;
-			}
+			const holders = await getUnmanagedAgents(api);
+			unmanagedAgents = holders.still_read_by_unmanaged;
 		} catch {
-			// Ignore preview error
+			// Ignore error
 		}
 	}
 
@@ -869,18 +779,15 @@ export async function deleteSkill(
 				success: false,
 				message: msg,
 				unmanagedKept,
-				stillReadByManaged: res.still_read_by_managed,
 				stillReadByUnmanaged: res.still_read_by_unmanaged,
 			};
 		}
 
 		if (verdict === "kept") {
-			const isGit = Boolean(res.error && res.skipped.length > 0);
 			const msg = t
 				? formatDeleteMessage("kept", {
 						name,
 						path: res.skipped[0],
-						isGit,
 						t,
 						context: options.context,
 					})
@@ -890,7 +797,6 @@ export async function deleteSkill(
 				success: false,
 				message: msg,
 				unmanagedKept,
-				stillReadByManaged: res.still_read_by_managed,
 				stillReadByUnmanaged: res.still_read_by_unmanaged,
 			};
 		}
@@ -908,7 +814,6 @@ export async function deleteSkill(
 				success: false,
 				message: msg,
 				unmanagedKept,
-				stillReadByManaged: res.still_read_by_managed,
 				stillReadByUnmanaged: res.still_read_by_unmanaged,
 			};
 		}
@@ -917,7 +822,6 @@ export async function deleteSkill(
 			verdict,
 			success: verdict === "removed" || verdict === "absent",
 			unmanagedKept,
-			stillReadByManaged: res.still_read_by_managed,
 			stillReadByUnmanaged: res.still_read_by_unmanaged,
 		};
 	} catch (error) {
@@ -926,7 +830,6 @@ export async function deleteSkill(
 		const refusal = interpretRefusal(error, {
 			intent,
 			unmanagedAgents,
-			managedSurvivors,
 			skillName: name,
 			t,
 		});
@@ -937,8 +840,6 @@ export async function deleteSkill(
 			message: refusal.message,
 			error: error instanceof Error ? error : new Error(String(error)),
 			retryWithUnmanaged: refusal.retryWithUnmanaged,
-			refusalCode: refusal.code,
-			rejectedTargets: refusal.rejectedTargets,
 		};
 	}
 }

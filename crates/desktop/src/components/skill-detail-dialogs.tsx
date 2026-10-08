@@ -19,7 +19,7 @@ import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import {
 	deleteSkill,
-	getSkillHolders,
+	getUnmanagedAgents,
 	splitDeleteTargets,
 	type BackendHolders,
 } from "../requests/delete-skill";
@@ -205,17 +205,9 @@ export function DeleteSkillDialog({
 			setLoadingHolders(false);
 			return;
 		}
-		const firstAgent =
-			group.items.find((i) => !!i.agent)?.agent ?? "claude";
 		setLoadingHolders(true);
 		setHoldersError(null);
-		getSkillHolders({
-			api,
-			agent: firstAgent,
-			skillName: skill.name,
-			scope: skill.source === "project" ? "project" : "global",
-			projectRoot: projectPath,
-		})
+		getUnmanagedAgents(api)
 			.then((holders) => {
 				setBackendHolders(holders);
 				setLoadingHolders(false);
@@ -226,7 +218,7 @@ export function DeleteSkillDialog({
 				);
 				setLoadingHolders(false);
 			});
-	}, [api, isOpen, skill, group.items, projectPath]);
+	}, [api, isOpen, skill]);
 
 	const targets = useMemo(
 		() =>
@@ -285,7 +277,6 @@ export function DeleteSkillDialog({
 					includeUnmanaged,
 				},
 				unmanagedAgents,
-				managedSurvivors: backendHolders?.still_read_by_managed,
 			});
 
 			if (!res.success) {

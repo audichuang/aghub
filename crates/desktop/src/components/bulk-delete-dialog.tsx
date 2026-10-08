@@ -10,7 +10,7 @@ import {
 	buildBulkDeleteRequests,
 	collectUnmanagedDeleteTargets,
 	deleteSkill,
-	getBulkSkillHolders,
+	getUnmanagedAgents,
 	type BackendHolders,
 	type BulkDeleteGroup,
 } from "../requests/delete-skill";
@@ -54,7 +54,7 @@ export function BulkDeleteDialog({
 		}
 		setLoadingHolders(true);
 		setHoldersError(null);
-		getBulkSkillHolders(api, groups, resourceType, projectPath)
+		getUnmanagedAgents(api)
 			.then((holders) => {
 				setBackendHolders(holders);
 				setLoadingHolders(false);
@@ -65,7 +65,7 @@ export function BulkDeleteDialog({
 				);
 				setLoadingHolders(false);
 			});
-	}, [api, isOpen, groups, resourceType, projectPath]);
+	}, [api, isOpen]);
 
 	const unmanagedItems = useMemo(
 		() =>
@@ -144,11 +144,10 @@ export function BulkDeleteDialog({
 							intent: {
 								kind: "from-agents",
 								agents: req.agents,
+								includeUnmanaged,
 							},
 							unmanagedAgents:
 								backendHolders?.still_read_by_unmanaged,
-							managedSurvivors:
-								backendHolders?.still_read_by_managed,
 						}).then((res) => {
 							if (!res.success) {
 								throw new Error(

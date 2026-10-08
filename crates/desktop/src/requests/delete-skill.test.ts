@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HTTPError } from "ky";
 import {
+	buildBulkDeleteRequests,
 	deleteSkill,
 	formatDeleteMessage,
-	getBulkSkillHolders,
-	getSkillHolders,
+	getUnmanagedAgents,
 	interpretRefusal,
 	interpretRemovalVerdict,
 	splitDeleteTargets,
@@ -105,17 +105,6 @@ test("formatDeleteMessage provides appropriate localized messages for verdicts",
 		"deleteSkillKeptSharedMaster|my-skill",
 	);
 
-	// Kept git tracked
-	assert.equal(
-		formatDeleteMessage("kept", {
-			name: "my-skill",
-			path: "/home/user/.agents/skills/my-skill",
-			isGit: true,
-			t,
-		}),
-		"deleteSkillKeptGit|my-skill|/home/user/.agents/skills/my-skill",
-	);
-
 	// Partial
 	assert.equal(
 		formatDeleteMessage("partial", { name: "my-skill", t }),
@@ -181,7 +170,6 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 			includeUnmanaged: false,
 		},
 		unmanagedAgents: ["cursor"],
-		managedSurvivors: [],
 		t,
 	});
 	assert.equal(refusal1.isRefusal, true);
@@ -189,32 +177,87 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 	assert.equal(refusal1.retryWithUnmanaged, true);
 	assert.equal(refusal1.message, "deleteSkillRetryWithUnmanaged");
 
-	// (a) Managed survivor + unmanaged preview -> no hint, reason shown
-	const managedSurvivorRefusal = createMockHttpError(422, {
+	// Real two-enabled-holder refusal: claude+codex enabled & named, cursor disabled unticked,
+	// rejected_targets all kind "shared" => hint fires
+	const twoEnabledRefusal = createMockHttpError(422, {
 		code: "UNSUPPORTED_OPERATION",
 		error: "skill reconcile preflight failed; nothing was written",
 		rejected_targets: [
 			{
 				agent: "claude",
-				reason: "location shared: /some/path",
+				reason: "location shared: /path/shared",
+				kind: "shared",
+			},
+			{
+				agent: "codex",
+				reason: "location shared: /path/shared",
 				kind: "shared",
 			},
 		],
 	});
+	const refusalTwoEnabled = interpretRefusal(twoEnabledRefusal, {
+		intent: {
+			kind: "from-agents",
+			agents: ["claude", "codex"],
+			includeUnmanaged: false,
+		},
+		unmanagedAgents: ["cursor"],
+		t,
+	});
+	assert.equal(refusalTwoEnabled.isRefusal, true);
+	assert.equal(refusalTwoEnabled.code, "UNSUPPORTED_OPERATION");
+	assert.equal(refusalTwoEnabled.retryWithUnmanaged, true);
+	assert.equal(refusalTwoEnabled.message, "deleteSkillRetryWithUnmanaged");
 
-	const refusalManaged = interpretRefusal(managedSurvivorRefusal, {
+	// Refusal with non-"shared" kind (or mixed kinds) => no hint, shows reason
+	const mixedKindRefusal = createMockHttpError(422, {
+		code: "UNSUPPORTED_OPERATION",
+		error: "skill reconcile preflight failed",
+		rejected_targets: [
+			{
+				agent: "claude",
+				reason: "location shared: /path/shared",
+				kind: "shared",
+			},
+			{
+				agent: "zed",
+				reason: "unsupported target",
+				kind: "unsupported",
+			},
+		],
+	});
+	const refusalMixed = interpretRefusal(mixedKindRefusal, {
 		intent: {
 			kind: "from-agents",
 			agents: ["claude"],
 			includeUnmanaged: false,
 		},
 		unmanagedAgents: ["cursor"],
-		managedSurvivors: ["claude"],
 		t,
 	});
-	assert.equal(refusalManaged.isRefusal, true);
-	assert.equal(refusalManaged.retryWithUnmanaged, false);
-	assert.equal(refusalManaged.message, "location shared: /some/path");
+	assert.equal(refusalMixed.isRefusal, true);
+	assert.equal(refusalMixed.retryWithUnmanaged, false);
+	assert.equal(
+		refusalMixed.message,
+		"location shared: /path/shared; unsupported target",
+	);
+
+	// includeUnmanaged=true => no hint
+	const refusalWithIncludeUnmanaged = interpretRefusal(twoEnabledRefusal, {
+		intent: {
+			kind: "from-agents",
+			agents: ["claude", "codex", "cursor"],
+			includeUnmanaged: true,
+		},
+		unmanagedAgents: ["cursor"],
+		t,
+	});
+	assert.equal(refusalWithIncludeUnmanaged.isRefusal, true);
+	assert.equal(refusalWithIncludeUnmanaged.retryWithUnmanaged, false);
+	assert.equal(
+		refusalWithIncludeUnmanaged.message,
+		"location shared: /path/shared; location shared: /path/shared",
+	);
 
 	// 422 UNSUPPORTED_OPERATION with git kind -> NOT retryWithUnmanaged, displays git message
 	const gitRefusal = createMockHttpError(422, {
@@ -290,6 +333,49 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 		refusal4.message?.includes("Zed agent has no project skill config"),
 		"must display the real reason for unsupported scope",
 	);
+});
+
+test("bulk delete refusal with includeUnmanaged=true does not produce retry hint", async () => {
+	const sharedRefusal = createMockHttpError(422, {
+		code: "UNSUPPORTED_OPERATION",
+		error: "skill reconcile preflight failed; nothing was written",
+		rejected_targets: [
+			{
+				agent: "claude",
+				reason: "location shared: /path/shared",
+				kind: "shared",
+			},
+		],
+	});
+
+	const api = {
+		skills: {
+			delete: async () => {
+				throw sharedRefusal;
+			},
+		},
+	} as any;
+
+	const result = await deleteSkill({
+		api,
+		skillName: "my-skill",
+		agent: "claude",
+		scope: "global",
+		context: "bulk",
+		intent: {
+			kind: "from-agents",
+			agents: ["claude", "cursor"],
+			includeUnmanaged: true,
+		},
+		unmanagedAgents: ["cursor"],
+		t,
+	});
+
+	assert.equal(result.success, false);
+	assert.equal(result.verdict, "refused");
+	assert.equal(result.retryWithUnmanaged, false);
+	assert.notEqual(result.message, "deleteSkillRetryWithUnmanaged");
+	assert.equal(result.message, "location shared: /path/shared");
 });
 
 // =========================================================================
@@ -371,12 +457,6 @@ test("cross-scope deleteSkill reports per-scope results and never claims nothing
 		result.message,
 		"deleteSkillCrossScopePartial|scopeGlobal|scopeProject|Zed agent has no project skill config",
 	);
-	assert.equal(result.scopeResults?.length, 2);
-	assert.equal(result.scopeResults[0].scope, "global");
-	assert.equal(result.scopeResults[0].success, true);
-	assert.equal(result.scopeResults[0].verdict, "removed");
-	assert.equal(result.scopeResults[1].scope, "project");
-	assert.equal(result.scopeResults[1].success, false);
 });
 
 test("cross-scope deleteSkill correctly handles project written and global failed", async () => {
@@ -534,8 +614,6 @@ test("cross-scope deleteSkill when scope 1 is absent and scope 2 is refused repo
 		"Zed agent has no project skill config",
 		"message must not claim global was written",
 	);
-	assert.equal(result.scopeResults?.[0]?.verdict, "absent");
-	assert.equal(result.scopeResults?.[1]?.verdict, "refused");
 });
 
 test("cross-scope deleteSkill where all scopes return absent yields verdict 'absent'", async () => {
@@ -616,11 +694,6 @@ test("cross-scope delete aggregates all delete rows and detects partial when one
 		"partial",
 		"mixed removed and kept must yield partial",
 	);
-	assert.equal(result.scopeResults?.[0]?.verdict, "partial");
-	assert.ok(
-		result.scopeResults?.[0]?.error?.includes("cursor: kept"),
-		"scope error must record that cursor was kept",
-	);
 });
 
 // =========================================================================
@@ -691,51 +764,25 @@ test("splitDeleteTargets classifies managed based on backend fields, not fronten
 	);
 });
 
-test("getSkillHolders retrieves authoritative classification from backend dry-run preview and overrides isDisabled", async () => {
-	let deleteCalledWith: any = null;
+test("getUnmanagedAgents fetches disabled agents from backend without dry-run delete", async () => {
 	const api = {
+		agents: {
+			disabled: async () => ({
+				configured: true,
+				agents: ["cursor", "opencode"],
+			}),
+		},
 		skills: {
-			delete: async (
-				agent: string,
-				skillName: string,
-				scope: string,
-				projectRoot: string | undefined,
-				allAgents: boolean,
-				agents: string[],
-				confirm: boolean,
-			) => {
-				deleteCalledWith = {
-					agent,
-					skillName,
-					scope,
-					projectRoot,
-					allAgents,
-					agents,
-					confirm,
-				};
-				return {
-					outcome: "kept",
-					still_read_by_managed: [],
-					still_read_by_unmanaged: ["cursor", "opencode"],
-				};
+			delete: async () => {
+				throw new Error(
+					"skills.delete must not be called by getUnmanagedAgents",
+				);
 			},
 		},
 	} as any;
 
-	const holders = await getSkillHolders({
-		api,
-		skillName: "my-skill",
-		agent: "claude",
-		scope: "global",
-	});
+	const holders = await getUnmanagedAgents(api);
 
-	assert.equal(
-		deleteCalledWith.confirm,
-		false,
-		"dry-run preview must pass confirm: false",
-	);
-	assert.equal(deleteCalledWith.allAgents, true);
-	assert.deepEqual(holders.still_read_by_managed, []);
 	assert.deepEqual(holders.still_read_by_unmanaged, ["cursor", "opencode"]);
 
 	const items = [
@@ -754,50 +801,98 @@ test("getSkillHolders retrieves authoritative classification from backend dry-ru
 	);
 });
 
-test("getBulkSkillHolders queries holders for each skill group and aggregates unmanaged agents", async () => {
-	const queries: string[] = [];
-	const api = {
-		skills: {
-			delete: async (agent: string, skillName: string) => {
-				queries.push(`${agent}:${skillName}`);
-				if (skillName === "skill-1") {
-					return {
-						outcome: "kept",
-						still_read_by_managed: [],
-						still_read_by_unmanaged: ["cursor"],
-					};
-				}
-				return {
-					outcome: "kept",
-					still_read_by_managed: [],
-					still_read_by_unmanaged: ["opencode"],
-				};
-			},
-		},
-	} as any;
+test("first item's agent is disabled => not in named/request until includeUnmanaged is ticked", () => {
+	const backendHolders: BackendHolders = {
+		still_read_by_unmanaged: ["cursor"],
+	};
 
-	const groups = [
-		{
-			key: "skill-1",
-			items: [
-				{ agent: "claude", source: "global" as const, name: "skill-1" },
-			],
-		},
-		{
-			key: "skill-2",
-			items: [
-				{ agent: "claude", source: "global" as const, name: "skill-2" },
-			],
-		},
+	// cursor is the FIRST item in the group
+	const items = [
+		{ name: "my-skill", agent: "cursor", source: "global" as const },
+		{ name: "my-skill", agent: "claude", source: "global" as const },
 	];
 
-	const res = await getBulkSkillHolders(api, groups, "skill");
-
-	assert.deepEqual(queries, ["claude:skill-1", "claude:skill-2"]);
+	// Unticked: cursor is not in named
+	const unticked = splitDeleteTargets(items, backendHolders, false);
 	assert.deepEqual(
-		[...(res.still_read_by_unmanaged ?? [])].sort(),
-		["cursor", "opencode"].sort(),
+		unticked.managed.map((i) => i.agent),
+		["claude"],
 	);
+	assert.deepEqual(
+		unticked.unmanaged.map((i) => i.agent),
+		["cursor"],
+	);
+	assert.deepEqual(
+		unticked.named.map((i) => i.agent),
+		["claude"],
+	);
+
+	// In bulk request building, cursor is not in requests without consent
+	const untickedBulk = buildBulkDeleteRequests({
+		groups: [{ key: "my-skill", items }],
+		resourceType: "skill",
+		backendHolders,
+		includeUnmanaged: false,
+	});
+	assert.equal(untickedBulk.requests.length, 1);
+	assert.equal(untickedBulk.requests[0].agent, "claude");
+	assert.deepEqual(untickedBulk.requests[0].agents, ["claude"]);
+
+	// Ticked: cursor is included in named and request
+	const ticked = splitDeleteTargets(items, backendHolders, true);
+	assert.deepEqual(
+		ticked.named.map((i) => i.agent),
+		["claude", "cursor"],
+	);
+	const tickedBulk = buildBulkDeleteRequests({
+		groups: [{ key: "my-skill", items }],
+		resourceType: "skill",
+		backendHolders,
+		includeUnmanaged: true,
+	});
+	assert.ok(tickedBulk.requests.some((r) => r.agent === "cursor"));
+	assert.ok(tickedBulk.requests[0].agents.includes("cursor"));
+});
+
+test("mixed-scope group: disabled agent is not named in either scope's request", () => {
+	const backendHolders: BackendHolders = {
+		still_read_by_unmanaged: ["cursor"],
+	};
+
+	const group = {
+		key: "my-skill",
+		items: [
+			{
+				name: "my-skill",
+				agent: "claude",
+				source: "global" as const,
+			},
+			{
+				name: "my-skill",
+				agent: "cursor",
+				source: "project" as const,
+				source_path: "/project/.agents/skills/my-skill",
+			},
+		],
+	};
+
+	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
+		groups: [group],
+		resourceType: "skill",
+		backendHolders,
+		includeUnmanaged: false,
+		projectPath: "/project",
+	});
+
+	// Only global scope for claude should be requested; project scope held only by disabled cursor must not be requested
+	assert.equal(requests.length, 1);
+	assert.equal(requests[0].scope, "global");
+	assert.equal(requests[0].agent, "claude");
+	assert.deepEqual(requests[0].agents, ["claude"]);
+	assert.ok(!requests.some((r) => r.agent === "cursor"));
+	assert.ok(!requests.some((r) => r.agents.includes("cursor")));
+	assert.ok(!requests.some((r) => r.scope === "project"));
+	assert.deepEqual(skippedGroupKeys, []);
 });
 
 test("deleteSkill returns verdict 'absent' when backend returns outcome 'absent', not 'removed'", async () => {
