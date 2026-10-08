@@ -45,7 +45,6 @@ test("a row with no agent is never named", () => {
 	} = splitDeleteTargets(
 		items,
 		{
-			still_read_by_managed: [],
 			still_read_by_unmanaged: [],
 		},
 		true,

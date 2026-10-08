@@ -45,7 +45,6 @@ export interface ScopeTarget {
 }
 
 export interface BackendHolders {
-	still_read_by_managed?: readonly string[];
 	still_read_by_unmanaged?: readonly string[];
 }
 
@@ -205,6 +204,26 @@ export function collectUnmanagedDeleteTargets(
 		}
 	}
 	return unmanaged;
+}
+
+/**
+ * Returns the deduplicated unmanaged (disabled) agents that hold a skill
+ * in the specified group.
+ */
+export function unmanagedAgentsForGroup(
+	group: BulkDeleteGroup | undefined,
+	backendHolders: BackendHolders | null | undefined,
+): string[] {
+	if (!group || !backendHolders?.still_read_by_unmanaged) {
+		return [];
+	}
+	const disabled = new Set(backendHolders.still_read_by_unmanaged);
+	const agents = group.items
+		.map((item) => item.agent)
+		.filter((agent): agent is string =>
+			Boolean(agent && disabled.has(agent)),
+		);
+	return [...new Set(agents)];
 }
 
 export function isGoneSkillPath(error: unknown): boolean {
@@ -762,7 +781,6 @@ export async function deleteSkill(
 			projectRoot,
 			allAgents,
 			agents,
-			true,
 		);
 
 		const verdict = interpretRemovalVerdict(res.outcome, intent.kind);

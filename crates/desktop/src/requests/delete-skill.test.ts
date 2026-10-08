@@ -9,7 +9,9 @@ import {
 	interpretRefusal,
 	interpretRemovalVerdict,
 	splitDeleteTargets,
+	unmanagedAgentsForGroup,
 	type BackendHolders,
+	type BulkDeleteGroup,
 	type DeleteSkillIntent,
 	type DeleteSkillVerdict,
 } from "./delete-skill.ts";
@@ -378,6 +380,61 @@ test("bulk delete refusal with includeUnmanaged=true does not produce retry hint
 	assert.equal(result.message, "location shared: /path/shared");
 });
 
+test("shared UNSUPPORTED_OPERATION refusal with unrelated disabled agent does not produce retry hint", () => {
+	const sharedRefusal = createMockHttpError(422, {
+		code: "UNSUPPORTED_OPERATION",
+		error: "skill reconcile preflight failed; nothing was written",
+		rejected_targets: [
+			{
+				agent: "claude",
+				reason: "location shared: /path/shared",
+				kind: "shared",
+			},
+		],
+	});
+
+	// Disabled agent (e.g. cursor) exists globally, but does not hold this skill group,
+	// so unmanagedAgents passed for this request is empty:
+	const refusal = interpretRefusal(sharedRefusal, {
+		intent: {
+			kind: "from-agents",
+			agents: ["claude"],
+			includeUnmanaged: false,
+		},
+		unmanagedAgents: [],
+		t,
+	});
+
+	assert.equal(refusal.isRefusal, true);
+	assert.equal(refusal.code, "UNSUPPORTED_OPERATION");
+	assert.equal(refusal.retryWithUnmanaged, false);
+	assert.notEqual(refusal.message, "deleteSkillRetryWithUnmanaged");
+	assert.equal(refusal.message, "location shared: /path/shared");
+});
+
+test("unmanagedAgentsForGroup returns unmanaged agents only for the requested group", () => {
+	const groupA: BulkDeleteGroup = {
+		key: "skill-a",
+		items: [
+			{ name: "skill-a", agent: "claude", source: "global" },
+			{ name: "skill-a", agent: "cursor", source: "global" },
+		],
+	};
+	const groupB: BulkDeleteGroup = {
+		key: "skill-b",
+		items: [{ name: "skill-b", agent: "claude", source: "global" }],
+	};
+	const backendHolders: BackendHolders = {
+		still_read_by_unmanaged: ["cursor"],
+	};
+
+	assert.deepEqual(unmanagedAgentsForGroup(groupA, backendHolders), [
+		"cursor",
+	]);
+	assert.deepEqual(unmanagedAgentsForGroup(groupB, backendHolders), []);
+	assert.deepEqual(unmanagedAgentsForGroup(undefined, backendHolders), []);
+});
+
 // =========================================================================
 // 3. Cross-scope deletion & multi-row aggregation
 // =========================================================================
@@ -739,9 +796,8 @@ test("splitDeleteTargets classifies managed based on backend fields, not fronten
 		{ agent: "opencode", source: "global" },
 	];
 
-	// Backend classification has still_read_by_managed empty (targeted agent credited away):
+	// Backend classification identifies disabled agents via still_read_by_unmanaged:
 	const backend: BackendHolders = {
-		still_read_by_managed: [],
 		still_read_by_unmanaged: ["cursor", "opencode"],
 	};
 
