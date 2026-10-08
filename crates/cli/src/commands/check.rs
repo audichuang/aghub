@@ -22,8 +22,8 @@ use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use skill_update::{
-	check_updates, projection, CheckDeps, EntryInput, Fetcher, GitFetcher,
-	RefResolver, ResultCache,
+	check_updates, projection, CheckDeps, EntryInput, Fetcher, RefResolver,
+	ResultCache,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -360,11 +360,10 @@ pub(crate) fn collect_update_views(
 	// One repository behind both: the preflight's tip resolution and the fetch
 	// that may follow it share the composite, its snapshot memo, and its token
 	// context.
-	let git_fetcher = GitFetcher::new();
+	let cli_fetcher = crate::commands::source::CliFetcher::new();
 	let ref_resolver: Arc<dyn RefResolver> =
-		Arc::new(git_fetcher.ref_resolver());
-	let fetcher: Arc<dyn Fetcher> =
-		Arc::new(crate::commands::source::CliFetcher);
+		Arc::new(cli_fetcher.ref_resolver());
+	let fetcher: Arc<dyn Fetcher> = Arc::new(cli_fetcher);
 	let resolver = EnvTokenResolver;
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {

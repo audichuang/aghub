@@ -271,7 +271,13 @@ pub struct FetchedResyncRequest<'a> {
 	pub expected: aghub_core::skills::lock::EntryIdentity,
 }
 
+pub const SKILL_PATH_NOT_FOUND_CODE: &str = "SKILL_PATH_NOT_FOUND";
+pub const SKILL_LOCK_ENTRY_NOT_FOUND_CODE: &str = "SKILL_LOCK_ENTRY_NOT_FOUND";
+pub const SOURCE_FETCH_FAILED_CODE: &str = "SOURCE_FETCH_FAILED";
+pub const KEYCHAIN_UNAVAILABLE_CODE: &str = "KEYCHAIN_UNAVAILABLE";
 pub const SKILL_SOURCE_VIEW_STALE_CODE: &str = "SKILL_SOURCE_VIEW_STALE";
+pub const INVALID_SCOPE_CODE: &str = "INVALID_SCOPE";
+pub const MISSING_PARAM_CODE: &str = "MISSING_PARAM";
 
 #[derive(Debug)]
 pub enum ResyncMutationError {
@@ -283,7 +289,7 @@ impl ResyncMutationError {
 	/// Stable machine code for this resync failure.
 	pub fn code(&self) -> &'static str {
 		match self {
-			Self::InvalidSkillPath => "SKILL_PATH_NOT_FOUND",
+			Self::InvalidSkillPath => SKILL_PATH_NOT_FOUND_CODE,
 			Self::Resync(err) => err.code(),
 		}
 	}
@@ -367,23 +373,22 @@ pub enum LockedResyncError {
 }
 
 impl LockedResyncError {
-	/// Stable machine code for this locked resync failure, or `None` if this
-	/// error has no shared wire code.
-	pub fn code(&self) -> Option<&'static str> {
+	/// Stable machine code for this locked resync failure.
+	pub fn code(&self) -> &'static str {
 		match self {
-			Self::NotInstalled => Some(
-				aghub_core::skills::resync::ResyncError::NotInstalled.code(),
-			),
-			Self::CredentialBackendUnavailable => Some("KEYCHAIN_UNAVAILABLE"),
-			Self::SourceGroupMismatch => Some(SKILL_SOURCE_VIEW_STALE_CODE),
-			Self::Resync(err) => Some(err.code()),
-			Self::UnsupportedScope(_)
-			| Self::ProjectRootRequired
-			| Self::LockEntryNotFound { .. }
-			| Self::MissingSkillPath
+			Self::UnsupportedScope(_) => INVALID_SCOPE_CODE,
+			Self::ProjectRootRequired => MISSING_PARAM_CODE,
+			Self::LockEntryNotFound { .. } => SKILL_LOCK_ENTRY_NOT_FOUND_CODE,
+			Self::MissingSkillPath
 			| Self::InvalidSkillPath
-			| Self::SourceSkillNotFound
-			| Self::Fetch(_) => None,
+			| Self::SourceSkillNotFound => SKILL_PATH_NOT_FOUND_CODE,
+			Self::NotInstalled => {
+				aghub_core::skills::resync::ResyncError::NotInstalled.code()
+			}
+			Self::CredentialBackendUnavailable => KEYCHAIN_UNAVAILABLE_CODE,
+			Self::SourceGroupMismatch => SKILL_SOURCE_VIEW_STALE_CODE,
+			Self::Fetch(_) => SOURCE_FETCH_FAILED_CODE,
+			Self::Resync(err) => err.code(),
 		}
 	}
 
@@ -854,6 +859,9 @@ mod tests {
 		resync_locked_skill, FetchMutationError, FetchedRenameRequest,
 		FetchedResyncRequest, FetchedSource, FetchedSourceRequest,
 		LockedResyncError, LockedResyncRequest, ResyncMutationError,
+		INVALID_SCOPE_CODE, KEYCHAIN_UNAVAILABLE_CODE, MISSING_PARAM_CODE,
+		SKILL_LOCK_ENTRY_NOT_FOUND_CODE, SKILL_PATH_NOT_FOUND_CODE,
+		SKILL_SOURCE_VIEW_STALE_CODE, SOURCE_FETCH_FAILED_CODE,
 	};
 
 	struct NoToken;
@@ -1324,111 +1332,131 @@ mod tests {
 		}
 
 		// Table asserting code and retryable for every variant of LockedResyncError
-		let locked_cases: Vec<(LockedResyncError, Option<&str>, bool)> = vec![
+		let locked_cases: Vec<(LockedResyncError, &'static str, bool)> = vec![
 			(
 				LockedResyncError::UnsupportedScope(ResourceScope::Both),
-				None,
+				INVALID_SCOPE_CODE,
 				false,
 			),
-			(LockedResyncError::ProjectRootRequired, None, false),
+			(
+				LockedResyncError::ProjectRootRequired,
+				MISSING_PARAM_CODE,
+				false,
+			),
 			(
 				LockedResyncError::LockEntryNotFound {
 					scope: ResourceScope::GlobalOnly,
 				},
-				None,
+				SKILL_LOCK_ENTRY_NOT_FOUND_CODE,
 				false,
 			),
-			(LockedResyncError::MissingSkillPath, None, false),
+			(
+				LockedResyncError::MissingSkillPath,
+				SKILL_PATH_NOT_FOUND_CODE,
+				false,
+			),
 			(
 				LockedResyncError::NotInstalled,
-				Some("SKILL_NOT_INSTALLED"),
+				"SKILL_NOT_INSTALLED",
 				false,
 			),
 			(
 				LockedResyncError::CredentialBackendUnavailable,
-				Some("KEYCHAIN_UNAVAILABLE"),
+				KEYCHAIN_UNAVAILABLE_CODE,
 				false,
 			),
-			(LockedResyncError::InvalidSkillPath, None, false),
-			(LockedResyncError::SourceSkillNotFound, None, false),
+			(
+				LockedResyncError::InvalidSkillPath,
+				SKILL_PATH_NOT_FOUND_CODE,
+				false,
+			),
+			(
+				LockedResyncError::SourceSkillNotFound,
+				SKILL_PATH_NOT_FOUND_CODE,
+				false,
+			),
 			(
 				LockedResyncError::SourceGroupMismatch,
-				Some("SKILL_SOURCE_VIEW_STALE"),
+				SKILL_SOURCE_VIEW_STALE_CODE,
 				false,
 			),
 			(
 				LockedResyncError::Fetch(FetchError::BackendUnavailable),
-				None,
+				SOURCE_FETCH_FAILED_CODE,
 				false,
 			),
-			(LockedResyncError::Fetch(FetchError::Auth), None, false),
+			(
+				LockedResyncError::Fetch(FetchError::Auth),
+				SOURCE_FETCH_FAILED_CODE,
+				false,
+			),
 			(
 				LockedResyncError::Fetch(FetchError::Network(
 					"conn reset".into(),
 				)),
-				None,
+				SOURCE_FETCH_FAILED_CODE,
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::Locked("busy".into())),
-				Some("SKILL_MUTATION_LOCK_BUSY"),
+				"SKILL_MUTATION_LOCK_BUSY",
 				true,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::StaleFetch(
 					"stale".into(),
 				)),
-				Some("SKILL_SOURCE_CHANGED_DURING_FETCH"),
+				"SKILL_SOURCE_CHANGED_DURING_FETCH",
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::NotInstalled),
-				Some("SKILL_NOT_INSTALLED"),
+				"SKILL_NOT_INSTALLED",
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::Renamed {
 					new_name: "renamed".into(),
 				}),
-				Some("SKILL_RENAMED_IN_SOURCE"),
+				"SKILL_RENAMED_IN_SOURCE",
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::Parse(
 					"parse err".into(),
 				)),
-				Some("SKILL_PARSE_FAILED"),
+				"SKILL_PARSE_FAILED",
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::Conflict(
 					"conflict".into(),
 				)),
-				Some("SKILL_UPDATE_CONFLICT"),
+				"SKILL_UPDATE_CONFLICT",
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::OutOfTree(
 					"escape".into(),
 				)),
-				Some("SKILL_TARGET_OUT_OF_TREE"),
+				"SKILL_TARGET_OUT_OF_TREE",
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::Hash("hash err".into())),
-				Some("SKILL_SYNC_ERROR"),
+				"SKILL_SYNC_ERROR",
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::Swap("swap err".into())),
-				Some("SKILL_SYNC_ERROR"),
+				"SKILL_SYNC_ERROR",
 				false,
 			),
 			(
 				LockedResyncError::Resync(ResyncError::LockUpdate(
 					"lock err".into(),
 				)),
-				Some("SKILL_LOCK_ERROR"),
+				"SKILL_LOCK_ERROR",
 				false,
 			),
 		];
@@ -1445,7 +1473,7 @@ mod tests {
 		let mutation_cases = [
 			(
 				ResyncMutationError::InvalidSkillPath,
-				"SKILL_PATH_NOT_FOUND",
+				SKILL_PATH_NOT_FOUND_CODE,
 				false,
 			),
 			(

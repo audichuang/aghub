@@ -69,6 +69,7 @@ pub fn mutation_guard(
 				.push(skill::lock::MutationScope::Project(root.to_path_buf()));
 		}
 	}
+	// Debug-only hook used exclusively by the lock-busy CLI smoke test in crates/cli/tests/cli_tests.rs.
 	#[cfg(debug_assertions)]
 	if let Ok(ms) = std::env::var("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS") {
 		if let Ok(ms) = ms.parse::<u64>() {

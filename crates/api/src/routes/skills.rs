@@ -2472,7 +2472,7 @@ pub async fn git_sync_skill(
 				"Skill path '{}' not found in cloned repository",
 				req.skill_path
 			),
-			"SKILL_PATH_NOT_FOUND",
+			skill_update::mutation::SKILL_PATH_NOT_FOUND_CODE,
 		));
 	}
 
@@ -2514,7 +2514,7 @@ pub async fn git_sync_skill(
 		return Err(ApiError::new(
 			Status::NotFound,
 			format!("Skill '{}' is not present in the lock", req.name),
-			"SKILL_LOCK_ENTRY_NOT_FOUND",
+			skill_update::mutation::SKILL_LOCK_ENTRY_NOT_FOUND_CODE,
 		));
 	}
 

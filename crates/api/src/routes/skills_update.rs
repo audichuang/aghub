@@ -362,7 +362,12 @@ fn apply_locked_resync_error(
 			"scope must be global or project".to_string()
 		}
 	};
-	Ok(apply_error_with_code(name, scope, &message, error.code()))
+	Ok(apply_error_with_code(
+		name,
+		scope,
+		&message,
+		Some(error.code()),
+	))
 }
 
 fn apply_success(
@@ -425,7 +430,7 @@ fn apply_locked_resync_batch_error(
 			name,
 			scope,
 			"Credential backend unavailable",
-			error.code(),
+			Some(error.code()),
 		);
 	}
 	match apply_locked_resync_error(name, scope, error) {

@@ -737,7 +737,7 @@ fn main() -> std::process::ExitCode {
 #[derive(Debug)]
 pub(crate) struct CodedError {
 	pub message: String,
-	pub code: Option<&'static str>,
+	pub code: &'static str,
 	pub retryable: bool,
 }
 
@@ -765,7 +765,7 @@ fn report_failure(error: &anyhow::Error, json: bool) {
 		let (code, retryable) = if let Some(coded) =
 			error.downcast_ref::<CodedError>()
 		{
-			(coded.code.unwrap_or("CLI_ERROR"), coded.retryable)
+			(coded.code, coded.retryable)
 		} else if let Some(config_error) = error.downcast_ref::<ConfigError>() {
 			(
 				aghub_core::error_codes::wire_code(config_error),

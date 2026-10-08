@@ -108,7 +108,23 @@ fn is_github_host(host: &str) -> bool {
 /// runtime env hook lets `assert_cmd` e2e tests point at a local dir (no
 /// network). The hook is gated on `cfg(debug_assertions)` (NOT `cfg(test)`):
 /// assert_cmd spawns the real binary, which is not built under `cfg(test)`.
-pub(crate) struct CliFetcher;
+#[derive(Default)]
+pub(crate) struct CliFetcher {
+	inner: skill_update::GitFetcher,
+}
+
+impl CliFetcher {
+	pub fn new() -> Self {
+		Self {
+			inner: skill_update::GitFetcher::new(),
+		}
+	}
+
+	pub fn ref_resolver(&self) -> skill_update::GitRefResolver {
+		self.inner.ref_resolver()
+	}
+}
+
 impl skill_update::Fetcher for CliFetcher {
 	fn fetch(
 		&self,
@@ -137,7 +153,7 @@ impl skill_update::Fetcher for CliFetcher {
 				)))
 			};
 		}
-		skill_update::GitFetcher::new().fetch(sr, token, selection)
+		self.inner.fetch(sr, token, selection)
 	}
 }
 
@@ -477,7 +493,7 @@ fn diff(
 		git_ref,
 		&scopes,
 		json,
-		&CliFetcher,
+		&CliFetcher::new(),
 		&EnvTokenResolver,
 	)
 }
@@ -799,7 +815,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// ONE call into the deep entry point: identity snapshot, coordinate
 	// resolution, single-tree assertion, refusals, the single fetch and the
 	// classification — never re-assembled here.
-	let inner = CliFetcher;
+	let inner = CliFetcher::new();
 	let sync_plan = match sources::plan_source_sync(
 		sources::SourceSyncInput {
 			source: source.clone(),
@@ -1535,7 +1551,7 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 			source: &source,
 			new_name: args.new_name,
 		},
-		&CliFetcher,
+		&CliFetcher::new(),
 		&EnvTokenResolver,
 	)
 	.map_err(|error| match error {

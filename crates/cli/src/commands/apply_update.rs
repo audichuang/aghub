@@ -31,7 +31,7 @@ pub fn execute(
 			scope,
 			project_root,
 		},
-		&crate::commands::source::CliFetcher,
+		&crate::commands::source::CliFetcher::new(),
 		&crate::commands::source::EnvTokenResolver,
 	)
 	.map_err(|error| locked_resync_error(&name, error))?;
@@ -175,7 +175,7 @@ pub fn execute_outdated(
 			scope,
 			project_root,
 		},
-		&crate::commands::source::CliFetcher,
+		&crate::commands::source::CliFetcher::new(),
 		&crate::commands::source::EnvTokenResolver,
 	)
 	.map_err(|error| match error {
@@ -189,7 +189,7 @@ pub fn execute_outdated(
 
 	struct FailureRow {
 		message: String,
-		code: Option<&'static str>,
+		code: &'static str,
 		retryable: bool,
 	}
 
