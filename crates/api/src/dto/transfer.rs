@@ -3,7 +3,6 @@ use aghub_core::transfer::{
 	OperationResult, ResourceLocator,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use ts_rs::TS;
 
 use crate::error::ApiError;
@@ -44,18 +43,30 @@ pub struct TargetDto {
 
 impl TargetDto {
 	pub fn to_core(&self) -> Result<InstallTarget, ApiError> {
-		let agent = self.agent.parse().map_err(|_| {
+		let agents = crate::extractors::resolve_agent_strings(&[&self.agent])?;
+		let agent = agents.into_iter().next().ok_or_else(|| {
 			ApiError::new(
 				rocket::http::Status::BadRequest,
-				format!("Unknown agent '{}'", self.agent),
+				"agent must not be empty",
 				"INVALID_PARAM",
 			)
 		})?;
 
+		let scope_str = match self.scope {
+			InstallScopeDto::Global => "global",
+			InstallScopeDto::Project => "project",
+		};
+		let write_scope = crate::extractors::resolve_write_scope(
+			scope_str,
+			self.project_root.as_deref(),
+		)?;
+		let project_root =
+			write_scope.project_root().map(std::path::Path::to_path_buf);
+
 		Ok(InstallTarget {
 			agent,
 			scope: self.scope.into(),
-			project_root: self.project_root.as_deref().map(PathBuf::from),
+			project_root,
 		})
 	}
 }
@@ -71,18 +82,30 @@ pub struct ResourceLocatorDto {
 
 impl ResourceLocatorDto {
 	pub fn to_core(&self) -> Result<ResourceLocator, ApiError> {
-		let agent = self.agent.parse().map_err(|_| {
+		let agents = crate::extractors::resolve_agent_strings(&[&self.agent])?;
+		let agent = agents.into_iter().next().ok_or_else(|| {
 			ApiError::new(
 				rocket::http::Status::BadRequest,
-				format!("Unknown agent '{}'", self.agent),
+				"agent must not be empty",
 				"INVALID_PARAM",
 			)
 		})?;
 
+		let scope_str = match self.scope {
+			InstallScopeDto::Global => "global",
+			InstallScopeDto::Project => "project",
+		};
+		let write_scope = crate::extractors::resolve_write_scope(
+			scope_str,
+			self.project_root.as_deref(),
+		)?;
+		let project_root =
+			write_scope.project_root().map(std::path::Path::to_path_buf);
+
 		Ok(ResourceLocator {
 			agent,
 			scope: self.scope.into(),
-			project_root: self.project_root.as_deref().map(PathBuf::from),
+			project_root,
 			name: self.name.clone(),
 		})
 	}

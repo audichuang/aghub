@@ -70,35 +70,12 @@ fn reconcile_sub_agent_route_inner(
 	let confirm = req.confirmed();
 	let source = req.source.to_core()?;
 
-	let added: Vec<_> = req
-		.added
-		.unwrap_or_default()
-		.iter()
-		.map(|agent_str| {
-			agent_str.parse().map_err(|_| {
-				ApiError::new(
-					rocket::http::Status::BadRequest,
-					format!("Unknown agent '{agent_str}'"),
-					"INVALID_PARAM",
-				)
-			})
-		})
-		.collect::<Result<Vec<_>, _>>()?;
-
-	let removed: Vec<_> = req
-		.removed
-		.unwrap_or_default()
-		.iter()
-		.map(|agent_str| {
-			agent_str.parse().map_err(|_| {
-				ApiError::new(
-					rocket::http::Status::BadRequest,
-					format!("Unknown agent '{agent_str}'"),
-					"INVALID_PARAM",
-				)
-			})
-		})
-		.collect::<Result<Vec<_>, _>>()?;
+	let added = crate::extractors::resolve_agent_strings(
+		req.added.as_deref().unwrap_or(&[]),
+	)?;
+	let removed = crate::extractors::resolve_agent_strings(
+		req.removed.as_deref().unwrap_or(&[]),
+	)?;
 
 	let result = transfer::reconcile_sub_agent(source, added, removed, confirm)
 		.map_err(ApiError::from)?;

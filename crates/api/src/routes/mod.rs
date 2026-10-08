@@ -94,20 +94,11 @@ pub(crate) fn requested_delete_agents(
 	agents: Option<&str>,
 ) -> Result<Vec<aghub_core::models::AgentType>, ApiError> {
 	let mut requested = vec![agent];
-	for id in agents
-		.unwrap_or_default()
-		.split(',')
-		.map(str::trim)
-		.filter(|id| !id.is_empty())
-	{
-		let parsed =
-			id.parse::<aghub_core::models::AgentType>().map_err(|_| {
-				ApiError::bad_request(format!(
-					"unknown agent in `agents`: {id}"
-				))
-			})?;
-		if !requested.contains(&parsed) {
-			requested.push(parsed);
+	if let Some(s) = agents {
+		for parsed in crate::extractors::resolve_agent_list(s)? {
+			if !requested.contains(&parsed) {
+				requested.push(parsed);
+			}
 		}
 	}
 	Ok(requested)
@@ -310,5 +301,42 @@ mod removal_or_noop_tests {
 				.is_err(),
 			"a non-ResourceNotFound error must propagate, not be swallowed"
 		);
+	}
+
+	#[test]
+	fn requested_delete_agents_matches_cli_a_empty_token_and_duplicate_semantics(
+	) {
+		use aghub_core::models::AgentType;
+
+		// Absent: returns only path agent
+		let single = match requested_delete_agents(AgentType::Claude, None) {
+			Ok(agents) => agents,
+			Err(err) => panic!("expected Ok, got Err({})", err.body.code),
+		};
+		assert_eq!(single, vec![AgentType::Claude]);
+
+		// Duplicates in list and with path agent: deduped preserving order, path agent first
+		let deduped = match requested_delete_agents(
+			AgentType::Claude,
+			Some("copilot,claude,copilot,cursor"),
+		) {
+			Ok(agents) => agents,
+			Err(err) => panic!("expected Ok, got Err({})", err.body.code),
+		};
+		assert_eq!(
+			deduped,
+			vec![AgentType::Claude, AgentType::Copilot, AgentType::Cursor]
+		);
+
+		// Empty token (trailing comma, double comma, empty string): rejected with INVALID_PARAM
+		for bad in ["claude,", "claude,,cursor", "", "  "] {
+			let err =
+				match requested_delete_agents(AgentType::Claude, Some(bad)) {
+					Ok(_) => panic!("expected Err for {bad:?}, got Ok"),
+					Err(err) => err,
+				};
+			assert_eq!(err.status, Status::BadRequest);
+			assert_eq!(err.body.code, "INVALID_PARAM");
+		}
 	}
 }

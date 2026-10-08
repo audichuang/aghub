@@ -100,35 +100,12 @@ fn reconcile_mcp_route_inner(
 	let confirm = req.confirmed();
 	let source = req.source.to_core()?;
 
-	let added: Vec<_> = req
-		.added
-		.unwrap_or_default()
-		.iter()
-		.map(|agent_str| {
-			agent_str.parse().map_err(|_| {
-				ApiError::new(
-					rocket::http::Status::BadRequest,
-					format!("Unknown agent '{agent_str}'"),
-					"INVALID_PARAM",
-				)
-			})
-		})
-		.collect::<Result<Vec<_>, _>>()?;
-
-	let removed: Vec<_> = req
-		.removed
-		.unwrap_or_default()
-		.iter()
-		.map(|agent_str| {
-			agent_str.parse().map_err(|_| {
-				ApiError::new(
-					rocket::http::Status::BadRequest,
-					format!("Unknown agent '{agent_str}'"),
-					"INVALID_PARAM",
-				)
-			})
-		})
-		.collect::<Result<Vec<_>, _>>()?;
+	let added = crate::extractors::resolve_agent_strings(
+		req.added.as_deref().unwrap_or(&[]),
+	)?;
+	let removed = crate::extractors::resolve_agent_strings(
+		req.removed.as_deref().unwrap_or(&[]),
+	)?;
 
 	let result = transfer::reconcile_mcp(source, added, removed, confirm)
 		.map_err(ApiError::from)?;
@@ -216,22 +193,7 @@ fn batch_create_mcp_inner(
 			"INVALID_PARAM",
 		));
 	}
-	// Stable-dedup after parsing (aliases included), matching the CLI's
-	// comma-list semantics — a duplicate must not turn into a second write
-	// that fails RESOURCE_EXISTS.
-	let mut agents: Vec<aghub_core::models::AgentType> = Vec::new();
-	for s in &req.agents {
-		let agent = s.parse().map_err(|_| {
-			ApiError::new(
-				Status::BadRequest,
-				format!("Unknown agent '{s}'"),
-				"INVALID_PARAM",
-			)
-		})?;
-		if !agents.contains(&agent) {
-			agents.push(agent);
-		}
-	}
+	let agents = crate::extractors::resolve_agent_strings(&req.agents)?;
 	// Preflight also has to know the transport: a dialect with no word for it
 	// refuses the write, and finding that out mid-batch leaves the agents that
 	// already succeeded holding the server.
@@ -1496,5 +1458,74 @@ mod tests {
 		assert_eq!(response.success_count, 0);
 		assert_eq!(response.failed_count, 2);
 		assert!(response.results.iter().all(|row| !row.ok));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn create_mcp_relative_project_root_is_absolutized() {
+		let _guard = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let temp = tempfile::tempdir().unwrap();
+		let temp_path = temp.path().canonicalize().unwrap();
+
+		let home = temp_path.join("home");
+		std::fs::create_dir_all(&home).unwrap();
+		let data = temp_path.join("data");
+		std::fs::create_dir_all(&data).unwrap();
+
+		let old_home = std::env::var_os("HOME");
+		let old_data = std::env::var_os("AGHUB_DATA_DIR");
+		std::env::set_var("HOME", &home);
+		std::env::set_var("AGHUB_DATA_DIR", &data);
+		struct EnvRestore {
+			home: Option<std::ffi::OsString>,
+			data: Option<std::ffi::OsString>,
+		}
+		impl Drop for EnvRestore {
+			fn drop(&mut self) {
+				match &self.home {
+					Some(val) => std::env::set_var("HOME", val),
+					None => std::env::remove_var("HOME"),
+				}
+				match &self.data {
+					Some(val) => std::env::set_var("AGHUB_DATA_DIR", val),
+					None => std::env::remove_var("AGHUB_DATA_DIR"),
+				}
+			}
+		}
+		let _env = EnvRestore {
+			home: old_home,
+			data: old_data,
+		};
+
+		let proj = temp_path.join("proj");
+		std::fs::create_dir_all(&proj).unwrap();
+		let result = {
+			let _cwd = crate::routes::CwdGuard::change_to(&temp_path);
+			create_mcp(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Claude),
+				ScopeParams {
+					scope: Some("project".to_string()),
+					project_root: Some("proj".to_string()),
+				},
+				Json(stdio_req("proj-mcp")),
+			)
+		};
+		assert!(
+			result.is_ok(),
+			"create_mcp with relative project root should succeed"
+		);
+		let config_path = proj.join(".mcp.json");
+		assert!(
+			config_path.exists(),
+			"MCP config must be written to absolutized project root"
+		);
+		let content = std::fs::read_to_string(&config_path).unwrap();
+		assert!(
+			content.contains("proj-mcp"),
+			"config must contain created MCP server: {content}"
+		);
 	}
 }

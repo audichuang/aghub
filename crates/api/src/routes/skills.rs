@@ -169,35 +169,12 @@ pub async fn reconcile_skill_route(
 	let confirm = req.confirmed();
 	let source = req.source.to_core()?;
 
-	let added: Vec<AgentType> = req
-		.added
-		.unwrap_or_default()
-		.iter()
-		.map(|agent_str| {
-			agent_str.parse().map_err(|_| {
-				ApiError::new(
-					rocket::http::Status::BadRequest,
-					format!("Unknown agent '{agent_str}'"),
-					"INVALID_PARAM",
-				)
-			})
-		})
-		.collect::<Result<Vec<AgentType>, _>>()?;
-
-	let removed: Vec<AgentType> = req
-		.removed
-		.unwrap_or_default()
-		.iter()
-		.map(|agent_str| {
-			agent_str.parse().map_err(|_| {
-				ApiError::new(
-					rocket::http::Status::BadRequest,
-					format!("Unknown agent '{agent_str}'"),
-					"INVALID_PARAM",
-				)
-			})
-		})
-		.collect::<Result<Vec<AgentType>, _>>()?;
+	let added = crate::extractors::resolve_agent_strings(
+		req.added.as_deref().unwrap_or(&[]),
+	)?;
+	let removed = crate::extractors::resolve_agent_strings(
+		req.removed.as_deref().unwrap_or(&[]),
+	)?;
 
 	// Installs into `added` and removes from `removed`, both under the lock.
 	in_mutation_pool(move || {
@@ -2205,18 +2182,18 @@ pub async fn git_sync_skill(
 	// scope/lock validation below reports the still-absent case with the route's
 	// historical precedence, and the appeared-during-the-fetch case is answered
 	// after it.
-	let write_scope_res = crate::extractors::resolve_write_scope(
+	let write_scope = crate::extractors::resolve_write_scope(
 		&req.scope,
 		req.project_root.as_deref(),
-	);
-	let (capture_scope, capture_root) = match &write_scope_res {
-		Ok(ws) => (ws.resource_scope(), ws.project_root()),
-		Err(_) => (ResourceScope::ProjectOnly, None),
-	};
+	)?;
+	let resource_scope = write_scope.resource_scope();
+	let project_root =
+		write_scope.project_root().map(std::path::Path::to_path_buf);
+
 	let pre_fetch_identity = aghub_core::skills::lock::EntryIdentity::capture(
 		&req.name,
-		capture_scope,
-		capture_root,
+		resource_scope,
+		project_root.as_deref(),
 	);
 	// Fetch only the selected skill folder.
 	let fetched = session
@@ -2230,7 +2207,7 @@ pub async fn git_sync_skill(
 		})?;
 	let fetched = skill_update::mutation::FetchedSource::from_repo(fetched);
 	// Preserve the route's historical precedence: a missing fetched skill is
-	// reported before request scope/lock validation. The mutation seam repeats
+	// reported before request lock validation. The mutation seam repeats
 	// this containment check at the write boundary.
 	if !skill_update::mutation::fetched_skill_path_exists(
 		&fetched,
@@ -2245,11 +2222,6 @@ pub async fn git_sync_skill(
 			skill_update::mutation::SKILL_PATH_NOT_FOUND_CODE,
 		));
 	}
-
-	let write_scope = write_scope_res?;
-	let resource_scope = write_scope.resource_scope();
-	let project_root =
-		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	let locked = match resource_scope {
 		ResourceScope::GlobalOnly => {
@@ -5874,6 +5846,153 @@ mod tests {
 			assert!(std::fs::read_to_string(target.join("SKILL.md"))
 				.unwrap()
 				.contains("old"));
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn git_sync_relative_project_root_is_absolutized() {
+		with_isolated_env(|_, _| {
+			with_pinned_data_dir(|_| {
+				let temp = tempdir().unwrap();
+				let temp_path = temp.path().canonicalize().unwrap();
+				let project = temp_path.join("project");
+				let skills_root = project.join(".claude/skills");
+				let target = skills_root.join("sync-me");
+				std::fs::create_dir_all(&target).unwrap();
+				std::fs::write(
+					target.join("SKILL.md"),
+					"---\nname: sync-me\ndescription: old\n---\n\nold\n",
+				)
+				.unwrap();
+				skill::add_skill_to_local_lock(
+					"sync-me",
+					skill::LocalSkillLockEntry {
+						source_url: None,
+						ref_commit: None,
+						source: "owner/repo".to_string(),
+						ref_name: Some("main".to_string()),
+						source_type: "github".to_string(),
+						computed_hash: "old".to_string(),
+						skill_path: Some("sync-me/SKILL.md".to_string()),
+					},
+					Some(&project),
+				)
+				.unwrap();
+
+				let fixture = tempdir().unwrap();
+				let cloned_skill = fixture.path().join("sync-me");
+				std::fs::create_dir_all(&cloned_skill).unwrap();
+				std::fs::write(
+					cloned_skill.join("SKILL.md"),
+					"---\nname: sync-me\ndescription: new\n---\n\nnew\n",
+				)
+				.unwrap();
+
+				let app_data = tempdir().unwrap();
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						app_data.path().to_path_buf(),
+					),
+				)
+				.expect("client");
+				let sessions = client
+					.rocket()
+					.state::<PinnedSourceSessions>()
+					.expect("git clone sessions");
+				sessions.insert(
+					"sync-session".to_string(),
+					session_from_fixture(
+						fixture.path(),
+						"https://github.com/owner/repo.git",
+						"main",
+					),
+				);
+
+				let response = {
+					let _cwd = crate::routes::CwdGuard::change_to(&temp_path);
+					client
+						.post("/api/v1/skills/git/sync")
+						.json(&serde_json::json!({
+							"session_id": "sync-session",
+							"name": "sync-me",
+							"scope": "project",
+							"project_root": "project",
+							"skill_path": "sync-me/SKILL.md",
+							"source_paths": [skills_root.display().to_string()],
+						}))
+						.dispatch()
+				};
+
+				assert_eq!(response.status(), rocket::http::Status::Ok);
+				assert!(std::fs::read_to_string(target.join("SKILL.md"))
+					.unwrap()
+					.contains("new"));
+				let lock = skill::lock::local::read_local_lock(Some(&project));
+				assert_ne!(
+					lock.skills["sync-me"].computed_hash, "old",
+					"project lock hash must advance after sync with relative project_root"
+				);
+			});
+		});
+	}
+
+	#[test]
+	fn git_sync_unknown_scope_rejected_before_fetch_identity_capture() {
+		with_isolated_env(|_, _| {
+			with_pinned_data_dir(|_| {
+				let fixture = tempdir().unwrap();
+				let cloned_skill = fixture.path().join("sync-me");
+				std::fs::create_dir_all(&cloned_skill).unwrap();
+				std::fs::write(
+					cloned_skill.join("SKILL.md"),
+					"---\nname: sync-me\ndescription: new\n---\n\nnew\n",
+				)
+				.unwrap();
+
+				let app_data = tempdir().unwrap();
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						app_data.path().to_path_buf(),
+					),
+				)
+				.expect("client");
+				let sessions = client
+					.rocket()
+					.state::<PinnedSourceSessions>()
+					.expect("git clone sessions");
+				sessions.insert(
+					"sync-session".to_string(),
+					session_from_fixture(
+						fixture.path(),
+						"https://github.com/owner/repo.git",
+						"main",
+					),
+				);
+
+				// Note: skill_path does NOT exist in fixture ("missing/SKILL.md").
+				// If catch-all were active, the route would proceed to fetch and return
+				// 404 SKILL_PATH_NOT_FOUND instead of 400 INVALID_SCOPE.
+				let response = client
+					.post("/api/v1/skills/git/sync")
+					.json(&serde_json::json!({
+						"session_id": "sync-session",
+						"name": "sync-me",
+						"scope": "bogus-scope",
+						"project_root": null,
+						"skill_path": "missing/SKILL.md",
+						"source_paths": [],
+					}))
+					.dispatch();
+
+				assert_eq!(response.status(), rocket::http::Status::BadRequest);
+				let body: serde_json::Value =
+					serde_json::from_str(&response.into_string().unwrap())
+						.unwrap();
+				assert_eq!(body["code"], "INVALID_SCOPE");
+			});
 		});
 	}
 

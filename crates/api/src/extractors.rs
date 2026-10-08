@@ -42,6 +42,15 @@ impl ResolvedScope {
 	}
 }
 
+impl From<WriteScope> for ResolvedScope {
+	fn from(scope: WriteScope) -> Self {
+		match scope {
+			WriteScope::Global => ResolvedScope::Global,
+			WriteScope::Project { root } => ResolvedScope::Project { root },
+		}
+	}
+}
+
 #[derive(rocket::FromForm)]
 pub struct ScopeParams {
 	pub scope: Option<String>,
@@ -139,39 +148,18 @@ impl ScopeParams {
 	/// Pinned by `routes::sources::tests::missing_scope_defaults_to_global_not_all`.
 	pub fn resolve(&self) -> Result<ResolvedScope, ApiError> {
 		let scope = self.scope.as_deref().unwrap_or("global");
-		match scope {
-			"global" => Ok(ResolvedScope::Global),
-			"project" => {
-				let root = self.project_root.as_deref().ok_or_else(|| {
-					ApiError::new(
-						Status::BadRequest,
-						"project_root is required when scope=project",
-						"MISSING_PARAM",
-					)
-				})?;
-				Ok(ResolvedScope::Project {
-					root: absolutize_root(root),
-				})
-			}
-			"all" => {
-				let project_root =
-					self.project_root.as_deref().map(PathBuf::from).or_else(
-						|| {
-							std::env::current_dir()
-								.ok()
-								.and_then(|cwd| find_project_root(&cwd))
-						},
-					);
-				Ok(ResolvedScope::All { project_root })
-			}
-			other => Err(ApiError::new(
-				Status::BadRequest,
-				format!(
-					"Unknown scope '{other}'. Use 'global', 'project', or 'all'"
-				),
-				"INVALID_PARAM",
-			)),
+		if scope == "all" {
+			let project_root =
+				self.project_root.as_deref().map(PathBuf::from).or_else(|| {
+					std::env::current_dir()
+						.ok()
+						.and_then(|cwd| find_project_root(&cwd))
+				});
+			return Ok(ResolvedScope::All { project_root });
 		}
+		let write_scope =
+			resolve_write_scope(scope, self.project_root.as_deref())?;
+		Ok(ResolvedScope::from(write_scope))
 	}
 }
 
@@ -299,6 +287,38 @@ mod tests {
 			),
 			_ => panic!("expected Project scope"),
 		}
+	}
+
+	#[test]
+	fn resolve_missing_project_root_returns_project_root_required() {
+		let params = ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: None,
+		};
+		let err = unwrap_err(params.resolve());
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "PROJECT_ROOT_REQUIRED");
+	}
+
+	#[test]
+	fn resolve_unknown_scope_returns_invalid_scope() {
+		let params = ScopeParams {
+			scope: Some("invalid".to_string()),
+			project_root: None,
+		};
+		let err = unwrap_err(params.resolve());
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_SCOPE");
+	}
+
+	#[test]
+	fn resolve_all_scope() {
+		let params = ScopeParams {
+			scope: Some("all".to_string()),
+			project_root: None,
+		};
+		let resolved = unwrap_ok(params.resolve());
+		assert!(resolved.is_all());
 	}
 
 	fn unwrap_ok<T>(res: Result<T, ApiError>) -> T {
