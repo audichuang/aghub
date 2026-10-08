@@ -82,7 +82,7 @@ pub fn resolve_write_scope(
 				.ok_or_else(|| {
 					ApiError::new(
 						Status::BadRequest,
-						"project scope requires project_root",
+						"project scope requires a project root",
 						"PROJECT_ROOT_REQUIRED",
 					)
 				})?;
@@ -91,7 +91,7 @@ pub fn resolve_write_scope(
 		_ => Err(ApiError::new(
 			Status::BadRequest,
 			format!("Invalid scope '{scope}'. Use 'global' or 'project'"),
-			"INVALID_SCOPE",
+			skill_update::mutation::INVALID_SCOPE_CODE,
 		)),
 	}
 }
@@ -353,17 +353,22 @@ mod tests {
 		let err = unwrap_err(resolve_write_scope("project", None));
 		assert_eq!(err.status, Status::BadRequest);
 		assert_eq!(err.body.code, "PROJECT_ROOT_REQUIRED");
+		assert_eq!(err.body.error, "project scope requires a project root");
 
 		let err_empty = unwrap_err(resolve_write_scope("project", Some("   ")));
 		assert_eq!(err_empty.status, Status::BadRequest);
 		assert_eq!(err_empty.body.code, "PROJECT_ROOT_REQUIRED");
+		assert_eq!(
+			err_empty.body.error,
+			"project scope requires a project root"
+		);
 	}
 
 	#[test]
 	fn resolve_write_scope_unknown_scope_returns_invalid_scope() {
 		let err = unwrap_err(resolve_write_scope("unknown", None));
 		assert_eq!(err.status, Status::BadRequest);
-		assert_eq!(err.body.code, "INVALID_SCOPE");
+		assert_eq!(err.body.code, skill_update::mutation::INVALID_SCOPE_CODE);
 	}
 
 	#[test]

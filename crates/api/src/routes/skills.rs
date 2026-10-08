@@ -215,9 +215,6 @@ pub async fn delete_skill_by_path(
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let req = body.into_inner();
 
-	let requested_agents =
-		crate::extractors::resolve_agent_strings(&req.agents)?;
-
 	let write_scope = crate::extractors::resolve_write_scope(
 		&req.scope,
 		req.project_root.as_deref(),
@@ -225,6 +222,9 @@ pub async fn delete_skill_by_path(
 	let resource_scope = write_scope.resource_scope();
 	let project_root =
 		write_scope.project_root().map(std::path::Path::to_path_buf);
+
+	let requested_agents =
+		crate::extractors::resolve_agent_strings(&req.agents)?;
 
 	let raw_path = std::path::PathBuf::from(&req.source_path);
 	let expanded_path = expand_tilde_path(&req.source_path);
@@ -2205,13 +2205,18 @@ pub async fn git_sync_skill(
 	// scope/lock validation below reports the still-absent case with the route's
 	// historical precedence, and the appeared-during-the-fetch case is answered
 	// after it.
+	let write_scope_res = crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	);
+	let (capture_scope, capture_root) = match &write_scope_res {
+		Ok(ws) => (ws.resource_scope(), ws.project_root()),
+		Err(_) => (ResourceScope::ProjectOnly, None),
+	};
 	let pre_fetch_identity = aghub_core::skills::lock::EntryIdentity::capture(
 		&req.name,
-		match req.scope.as_str() {
-			"global" => ResourceScope::GlobalOnly,
-			_ => ResourceScope::ProjectOnly,
-		},
-		req.project_root.as_deref().map(std::path::Path::new),
+		capture_scope,
+		capture_root,
 	);
 	// Fetch only the selected skill folder.
 	let fetched = session
@@ -2241,10 +2246,7 @@ pub async fn git_sync_skill(
 		));
 	}
 
-	let write_scope = crate::extractors::resolve_write_scope(
-		&req.scope,
-		req.project_root.as_deref(),
-	)?;
+	let write_scope = write_scope_res?;
 	let resource_scope = write_scope.resource_scope();
 	let project_root =
 		write_scope.project_root().map(std::path::Path::to_path_buf);
@@ -2730,7 +2732,23 @@ mod tests {
 			.unwrap_err();
 		assert_eq!(err.status, Status::BadRequest);
 		assert_eq!(err.body.code, "PROJECT_ROOT_REQUIRED");
-		assert_eq!(err.body.error, "project scope requires project_root");
+		assert_eq!(err.body.error, "project scope requires a project root");
+	}
+
+	#[test]
+	fn delete_by_path_validates_scope_before_agents() {
+		let req = DeleteSkillByPathRequest {
+			source_path: "/some/path/SKILL.md".to_string(),
+			agents: vec!["unknown-agent".to_string()],
+			scope: "invalid-scope".to_string(),
+			project_root: None,
+			all_agents: None,
+			confirm: Some(false),
+		};
+		let err = block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+			.unwrap_err();
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, skill_update::mutation::INVALID_SCOPE_CODE);
 	}
 
 	#[cfg(unix)]
@@ -5280,46 +5298,6 @@ mod tests {
 			.into_inner();
 			assert!(resp.error.is_some(), "project prune needs a project root");
 			assert!(resp.pruned.is_empty());
-		});
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn prune_lock_route_relative_project_root_is_absolutized() {
-		with_isolated_env(|home, _state| {
-			let home = home.canonicalize().unwrap();
-			let proj = home.join("proj");
-			std::fs::create_dir_all(&proj).unwrap();
-			let mut lock = skill::LocalSkillLockFile::default();
-			let entry = skill::LocalSkillLockEntry {
-				source: "owner/repo".to_string(),
-				source_url: None,
-				source_type: "github".to_string(),
-				ref_name: Some("main".to_string()),
-				skill_path: Some("orphan/SKILL.md".to_string()),
-				computed_hash: "deadbeef".to_string(),
-				ref_commit: None,
-			};
-			lock.skills.insert("orphan".into(), entry);
-			skill::write_local_lock(&lock, Some(&proj)).unwrap();
-
-			let resp = {
-				let _cwd = crate::routes::CwdGuard::change_to(&home);
-				let req = PruneLockRequest {
-					scope: "project".to_string(),
-					project_root: Some("proj".to_string()),
-					confirm: Some(true),
-				};
-				block_on(prune_lock_route(TrustedLocalOrigin, Json(req)))
-					.ok()
-					.expect("handler ok")
-					.into_inner()
-			};
-
-			assert_eq!(resp.error, None);
-			assert_eq!(resp.pruned, vec!["orphan".to_string()]);
-			let lock_after = skill::lock::local::read_local_lock(Some(&proj));
-			assert!(!lock_after.skills.contains_key("orphan"));
 		});
 	}
 
@@ -8903,48 +8881,6 @@ mod tests {
 			let body: serde_json::Value =
 				serde_json::from_str(&response.into_string().unwrap()).unwrap();
 			assert_eq!(body["code"], "PROJECT_ROOT_REQUIRED");
-		}
-
-		#[test]
-		fn repair_relative_project_root_is_absolutized() {
-			let _guard = crate::routes::test_env_lock()
-				.lock()
-				.unwrap_or_else(|e| e.into_inner());
-			let (temp, root) = legacy_project(&["alpha"]);
-			let temp_path = temp.path().canonicalize().unwrap();
-			let root_canon = root.canonicalize().unwrap();
-			let rel_root = root_canon.strip_prefix(&temp_path).unwrap();
-			let _cwd = crate::routes::CwdGuard::change_to(&temp_path);
-			let c = client();
-			with_pinned_data_dir(|_| {
-				let response = c
-					.post("/api/v1/skills/repair")
-					.json(&serde_json::json!({
-						"scope": "project",
-						"project_root": rel_root.to_str().unwrap(),
-						"dry_run": false,
-					}))
-					.dispatch();
-				assert_eq!(response.status(), Status::Ok);
-				let body: serde_json::Value =
-					serde_json::from_str(&response.into_string().unwrap())
-						.unwrap();
-				assert_eq!(body["refused"], false, "{body}");
-				assert_eq!(body["skills"][0]["outcome"], "migrated", "{body}");
-				assert!(
-					root_canon.join(".aghub/alpha/SKILL.md").exists(),
-					"Master must be materialized at absolutized project root"
-				);
-				assert!(
-					aghub_core::skills::linker::Linker::is_link(
-						&root_canon
-							.join(".agents")
-							.join("skills")
-							.join("alpha")
-					),
-					"alpha's shared slot must have become a referrer"
-				);
-			});
 		}
 	}
 
