@@ -345,7 +345,7 @@ list those readers (see above). To remove the skill everywhere use `delete
 skills <NAME> --all-agents`.
 
 An agent that already holds a linked copy is a cheaper grant source: for a skill
-linked to at least one agent — including an untracked `add --from` skill, which
+linked to at least one agent — including a local `add --from` skill, which
 `source sync` cannot grant — `transfer skill --from-agent <LINKED_AGENT> --name
 <NAME> --to <AGENT>` (repeat `--to`) links the EXISTING Master offline. It
 writes at once — no preview, no `--yes`. It never fetches, so the
@@ -485,9 +485,10 @@ If no other Referrer remains, the Master content is deleted too (the removed
 paths include `.aghub/<name>`), so re-enabling a disabled agent later does not bring
 the skill back; it has to be reinstalled.
 
-An `add --from` install is intentionally untracked and has no upstream-update
-branch; refresh it through the same backed-up delete plus a re-`add` with an
-explicit comma roster.
+An `add --from` install writes a local lock entry (`source_type: local`) and
+refuses if another owner's lock entry already holds the name. It has no
+upstream-update branch; refresh it through the same backed-up delete plus a
+re-`add` with an explicit comma roster.
 
 ### Accept an upstream rename
 

@@ -17,13 +17,10 @@ use std::path::{Path, PathBuf};
 
 use crate::models::ResourceScope;
 use crate::skills::linker::classify::{classify_agent, LinkNeed};
-use crate::skills::linker::{
-	install_universal, master_store_dir, LinkTarget, Linker,
-};
+use crate::skills::linker::{install_universal, master_store_dir, LinkTarget};
 use crate::skills::skill_source_root;
 use crate::skills::update::{detect_rename, skill_renamed_message};
 use aghub_agents::models::AgentType;
-use skill::sanitize::sanitize_name;
 
 /// What happened for one target agent.
 #[derive(Clone, Debug)]
@@ -88,137 +85,10 @@ pub struct FetchedSkillInstallReport {
 	pub agent_results: Vec<AgentInstallResult>,
 }
 
-#[derive(Clone, Debug)]
-struct LockedSourceOwner {
-	source: String,
-	source_type: String,
-	source_url: Option<String>,
-	/// Update coordinates already recorded for this skill. Compared against the
-	/// request so a same-owner re-install with a different ref / path / commit
-	/// heals them instead of leaving the lock pinned to the old ones.
-	ref_name: Option<String>,
-	skill_path: Option<String>,
-	ref_commit: Option<String>,
-}
-
-fn skill_lock_source(
-	skill_name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Option<LockedSourceOwner> {
-	match scope {
-		ResourceScope::GlobalOnly => {
-			skill::lock::global::get_skill_from_lock(skill_name).map(|entry| {
-				LockedSourceOwner {
-					source: entry.source,
-					source_type: entry.source_type,
-					source_url: Some(entry.source_url),
-					ref_name: entry.ref_name,
-					skill_path: entry.skill_path,
-					ref_commit: entry.ref_commit,
-				}
-			})
-		}
-		ResourceScope::ProjectOnly => project_root.and_then(|root| {
-			skill::lock::local::read_local_lock(Some(root))
-				.skills
-				.get(skill_name)
-				.map(|entry| LockedSourceOwner {
-					source: entry.source.clone(),
-					source_type: entry.source_type.clone(),
-					source_url: entry.source_url.clone(),
-					ref_name: entry.ref_name.clone(),
-					skill_path: entry.skill_path.clone(),
-					ref_commit: entry.ref_commit.clone(),
-				})
-		}),
-		ResourceScope::Both => None,
-	}
-}
-
-/// Canonical host + repo-path identity for the common remote URL forms. The
-/// transport and optional `.git` suffix do not define ownership; the host does.
-///
-/// Low-level normalizer only, not an identity policy. Its three callers add
-/// their own fallbacks (install owner check: literal equality;
-/// [`crate::skills::lock::EntryIdentity`]'s `comparable_remote`: `owner/repo`
-/// shorthand, `None` for TFS/origin-shaped strings; `skill_update::sources`:
-/// provider-restored URLs). Keep those fallbacks out of here, or they widen
-/// install ownership and `EntryIdentity` comparisons.
-pub fn remote_owner_from_url(source_url: &str) -> Option<String> {
-	let source_url = source_url.trim();
-	if source_url.is_empty() || source_url.starts_with("file:") {
-		return None;
-	}
-
-	let (authority, path) =
-		if let Some((scheme, rest)) = source_url.split_once("://") {
-			if !matches!(
-				scheme.to_ascii_lowercase().as_str(),
-				"http" | "https" | "ssh" | "git"
-			) {
-				return None;
-			}
-			let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-			(authority, path)
-		} else {
-			// SCP-like Git URL: `[user@]host:path/to/repo.git`.
-			let host_and_path = source_url
-				.rsplit_once('@')
-				.map_or(source_url, |(_, value)| value);
-			host_and_path.split_once(':')?
-		};
-	let authority = authority
-		.rsplit_once('@')
-		.map_or(authority, |(_, value)| value)
-		.to_ascii_lowercase();
-	let path = path
-		.split(['?', '#'])
-		.next()
-		.unwrap_or(path)
-		.trim_matches('/');
-	let path = path
-		.strip_suffix(".git")
-		.unwrap_or(path)
-		.trim_end_matches('/');
-	(!authority.is_empty() && !path.is_empty())
-		.then(|| format!("{authority}/{path}"))
-}
-
-fn same_source_owner(
-	existing: &LockedSourceOwner,
-	requested: &skill::InstallLockSource,
-) -> bool {
-	if !existing
-		.source_type
-		.eq_ignore_ascii_case(&requested.source_type)
-	{
-		return false;
-	}
-	match existing
-		.source_url
-		.as_deref()
-		.filter(|source_url| !source_url.trim().is_empty())
-	{
-		Some(source_url) => match (
-			remote_owner_from_url(source_url),
-			remote_owner_from_url(&requested.source_url),
-		) {
-			(Some(existing), Some(requested)) => existing == requested,
-			_ => source_url.trim() == requested.source_url.trim(),
-		},
-		// Project GitHub and local locks intentionally omit a reconstructable
-		// sourceUrl, and their provider gives the missing identity. A legacy
-		// non-GitHub remote without sourceUrl has lost its host; fail closed rather
-		// than let an arbitrary host with the same owner/repo claim it.
-		None => {
-			matches!(
-				existing.source_type.to_ascii_lowercase().as_str(),
-				"github" | "local"
-			) && existing.source == requested.source
-		}
-	}
-}
+pub use crate::skills::adoption::{
+	ensure_link_free_master, hash_master, remote_owner_from_url,
+	same_source_owner, skill_lock_source, AdoptionCheck, LockedSourceOwner,
+};
 
 /// Whether a same-owner lock's update coordinates disagree with this request.
 /// Healing them keeps `source sync --update` on the requested ref; an
@@ -238,60 +108,6 @@ fn coordinates_need_heal(
 	differs(requested_ref, &existing.ref_name)
 		|| differs(requested_commit, &existing.ref_commit)
 		|| existing.skill_path.as_deref() != Some(requested_skill_path)
-}
-
-fn hash_master(
-	skill_name: &str,
-	canonical: &Path,
-) -> Result<String, crate::ConfigError> {
-	skill::compute_skill_folder_hash(canonical).map_err(|error| {
-		crate::ConfigError::ValidationFailed(format!(
-			"Master for skill '{skill_name}' could not be verified: {error}",
-		))
-	})
-}
-
-/// Inspect a Master with lstat semantics and never descend through a link or
-/// Windows reparse point. Hashing intentionally skips links for npx parity, so
-/// provenance adoption needs this separate invariant: every byte reachable
-/// through the adopted Master must come from its real directory tree.
-fn ensure_link_free_master(
-	skill_name: &str,
-	canonical: &Path,
-) -> Result<(), crate::ConfigError> {
-	let mut pending = vec![canonical.to_path_buf()];
-	while let Some(path) = pending.pop() {
-		let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-			crate::ConfigError::ValidationFailed(format!(
-				"Master for skill '{skill_name}' could not be inspected for links: \
-				 {error}",
-			))
-		})?;
-		if metadata.file_type().is_symlink() || Linker::is_link(&path) {
-			return Err(crate::ConfigError::ValidationFailed(format!(
-				"Master for skill '{skill_name}' contains a link or junction; \
-				 refusing to adopt it",
-			)));
-		}
-		if metadata.is_dir() {
-			let entries = std::fs::read_dir(&path).map_err(|error| {
-				crate::ConfigError::ValidationFailed(format!(
-					"Master for skill '{skill_name}' could not be inspected for \
-					 links: {error}",
-				))
-			})?;
-			for entry in entries {
-				let entry = entry.map_err(|error| {
-					crate::ConfigError::ValidationFailed(format!(
-						"Master for skill '{skill_name}' could not be inspected for \
-						 links: {error}",
-					))
-				})?;
-				pending.push(entry.path());
-			}
-		}
-	}
-	Ok(())
 }
 
 /// What a lock write actually replaced, straight from the map insert. `None` in
@@ -352,15 +168,6 @@ fn write_install_lock(
 	}
 }
 
-/// What [`adoption_guard`] proved and the install then reuses.
-struct AdoptionCheck {
-	source_root: PathBuf,
-	safe_name: String,
-	installed_hash: String,
-	canonical: Option<PathBuf>,
-	existing_owner: Option<LockedSourceOwner>,
-}
-
 /// Parse + rename guard + scope guard. Pure reads; runs BEFORE the mutation
 /// lock so an unsupported request creates nothing. Returns the skill name.
 fn precheck_request(
@@ -402,60 +209,13 @@ fn adoption_guard(
 	req: &FetchedSkillInstallRequest<'_>,
 ) -> Result<AdoptionCheck, crate::ConfigError> {
 	let source_root = skill_source_root(req.skill_file);
-	let safe_name = sanitize_name(name);
-	let installed_hash = skill::compute_skill_folder_hash(&source_root)
-		.map_err(|e| {
-			crate::ConfigError::InvalidConfig(format!(
-				"Failed to hash fetched skill: {e}"
-			))
-		})?;
-	let canonical_root = if matches!(req.scope, ResourceScope::ProjectOnly) {
-		req.project_root
-	} else {
-		None
-	};
-	let canonical = master_store_dir(canonical_root)
-		.map(|skills_dir| skills_dir.join(&safe_name));
-	let existing_owner = skill_lock_source(name, req.scope, req.project_root);
-	if let Some(existing_owner) = existing_owner.as_ref() {
-		if !same_source_owner(existing_owner, req.source) {
-			return Err(crate::ConfigError::ValidationFailed(format!(
-				"Skill '{name}' is already owned by source '{}:{}'; its \
-				 canonical source owner differs from requested source '{}:{}', \
-				 so reassignment was refused",
-				existing_owner.source_type,
-				existing_owner.source,
-				req.source.source_type,
-				req.source.source,
-			)));
-		}
-	}
-	if let Some(canonical) = canonical.as_ref() {
-		if Linker::is_link(canonical) {
-			return Err(crate::ConfigError::ValidationFailed(format!(
-				"Master slot for skill '{name}' is a link; refusing to follow or \
-				 adopt it",
-			)));
-		}
-		if canonical.exists() {
-			ensure_link_free_master(name, canonical)?;
-			let master_hash = hash_master(name, canonical)?;
-			if master_hash != installed_hash {
-				return Err(crate::ConfigError::ValidationFailed(format!(
-					"Pre-existing Master for skill '{name}' has different content; \
-					 refusing to adopt it for fetched source '{}'",
-					req.source.source,
-				)));
-			}
-		}
-	}
-	Ok(AdoptionCheck {
-		source_root,
-		safe_name,
-		installed_hash,
-		canonical,
-		existing_owner,
-	})
+	crate::skills::adoption::adoption_guard(
+		name,
+		&source_root,
+		req.scope,
+		req.project_root,
+		req.source,
+	)
 }
 
 /// Advisory dry run of the install's refusals: the same [`precheck_request`]

@@ -1,5 +1,7 @@
+pub mod adoption;
 pub mod discovery;
 pub mod install_fetched;
+pub mod install_local;
 pub mod linker;
 pub mod lock;
 pub mod prune;
@@ -12,6 +14,9 @@ pub mod update;
 pub mod usage;
 
 pub use discovery::{load_skills_from_dir, load_skills_from_dirs};
+pub use install_local::{
+	install_local_skill, LocalSkillInstallReport, LocalSkillInstallRequest,
+};
 /// Undo a `materialize_universal_master` from the caller's OWN receipt. Shared
 /// by every flow that writes files before it writes the lock (rename, fetched
 /// install, the API import route) so none of them hand-rolls a second one.

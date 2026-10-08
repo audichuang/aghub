@@ -87,13 +87,14 @@ pub fn execute(
 					"Importing skill from: {}",
 					from_path.display()
 				);
-				// `--name` is written by the install itself: duplicate check,
-				// copy and frontmatter fix are one span under one lock, and a
-				// conflict is refused BEFORE any write, so no rollback is
-				// needed. See docs/history/cli.md#add-from-with-name
-				let added = manager.add_skill_from_path_universal(
-					&from_path,
-					name.as_deref(),
+				let agent_type = manager.agent_type();
+				let added = aghub_core::skills::install_local::install_local_skill(
+					aghub_core::skills::install_local::LocalSkillInstallRequest {
+						source_path: &from_path,
+						scope: manager.write_scope(),
+						target_agents: &[agent_type],
+						install_name: name.as_deref(),
+					},
 				)?;
 				let skill = added.skill;
 

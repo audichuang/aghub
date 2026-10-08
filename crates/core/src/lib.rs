@@ -13,6 +13,7 @@ pub mod error_codes;
 pub mod manager;
 pub mod paths;
 pub mod registry;
+pub mod scope;
 pub mod skills;
 pub mod transfer;
 
@@ -37,6 +38,7 @@ pub mod testing;
 pub use adapters::{create_adapter, AgentAdapter};
 pub use all_agents::{load_all_agents, load_managed_agents, AgentResources};
 pub use manager::ConfigManager;
+pub use scope::WriteScope;
 pub use transfer::{
 	InstallScope, InstallTarget, OperationAction, OperationBatchResult,
 	OperationResult, ResourceLocator,

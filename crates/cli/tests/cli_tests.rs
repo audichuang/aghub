@@ -17591,3 +17591,58 @@ fn apply_update_outdated_and_source_sync_share_mutation_lock_busy_code_and_retry
 	);
 	drop(held_file);
 }
+
+#[test]
+fn add_skills_from_path_tracks_skill_in_doctor() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let src = home.path().join("source-skill");
+	std::fs::create_dir_all(&src).unwrap();
+	std::fs::write(
+		src.join("SKILL.md"),
+		"---\nname: my-tracked-local\ndescription: test\n---\n\nbody\n",
+	)
+	.unwrap();
+
+	let add_out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"add",
+			"skills",
+			"--from",
+			src.to_str().unwrap(),
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add_out.status.success(),
+		"add skills --from failed: {}",
+		String::from_utf8_lossy(&add_out.stderr)
+	);
+
+	let doc_out = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "doctor"])
+		.output()
+		.unwrap();
+	assert!(
+		doc_out.status.success(),
+		"doctor --json failed: {}",
+		String::from_utf8_lossy(&doc_out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&doc_out.stdout).unwrap();
+	let arr = json.as_array().expect("doctor output must be an array");
+	let row = arr
+		.iter()
+		.find(|r| r["skill"] == "my-tracked-local")
+		.expect("my-tracked-local must appear in doctor report");
+
+	assert_eq!(
+		row["health"], "ok",
+		"health must be ok (tracked), not untracked: {row}"
+	);
+	assert_eq!(row["source"], "local", "source must be local: {row}");
+}

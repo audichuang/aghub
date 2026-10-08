@@ -19,6 +19,9 @@ pub struct CreateSkillRequest {
 #[ts(export)]
 pub struct ImportSkillRequest {
 	pub path: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub name: Option<String>,
 }
 
 impl From<CreateSkillRequest> for Skill {

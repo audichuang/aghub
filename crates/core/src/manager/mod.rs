@@ -77,6 +77,17 @@ impl ConfigManager {
 			.unwrap_or(crate::models::AgentType::Claude)
 	}
 
+	pub fn write_scope(&self) -> crate::WriteScope {
+		match self.write_scope {
+			ResourceScope::GlobalOnly => crate::WriteScope::Global,
+			ResourceScope::ProjectOnly | ResourceScope::Both => {
+				crate::WriteScope::Project {
+					root: self.project_root.clone().unwrap_or_default(),
+				}
+			}
+		}
+	}
+
 	pub fn load(&mut self) -> Result<&AgentConfig> {
 		debug!(
 			"loading config for agent '{}' with scope {:?}",

@@ -17,30 +17,10 @@ use std::path::{Path, PathBuf};
 /// on-disk dir) OR the rename is degenerate (old/new sanitize to one dir).
 pub const RENAME_TARGET_EXISTS_CODE: &str = "RENAME_TARGET_EXISTS";
 
-/// Exactly one scope a rename targets. Unlike [`ResourceScope`] this makes the
-/// illegal states unrepresentable: there is no `Both`, and a project rename
-/// always carries its root.
-#[derive(Debug, Clone)]
-pub enum RenameScope {
-	Global,
-	Project { root: PathBuf },
-}
+pub use crate::WriteScope;
 
-impl RenameScope {
-	fn resource_scope(&self) -> ResourceScope {
-		match self {
-			RenameScope::Global => ResourceScope::GlobalOnly,
-			RenameScope::Project { .. } => ResourceScope::ProjectOnly,
-		}
-	}
-
-	fn project_root(&self) -> Option<&Path> {
-		match self {
-			RenameScope::Global => None,
-			RenameScope::Project { root } => Some(root),
-		}
-	}
-}
+/// Backward-compatible alias for [`WriteScope`].
+pub type RenameScope = WriteScope;
 
 /// Source coordinates of the OLD-name lock entry plus the fields needed to
 /// re-install under the new name. The adapter reads this (via
@@ -74,7 +54,7 @@ pub struct FetchedRename<'a> {
 pub struct RenameRequest<'a> {
 	pub old_name: &'a str,
 	pub new_name: &'a str,
-	pub scope: RenameScope,
+	pub scope: WriteScope,
 }
 
 /// The result of a committed rename.

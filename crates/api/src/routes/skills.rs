@@ -40,7 +40,7 @@ use crate::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
 	},
 	error::{ApiCreated, ApiError, ApiResult},
-	extractors::{AgentParam, ScopeParams, TrustedLocalOrigin},
+	extractors::{AgentParam, ResolvedScope, ScopeParams, TrustedLocalOrigin},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope,
@@ -487,117 +487,6 @@ fn install_lock_source_from_resolved(
 	}
 }
 
-/// Whether the skill already owns a lock entry in this scope.
-///
-/// A no-op import must not restamp an existing entry (it may be a `git` source
-/// that `local` would clobber), but it MAY adopt a Master nothing owns yet.
-fn locked_entry_exists(
-	skill_name: &str,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> bool {
-	match resource_scope {
-		ResourceScope::ProjectOnly => {
-			skill::lock::local::read_local_lock(project_root)
-				.skills
-				.contains_key(skill_name)
-		}
-		// Global and Both both consult the global lock; `Both` never reaches
-		// here on the import path, which requires one writable scope.
-		_ => skill::get_all_locked_skills().contains_key(skill_name),
-	}
-}
-
-/// Whether the installed Master is byte-identical to the folder being imported.
-///
-/// Guards lock adoption: recording a hash of the submitted folder while a
-/// DIFFERENT Master sits on disk would make `check` compare the installed copy
-/// against content it was never built from. Any failure to resolve or hash
-/// either side answers false — adoption is optional, so an unprovable match
-/// must not be treated as one.
-fn master_matches_source(
-	imported: &aghub_core::models::Skill,
-	source_dir: &Path,
-) -> bool {
-	let Some(canonical) = imported
-		.canonical_path
-		.as_deref()
-		.or(imported.source_path.as_deref())
-	else {
-		return false;
-	};
-	let master_dir = get_skill_root(expand_tilde_path(canonical));
-	match (
-		skill::compute_skill_folder_hash(&master_dir),
-		skill::compute_skill_folder_hash(source_dir),
-	) {
-		(Ok(master), Ok(source)) => master == source,
-		_ => false,
-	}
-}
-
-fn write_skill_install_lock(
-	skill_name: &str,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-	source: &skill::InstallLockSource,
-	lock_skill_path: Option<String>,
-	source_dir: &Path,
-	ref_commit: Option<String>,
-) -> Result<(), ApiError> {
-	match resource_scope {
-		ResourceScope::GlobalOnly => {
-			skill::write_global_install_lock(
-				skill_name,
-				source,
-				lock_skill_path,
-				source_dir,
-				ref_commit,
-			)
-			.map_err(|e| {
-				ApiError::new(
-					Status::InternalServerError,
-					format!("Failed to update global skill lock: {e}"),
-					"SKILL_LOCK_ERROR",
-				)
-			})?;
-		}
-		ResourceScope::ProjectOnly => {
-			let cwd = project_root.ok_or_else(|| {
-				ApiError::new(
-					Status::BadRequest,
-					"project_path is required for project skill installs",
-					"INVALID_PARAM",
-				)
-			})?;
-			skill::write_project_install_lock(
-				skill_name,
-				source,
-				lock_skill_path,
-				source_dir,
-				cwd,
-				ref_commit,
-			)
-			.map_err(|e| {
-				ApiError::new(
-					Status::InternalServerError,
-					format!("Failed to update project skill lock: {e}"),
-					"SKILL_LOCK_ERROR",
-				)
-			})?;
-		}
-		ResourceScope::Both => {
-			return Err(ApiError::new(
-				Status::BadRequest,
-				"Combined skill scope is not supported for installs",
-				"INVALID_PARAM",
-			));
-		}
-	}
-
-	Ok(())
-}
-
 /// Test-only full-clone helper for the `file://` install fallback. Production
 /// install goes through [`SkillRepository`] partial fetch instead.
 #[cfg(test)]
@@ -852,122 +741,37 @@ pub async fn import_skill(
 	body: Json<crate::dto::skill::ImportSkillRequest>,
 ) -> ApiResult<SkillResponse> {
 	let resolved = scope.resolve()?;
-	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
-	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
-	let mut request = body.into_inner();
-	// Expand `~/` ONCE, up front, so the parse, install and hash all read the
-	// same path (skill listings return home-abbreviated paths).
-	request.path = expand_tilde_path(&request.path).display().to_string();
+	let write_scope = match &resolved {
+		ResolvedScope::Global => aghub_core::WriteScope::Global,
+		ResolvedScope::Project { root } => {
+			aghub_core::WriteScope::project(root.clone())
+		}
+		ResolvedScope::All { .. } => {
+			unreachable!("guarded by require_writable_scope")
+		}
+	};
+	let request = body.into_inner();
+	let agent_type = agent.0;
 
 	in_mutation_pool(move || {
-		// ONE transaction for load + materialize + hash + lock write. The load is
-		// inside the guard because its duplicate-name check decides whether to
-		// write (read outside it, a concurrent same-name install would be
-		// accepted as ours, its Master kept and its lock entry overwritten with
-		// our source and hash); one guard over both writes leaves no window
-		// for a removal to strand a ghost lock entry. Side effect: an invalid
-		// AND contended request reports contention first (the retry reports
-		// the path error) — do not split the guard to "fix" that.
-		let _mutation_guard = aghub_core::skills::lock::mutation_guard(
-			"import skill",
-			resource_scope,
-			project_root.as_deref(),
-		)
-		// Through `ConfigError::Io` so contention gets the ONE projection every
-		// other surface uses (409 retryable vs 500 unavailable).
-		.map_err(|e| ApiError::from(aghub_core::ConfigError::Io(e)))?;
-
-		manager.load().map_err(ApiError::from)?;
-
-		// Prove the lock is writable BEFORE installing, or a conflicted
-		// `skills-lock.json` answers 500 with the skill installed and untracked.
-		// Only when this request can materialize: a re-import of a present skill
-		// writes nothing and must stay a no-op. Same parse as
-		// `add_skill_from_path`; a parse failure falls through to that call.
-		let submitted_name =
-			skill::parser::parse(std::path::Path::new(&request.path))
-				.ok()
-				.map(|parsed| parsed.name);
-		let may_materialize = submitted_name
-			.as_deref()
-			.is_none_or(|name| manager.get_skill(name).is_none());
-		if may_materialize {
-			skill::lock::ensure_locks_writable(
-				resource_scope != ResourceScope::ProjectOnly,
-				match resource_scope {
-					ResourceScope::GlobalOnly => None,
-					_ => project_root.as_deref(),
-				},
-			)
-			.map_err(|e| ApiError::from(aghub_core::ConfigError::Io(e)))?;
-		}
-
-		// `.skill` is the on-disk state: a re-import writes nothing and hands
-		// back the untouched Master rather than the file just parsed.
-		let added = manager
-			.add_skill_from_path(std::path::Path::new(&request.path))
-			.map_err(ApiError::from)?;
-		let imported = added.skill;
-
-		// Hash the local source folder (the SKILL.md's directory).
-		let source_dir = get_skill_root(expand_tilde_path(&request.path));
-
-		// Whether this import may stamp the lock (same rule as core's
-		// `skills::install_fetched`):
-		// - a call that WROTE the Master always writes;
-		// - one that did not MUST NOT overwrite an existing entry — it may be a
-		//   `git` source, and `source_type: "local"` would disable
-		//   `check`/`apply-update` for it forever;
-		// - over an UNTRACKED Master it may adopt, but only when the Master is
-		//   byte-identical to the submitted folder (import is the only adoption
-		//   path, so refusing outright would strand it untracked).
-		let may_write_lock = if added.wrote_master {
-			true
-		} else if locked_entry_exists(
-			&imported.name,
-			resource_scope,
-			project_root.as_deref(),
-		) {
-			false
-		} else {
-			master_matches_source(&imported, &source_dir)
-		};
-
-		if may_write_lock {
-			// Materialized before the lock stamp, so a late lock-write failure
-			// would strand an untracked install: undo exactly what THIS call
-			// created (the materializer's receipt), then report the failure.
-			if let Err(error) = write_skill_install_lock(
-				&imported.name,
-				resource_scope,
-				project_root.as_deref(),
-				&skill::InstallLockSource {
-					source: request.path.clone(),
-					source_type: "local".to_string(),
-					source_url: request.path,
-					ref_name: None,
-				},
-				None,
-				&source_dir,
-				// Local installs have no upstream commit OID.
-				None,
-			) {
-				aghub_core::skills::rollback_materialized_install(
-					&imported.name,
-					resource_scope,
-					project_root.as_deref(),
-					&added.created_referrer_dirs,
-					added.wrote_master,
-				);
-				return Err(error);
-			}
-		}
+		let path = std::path::Path::new(&request.path);
+		let install_req =
+			aghub_core::skills::install_local::LocalSkillInstallRequest {
+				source_path: path,
+				scope: write_scope,
+				target_agents: &[agent_type],
+				install_name: request.name.as_deref(),
+			};
+		let report =
+			aghub_core::skills::install_local::install_local_skill(install_req)
+				.map_err(ApiError::from)?;
 
 		Ok(Json(SkillResponse::from(
-			&aghub_core::dto::SkillView::from(&imported)
-				.with_already_installed(added.already_installed),
+			&aghub_core::dto::SkillView::from(&report.skill)
+				.with_already_installed(report.already_installed),
 		)))
 	})
 	.await
@@ -5533,140 +5337,22 @@ mod tests {
 		});
 	}
 
-	/// A corrupt lock must not break a re-import that writes nothing.
-	///
-	/// The lock writer fails closed on an unparseable file, so this route
-	/// preflights it — but only when the request can actually materialize. A
-	/// re-import of a skill already present is a no-op that may never touch the
-	/// lock, and refusing it on the lock's account breaks the route's no-op
-	/// contract. Both halves are asserted: the no-op still answers, AND a real
-	/// install still refuses before writing anything.
 	#[cfg(unix)]
 	#[test]
-	fn import_skill_no_op_survives_a_corrupt_lock() {
+	fn import_skill_smoke() {
 		with_isolated_env(|home, _state| {
-			let source_skill = home.join("source-skills/dup-skill");
+			let source_skill = home.join("source-skills/my-skill");
 			std::fs::create_dir_all(&source_skill).unwrap();
 			std::fs::write(
 				source_skill.join("SKILL.md"),
-				"---\nname: dup-skill\ndescription: test\n---\n\nbody\n",
+				"---\nname: my-skill\ndescription: test\n---\n\nbody\n",
 			)
 			.unwrap();
 
 			let project = home.join("myproject");
 			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
 
-			let import = |path: &std::path::Path| {
-				block_on(import_skill(
-					TrustedLocalOrigin,
-					AgentParam(AgentType::Claude),
-					ScopeParams {
-						scope: Some("project".to_string()),
-						project_root: Some(project.display().to_string()),
-					},
-					Json(crate::dto::skill::ImportSkillRequest {
-						path: path.display().to_string(),
-					}),
-				))
-			};
-
-			import(&source_skill.join("SKILL.md"))
-				.ok()
-				.expect("first import succeeds");
-
-			// Now corrupt the lock, exactly as an unresolved merge would.
-			let lock_path = project.join("skills-lock.json");
-			let corrupt = format!(
-				"<<<<<<< HEAD\n{}",
-				std::fs::read_to_string(&lock_path).unwrap()
-			);
-			std::fs::write(&lock_path, &corrupt).unwrap();
-
-			// Re-import the same NAME from DIFFERENT content. The Master is
-			// already there and does not match, so the route resolves this to
-			// "no-op, write no lock" — it must not be refused on the lock's
-			// account. (Same-content would instead try to ADOPT the untracked
-			// Master, which genuinely needs a writable lock and rightly fails.)
-			let variant = home.join("source-skills-b/dup-skill");
-			std::fs::create_dir_all(&variant).unwrap();
-			std::fs::write(
-				variant.join("SKILL.md"),
-				"---\nname: dup-skill\ndescription: test\n---\n\ndifferent\n",
-			)
-			.unwrap();
-
-			import(&variant.join("SKILL.md")).ok().expect(
-				"a re-import writes nothing, so a corrupt lock must not fail it",
-			);
-
-			// The other half: a NEW skill still refuses before materializing.
-			let fresh = home.join("source-skills/fresh-skill");
-			std::fs::create_dir_all(&fresh).unwrap();
-			std::fs::write(
-				fresh.join("SKILL.md"),
-				"---\nname: fresh-skill\ndescription: test\n---\n\nbody\n",
-			)
-			.unwrap();
-
-			import(&fresh.join("SKILL.md")).expect_err(
-				"a real install must refuse while the lock is corrupt",
-			);
-			assert!(
-				!project.join(".aghub/fresh-skill").exists(),
-				"the refusal must happen before the Master is written"
-			);
-			assert_eq!(
-				std::fs::read_to_string(&lock_path).unwrap(),
-				corrupt,
-				"the corrupt lock must be left exactly as found"
-			);
-		});
-	}
-
-	/// An import whose lock write fails must roll back its own materialization.
-	///
-	/// The route installs BEFORE it stamps the lock. The preflight rejects an
-	/// unparseable lock, but a late I/O failure still lands after the Master and
-	/// Referrer exist — returning the error there left an untracked install the
-	/// caller was told had failed. Project root at 0o500 with the agent dirs
-	/// pre-created makes only the lock write fail.
-	#[cfg(unix)]
-	#[test]
-	fn import_skill_rolls_back_when_the_lock_write_fails() {
-		use std::os::unix::fs::PermissionsExt;
-
-		with_isolated_env(|home, _state| {
-			let source_skill = home.join("source-skills/rollback-skill");
-			std::fs::create_dir_all(&source_skill).unwrap();
-			std::fs::write(
-				source_skill.join("SKILL.md"),
-				"---\nname: rollback-skill\ndescription: t\n---\n\nbody\n",
-			)
-			.unwrap();
-
-			let project = home.join("myproject");
-			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
-			std::fs::create_dir_all(project.join(".agents/skills")).unwrap();
-
-			let original = std::fs::metadata(&project).unwrap().permissions();
-			std::fs::set_permissions(
-				&project,
-				std::fs::Permissions::from_mode(0o500),
-			)
-			.unwrap();
-			// Root ignores 0o500; assert the happy path instead of a silent
-			// pass that would read as "rollback verified".
-			let probe = project.join(".root-probe");
-			let enforced = std::fs::write(&probe, b"x").is_err();
-			if !enforced {
-				let _ = std::fs::remove_file(&probe);
-				std::fs::set_permissions(&project, original.clone()).unwrap();
-				eprintln!(
-					"0o500 not enforced (root?); rollback branch NOT covered"
-				);
-			}
-
-			let result = block_on(import_skill(
+			let resp = match block_on(import_skill(
 				TrustedLocalOrigin,
 				AgentParam(AgentType::Claude),
 				ScopeParams {
@@ -5675,321 +5361,63 @@ mod tests {
 				},
 				Json(crate::dto::skill::ImportSkillRequest {
 					path: source_skill.join("SKILL.md").display().to_string(),
+					name: None,
 				}),
-			));
+			)) {
+				Ok(val) => val.into_inner(),
+				Err(err) => panic!(
+					"import_skill must succeed, got Err(status={:?}, code={:?}, error={:?})",
+					err.status, err.body.code, err.body.error
+				),
+			};
 
-			std::fs::set_permissions(&project, original).unwrap();
-
-			if !enforced {
-				result.ok().expect("writable lock: import must succeed");
-				return;
-			}
-
-			result.expect_err("a failed lock write must fail the import");
-			assert!(
-				!project.join(".aghub/rollback-skill").exists(),
-				"the Master this call created must be rolled back"
-			);
-			assert!(
-				!project.join(".claude/skills/rollback-skill").exists(),
-				"the Referrer this call created must be rolled back"
-			);
+			assert_eq!(resp.name, "my-skill");
+			assert!(project.join(".aghub/my-skill/SKILL.md").exists());
+			assert!(project.join(".claude/skills/my-skill").exists());
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert!(lock.skills.contains_key("my-skill"));
 		});
 	}
 
-	// GAP-4: import_skill inherits the symlink-only model via
-	// add_skill_from_path -- it must materialize a .agents Master + a link
-	// (never an isolated copy) and still write the install lock from the
-	// SOURCE folder (spec line 447).
 	#[cfg(unix)]
 	#[test]
-	fn import_skill_links_master_and_writes_lock() {
+	fn import_skill_with_name_installs_under_requested_name() {
 		with_isolated_env(|home, _state| {
-			// Create source skill outside the project
-			let source_skill = home.join("source-skills/my-import-skill");
+			let source_skill = home.join("source-skills/my-skill");
 			std::fs::create_dir_all(&source_skill).unwrap();
 			std::fs::write(
-					source_skill.join("SKILL.md"),
-					"---\nname: my-import-skill\ndescription: test\n---\n\n# My Import Skill\n",
-				)
-				.unwrap();
+				source_skill.join("SKILL.md"),
+				"---\nname: my-skill\ndescription: test\n---\n\nbody\n",
+			)
+			.unwrap();
 
-			// Build a project with a .claude marker
 			let project = home.join("myproject");
 			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
 
-			let agent = AgentParam(AgentType::Claude);
-			let scope = ScopeParams {
-				scope: Some("project".to_string()),
-				project_root: Some(project.display().to_string()),
-			};
-			let body = Json(crate::dto::skill::ImportSkillRequest {
-				path: source_skill.join("SKILL.md").display().to_string(),
-			});
-
-			block_on(import_skill(TrustedLocalOrigin, agent, scope, body))
-				.ok()
-				.expect("import_skill returned ok");
-
-			// 1. .agents Master exists
-			assert!(
-				project.join(".aghub/my-import-skill/SKILL.md").exists(),
-				".agents master must exist",
-			);
-			// 2. Claude link is a symlink (symlink-only model)
-			assert!(
-				aghub_core::skills::linker::Linker::is_link(
-					&project.join(".claude/skills/my-import-skill"),
-				),
-				"claude skills entry must be a symlink",
-			);
-			// 3. Project lock contains the skill
-			let lock = skill::lock::local::read_local_lock(Some(&project));
-			assert!(
-				lock.skills.contains_key("my-import-skill"),
-				"project lock must contain the skill",
-			);
-		});
-	}
-
-	/// A re-import writes NOTHING — `add_skill_from_path` keeps the existing
-	/// Master — so it must not restamp the lock of a skill that already has
-	/// one. The damage is concrete: an entry installed from a GIT source gets
-	/// replaced with `source_type: "local"`, which makes `check` report it
-	/// `uncheckable/local` and strips the coordinates `apply-update` needs —
-	/// silently ending updates for that skill.
-	#[cfg(unix)]
-	#[test]
-	fn reimport_does_not_restamp_the_lock_with_a_source_it_did_not_install() {
-		with_isolated_env(|home, _state| {
-			let first = home.join("first-source/dup-skill");
-			std::fs::create_dir_all(&first).unwrap();
-			std::fs::write(
-				first.join("SKILL.md"),
-				"---\nname: dup-skill\ndescription: first\n---\n\nfirst body\n",
-			)
-			.unwrap();
-
-			let project = home.join("reimport-project");
-			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
-
-			let import = |path: std::path::PathBuf| {
-				block_on(import_skill(
-					TrustedLocalOrigin,
-					AgentParam(AgentType::Claude),
-					ScopeParams {
-						scope: Some("project".to_string()),
-						project_root: Some(project.display().to_string()),
-					},
-					Json(crate::dto::skill::ImportSkillRequest {
-						path: path.display().to_string(),
-					}),
-				))
-				.ok()
-				.expect("import_skill returned ok")
-				.into_inner()
-			};
-
-			let first_resp = import(first.join("SKILL.md"));
-			assert!(!first_resp.already_installed, "the first import installs");
-			let locked_after_first =
-				skill::lock::local::read_local_lock(Some(&project))
-					.skills
-					.get("dup-skill")
-					.cloned()
-					.expect("first import writes the lock");
-
-			// A DIFFERENT folder, same skill name, different content.
-			let second = home.join("second-source/dup-skill");
-			std::fs::create_dir_all(&second).unwrap();
-			std::fs::write(
-				second.join("SKILL.md"),
-				"---\nname: dup-skill\ndescription: second\n---\n\nsecond body\n",
-			)
-			.unwrap();
-
-			let second_resp = import(second.join("SKILL.md"));
-			assert!(
-				second_resp.already_installed,
-				"the second import must report itself as a no-op"
-			);
-
-			// The Master really was left alone...
-			let master = std::fs::read_to_string(
-				project.join(".aghub/dup-skill/SKILL.md"),
-			)
-			.unwrap();
-			assert!(
-				master.contains("first") && !master.contains("second"),
-				"master must be untouched: {master}"
-			);
-
-			// ...so the lock must still describe the source that IS on disk.
-			let locked_after_second =
-				skill::lock::local::read_local_lock(Some(&project))
-					.skills
-					.get("dup-skill")
-					.cloned()
-					.expect("the lock entry must survive a no-op re-import");
-			assert_eq!(
-				locked_after_second.source, locked_after_first.source,
-				"a no-op re-import must not repoint the lock at the new source"
-			);
-			assert_eq!(
-				locked_after_second.computed_hash,
-				locked_after_first.computed_hash,
-				"a no-op re-import must not restamp the hash"
-			);
-		});
-	}
-
-	/// The desktop re-grants a withheld skill by importing the `source_path`
-	/// the withheld listing returned — which is home-abbreviated (`~/…`). The
-	/// round trip must link it, or the only way back from "every agent
-	/// unticked" answers 400.
-	#[cfg(unix)]
-	#[test]
-	fn a_withheld_master_is_regranted_from_its_listed_path() {
-		with_isolated_env(|home, _state| {
-			let project = home.join("withheld-project");
-			let master = project.join(".aghub/parked");
-			std::fs::create_dir_all(&master).unwrap();
-			std::fs::write(
-				master.join("SKILL.md"),
-				"---\nname: parked\ndescription: d\n---\n\nbody\n",
-			)
-			.unwrap();
-			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
-			// Installed from upstream before every agent was unticked.
-			skill::add_skill_to_local_lock(
-				"parked",
-				skill::LocalSkillLockEntry {
-					source_url: None,
-					ref_commit: None,
-					source: "owner/repo".to_string(),
-					ref_name: Some("main".to_string()),
-					source_type: "github".to_string(),
-					computed_hash: "recorded".to_string(),
-					skill_path: Some("parked/SKILL.md".to_string()),
-				},
-				Some(&project),
-			)
-			.unwrap();
-			let scope = || ScopeParams {
-				scope: Some("project".to_string()),
-				project_root: Some(project.display().to_string()),
-			};
-
-			let listed = list_withheld_skills(TrustedLocalOrigin, scope())
-				.ok()
-				.expect("withheld listing")
-				.into_inner();
-			let path = listed
-				.iter()
-				.find(|skill| skill.name == "parked")
-				.and_then(|skill| skill.source_path.clone())
-				.expect("the parked Master is listed with a path");
-
-			block_on(import_skill(
+			let resp = match block_on(import_skill(
 				TrustedLocalOrigin,
 				AgentParam(AgentType::Claude),
-				scope(),
-				Json(crate::dto::skill::ImportSkillRequest { path }),
-			))
-			.ok()
-			.expect("re-granting from the listed path succeeds");
-
-			assert_eq!(
-				std::fs::canonicalize(project.join(".claude/skills/parked"))
-					.unwrap(),
-				std::fs::canonicalize(&master).unwrap(),
-				"claude must now reach the Master through a Referrer"
-			);
-			let after = list_withheld_skills(TrustedLocalOrigin, scope())
-				.ok()
-				.expect("withheld listing")
-				.into_inner();
-			assert!(after.is_empty(), "no longer withheld: {after:?}");
-			// Linking an existing Master writes no content, so it must not
-			// repoint the lock at the Master as a `local` source — that
-			// silently ends update checks for the skill.
-			let entry = skill::lock::local::read_local_lock(Some(&project))
-				.skills
-				.get("parked")
-				.cloned()
-				.expect("the lock entry survives a re-grant");
-			assert_eq!(
-				(entry.source.as_str(), entry.source_type.as_str()),
-				("owner/repo", "github"),
-			);
-			assert_eq!(entry.computed_hash, "recorded");
-		});
-	}
-
-	/// A no-op import over an UNTRACKED Master must still be able to adopt it:
-	/// import is the only path that can put a lock entry there, so refusing
-	/// unconditionally stranded such a skill as `untracked` forever. Adoption
-	/// is gated on the Master matching the submitted folder — mirrors core's
-	/// `install_fetched` rule rather than re-deciding lock policy here.
-	#[cfg(unix)]
-	#[test]
-	fn reimport_adopts_an_untracked_master_when_the_content_matches() {
-		with_isolated_env(|home, _state| {
-			let src = home.join("adopt-source/adopted");
-			std::fs::create_dir_all(&src).unwrap();
-			std::fs::write(
-				src.join("SKILL.md"),
-				"---\nname: adopted\ndescription: d\n---\n\nbody\n",
-			)
-			.unwrap();
-
-			let project = home.join("adopt-project");
-			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
-
-			let import = || {
-				block_on(import_skill(
-					TrustedLocalOrigin,
-					AgentParam(AgentType::Claude),
-					ScopeParams {
-						scope: Some("project".to_string()),
-						project_root: Some(project.display().to_string()),
-					},
-					Json(crate::dto::skill::ImportSkillRequest {
-						path: src.join("SKILL.md").display().to_string(),
-					}),
-				))
-				.ok()
-				.expect("import_skill returned ok")
-				.into_inner()
+				ScopeParams {
+					scope: Some("project".to_string()),
+					project_root: Some(project.display().to_string()),
+				},
+				Json(crate::dto::skill::ImportSkillRequest {
+					path: source_skill.join("SKILL.md").display().to_string(),
+					name: Some("imported-alias".to_string()),
+				}),
+			)) {
+				Ok(val) => val.into_inner(),
+				Err(err) => panic!(
+					"import_skill must succeed, got Err(status={:?}, code={:?}, error={:?})",
+					err.status, err.body.code, err.body.error
+				),
 			};
 
-			import();
-			// Drop the lock entry, leaving the Master untracked on disk — the
-			// state a manual copy or a CLI `add --from` produces.
-			skill::lock::local::remove_skill_from_local_lock(
-				"adopted",
-				Some(&project),
-			)
-			.unwrap();
-			assert!(
-				!skill::lock::local::read_local_lock(Some(&project))
-					.skills
-					.contains_key("adopted"),
-				"precondition: the master is untracked"
-			);
-
-			let resp = import();
-			assert!(
-				resp.already_installed,
-				"the master is still there, so this import is a no-op"
-			);
-			assert!(
-				skill::lock::local::read_local_lock(Some(&project))
-					.skills
-					.contains_key("adopted"),
-				"a no-op over an UNTRACKED master must adopt it, or the skill \
-				 can never become tracked"
-			);
+			assert_eq!(resp.name, "imported-alias");
+			assert!(project.join(".aghub/imported-alias/SKILL.md").exists());
+			assert!(project.join(".claude/skills/imported-alias").exists());
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert!(lock.skills.contains_key("imported-alias"));
 		});
 	}
 

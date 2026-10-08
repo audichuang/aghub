@@ -163,7 +163,8 @@ A git install has a lock entry with normalized source, repo path, commit, and
 Master hash. It can take part in `source diff`, `source sync --update`, and
 `check --online`.
 
-`add --from` creates local content with no source lock. Re-running it does not
+`add --from` writes a local lock entry (`source_type: local`) and refuses if
+another owner's lock entry already holds the name. Re-running it does not
 refresh an occupied Master. Refresh it through a backed-up delete and re-add;
 move it to git provenance through the adopt/replace branch.
 

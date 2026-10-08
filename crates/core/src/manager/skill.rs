@@ -66,7 +66,7 @@ impl SkillAdd {
 ///
 /// `None` when the Master cannot be parsed. Both callers treat that as an
 /// ERROR, never a fallback to their own input: nothing can read that Master.
-fn master_on_disk(canonical: &Path, name: &str) -> Option<Skill> {
+pub(crate) fn master_on_disk(canonical: &Path, name: &str) -> Option<Skill> {
 	let pkg = skill::parser::parse(canonical).ok()?;
 	let mut found = convert_skill(pkg);
 	// Keyed by the REQUESTED name: that is what the caller's `config.skills`
@@ -1519,7 +1519,7 @@ fn rollback_master_rename(
 /// the author wrote — is carried through the raw map untouched; only `name` is
 /// replaced. Deliberately NOT via `format_skill`, which reserializes from the
 /// reduced model and would drop exactly those keys.
-fn rewrite_master_skill_name(
+pub(crate) fn rewrite_master_skill_name(
 	master: &Path,
 	new_name: &str,
 ) -> std::io::Result<()> {
