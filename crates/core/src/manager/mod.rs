@@ -38,7 +38,9 @@ impl ConfigManager {
 		Self::with_scope(adapter, global, project_root, scope)
 	}
 
-	/// Create a new ConfigManager with resource scope
+	/// Create a new ConfigManager with resource scope.
+	/// The manager's write target is derived from (global, project_root) and is
+	/// intentionally still built that way (deferred: MCP/sub-agent entries taking WriteScope directly).
 	pub fn with_scope(
 		adapter: Box<dyn AgentAdapter>,
 		global: bool,
@@ -59,27 +61,11 @@ impl ConfigManager {
 		}
 	}
 
-	/// Create a ConfigManager targeting exactly one [`WriteScope`]
-	pub fn for_write(
-		adapter: Box<dyn AgentAdapter>,
-		write_scope: crate::WriteScope,
-	) -> Self {
-		let scope = write_scope.resource_scope();
-		let project_root = write_scope.project_root().map(Path::to_path_buf);
-		Self {
-			adapter,
-			project_root,
-			config: None,
-			scope,
-			write_scope: Some(write_scope),
-		}
-	}
-
 	pub(crate) fn write_resource_scope(&self) -> ResourceScope {
 		self.write_scope
 			.as_ref()
 			.map(|w| w.resource_scope())
-			.unwrap_or(self.scope)
+			.unwrap_or(ResourceScope::ProjectOnly)
 	}
 
 	pub fn config_path(&self) -> Option<PathBuf> {
@@ -522,19 +508,6 @@ mod tests {
 				root: PathBuf::from("/test/project")
 			}
 		);
-
-		let mgr_for_write = ConfigManager::for_write(
-			create_adapter(AgentType::Claude),
-			crate::WriteScope::project(PathBuf::from("/test/project")),
-		);
-		assert_eq!(
-			mgr_for_write.write_scope().unwrap(),
-			&crate::WriteScope::Project {
-				root: PathBuf::from("/test/project")
-			}
-		);
-		assert_eq!(mgr_for_write.scope, ResourceScope::ProjectOnly);
-
 		let mgr_global =
 			ConfigManager::new(create_adapter(AgentType::Claude), true, None);
 		let global_scope = mgr_global.write_scope().unwrap();

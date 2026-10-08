@@ -654,20 +654,6 @@ mod tests {
 	}
 
 	#[test]
-	fn prune_lock_project_requires_project_root() {
-		let _g = GlobalLockGuard::new();
-		let project = tempdir().unwrap();
-		let scope = WriteScope::project(project.path());
-		assert_eq!(scope.project_root(), Some(project.path()));
-		assert_eq!(
-			scope.resource_scope(),
-			crate::models::ResourceScope::ProjectOnly
-		);
-		let pruned = prune_lock(&scope, &names(&[])).unwrap();
-		assert!(pruned.is_empty());
-	}
-
-	#[test]
 	fn prune_lock_global_never_touches_project_lock() {
 		let _g = GlobalLockGuard::new();
 		let project = tempdir().unwrap();

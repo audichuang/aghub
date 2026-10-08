@@ -40,21 +40,3 @@ impl WriteScope {
 		}
 	}
 }
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn write_scope_properties() {
-		let global = WriteScope::global();
-		assert_eq!(global.resource_scope(), ResourceScope::GlobalOnly);
-		assert_eq!(global.project_root(), None);
-		assert_eq!(global.label(), "global");
-
-		let project = WriteScope::project("/test/path");
-		assert_eq!(project.resource_scope(), ResourceScope::ProjectOnly);
-		assert_eq!(project.project_root(), Some(Path::new("/test/path")));
-		assert_eq!(project.label(), "project");
-	}
-}

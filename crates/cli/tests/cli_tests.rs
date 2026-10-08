@@ -5776,9 +5776,9 @@ fn transfer_skill_project_without_root_errors() {
 	// `-p` with no project marker anywhere up-tree: scope is Project but there is
 	// no project_root. The Project-scoped source skill is then unresolvable, so
 	// transfer fails before any copy — proving the no-root path is rejected, not
-	// silently treated as global. (A destination-only missing root surfaces
-	// `validate_target`'s "project root is required"; the CLI shares one scope
-	// across source+targets, so the source-load failure fires first.)
+	// silently treated as global. (A rootless `-p` is rejected at CLI scope
+	// resolution (`resolve_transfer_scope` in crates/cli/src/commands/transfer.rs),
+	// before any copy.)
 	let empty = tempfile::TempDir::new().unwrap();
 
 	let out = transfer_cli(empty.path())

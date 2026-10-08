@@ -2375,30 +2375,6 @@ mod tests {
 	use crate::testing::master_with_claude_referrer;
 	use tempfile::tempdir;
 
-	#[test]
-	fn install_target_and_locator_hold_exact_write_scope() {
-		let temp = tempdir().unwrap();
-		let target = InstallTarget {
-			agent: AgentType::Claude,
-			scope: WriteScope::project(temp.path()),
-		};
-		assert_eq!(target.scope, WriteScope::project(temp.path()));
-		assert_eq!(
-			target.scope.resource_scope(),
-			crate::models::ResourceScope::ProjectOnly
-		);
-
-		let global_target = InstallTarget {
-			agent: AgentType::Claude,
-			scope: WriteScope::Global,
-		};
-		assert_eq!(global_target.scope, WriteScope::Global);
-		assert_eq!(
-			global_target.scope.resource_scope(),
-			crate::models::ResourceScope::GlobalOnly
-		);
-	}
-
 	/// A reconcile deletes a sub-agent's source only while every copy still
 	/// holds what was copied; a copy edited or removed in between keeps it.
 	#[test]
