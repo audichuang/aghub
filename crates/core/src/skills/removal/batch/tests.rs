@@ -1901,3 +1901,54 @@ fn test_get_skill_holders_managed_unmanaged_split() {
 	assert!(holders.unmanaged.contains(&"opencode".to_string()));
 	assert!(!holders.unmanaged.contains(&"claude".to_string()));
 }
+
+#[test]
+fn test_by_name_shared_refusal_excludes_all_requested_agents_from_readers() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+
+	let slot = root.join(".agents/skills/shared-skill");
+	fs::create_dir_all(&slot).unwrap();
+	fs::write(
+		slot.join("SKILL.md"),
+		"---\nname: shared-skill\ndescription: shared skill\n---\n",
+	)
+	.unwrap();
+
+	// Cursor and OpenCode are the requested managed agents.
+	// Disable codex (which also reads project .agents/skills), leaving the remaining
+	// structural readers (amp, cline, copilot, etc.) managed so the shared refusal fires.
+	let _off = crate::agent_settings::test_override::disable(&["codex"]);
+
+	// Request by-name delete for both managed agents (Cursor and OpenCode)
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName("shared-skill".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Cursor, AgentType::OpenCode],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+	let err = remove_skill_batch(&req).unwrap_err();
+	let rejected = err.rejected_targets().expect("rejected_targets on refusal");
+
+	// Both cursor and opencode targets should exclude each other from readers (pinning Finding 2),
+	// and surviving readers (like disabled codex) must be listed.
+	assert_eq!(rejected.len(), 2);
+	for target in rejected {
+		assert_eq!(target.kind.as_deref(), Some("shared"));
+		let readers = target.readers.as_ref().expect("readers must be present");
+		assert!(!readers.is_empty(), "readers must be non-empty");
+		// Must NOT contain requested agents cursor or opencode
+		assert!(!readers.iter().any(|r| r.agent == "cursor"));
+		assert!(!readers.iter().any(|r| r.agent == "opencode"));
+		// Must contain disabled reader codex
+		assert!(readers.iter().any(|r| r.agent == "codex" && !r.managed));
+	}
+}

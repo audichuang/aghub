@@ -73,25 +73,14 @@ export function splitDeleteTargets<T extends DeleteTargetItem>(
 	includeUnmanaged: boolean,
 ): DeleteTargets<T> {
 	const withAgent = items.filter((item) => !!item.agent);
-	const unmanagedList =
-		backendHolders.unmanaged ?? backendHolders.still_read_by_unmanaged;
-	const unmanagedSet = unmanagedList ? new Set(unmanagedList) : null;
-	const managedSet = backendHolders.managed
-		? new Set(backendHolders.managed)
-		: null;
+	const managedSet = new Set(backendHolders.managed ?? []);
 
-	const unmanaged = withAgent.filter((item) => {
-		const agent = item.agent as string;
-		if (unmanagedSet) return unmanagedSet.has(agent);
-		if (managedSet) return !managedSet.has(agent);
-		return false;
-	});
-	const managed = withAgent.filter((item) => {
-		const agent = item.agent as string;
-		if (unmanagedSet) return !unmanagedSet.has(agent);
-		if (managedSet) return managedSet.has(agent);
-		return true;
-	});
+	const managed = withAgent.filter((item) =>
+		managedSet.has(item.agent as string),
+	);
+	const unmanaged = withAgent.filter(
+		(item) => !managedSet.has(item.agent as string),
+	);
 	return {
 		managed,
 		unmanaged,
@@ -238,32 +227,6 @@ export function collectUnmanagedDeleteTargets(
 	return unmanaged;
 }
 
-/**
- * Returns the deduplicated unmanaged (disabled) agents that hold a skill
- * in the specified group.
- */
-export function unmanagedAgentsForGroup(
-	group: BulkDeleteGroup | undefined,
-	backendHolders: BackendHolders | null | undefined,
-): string[] {
-	if (!group || !backendHolders) {
-		return [];
-	}
-	const disabledList =
-		backendHolders.byGroup && backendHolders.byGroup[group.key]
-			? (backendHolders.byGroup[group.key].unmanaged ?? [])
-			: (backendHolders.unmanaged ??
-				backendHolders.still_read_by_unmanaged ??
-				[]);
-	const disabled = new Set(disabledList);
-	const agents = group.items
-		.map((item) => item.agent)
-		.filter((agent): agent is string =>
-			Boolean(agent && disabled.has(agent)),
-		);
-	return [...new Set(agents)];
-}
-
 export function isGoneSkillPath(error: unknown): boolean {
 	return isHTTPError(error) && error.response.status === 404;
 }
@@ -292,11 +255,13 @@ export type TranslateFn = (
 
 /**
  * Evaluates whether an error represents a whole-batch preflight refusal
- * based on the machine code, rather than matching error text.
+ * based on the machine code and presence of rejected targets, rather than matching error text.
  */
 export function isWholeBatchRefusal(error: unknown): boolean {
 	const code = getApiErrorCode(error);
-	return code === "UNSUPPORTED_OPERATION" || code === "INVALID_CONFIG";
+	const body = getApiErrorBody(error);
+	const rejectedTargets = body?.rejected_targets ?? [];
+	return code === "UNSUPPORTED_OPERATION" && rejectedTargets.length > 0;
 }
 
 /**
@@ -331,7 +296,6 @@ export interface RefusalInterpretation {
 
 export interface InterpretRefusalOptions {
 	intent?: DeleteSkillIntent;
-	unmanagedAgents?: readonly string[];
 	skillName?: string;
 	t?: TranslateFn;
 }
@@ -485,7 +449,6 @@ export interface DeleteSkillOptions {
 	projectRoot?: string | null;
 	scopes?: readonly ScopeTarget[];
 	intent: DeleteSkillIntent;
-	unmanagedAgents?: readonly string[];
 	context?: "single" | "bulk";
 	t?: TranslateFn;
 }
@@ -580,7 +543,6 @@ export async function deleteSkill(
 
 			const refusal = interpretRefusal(error, {
 				intent,
-				unmanagedAgents: options.unmanagedAgents,
 				skillName: name,
 				t,
 			});
@@ -724,7 +686,6 @@ export async function deleteSkill(
 			} catch (error) {
 				const refusal = interpretRefusal(error, {
 					intent,
-					unmanagedAgents: options.unmanagedAgents,
 					skillName: name,
 					t,
 				});
@@ -882,7 +843,6 @@ export async function deleteSkill(
 
 		const refusal = interpretRefusal(error, {
 			intent,
-			unmanagedAgents: options.unmanagedAgents,
 			skillName: name,
 			t,
 		});

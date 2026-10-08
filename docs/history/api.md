@@ -273,3 +273,9 @@ Pinned by: `delete_by_path_git_tracked_is_kept_untracked_is_deleted`,
 `delete_by_path_keeps_shared_slot_read_by_other_agents`,
 `delete_by_path_rejects_missing_project_root_when_scope_is_project`
 (`crates/api/src/routes/skills.rs`).
+
+## skill holders query endpoint
+
+`GET /skills/<name>/holders?<scope..>` queries in-scope skill holders partitioned into `managed` and `unmanaged` lists (`SkillHoldersResponse`), allowing client consent dialogs to classify holders without heuristics.
+
+Pinned by: `get_skill_holders_returns_managed_unmanaged_split` (`crates/api/src/routes/skills.rs`).

@@ -3,7 +3,6 @@
 //! Handles shared-first ordering, whole-batch dry-run preflight, prior-row credit,
 //! sibling credit, lock-free preview vs locked commit, Master GC, and lock pruning.
 
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -177,7 +176,7 @@ pub type HolderKeys = (
 );
 
 /// Holders of a skill that survive a removal, partitioned into managed and unmanaged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct SkillHoldersView {
 	pub all: Vec<String>,
 	pub managed: Vec<String>,
@@ -185,6 +184,22 @@ pub struct SkillHoldersView {
 }
 
 impl SkillHoldersView {
+	pub fn from_agents(agents: impl IntoIterator<Item = AgentType>) -> Self {
+		let all: Vec<String> =
+			agents.into_iter().map(|a| a.as_str().to_string()).collect();
+		if all.is_empty() {
+			return Self::default();
+		}
+		let (managed, unmanaged): (Vec<String>, Vec<String>) = all
+			.iter()
+			.cloned()
+			.partition(|a| crate::agent_settings::is_managed(a));
+		Self {
+			all,
+			managed,
+			unmanaged,
+		}
+	}
 	pub fn is_empty(&self) -> bool {
 		self.all.is_empty()
 	}
@@ -273,23 +288,7 @@ pub struct SkillRemovalResponse {
 impl SkillRemovalResponse {
 	/// Holders of the skill that keep the master, split into managed vs unmanaged.
 	pub fn holders_view(&self) -> SkillHoldersView {
-		if self.keepers.is_empty() {
-			return SkillHoldersView::default();
-		}
-		let all: Vec<String> = self
-			.keepers
-			.iter()
-			.map(|a| a.as_str().to_string())
-			.collect();
-		let (managed, unmanaged): (Vec<String>, Vec<String>) = all
-			.iter()
-			.cloned()
-			.partition(|a| crate::agent_settings::is_managed(a));
-		SkillHoldersView {
-			all,
-			managed,
-			unmanaged,
-		}
+		SkillHoldersView::from_agents(self.keepers.iter().copied())
 	}
 
 	/// Project this response into the shared [`AgentBatchView`] wire envelope.
@@ -622,78 +621,84 @@ pub fn get_skill_holders(
 	project_root: Option<&Path>,
 ) -> SkillHoldersView {
 	let (holders, _) = find_skill_holders(name, scope, project_root);
-	let all: Vec<String> = holders
-		.into_iter()
-		.map(|a| a.as_str().to_string())
-		.collect();
-	let (managed, unmanaged): (Vec<String>, Vec<String>) = all
-		.iter()
-		.cloned()
-		.partition(|a| crate::agent_settings::is_managed(a));
-	SkillHoldersView {
-		all,
-		managed,
-		unmanaged,
-	}
+	SkillHoldersView::from_agents(holders)
 }
 
-/// Find in-scope agents still reading the kept path `path`, partitioned by managed status.
+/// Find in-scope agents outside `excluding` reading the kept path `path`, partitioned by managed status.
 pub fn find_readers_of_kept_path(
-	name: &str,
 	path: &Path,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	excluding: &[AgentType],
 ) -> Vec<crate::errors::RejectedTargetReader> {
-	let target = crate::skills::linker::classify::canonicalize_lenient(path);
-	let mut readers = Vec::new();
-	for agent in crate::models::AgentType::ALL {
-		if excluding.contains(agent) {
-			continue;
-		}
-		let dirs =
-			crate::create_adapter(*agent).get_skills_paths(project_root, scope);
-		let reads_structurally = dirs.iter().any(|dir| {
-			target.starts_with(
-				crate::skills::linker::classify::canonicalize_lenient(dir),
-			)
-		});
-		let reads_discovered = if reads_structurally {
-			true
-		} else {
-			crate::skills::discovery::load_skills_from_dirs(&dirs)
-				.map(|skills| {
-					skills.iter().any(|skill| {
-						if skill.name != name {
-							return false;
-						}
-						if let Some(entry) =
-							crate::skills::removal::discovered_entry_dir(skill)
-						{
-							let entry_canon =
-								crate::skills::linker::classify::canonicalize_lenient(
-									&entry,
-								);
-							entry_canon == target
-								|| entry_canon.starts_with(&target)
-								|| target.starts_with(&entry_canon)
-						} else {
-							false
-						}
-					})
-				})
-				.unwrap_or(false)
-		};
+	crate::skills::removal::readers_outside(
+		path,
+		scope,
+		project_root,
+		excluding,
+		true,
+	)
+	.into_iter()
+	.map(|id| crate::errors::RejectedTargetReader {
+		agent: id.to_string(),
+		managed: crate::agent_settings::is_managed(id),
+	})
+	.collect()
+}
 
-		if reads_discovered {
-			let managed = crate::agent_settings::is_managed(agent.as_str());
-			readers.push(crate::errors::RejectedTargetReader {
-				agent: agent.as_str().to_string(),
-				managed,
-			});
-		}
+/// Build a [`RejectedTarget`] for a refused agent, populating `readers` when `kind == "shared"`.
+///
+/// `all_requested` is excluded from the reader roster so sibling requested agents
+/// do not falsely appear as managed readers.
+pub fn build_rejected_target(
+	agent: AgentType,
+	reason: &str,
+	kind: Option<&str>,
+	path: Option<&Path>,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	all_requested: &[AgentType],
+) -> crate::errors::RejectedTarget {
+	let readers = if kind == Some("shared") {
+		path.map(|p| {
+			find_readers_of_kept_path(p, scope, project_root, all_requested)
+		})
+	} else {
+		None
+	};
+	crate::errors::RejectedTarget {
+		agent: agent.as_str().to_string(),
+		reason: reason.to_string(),
+		kind: kind.map(ToString::to_string),
+		path: path.map(|p| p.display().to_string()),
+		readers,
 	}
-	readers
+}
+
+/// Build [`RejectedTarget`]s for a set of rejected agents, sharing the populated `readers`.
+pub fn build_rejected_targets(
+	agents: &[AgentType],
+	reason: &str,
+	kind: Option<&str>,
+	path: Option<&Path>,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<crate::errors::RejectedTarget> {
+	let readers = if kind == Some("shared") {
+		path.map(|p| find_readers_of_kept_path(p, scope, project_root, agents))
+	} else {
+		None
+	};
+	agents
+		.iter()
+		.map(|agent| crate::errors::RejectedTarget {
+			agent: agent.as_str().to_string(),
+			reason: reason.to_string(),
+			kind: kind.map(ToString::to_string),
+			path: path.map(|p| p.display().to_string()),
+			readers: readers.clone(),
+		})
+		.collect()
 }
 
 /// Shared slots must go first: a private Referrer cannot be revoked while
@@ -1037,29 +1042,14 @@ fn remove_skill_by_path(
 				ref path,
 			} = verdict
 			{
-				let readers = if kind == "shared" {
-					path.as_ref().map(|p| {
-						find_readers_of_kept_path(
-							&skill_name,
-							p,
-							request.scope,
-							request.project_root.as_deref(),
-							&target_agents,
-						)
-					})
-				} else {
-					None
-				};
-				let rejected_targets = target_agents
-					.iter()
-					.map(|agent| crate::errors::RejectedTarget {
-						agent: agent.as_str().to_string(),
-						reason: reason.clone(),
-						kind: Some(kind.clone()),
-						path: path.as_ref().map(|p| p.display().to_string()),
-						readers: readers.clone(),
-					})
-					.collect();
+				let rejected_targets = build_rejected_targets(
+					&target_agents,
+					reason,
+					Some(kind),
+					path.as_deref(),
+					request.scope,
+					request.project_root.as_deref(),
+				);
 				return Err(ConfigError::unsupported_operation_with_targets(
 					"remove for this agent alone",
 					reason,
@@ -1267,26 +1257,15 @@ fn remove_skill_by_name(
 					} else {
 						"remove for this agent alone"
 					};
-					let readers = if kind == "shared" {
-						path.as_ref().map(|p| {
-							find_readers_of_kept_path(
-								name,
-								p,
-								request.scope,
-								request.project_root.as_deref(),
-								&[agent],
-							)
-						})
-					} else {
-						None
-					};
-					let rejected_target = crate::errors::RejectedTarget {
-						agent: agent.as_str().to_string(),
-						reason: reason.clone(),
-						kind: Some(kind.clone()),
-						path: path.as_ref().map(|p| p.display().to_string()),
-						readers,
-					};
+					let rejected_target = build_rejected_target(
+						agent,
+						reason,
+						Some(kind),
+						path.as_deref(),
+						request.scope,
+						request.project_root.as_deref(),
+						&request.agents,
+					);
 					preflight_failures.push((
 						agent,
 						Arc::new(

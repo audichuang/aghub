@@ -288,10 +288,6 @@ export function DeleteSkillDialog({
 				});
 			}
 
-			const unmanagedAgents = targets.unmanaged
-				.map((item) => item.agent)
-				.filter((agent): agent is string => !!agent);
-
 			const res = await deleteSkill({
 				api,
 				queryClient,
@@ -302,7 +298,6 @@ export function DeleteSkillDialog({
 					kind: "all-agents",
 					includeUnmanaged,
 				},
-				unmanagedAgents,
 			});
 
 			if (!res.success) {

@@ -1073,7 +1073,7 @@ fn is_universal_master(dir: &Path, project_root: Option<&Path>) -> bool {
 	assert_strictly_contained(dir, &skill_store_roots(project_root)).is_some()
 }
 
-fn readers_outside(
+pub(crate) fn readers_outside(
 	dir: &Path,
 	scope: crate::models::ResourceScope,
 	project_root: Option<&Path>,

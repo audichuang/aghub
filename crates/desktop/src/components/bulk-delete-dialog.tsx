@@ -11,7 +11,6 @@ import {
 	collectUnmanagedDeleteTargets,
 	deleteSkill,
 	getSkillHolders,
-	unmanagedAgentsForGroup,
 	type BackendHolders,
 	type BulkDeleteGroup,
 } from "../requests/delete-skill";
@@ -206,10 +205,6 @@ export function BulkDeleteDialog({
 								agents: req.agents,
 								includeUnmanaged,
 							},
-							unmanagedAgents: unmanagedAgentsForGroup(
-								groups.find((g) => g.key === req.groupKey),
-								backendHolders,
-							),
 						}).then((res) => {
 							if (!res.success) {
 								throw new Error(

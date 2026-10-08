@@ -9,9 +9,7 @@ import {
 	interpretRefusal,
 	interpretRemovalVerdict,
 	splitDeleteTargets,
-	unmanagedAgentsForGroup,
 	type BackendHolders,
-	type BulkDeleteGroup,
 	type DeleteSkillIntent,
 	type DeleteSkillVerdict,
 } from "./delete-skill.ts";
@@ -181,7 +179,6 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 			agents: ["opencode"],
 			includeUnmanaged: false,
 		},
-		unmanagedAgents: ["cursor"],
 		t,
 	});
 	assert.equal(refusal1.isRefusal, true);
@@ -225,7 +222,6 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 			agents: ["claude", "codex"],
 			includeUnmanaged: false,
 		},
-		unmanagedAgents: ["cursor"],
 		t,
 	});
 	assert.equal(refusalTwoEnabled.isRefusal, true);
@@ -262,7 +258,6 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 			agents: ["claude"],
 			includeUnmanaged: false,
 		},
-		unmanagedAgents: ["cursor"],
 		t,
 	});
 	assert.equal(refusalMixed.isRefusal, true);
@@ -279,7 +274,6 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 			agents: ["claude", "codex", "cursor"],
 			includeUnmanaged: true,
 		},
-		unmanagedAgents: ["cursor"],
 		t,
 	});
 	assert.equal(refusalWithIncludeUnmanaged.isRefusal, true);
@@ -305,7 +299,6 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 
 	const refusal2 = interpretRefusal(gitRefusal, {
 		intent: { kind: "all-agents", includeUnmanaged: false },
-		unmanagedAgents: ["cursor"],
 		skillName: "my-skill",
 		t,
 	});
@@ -316,7 +309,7 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 		"deleteSkillKeptGit|my-skill|/path/to/skill",
 	);
 
-	// 400 INVALID_CONFIG with duplicate masters -> NOT retryWithUnmanaged, displays real reason
+	// 400 INVALID_CONFIG is NOT classified as a whole-batch refusal (fails through)
 	const dupMasterRefusal = createMockHttpError(400, {
 		code: "INVALID_CONFIG",
 		error: "skill reconcile preflight failed; nothing was written: duplicate masters",
@@ -330,14 +323,13 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 
 	const refusal3 = interpretRefusal(dupMasterRefusal, {
 		intent: { kind: "all-agents", includeUnmanaged: false },
-		unmanagedAgents: ["cursor"],
 		t,
 	});
-	assert.equal(refusal3.isRefusal, true);
+	assert.equal(refusal3.isRefusal, false);
 	assert.equal(refusal3.retryWithUnmanaged, false);
 	assert.ok(
-		refusal3.message?.includes("two Masters found"),
-		"must display the real reason from rejected_targets, not retryWithUnmanaged",
+		refusal3.message?.includes("duplicate masters"),
+		"must pass through the error message, not whole-batch refusal",
 	);
 
 	// 422 UNSUPPORTED_OPERATION for agent without project config (zed) -> displays real reason
@@ -354,7 +346,6 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 
 	const refusal4 = interpretRefusal(zedRefusal, {
 		intent: { kind: "all-agents", includeUnmanaged: false },
-		unmanagedAgents: ["cursor"],
 		t,
 	});
 	assert.equal(refusal4.isRefusal, true);
@@ -397,7 +388,6 @@ test("bulk delete refusal with includeUnmanaged=true does not produce retry hint
 			agents: ["claude", "cursor"],
 			includeUnmanaged: true,
 		},
-		unmanagedAgents: ["cursor"],
 		t,
 	});
 
@@ -467,63 +457,41 @@ test("shared UNSUPPORTED_OPERATION refusal where all readers are unmanaged produ
 	assert.equal(refusal.message, "deleteSkillRetryWithUnmanaged");
 });
 
-test("unmanagedAgentsForGroup returns unmanaged agents only for the requested group", () => {
-	const groupA: BulkDeleteGroup = {
-		key: "skill-a",
-		items: [
-			{ name: "skill-a", agent: "claude", source: "global" },
-			{ name: "skill-a", agent: "cursor", source: "global" },
-		],
-	};
-	const groupB: BulkDeleteGroup = {
-		key: "skill-b",
-		items: [{ name: "skill-b", agent: "claude", source: "global" }],
-	};
-	const backendHolders: BackendHolders = {
-		still_read_by_unmanaged: ["cursor"],
-	};
-
-	assert.deepEqual(unmanagedAgentsForGroup(groupA, backendHolders), [
-		"cursor",
-	]);
-	assert.deepEqual(unmanagedAgentsForGroup(groupB, backendHolders), []);
-	assert.deepEqual(unmanagedAgentsForGroup(undefined, backendHolders), []);
-});
-
 // =========================================================================
 // 3. Cross-scope deletion & multi-row aggregation
 // =========================================================================
 
-test("cross-scope deleteSkill reports per-scope results and never claims nothing was written when earlier scope succeeded", async () => {
-	let globalCalled = false;
-	let projectCalled = false;
-
-	const api = {
-		skills: {
-			reconcile: async (req: any) => {
-				if (req.source.scope === "global") {
-					globalCalled = true;
-					return {
-						success_count: 1,
-						failed_count: 0,
-						results: [
-							{
-								agent: "claude",
-								scope: "global",
-								project_root: null,
-								action: "delete",
-								success: true,
-								ok: true,
-								already_present: false,
-								error: null,
-								outcome: "removed",
-							},
-						],
-					};
-				}
-				if (req.source.scope === "project") {
-					projectCalled = true;
-					// Project scope preflight refusal!
+test("cross-scope deleteSkill handles scope outcomes according to table cases", async () => {
+	const cases = [
+		{
+			name: "written -> refused => partial verdict",
+			scopes: [
+				{ scope: "global" as const, agents: ["claude"] },
+				{
+					scope: "project" as const,
+					projectRoot: "/proj",
+					agents: ["zed"],
+				},
+			],
+			mockResponses: {
+				global: () => ({
+					success_count: 1,
+					failed_count: 0,
+					results: [
+						{
+							agent: "claude",
+							scope: "global",
+							project_root: null,
+							action: "delete",
+							success: true,
+							ok: true,
+							already_present: false,
+							error: null,
+							outcome: "removed",
+						},
+					],
+				}),
+				project: () => {
 					throw createMockHttpError(422, {
 						code: "UNSUPPORTED_OPERATION",
 						error: "skill reconcile preflight failed; nothing was written: delete zed (project): no project config",
@@ -534,160 +502,60 @@ test("cross-scope deleteSkill reports per-scope results and never claims nothing
 							},
 						],
 					});
-				}
-				throw new Error("unexpected scope");
+				},
+			},
+			expectedSuccess: false,
+			expectedVerdict: "partial",
+			verify(result: any, calls: { global: number; project: number }) {
+				assert.equal(
+					calls.global,
+					1,
+					"global scope must have been called",
+				);
+				assert.equal(
+					calls.project,
+					1,
+					"project scope must have been called",
+				);
+				assert.ok(
+					!result.message?.includes("nothing was written"),
+					"cross-scope failure must not imply nothing was written when global wrote",
+				);
+				assert.equal(
+					result.message,
+					"deleteSkillCrossScopePartial|scopeGlobal|scopeProject|Zed agent has no project skill config",
+				);
 			},
 		},
-	} as any;
-
-	const result = await deleteSkill({
-		api,
-		skillName: "cross-skill",
-		scopes: [
-			{ scope: "global", agents: ["claude"] },
-			{ scope: "project", projectRoot: "/proj", agents: ["zed"] },
-		],
-		intent: { kind: "all-agents" },
-		t,
-	});
-
-	assert.equal(globalCalled, true, "global scope must have been called");
-	assert.equal(projectCalled, true, "project scope must have been called");
-	assert.equal(
-		result.success,
-		false,
-		"overall operation failed due to project refusal",
-	);
-	assert.equal(result.verdict, "partial");
-
-	// Critical check: Message MUST NOT say "nothing was written" or imply nothing happened
-	assert.ok(
-		!result.message?.includes("nothing was written"),
-		"cross-scope failure must not imply nothing was written when global wrote",
-	);
-	assert.equal(
-		result.message,
-		"deleteSkillCrossScopePartial|scopeGlobal|scopeProject|Zed agent has no project skill config",
-	);
-});
-
-test("cross-scope deleteSkill correctly handles project written and global failed", async () => {
-	const api = {
-		skills: {
-			reconcile: async (req: any) => {
-				if (req.source.scope === "project") {
-					return {
-						success_count: 1,
-						failed_count: 0,
-						results: [
-							{
-								agent: "claude",
-								scope: "project",
-								project_root: "/proj",
-								action: "delete",
-								success: true,
-								ok: true,
-								already_present: false,
-								error: null,
-								outcome: "removed",
-							},
-						],
-					};
-				}
-				if (req.source.scope === "global") {
-					throw createMockHttpError(422, {
-						code: "UNSUPPORTED_OPERATION",
-						error: "global refusal",
-						rejected_targets: [
-							{
-								agent: "zed",
-								reason: "global failed for zed",
-							},
-						],
-					});
-				}
-				throw new Error("unexpected scope");
-			},
-		},
-	} as any;
-
-	const result = await deleteSkill({
-		api,
-		skillName: "cross-skill",
-		scopes: [
-			{ scope: "project", projectRoot: "/proj", agents: ["claude"] },
-			{ scope: "global", agents: ["zed"] },
-		],
-		intent: { kind: "all-agents" },
-		t,
-	});
-
-	assert.equal(result.success, false);
-	assert.equal(result.verdict, "partial");
-	assert.equal(
-		result.message,
-		"deleteSkillCrossScopePartial|scopeProject|scopeGlobal|global failed for zed",
-	);
-});
-
-test("cross-scope deleteSkill when first scope fails reports failure without claiming any scope was written", async () => {
-	const api = {
-		skills: {
-			reconcile: async () => {
-				throw createMockHttpError(422, {
-					code: "UNSUPPORTED_OPERATION",
-					error: "global refusal",
-					rejected_targets: [
+		{
+			name: "absent -> refused => refused verdict (not partial)",
+			scopes: [
+				{ scope: "global" as const, agents: ["claude"] },
+				{
+					scope: "project" as const,
+					projectRoot: "/proj",
+					agents: ["zed"],
+				},
+			],
+			mockResponses: {
+				global: () => ({
+					success_count: 1,
+					failed_count: 0,
+					results: [
 						{
 							agent: "claude",
-							reason: "cannot delete for claude",
+							scope: "global",
+							project_root: null,
+							action: "delete",
+							success: true,
+							ok: true,
+							already_present: false,
+							error: null,
+							outcome: "absent",
 						},
 					],
-				});
-			},
-		},
-	} as any;
-
-	const result = await deleteSkill({
-		api,
-		skillName: "cross-skill",
-		scopes: [
-			{ scope: "global", agents: ["claude"] },
-			{ scope: "project", projectRoot: "/proj", agents: ["claude"] },
-		],
-		intent: { kind: "all-agents" },
-		t,
-	});
-
-	assert.equal(result.success, false);
-	assert.equal(result.verdict, "refused");
-	assert.equal(result.message, "cannot delete for claude");
-});
-
-test("cross-scope deleteSkill when scope 1 is absent and scope 2 is refused reports scope 2 failure without claiming scope 1 was written", async () => {
-	const api = {
-		skills: {
-			reconcile: async (req: any) => {
-				if (req.source.scope === "global") {
-					return {
-						success_count: 1,
-						failed_count: 0,
-						results: [
-							{
-								agent: "claude",
-								scope: "global",
-								project_root: null,
-								action: "delete",
-								success: true,
-								ok: true,
-								already_present: false,
-								error: null,
-								outcome: "absent",
-							},
-						],
-					};
-				}
-				if (req.source.scope === "project") {
+				}),
+				project: () => {
 					throw createMockHttpError(422, {
 						code: "UNSUPPORTED_OPERATION",
 						error: "project refusal",
@@ -698,34 +566,101 @@ test("cross-scope deleteSkill when scope 1 is absent and scope 2 is refused repo
 							},
 						],
 					});
-				}
-				throw new Error("unexpected scope");
+				},
+			},
+			expectedSuccess: false,
+			expectedVerdict: "refused",
+			verify(result: any, calls: { global: number; project: number }) {
+				assert.equal(calls.global, 1);
+				assert.equal(calls.project, 1);
+				assert.equal(
+					result.message,
+					"Zed agent has no project skill config",
+					"message must not claim global was written",
+				);
 			},
 		},
-	} as any;
+		{
+			name: "refused-first => refused verdict (no second call)",
+			scopes: [
+				{ scope: "global" as const, agents: ["claude"] },
+				{
+					scope: "project" as const,
+					projectRoot: "/proj",
+					agents: ["claude"],
+				},
+			],
+			mockResponses: {
+				global: () => {
+					throw createMockHttpError(422, {
+						code: "UNSUPPORTED_OPERATION",
+						error: "global refusal",
+						rejected_targets: [
+							{
+								agent: "claude",
+								reason: "cannot delete for claude",
+							},
+						],
+					});
+				},
+				project: () => {
+					throw new Error(
+						"project scope must not be called when first scope fails",
+					);
+				},
+			},
+			expectedSuccess: false,
+			expectedVerdict: "refused",
+			verify(result: any, calls: { global: number; project: number }) {
+				assert.equal(calls.global, 1);
+				assert.equal(
+					calls.project,
+					0,
+					"second scope must not be called",
+				);
+				assert.equal(result.message, "cannot delete for claude");
+			},
+		},
+	];
 
-	const result = await deleteSkill({
-		api,
-		skillName: "absent-then-fail",
-		scopes: [
-			{ scope: "global", agents: ["claude"] },
-			{ scope: "project", projectRoot: "/proj", agents: ["zed"] },
-		],
-		intent: { kind: "all-agents" },
-		t,
-	});
+	for (const tc of cases) {
+		const calls = { global: 0, project: 0 };
+		const api = {
+			skills: {
+				reconcile: async (req: any) => {
+					if (req.source.scope === "global") {
+						calls.global++;
+						return tc.mockResponses.global();
+					}
+					if (req.source.scope === "project") {
+						calls.project++;
+						return tc.mockResponses.project();
+					}
+					throw new Error(`unexpected scope: ${req.source.scope}`);
+				},
+			},
+		} as any;
 
-	assert.equal(result.success, false);
-	assert.equal(
-		result.verdict,
-		"refused",
-		"overall verdict must be refused, not partial, because nothing was written",
-	);
-	assert.equal(
-		result.message,
-		"Zed agent has no project skill config",
-		"message must not claim global was written",
-	);
+		const result = await deleteSkill({
+			api,
+			skillName: "cross-skill",
+			scopes: tc.scopes,
+			intent: { kind: "all-agents" },
+			t,
+		});
+
+		assert.equal(
+			result.success,
+			tc.expectedSuccess,
+			`${tc.name}: success mismatch`,
+		);
+		assert.equal(
+			result.verdict,
+			tc.expectedVerdict,
+			`${tc.name}: verdict mismatch`,
+		);
+		tc.verify(result, calls);
+	}
 });
 
 test("cross-scope deleteSkill where all scopes return absent yields verdict 'absent'", async () => {
@@ -874,6 +809,48 @@ test("splitDeleteTargets classifies managed based on backend fields, not fronten
 	assert.deepEqual(
 		named.map((i) => i.agent),
 		["claude"],
+	);
+});
+
+test("splitDeleteTargets: disabled agent missing from both managed and unmanaged lists is not named without consent (fail-closed)", () => {
+	const items = [
+		{ name: "my-skill", agent: "claude", source: "global" as const },
+		{ name: "my-skill", agent: "cursor", source: "global" as const },
+		{
+			name: "my-skill",
+			agent: "unknown-disabled",
+			source: "global" as const,
+		},
+	];
+
+	// Backend holders only knows about claude in managed.
+	// cursor is in unmanaged, and unknown-disabled is missing from both lists.
+	const backend: BackendHolders = {
+		managed: ["claude"],
+		unmanaged: ["cursor"],
+	};
+
+	// Unticked consent: unknown-disabled must NOT be classified as managed, so it must NOT be named!
+	const unticked = splitDeleteTargets(items, backend, false);
+	assert.deepEqual(
+		unticked.managed.map((i) => i.agent),
+		["claude"],
+	);
+	assert.deepEqual(
+		unticked.unmanaged.map((i) => i.agent),
+		["cursor", "unknown-disabled"],
+	);
+	assert.deepEqual(
+		unticked.named.map((i) => i.agent),
+		["claude"],
+		"agent missing from both lists must not be named without consent",
+	);
+
+	// Ticked consent: unknown-disabled is now included in named
+	const ticked = splitDeleteTargets(items, backend, true);
+	assert.deepEqual(
+		ticked.named.map((i) => i.agent),
+		["claude", "cursor", "unknown-disabled"],
 	);
 });
 
