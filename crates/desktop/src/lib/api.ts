@@ -323,12 +323,13 @@ export function createApi(baseUrl: string) {
 				// Every agent this one action deletes from: a shared Referrer
 				// may go only when all of its readers are in the set.
 				agents: readonly string[] = [],
+				confirm = true,
 			): Promise<DeleteSkillByPathResponse> {
 				return client
 					.delete(`agents/${agent}/skills/${name}`, {
 						searchParams: {
 							scope,
-							confirm: "true",
+							confirm: confirm.toString(),
 							...(allAgents ? { all_agents: "true" } : {}),
 							...(projectRoot
 								? { project_root: projectRoot }

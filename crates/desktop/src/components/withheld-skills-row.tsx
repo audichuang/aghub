@@ -210,7 +210,9 @@ function WithheldSkillItem({
 			setBusy(null);
 			setConfirmDelete(false);
 		}
-		await refresh();
+		await queryClient.refetchQueries({
+			queryKey: queryKeys.skills.withheld(scope, projectPath),
+		});
 	};
 
 	return (

@@ -12,14 +12,14 @@ import {
 } from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as pathe from "pathe";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { SkillResponse } from "../generated/dto";
-import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import {
 	deleteSkill,
+	getSkillHolders,
 	splitDeleteTargets,
 	type BackendHolders,
 } from "../requests/delete-skill";
@@ -56,27 +56,22 @@ export function DeleteSkillLocationDialog({
 			if (!item || item.installations.length === 0) {
 				return;
 			}
+			const scope =
+				item.installations[0].source === "project"
+					? "project"
+					: "global";
+			const projectRoot =
+				scope === "project" ? (projectPath ?? null) : null;
 			const res = await deleteSkill({
 				api,
 				queryClient,
 				skillName,
 				t,
-				scopes: [
-					{
-						scope:
-							item.installations[0].source === "project"
-								? "project"
-								: "global",
-						projectRoot:
-							item.installations[0].source === "project"
-								? (projectPath ?? null)
-								: null,
-						agents: item.installations.map((i) => i.agent),
-					},
-				],
 				intent: {
 					kind: "by-path",
 					sourcePath: item.sourcePath,
+					scope,
+					projectRoot,
 					agents: item.installations.map((i) => i.agent),
 				},
 			});
@@ -196,24 +191,24 @@ export function DeleteSkillDialog({
 	const queryClient = useQueryClient();
 
 	const skill = group.items[0];
-	const { availableAgents } = useAgentAvailability();
-	// Agents the user turned off still read the skill and keep its shared
-	// Master alive, so they are listed apart and only named on request.
-	// "Managed" is core's `agent_settings::is_managed` (not disabled), NOT
-	// `isUsable`: an enabled agent that is merely undetected is still a reader
-	// the server counts, and leaving it unnamed made the request refuse itself.
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
-	const backendHolders: BackendHolders = useMemo(
-		() => ({
-			still_read_by_managed: availableAgents
-				.filter((agent) => !agent.isDisabled)
-				.map((agent) => agent.id),
-			still_read_by_unmanaged: availableAgents
-				.filter((agent) => agent.isDisabled)
-				.map((agent) => agent.id),
-		}),
-		[availableAgents],
-	);
+	const [backendHolders, setBackendHolders] = useState<BackendHolders>({});
+
+	useEffect(() => {
+		if (!isOpen || !skill) return;
+		const firstAgent =
+			group.items.find((i) => !!i.agent)?.agent ?? "claude";
+		getSkillHolders({
+			api,
+			agent: firstAgent,
+			skillName: skill.name,
+			scope: skill.source === "project" ? "project" : "global",
+			projectRoot: projectPath,
+		})
+			.then(setBackendHolders)
+			.catch(() => {});
+	}, [api, isOpen, skill, group.items, projectPath]);
+
 	const targets = useMemo(
 		() => splitDeleteTargets(group.items, backendHolders, includeUnmanaged),
 		[group.items, backendHolders, includeUnmanaged],

@@ -985,7 +985,7 @@ export default {
 	deleteSkillKeptForUnmanaged:
 		"Removed from managed agents; unmanaged agents still keep the skill.",
 	deleteSkillCrossScopePartial:
-		"Global scope was deleted, but project scope failed: {{error}}",
+		"{{writtenScope}} scope deleted, but {{failedScope}} scope failed: {{reason}}",
 	deleteAll: "Delete All",
 	locations: "Locations",
 	globalSkills: "Global Skills",

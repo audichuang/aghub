@@ -4,6 +4,7 @@ import { HTTPError } from "ky";
 import {
 	deleteSkill,
 	formatDeleteMessage,
+	getSkillHolders,
 	interpretRefusal,
 	interpretRemovalVerdict,
 	splitDeleteTargets,
@@ -19,7 +20,12 @@ const t = (
 	const parts = [key];
 	if (typeof options?.name === "string") parts.push(options.name);
 	if (typeof options?.path === "string") parts.push(options.path);
-	if (typeof options?.error === "string") parts.push(options.error);
+	if (typeof options?.writtenScope === "string")
+		parts.push(options.writtenScope);
+	if (typeof options?.failedScope === "string")
+		parts.push(options.failedScope);
+	if (typeof options?.reason === "string") parts.push(options.reason);
+	else if (typeof options?.error === "string") parts.push(options.error);
 	return parts.join("|");
 };
 
@@ -41,7 +47,7 @@ function createMockHttpError(
 		new Request("http://api.test/skills/delete"),
 		{} as any,
 	);
-	err.data = data;
+	(err as any).data = data;
 	if (data.error) {
 		err.message = data.error;
 	}
@@ -49,7 +55,7 @@ function createMockHttpError(
 }
 
 // =========================================================================
-// 1. Verdict 5 states interpretation
+// 1. Verdict 5 states interpretation & localized formatting
 // =========================================================================
 
 test("interpretRemovalVerdict covers all five Verdict states", () => {
@@ -122,19 +128,40 @@ test("formatDeleteMessage provides appropriate localized messages for verdicts",
 	);
 });
 
+test("formatDeleteMessage handles bulk context properly", () => {
+	const bulkT = (key: string) => `i18n:${key}`;
+	assert.equal(
+		formatDeleteMessage("kept", {
+			name: "my-skill",
+			context: "bulk",
+			t: bulkT,
+		}),
+		"i18n:bulkDeleteKept",
+	);
+	assert.equal(
+		formatDeleteMessage("partial", {
+			name: "my-skill",
+			context: "bulk",
+			t: bulkT,
+		}),
+		"i18n:bulkDeletePartial",
+	);
+});
+
 // =========================================================================
 // 2. Whole-batch refusal by code and structured fields (NOT error-text)
 // =========================================================================
 
 test("whole-batch refusal is identified by code and structured rejected_targets", () => {
 	// 422 UNSUPPORTED_OPERATION with unticked unmanaged agent -> retryWithUnmanaged
+	// Matches real API refusal body from crates/api/src/routes/skills.rs:9830-9856
 	const unmanagedRefusal = createMockHttpError(422, {
 		code: "UNSUPPORTED_OPERATION",
-		error: "skill reconcile preflight failed; nothing was written: delete cursor (global): Cannot remove for this agent alone",
+		error: "skill reconcile preflight failed; nothing was written: delete opencode (project): location shared with other agents: /path",
 		rejected_targets: [
 			{
-				agent: "cursor",
-				reason: "Cannot remove for this agent alone shared slot",
+				agent: "opencode",
+				reason: "location shared with other agents: /path",
 				kind: "shared",
 			},
 		],
@@ -143,7 +170,7 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 	const refusal1 = interpretRefusal(unmanagedRefusal, {
 		intent: {
 			kind: "from-agents",
-			agents: ["claude"],
+			agents: ["opencode"],
 			includeUnmanaged: false,
 		},
 		unmanagedAgents: ["cursor"],
@@ -231,7 +258,7 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 });
 
 // =========================================================================
-// 3. Cross-scope deletion: earlier written, later refused
+// 3. Cross-scope deletion & multi-row aggregation
 // =========================================================================
 
 test("cross-scope deleteSkill reports per-scope results and never claims nothing was written when earlier scope succeeded", async () => {
@@ -307,7 +334,7 @@ test("cross-scope deleteSkill reports per-scope results and never claims nothing
 	);
 	assert.equal(
 		result.message,
-		"deleteSkillCrossScopePartial|Zed agent has no project skill config",
+		"deleteSkillCrossScopePartial|global|project|Zed agent has no project skill config",
 	);
 	assert.equal(result.scopeResults?.length, 2);
 	assert.equal(result.scopeResults[0].scope, "global");
@@ -317,8 +344,152 @@ test("cross-scope deleteSkill reports per-scope results and never claims nothing
 	assert.equal(result.scopeResults[1].success, false);
 });
 
+test("cross-scope deleteSkill correctly handles project written and global failed", async () => {
+	const api = {
+		skills: {
+			reconcile: async (req: any) => {
+				if (req.source.scope === "project") {
+					return {
+						success_count: 1,
+						failed_count: 0,
+						results: [
+							{
+								agent: "claude",
+								scope: "project",
+								project_root: "/proj",
+								action: "delete",
+								success: true,
+								ok: true,
+								already_present: false,
+								error: null,
+								outcome: "removed",
+							},
+						],
+					};
+				}
+				if (req.source.scope === "global") {
+					throw createMockHttpError(422, {
+						code: "UNSUPPORTED_OPERATION",
+						error: "global refusal",
+						rejected_targets: [
+							{
+								agent: "zed",
+								reason: "global failed for zed",
+							},
+						],
+					});
+				}
+				throw new Error("unexpected scope");
+			},
+		},
+	} as any;
+
+	const result = await deleteSkill({
+		api,
+		name: "cross-skill",
+		scopes: [
+			{ scope: "project", projectRoot: "/proj", agents: ["claude"] },
+			{ scope: "global", agents: ["zed"] },
+		],
+		intent: { kind: "all-agents" },
+		t,
+	});
+
+	assert.equal(result.success, false);
+	assert.equal(result.verdict, "partial");
+	assert.equal(
+		result.message,
+		"deleteSkillCrossScopePartial|project|global|global failed for zed",
+	);
+});
+
+test("cross-scope deleteSkill when first scope fails reports failure without claiming any scope was written", async () => {
+	const api = {
+		skills: {
+			reconcile: async () => {
+				throw createMockHttpError(422, {
+					code: "UNSUPPORTED_OPERATION",
+					error: "global refusal",
+					rejected_targets: [
+						{
+							agent: "claude",
+							reason: "cannot delete for claude",
+						},
+					],
+				});
+			},
+		},
+	} as any;
+
+	const result = await deleteSkill({
+		api,
+		name: "cross-skill",
+		scopes: [
+			{ scope: "global", agents: ["claude"] },
+			{ scope: "project", projectRoot: "/proj", agents: ["claude"] },
+		],
+		intent: { kind: "all-agents" },
+		t,
+	});
+
+	assert.equal(result.success, false);
+	assert.equal(result.verdict, "refused");
+	assert.equal(result.message, "cannot delete for claude");
+});
+
+test("cross-scope delete aggregates all delete rows and detects partial when one agent is removed and another is kept", async () => {
+	const api = {
+		skills: {
+			reconcile: async () => ({
+				success_count: 2,
+				failed_count: 0,
+				results: [
+					{
+						agent: "claude",
+						scope: "global",
+						action: "delete",
+						success: true,
+						outcome: "removed",
+					},
+					{
+						agent: "cursor",
+						scope: "global",
+						action: "delete",
+						success: true,
+						outcome: "kept",
+					},
+				],
+			}),
+		},
+	} as any;
+
+	const result = await deleteSkill({
+		api,
+		name: "my-skill",
+		scopes: [{ scope: "global", agents: ["claude", "cursor"] }],
+		intent: { kind: "from-agents", agents: ["claude", "cursor"] },
+		t,
+	});
+
+	assert.equal(
+		result.success,
+		false,
+		"overall must fail if one agent is kept",
+	);
+	assert.equal(
+		result.verdict,
+		"partial",
+		"mixed removed and kept must yield partial",
+	);
+	assert.equal(result.scopeResults?.[0]?.verdict, "partial");
+	assert.ok(
+		result.scopeResults?.[0]?.error?.includes("cursor: kept"),
+		"scope error must record that cursor was kept",
+	);
+});
+
 // =========================================================================
-// 4. Backend fields for still_read_by (No listAll guessing)
+// 4. Backend fields for still_read_by & dry-run preview (Findings 1, 2, 8)
 // =========================================================================
 
 test("deleteSkill returns unmanagedKept directly from backend still_read_by_unmanaged field", async () => {
@@ -354,10 +525,6 @@ test("deleteSkill returns unmanagedKept directly from backend still_read_by_unma
 	assert.deepEqual(result.stillReadByUnmanaged, ["cursor"]);
 });
 
-// =========================================================================
-// 5. Managed classification from backend holders (Counter-proof target)
-// =========================================================================
-
 test("splitDeleteTargets classifies managed based on backend fields, not frontend rule", () => {
 	const items = [
 		{ agent: "claude", source: "global" },
@@ -387,5 +554,130 @@ test("splitDeleteTargets classifies managed based on backend fields, not fronten
 	assert.deepEqual(
 		named.map((i) => i.agent),
 		["claude"],
+	);
+});
+
+test("getSkillHolders retrieves authoritative classification from backend dry-run preview and overrides isDisabled", async () => {
+	let deleteCalledWith: any = null;
+	const api = {
+		skills: {
+			delete: async (
+				agent: string,
+				skillName: string,
+				scope: string,
+				projectRoot: string | undefined,
+				allAgents: boolean,
+				agents: string[],
+				confirm: boolean,
+			) => {
+				deleteCalledWith = {
+					agent,
+					skillName,
+					scope,
+					projectRoot,
+					allAgents,
+					agents,
+					confirm,
+				};
+				return {
+					outcome: "kept",
+					still_read_by_managed: ["claude"],
+					still_read_by_unmanaged: ["cursor", "opencode"],
+				};
+			},
+		},
+	} as any;
+
+	const holders = await getSkillHolders({
+		api,
+		skillName: "my-skill",
+		agent: "claude",
+		scope: "global",
+	});
+
+	assert.equal(
+		deleteCalledWith.confirm,
+		false,
+		"dry-run preview must pass confirm: false",
+	);
+	assert.equal(deleteCalledWith.allAgents, true);
+	assert.deepEqual(holders.still_read_by_managed, ["claude"]);
+	assert.deepEqual(holders.still_read_by_unmanaged, ["cursor", "opencode"]);
+
+	const items = [
+		{ agent: "claude", source: "global" },
+		{ agent: "cursor", source: "global" },
+		{ agent: "opencode", source: "global" },
+	];
+	const { managed, unmanaged } = splitDeleteTargets(items, holders, false);
+	assert.deepEqual(
+		managed.map((i) => i.agent),
+		["claude"],
+	);
+	assert.deepEqual(
+		unmanaged.map((i) => i.agent),
+		["cursor", "opencode"],
+	);
+});
+
+test("deleteSkill by-path with project location passes scope='project' and project_root to api.skills.deleteByPath", async () => {
+	let deleteByPathPayload: any = null;
+	const api = {
+		skills: {
+			deleteByPath: async (payload: any) => {
+				deleteByPathPayload = payload;
+				return {
+					success: true,
+					dry_run: false,
+					executed: true,
+					needs_confirm: false,
+					paths: ["/my/project/.agents/skills/test-skill"],
+					skipped: [],
+					deleted_path: "/my/project/.agents/skills/test-skill",
+					outcome: "removed",
+					still_read_by: [],
+					still_read_by_managed: [],
+					still_read_by_unmanaged: [],
+				};
+			},
+		},
+	} as any;
+
+	const result = await deleteSkill({
+		api,
+		name: "test-skill",
+		intent: {
+			kind: "by-path",
+			sourcePath: "/my/project/.agents/skills/test-skill",
+			scope: "project",
+			projectRoot: "/my/project",
+			agents: ["claude"],
+		},
+		t,
+	});
+
+	assert.equal(result.success, true);
+	assert.equal(result.verdict, "removed");
+	assert.ok(deleteByPathPayload, "deleteByPath must be called");
+	assert.equal(
+		deleteByPathPayload.source_path,
+		"/my/project/.agents/skills/test-skill",
+	);
+	assert.equal(deleteByPathPayload.scope, "project");
+	assert.equal(deleteByPathPayload.project_root, "/my/project");
+	assert.deepEqual(deleteByPathPayload.agents, ["claude"]);
+	assert.equal(deleteByPathPayload.confirm, true);
+});
+
+test("deleteSkill by-name throws if agent is not provided", async () => {
+	const api = { skills: { delete: async () => {} } } as any;
+	await assert.rejects(
+		deleteSkill({
+			api,
+			name: "my-skill",
+			intent: { kind: "all-agents" },
+			t,
+		}),
+		/agent is required for by-name skill deletion/,
 	);
 });

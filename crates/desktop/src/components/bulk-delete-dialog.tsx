@@ -1,9 +1,8 @@
 import { ExclamationTriangleIcon } from "@heroicons/react/24/solid";
 import { Button, Checkbox, Modal, Spinner, toast } from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import { BulkOperationError, bulkFailureItemsLabel } from "../lib/bulk-errors";
@@ -11,11 +10,11 @@ import {
 	buildBulkDeleteRequests,
 	collectUnmanagedDeleteTargets,
 	deleteSkill,
+	getBulkSkillHolders,
 	type BackendHolders,
 	type BulkDeleteGroup,
 } from "../requests/delete-skill";
 import { invalidateMcpQueries } from "../requests/mcps";
-import { invalidateSkillQueries } from "../requests/skills";
 
 interface BulkDeleteDialogProps {
 	groups: BulkDeleteGroup[];
@@ -38,20 +37,16 @@ export function BulkDeleteDialog({
 	const api = useApi();
 	const agentName = useAgentName();
 	const queryClient = useQueryClient();
-	const { availableAgents } = useAgentAvailability();
 
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
-	const backendHolders: BackendHolders = useMemo(
-		() => ({
-			still_read_by_managed: availableAgents
-				.filter((agent) => !agent.isDisabled)
-				.map((agent) => agent.id),
-			still_read_by_unmanaged: availableAgents
-				.filter((agent) => agent.isDisabled)
-				.map((agent) => agent.id),
-		}),
-		[availableAgents],
-	);
+	const [backendHolders, setBackendHolders] = useState<BackendHolders>({});
+
+	useEffect(() => {
+		if (!isOpen) return;
+		getBulkSkillHolders(api, groups, resourceType, projectPath)
+			.then(setBackendHolders)
+			.catch(() => {});
+	}, [api, isOpen, groups, resourceType, projectPath]);
 
 	const unmanagedItems = useMemo(
 		() =>
@@ -118,6 +113,7 @@ export function BulkDeleteDialog({
 							scope: req.scope,
 							projectRoot: req.projectRoot,
 							agent: req.agent,
+							context: "bulk",
 							intent: {
 								kind: "from-agents",
 								agents: req.agents,
@@ -125,12 +121,7 @@ export function BulkDeleteDialog({
 						}).then((res) => {
 							if (!res.success) {
 								throw new Error(
-									res.verdict === "kept"
-										? t("bulkDeleteKept")
-										: res.verdict === "partial"
-											? t("bulkDeletePartial")
-											: res.message ||
-												t("failedToDeleteSkill"),
+									res.message || t("failedToDeleteSkill"),
 								);
 							}
 						}),
@@ -185,9 +176,6 @@ export function BulkDeleteDialog({
 		onSuccess: async () => {
 			if (resourceType === "mcp" || resourceType === "mixed") {
 				await invalidateMcpQueries(queryClient);
-			}
-			if (resourceType === "skill" || resourceType === "mixed") {
-				await invalidateSkillQueries(queryClient);
 			}
 			setIncludeUnmanaged(false);
 			onSuccess();

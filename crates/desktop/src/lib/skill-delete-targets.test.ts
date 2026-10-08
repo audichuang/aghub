@@ -4,7 +4,7 @@ import {
 	buildBulkDeleteRequests,
 	collectUnmanagedDeleteTargets,
 	splitDeleteTargets,
-} from "./skill-delete-targets.ts";
+} from "../requests/delete-skill.ts";
 
 const items = [
 	{ agent: "claude", source: "global" },
