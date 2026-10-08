@@ -32,9 +32,9 @@ use crate::{
 		GitSyncResponse, GlobalSkillLockResponse, InstallSkillRequest,
 		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
 		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
-		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
-		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
-		SkillUsageResponse, UpdateSkillRequest,
+		SkillContentQuery, SkillHoldersResponse, SkillLockEntryResponse,
+		SkillResponse, SkillTreeNodeKind, SkillTreeNodeResponse,
+		SkillTreeQuery, SkillUsageResponse, UpdateSkillRequest,
 	},
 	dto::transfer::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
@@ -777,6 +777,24 @@ pub fn list_withheld_skills(
 	)
 	.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
 	Ok(Json(masters.iter().map(SkillResponse::from).collect()))
+}
+
+/// Holders of a skill split into managed and unmanaged agents.
+#[get("/skills/<name>/holders?<scope..>")]
+pub fn get_skill_holders(
+	_origin: TrustedLocalOrigin,
+	name: &str,
+	scope: ScopeParams,
+) -> ApiResult<SkillHoldersResponse> {
+	let resolved = scope.resolve()?;
+	require_writable_scope(&resolved)?;
+	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
+	let view = aghub_core::skills::removal::batch::get_skill_holders(
+		name,
+		resource_scope,
+		project_root.as_deref(),
+	);
+	Ok(Json(SkillHoldersResponse::from(view)))
 }
 
 /// Usage counts for the installed global Claude skills, from Claude Code's
@@ -10045,6 +10063,79 @@ mod tests {
 					"preview must not modify the lock file"
 				);
 			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn get_skill_holders_returns_managed_unmanaged_split() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|data_dir| {
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						data_dir.to_path_buf(),
+					),
+				)
+				.expect("client");
+
+				let disabled: std::collections::BTreeSet<String> =
+					["opencode".to_string()].into_iter().collect();
+				aghub_core::agent_settings::write_disabled_agents_in(
+					data_dir, &disabled,
+				)
+				.unwrap();
+
+				let project = home.join("proj");
+				let master = project.join(".aghub/holders-skill");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: holders-skill\ndescription: test\n---\n",
+				)
+				.unwrap();
+
+				let opencode_slot =
+					project.join(".agents/skills/holders-skill");
+				std::fs::create_dir_all(opencode_slot.parent().unwrap())
+					.unwrap();
+				std::os::unix::fs::symlink(&master, &opencode_slot).unwrap();
+
+				let claude_slot = project.join(".claude/skills/holders-skill");
+				std::fs::create_dir_all(claude_slot.parent().unwrap()).unwrap();
+				std::os::unix::fs::symlink(&master, &claude_slot).unwrap();
+
+				let resp = client
+					.get(format!(
+						"/api/v1/skills/holders-skill/holders?scope=project&project_root={}",
+						project.display()
+					))
+					.dispatch();
+
+				assert_eq!(resp.status(), rocket::http::Status::Ok);
+				let body: serde_json::Value = serde_json::from_str(
+					&resp.into_string().expect("response body"),
+				)
+				.expect("json body");
+
+				let managed = body["managed"]
+					.as_array()
+					.expect("managed array")
+					.iter()
+					.map(|v| v.as_str().unwrap().to_string())
+					.collect::<Vec<_>>();
+				let unmanaged = body["unmanaged"]
+					.as_array()
+					.expect("unmanaged array")
+					.iter()
+					.map(|v| v.as_str().unwrap().to_string())
+					.collect::<Vec<_>>();
+
+				assert!(managed.contains(&"claude".to_string()));
+				assert!(!managed.contains(&"opencode".to_string()));
+				assert!(unmanaged.contains(&"opencode".to_string()));
+				assert!(!unmanaged.contains(&"claude".to_string()));
+			})
 		});
 	}
 }

@@ -5,7 +5,7 @@ import {
 	buildBulkDeleteRequests,
 	deleteSkill,
 	formatDeleteMessage,
-	getUnmanagedAgents,
+	getSkillHolders,
 	interpretRefusal,
 	interpretRemovalVerdict,
 	splitDeleteTargets,
@@ -42,6 +42,10 @@ function createMockHttpError(
 			reason: string;
 			kind?: string;
 			path?: string;
+			readers?: Array<{
+				agent: string;
+				managed: boolean;
+			}>;
 		}>;
 	},
 ): HTTPError {
@@ -161,6 +165,12 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 				agent: "opencode",
 				reason: "location shared: /some/path",
 				kind: "shared",
+				readers: [
+					{
+						agent: "cursor",
+						managed: false,
+					},
+				],
 			},
 		],
 	});
@@ -189,11 +199,23 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 				agent: "claude",
 				reason: "location shared: /path/shared",
 				kind: "shared",
+				readers: [
+					{
+						agent: "cursor",
+						managed: false,
+					},
+				],
 			},
 			{
 				agent: "codex",
 				reason: "location shared: /path/shared",
 				kind: "shared",
+				readers: [
+					{
+						agent: "cursor",
+						managed: false,
+					},
+				],
 			},
 		],
 	});
@@ -220,6 +242,12 @@ test("whole-batch refusal is identified by code and structured rejected_targets"
 				agent: "claude",
 				reason: "location shared: /path/shared",
 				kind: "shared",
+				readers: [
+					{
+						agent: "cursor",
+						managed: false,
+					},
+				],
 			},
 			{
 				agent: "zed",
@@ -380,7 +408,7 @@ test("bulk delete refusal with includeUnmanaged=true does not produce retry hint
 	assert.equal(result.message, "location shared: /path/shared");
 });
 
-test("shared UNSUPPORTED_OPERATION refusal with unrelated disabled agent does not produce retry hint", () => {
+test("shared UNSUPPORTED_OPERATION refusal caused by a managed reader does not produce retry hint", () => {
 	const sharedRefusal = createMockHttpError(422, {
 		code: "UNSUPPORTED_OPERATION",
 		error: "skill reconcile preflight failed; nothing was written",
@@ -389,19 +417,17 @@ test("shared UNSUPPORTED_OPERATION refusal with unrelated disabled agent does no
 				agent: "claude",
 				reason: "location shared: /path/shared",
 				kind: "shared",
+				readers: [{ agent: "opencode", managed: true }],
 			},
 		],
 	});
 
-	// Disabled agent (e.g. cursor) exists globally, but does not hold this skill group,
-	// so unmanagedAgents passed for this request is empty:
 	const refusal = interpretRefusal(sharedRefusal, {
 		intent: {
 			kind: "from-agents",
 			agents: ["claude"],
 			includeUnmanaged: false,
 		},
-		unmanagedAgents: [],
 		t,
 	});
 
@@ -410,6 +436,35 @@ test("shared UNSUPPORTED_OPERATION refusal with unrelated disabled agent does no
 	assert.equal(refusal.retryWithUnmanaged, false);
 	assert.notEqual(refusal.message, "deleteSkillRetryWithUnmanaged");
 	assert.equal(refusal.message, "location shared: /path/shared");
+});
+
+test("shared UNSUPPORTED_OPERATION refusal where all readers are unmanaged produces retry hint", () => {
+	const sharedRefusal = createMockHttpError(422, {
+		code: "UNSUPPORTED_OPERATION",
+		error: "skill reconcile preflight failed; nothing was written",
+		rejected_targets: [
+			{
+				agent: "claude",
+				reason: "location shared: /path/shared",
+				kind: "shared",
+				readers: [{ agent: "cursor", managed: false }],
+			},
+		],
+	});
+
+	const refusal = interpretRefusal(sharedRefusal, {
+		intent: {
+			kind: "from-agents",
+			agents: ["claude"],
+			includeUnmanaged: false,
+		},
+		t,
+	});
+
+	assert.equal(refusal.isRefusal, true);
+	assert.equal(refusal.code, "UNSUPPORTED_OPERATION");
+	assert.equal(refusal.retryWithUnmanaged, true);
+	assert.equal(refusal.message, "deleteSkillRetryWithUnmanaged");
 });
 
 test("unmanagedAgentsForGroup returns unmanaged agents only for the requested group", () => {
@@ -796,8 +851,10 @@ test("splitDeleteTargets classifies managed based on backend fields, not fronten
 		{ agent: "opencode", source: "global" },
 	];
 
-	// Backend classification identifies disabled agents via still_read_by_unmanaged:
+	// Backend classification identifies disabled agents via unmanaged:
 	const backend: BackendHolders = {
+		managed: ["claude"],
+		unmanaged: ["cursor", "opencode"],
 		still_read_by_unmanaged: ["cursor", "opencode"],
 	};
 
@@ -820,26 +877,25 @@ test("splitDeleteTargets classifies managed based on backend fields, not fronten
 	);
 });
 
-test("getUnmanagedAgents fetches disabled agents from backend without dry-run delete", async () => {
+test("getSkillHolders fetches holders and splits managed vs unmanaged from response", async () => {
 	const api = {
-		agents: {
-			disabled: async () => ({
-				configured: true,
-				agents: ["cursor", "opencode"],
-			}),
-		},
 		skills: {
-			delete: async () => {
-				throw new Error(
-					"skills.delete must not be called by getUnmanagedAgents",
-				);
+			holders: async (name: string, scope: string) => {
+				assert.equal(name, "my-skill");
+				assert.equal(scope, "global");
+				return {
+					managed: ["claude"],
+					unmanaged: ["cursor", "opencode"],
+					all: ["claude", "cursor", "opencode"],
+				};
 			},
 		},
 	} as any;
 
-	const holders = await getUnmanagedAgents(api);
+	const holders = await getSkillHolders(api, "my-skill", "global");
 
-	assert.deepEqual(holders.still_read_by_unmanaged, ["cursor", "opencode"]);
+	assert.deepEqual(holders.managed, ["claude"]);
+	assert.deepEqual(holders.unmanaged, ["cursor", "opencode"]);
 
 	const items = [
 		{ agent: "claude", source: "global" },
@@ -859,6 +915,8 @@ test("getUnmanagedAgents fetches disabled agents from backend without dry-run de
 
 test("first item's agent is disabled => not in named/request until includeUnmanaged is ticked", () => {
 	const backendHolders: BackendHolders = {
+		managed: ["claude"],
+		unmanaged: ["cursor"],
 		still_read_by_unmanaged: ["cursor"],
 	};
 
@@ -912,6 +970,8 @@ test("first item's agent is disabled => not in named/request until includeUnmana
 
 test("mixed-scope group: disabled agent is not named in either scope's request", () => {
 	const backendHolders: BackendHolders = {
+		managed: ["claude"],
+		unmanaged: ["cursor"],
 		still_read_by_unmanaged: ["cursor"],
 	};
 

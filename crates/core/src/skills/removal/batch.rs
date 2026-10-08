@@ -3,6 +3,7 @@
 //! Handles shared-first ordering, whole-batch dry-run preflight, prior-row credit,
 //! sibling credit, lock-free preview vs locked commit, Master GC, and lock pruning.
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -176,7 +177,7 @@ pub type HolderKeys = (
 );
 
 /// Holders of a skill that survive a removal, partitioned into managed and unmanaged.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillHoldersView {
 	pub all: Vec<String>,
 	pub managed: Vec<String>,
@@ -614,6 +615,87 @@ pub fn find_skill_holders_crediting(
 	(holders, unreadable)
 }
 
+/// Query holders of a skill in the given scope, partitioned into managed and unmanaged.
+pub fn get_skill_holders(
+	name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> SkillHoldersView {
+	let (holders, _) = find_skill_holders(name, scope, project_root);
+	let all: Vec<String> = holders
+		.into_iter()
+		.map(|a| a.as_str().to_string())
+		.collect();
+	let (managed, unmanaged): (Vec<String>, Vec<String>) = all
+		.iter()
+		.cloned()
+		.partition(|a| crate::agent_settings::is_managed(a));
+	SkillHoldersView {
+		all,
+		managed,
+		unmanaged,
+	}
+}
+
+/// Find in-scope agents still reading the kept path `path`, partitioned by managed status.
+pub fn find_readers_of_kept_path(
+	name: &str,
+	path: &Path,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	excluding: &[AgentType],
+) -> Vec<crate::errors::RejectedTargetReader> {
+	let target = crate::skills::linker::classify::canonicalize_lenient(path);
+	let mut readers = Vec::new();
+	for agent in crate::models::AgentType::ALL {
+		if excluding.contains(agent) {
+			continue;
+		}
+		let dirs =
+			crate::create_adapter(*agent).get_skills_paths(project_root, scope);
+		let reads_structurally = dirs.iter().any(|dir| {
+			target.starts_with(
+				crate::skills::linker::classify::canonicalize_lenient(dir),
+			)
+		});
+		let reads_discovered = if reads_structurally {
+			true
+		} else {
+			crate::skills::discovery::load_skills_from_dirs(&dirs)
+				.map(|skills| {
+					skills.iter().any(|skill| {
+						if skill.name != name {
+							return false;
+						}
+						if let Some(entry) =
+							crate::skills::removal::discovered_entry_dir(skill)
+						{
+							let entry_canon =
+								crate::skills::linker::classify::canonicalize_lenient(
+									&entry,
+								);
+							entry_canon == target
+								|| entry_canon.starts_with(&target)
+								|| target.starts_with(&entry_canon)
+						} else {
+							false
+						}
+					})
+				})
+				.unwrap_or(false)
+		};
+
+		if reads_discovered {
+			let managed = crate::agent_settings::is_managed(agent.as_str());
+			readers.push(crate::errors::RejectedTargetReader {
+				agent: agent.as_str().to_string(),
+				managed,
+			});
+		}
+	}
+	readers
+}
+
 /// Shared slots must go first: a private Referrer cannot be revoked while
 /// the same agent still reads the shared slot this batch is removing. Reader
 /// count comes from `slot_reader_count` (full roster); never re-derive slot
@@ -955,6 +1037,19 @@ fn remove_skill_by_path(
 				ref path,
 			} = verdict
 			{
+				let readers = if kind == "shared" {
+					path.as_ref().map(|p| {
+						find_readers_of_kept_path(
+							&skill_name,
+							p,
+							request.scope,
+							request.project_root.as_deref(),
+							&target_agents,
+						)
+					})
+				} else {
+					None
+				};
 				let rejected_targets = target_agents
 					.iter()
 					.map(|agent| crate::errors::RejectedTarget {
@@ -962,6 +1057,7 @@ fn remove_skill_by_path(
 						reason: reason.clone(),
 						kind: Some(kind.clone()),
 						path: path.as_ref().map(|p| p.display().to_string()),
+						readers: readers.clone(),
 					})
 					.collect();
 				return Err(ConfigError::unsupported_operation_with_targets(
@@ -1171,11 +1267,25 @@ fn remove_skill_by_name(
 					} else {
 						"remove for this agent alone"
 					};
+					let readers = if kind == "shared" {
+						path.as_ref().map(|p| {
+							find_readers_of_kept_path(
+								name,
+								p,
+								request.scope,
+								request.project_root.as_deref(),
+								&[agent],
+							)
+						})
+					} else {
+						None
+					};
 					let rejected_target = crate::errors::RejectedTarget {
 						agent: agent.as_str().to_string(),
 						reason: reason.clone(),
 						kind: Some(kind.clone()),
 						path: path.as_ref().map(|p| p.display().to_string()),
+						readers,
 					};
 					preflight_failures.push((
 						agent,
@@ -1305,6 +1415,7 @@ fn remove_skill_by_name(
 								reason: err.to_string(),
 								kind: target.kind.clone(),
 								path: target.path.clone(),
+								readers: target.readers.clone(),
 							};
 						}
 					}
@@ -1313,6 +1424,7 @@ fn remove_skill_by_name(
 						reason: err.to_string(),
 						kind: None,
 						path: None,
+						readers: None,
 					}
 				})
 				.collect();

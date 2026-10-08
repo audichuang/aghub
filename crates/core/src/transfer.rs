@@ -1275,6 +1275,7 @@ fn batch_preflight_error(
 			reason: failure.reason.to_string(),
 			kind: None,
 			path: None,
+			readers: None,
 		})
 		.collect();
 	let failures = error

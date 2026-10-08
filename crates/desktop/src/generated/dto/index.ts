@@ -109,6 +109,7 @@ export type { ScopeSupportDto } from "./ScopeSupportDto";
 export type { SetDisabledAgentsRequest } from "./SetDisabledAgentsRequest";
 export type { SkillCapabilitiesDto } from "./SkillCapabilitiesDto";
 export type { SkillContentQuery } from "./SkillContentQuery";
+export type { SkillHoldersResponse } from "./SkillHoldersResponse";
 export type { SkillLockEntryResponse } from "./SkillLockEntryResponse";
 export type { SkillResponse } from "./SkillResponse";
 export type { SkillTreeNodeKind } from "./SkillTreeNodeKind";

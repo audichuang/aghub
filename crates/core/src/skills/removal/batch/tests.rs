@@ -1547,6 +1547,12 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 		.rejected_targets()
 		.expect("rejected_targets on by-name");
 	assert_eq!(name_targets[0].kind.as_deref(), Some("shared"));
+	let readers = name_targets[0]
+		.readers
+		.as_ref()
+		.expect("readers must be present on shared refusal");
+	assert!(readers.iter().any(|r| r.agent == "opencode" && r.managed));
+	assert!(!readers.iter().any(|r| r.agent == "cursor"));
 	let path_targets = err_path
 		.rejected_targets()
 		.expect("rejected_targets on by-path");
@@ -1871,4 +1877,27 @@ fn test_by_path_refuses_plugin_owned_skill_leaving_disk_unchanged() {
 		plugin_skill.join("SKILL.md").exists(),
 		"disk must remain unchanged"
 	);
+}
+
+#[test]
+fn test_get_skill_holders_managed_unmanaged_split() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+
+	setup_master_and_referrers(&root, "holders-skill", &["claude", "opencode"]);
+
+	let _off = crate::agent_settings::test_override::disable(&["opencode"]);
+
+	let holders = get_skill_holders(
+		"holders-skill",
+		ResourceScope::ProjectOnly,
+		Some(&root),
+	);
+	assert!(holders.managed.contains(&"claude".to_string()));
+	assert!(!holders.managed.contains(&"opencode".to_string()));
+	assert!(holders.unmanaged.contains(&"opencode".to_string()));
+	assert!(!holders.unmanaged.contains(&"claude".to_string()));
 }

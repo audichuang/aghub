@@ -776,6 +776,19 @@ impl ConfigManager {
 				} else {
 					"remove for this agent alone"
 				};
+				let readers = if kind == "shared" {
+					path.as_ref().map(|p| {
+						removal::batch::find_readers_of_kept_path(
+							name,
+							p,
+							scope,
+							project_root.as_deref(),
+							requested_agents,
+						)
+					})
+				} else {
+					None
+				};
 				let rejected_targets = requested_agents
 					.iter()
 					.map(|agent| crate::errors::RejectedTarget {
@@ -783,6 +796,7 @@ impl ConfigManager {
 						reason: reason.clone(),
 						kind: Some(kind.clone()),
 						path: path.as_ref().map(|p| p.display().to_string()),
+						readers: readers.clone(),
 					})
 					.collect();
 				return Err(ConfigError::unsupported_operation_with_targets(

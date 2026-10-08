@@ -45,7 +45,10 @@ export interface ScopeTarget {
 }
 
 export interface BackendHolders {
+	managed?: readonly string[];
+	unmanaged?: readonly string[];
 	still_read_by_unmanaged?: readonly string[];
+	byGroup?: Record<string, { managed?: string[]; unmanaged?: string[] }>;
 }
 
 export interface DeleteTargetItem {
@@ -62,9 +65,7 @@ export interface DeleteTargets<T extends DeleteTargetItem> {
 
 /**
  * Splits target items into managed and unmanaged groups using the backend's
- * classification (`still_read_by_unmanaged`), avoiding frontend heuristics.
- * An agent is unmanaged if it appears in `still_read_by_unmanaged`; otherwise
- * it is considered managed.
+ * classification, avoiding frontend heuristics.
  */
 export function splitDeleteTargets<T extends DeleteTargetItem>(
 	items: readonly T[],
@@ -72,13 +73,25 @@ export function splitDeleteTargets<T extends DeleteTargetItem>(
 	includeUnmanaged: boolean,
 ): DeleteTargets<T> {
 	const withAgent = items.filter((item) => !!item.agent);
-	const unmanagedSet = new Set(backendHolders.still_read_by_unmanaged ?? []);
-	const unmanaged = withAgent.filter((item) =>
-		unmanagedSet.has(item.agent as string),
-	);
-	const managed = withAgent.filter(
-		(item) => !unmanagedSet.has(item.agent as string),
-	);
+	const unmanagedList =
+		backendHolders.unmanaged ?? backendHolders.still_read_by_unmanaged;
+	const unmanagedSet = unmanagedList ? new Set(unmanagedList) : null;
+	const managedSet = backendHolders.managed
+		? new Set(backendHolders.managed)
+		: null;
+
+	const unmanaged = withAgent.filter((item) => {
+		const agent = item.agent as string;
+		if (unmanagedSet) return unmanagedSet.has(agent);
+		if (managedSet) return !managedSet.has(agent);
+		return false;
+	});
+	const managed = withAgent.filter((item) => {
+		const agent = item.agent as string;
+		if (unmanagedSet) return !unmanagedSet.has(agent);
+		if (managedSet) return managedSet.has(agent);
+		return true;
+	});
 	return {
 		managed,
 		unmanaged,
@@ -138,8 +151,17 @@ export function buildBulkDeleteRequests({
 	for (const group of groups) {
 		const groupResourceType = group.resourceType ?? resourceType;
 		const isSkill = groupResourceType === "skill";
+		const groupHolders: BackendHolders =
+			backendHolders.byGroup && backendHolders.byGroup[group.key]
+				? {
+						managed: backendHolders.byGroup[group.key].managed,
+						unmanaged: backendHolders.byGroup[group.key].unmanaged,
+						still_read_by_unmanaged:
+							backendHolders.byGroup[group.key].unmanaged,
+					}
+				: backendHolders;
 		const targets = isSkill
-			? splitDeleteTargets(group.items, backendHolders, includeUnmanaged)
+			? splitDeleteTargets(group.items, groupHolders, includeUnmanaged)
 			: null;
 		const candidateItems = targets ? targets.named : group.items;
 
@@ -195,9 +217,19 @@ export function collectUnmanagedDeleteTargets(
 	for (const group of groups) {
 		const groupResourceType = group.resourceType ?? resourceType;
 		if (groupResourceType === "skill") {
+			const groupHolders: BackendHolders =
+				backendHolders.byGroup && backendHolders.byGroup[group.key]
+					? {
+							managed: backendHolders.byGroup[group.key].managed,
+							unmanaged:
+								backendHolders.byGroup[group.key].unmanaged,
+							still_read_by_unmanaged:
+								backendHolders.byGroup[group.key].unmanaged,
+						}
+					: backendHolders;
 			const targets = splitDeleteTargets(
 				group.items,
-				backendHolders,
+				groupHolders,
 				false,
 			);
 			unmanaged.push(...targets.unmanaged);
@@ -214,10 +246,16 @@ export function unmanagedAgentsForGroup(
 	group: BulkDeleteGroup | undefined,
 	backendHolders: BackendHolders | null | undefined,
 ): string[] {
-	if (!group || !backendHolders?.still_read_by_unmanaged) {
+	if (!group || !backendHolders) {
 		return [];
 	}
-	const disabled = new Set(backendHolders.still_read_by_unmanaged);
+	const disabledList =
+		backendHolders.byGroup && backendHolders.byGroup[group.key]
+			? (backendHolders.byGroup[group.key].unmanaged ?? [])
+			: (backendHolders.unmanaged ??
+				backendHolders.still_read_by_unmanaged ??
+				[]);
+	const disabled = new Set(disabledList);
 	const agents = group.items
 		.map((item) => item.agent)
 		.filter((agent): agent is string =>
@@ -231,15 +269,19 @@ export function isGoneSkillPath(error: unknown): boolean {
 }
 
 /**
- * Retrieves the disabled-agent list from the backend to identify unmanaged agents,
- * avoiding frontend heuristics and crediting dry-run preview calls.
+ * Retrieves skill holders partitioned into managed and unmanaged from the backend.
  */
-export async function getUnmanagedAgents(
+export async function getSkillHolders(
 	api: ApiClient,
+	name: string,
+	scope: "global" | "project",
+	projectRoot?: string | null,
 ): Promise<BackendHolders> {
-	const dto = await api.agents.disabled();
+	const res = await api.skills.holders(name, scope, projectRoot);
 	return {
-		still_read_by_unmanaged: dto.agents ?? [],
+		managed: res.managed,
+		unmanaged: res.unmanaged,
+		still_read_by_unmanaged: res.unmanaged,
 	};
 }
 
@@ -335,21 +377,24 @@ export function interpretRefusal(
 	}
 
 	// 2. Check if refusal was caused by unticked unmanaged (disabled) agents
-	const unmanagedList = options?.unmanagedAgents ?? [];
 	const allShared =
 		rejectedTargets.length > 0 &&
 		rejectedTargets.every((tgt) => tgt.kind === "shared");
 
-	// ponytail: The API wire format reports rejected_targets with structured kind ("shared", "git", etc.)
-	// but does not carry a path->holder mapping. Without knowing which agents hold each shared path,
-	// checking that all rejected targets are "shared" and that unticked unmanaged agents exist is the
-	// tightest structured condition possible without string-matching on error reasons or paths.
+	const everyReaderUnmanaged =
+		allShared &&
+		rejectedTargets.every(
+			(tgt) =>
+				tgt.readers &&
+				tgt.readers.length > 0 &&
+				tgt.readers.every((r) => r.managed === false),
+		);
+
 	const retryWithUnmanaged =
 		code === "UNSUPPORTED_OPERATION" &&
 		!includeUnmanaged &&
 		!gitTarget &&
-		allShared &&
-		unmanagedList.length > 0;
+		everyReaderUnmanaged;
 
 	let message: string | undefined;
 	if (retryWithUnmanaged) {
@@ -763,16 +808,6 @@ export async function deleteSkill(
 		intent.kind === "all-agents" || intent.kind === "clean-lock";
 	const agents = intent.kind === "from-agents" ? [...intent.agents] : [];
 
-	let unmanagedAgents = options.unmanagedAgents;
-	if (intent.kind === "all-agents" && !unmanagedAgents) {
-		try {
-			const holders = await getUnmanagedAgents(api);
-			unmanagedAgents = holders.still_read_by_unmanaged;
-		} catch {
-			// Ignore error
-		}
-	}
-
 	try {
 		const res: DeleteSkillByPathResponse = await api.skills.delete(
 			agent,
@@ -847,7 +882,7 @@ export async function deleteSkill(
 
 		const refusal = interpretRefusal(error, {
 			intent,
-			unmanagedAgents,
+			unmanagedAgents: options.unmanagedAgents,
 			skillName: name,
 			t,
 		});

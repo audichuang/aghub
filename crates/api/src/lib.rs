@@ -253,6 +253,7 @@ fn build_rocket_with_state_factories(
 				routes::skills::create_skill,
 				routes::skills::import_skill,
 				routes::skills::get_skill,
+				routes::skills::get_skill_holders,
 				routes::skills::update_skill,
 				routes::skills::delete_skill,
 				routes::skills::enable_skill,

@@ -760,6 +760,27 @@ pub struct AcceptRenameResponse {
 	pub code: Option<String>,
 }
 
+/// Holders of a skill split into managed and unmanaged agents.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct SkillHoldersResponse {
+	pub managed: Vec<String>,
+	pub unmanaged: Vec<String>,
+	pub all: Vec<String>,
+}
+
+impl From<aghub_core::skills::removal::SkillHoldersView>
+	for SkillHoldersResponse
+{
+	fn from(view: aghub_core::skills::removal::SkillHoldersView) -> Self {
+		Self {
+			managed: view.managed,
+			unmanaged: view.unmanaged,
+			all: view.all,
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1156,5 +1177,15 @@ mod tests {
 		assert_eq!(val["oldName"], "a");
 		assert_eq!(val["newName"], "b");
 		assert!(val.get("error").is_none() || val["error"].is_null());
+	}
+
+	#[test]
+	fn skill_holders_response_serde_optionality_matches_ts() {
+		let resp = SkillHoldersResponse {
+			managed: vec!["claude".to_string()],
+			unmanaged: vec!["cursor".to_string()],
+			all: vec!["claude".to_string(), "cursor".to_string()],
+		};
+		assert_serde_matches_ts(&resp);
 	}
 }

@@ -10,7 +10,7 @@ import {
 	buildBulkDeleteRequests,
 	collectUnmanagedDeleteTargets,
 	deleteSkill,
-	getUnmanagedAgents,
+	getSkillHolders,
 	unmanagedAgentsForGroup,
 	type BackendHolders,
 	type BulkDeleteGroup,
@@ -55,9 +55,68 @@ export function BulkDeleteDialog({
 		}
 		setLoadingHolders(true);
 		setHoldersError(null);
-		getUnmanagedAgents(api)
-			.then((holders) => {
-				setBackendHolders(holders);
+
+		const skillGroups = groups.filter(
+			(g) => (g.resourceType ?? resourceType) === "skill",
+		);
+
+		if (skillGroups.length === 0) {
+			setBackendHolders({});
+			setLoadingHolders(false);
+			return;
+		}
+
+		// Query holders per group (skill name + scope)
+		const queries = skillGroups.flatMap((group) => {
+			const scopes = new Set<"global" | "project">();
+			for (const item of group.items) {
+				scopes.add(item.source === "project" ? "project" : "global");
+			}
+			if (scopes.size === 0) scopes.add("global");
+			return Array.from(scopes).map(async (scope) => {
+				const res = await getSkillHolders(
+					api,
+					group.items[0]?.name ?? group.key,
+					scope,
+					scope === "project" ? projectPath : undefined,
+				);
+				return { groupKey: group.key, scope, res };
+			});
+		});
+
+		Promise.all(queries)
+			.then((results) => {
+				const byGroup: Record<
+					string,
+					{ managed: string[]; unmanaged: string[] }
+				> = {};
+				const allUnmanaged = new Set<string>();
+				const allManaged = new Set<string>();
+
+				for (const { groupKey, res } of results) {
+					if (!byGroup[groupKey]) {
+						byGroup[groupKey] = { managed: [], unmanaged: [] };
+					}
+					for (const m of res.managed ?? []) {
+						if (!byGroup[groupKey].managed.includes(m)) {
+							byGroup[groupKey].managed.push(m);
+						}
+						allManaged.add(m);
+					}
+					for (const u of res.unmanaged ?? []) {
+						if (!byGroup[groupKey].unmanaged.includes(u)) {
+							byGroup[groupKey].unmanaged.push(u);
+						}
+						allUnmanaged.add(u);
+					}
+				}
+
+				setBackendHolders({
+					managed: Array.from(allManaged),
+					unmanaged: Array.from(allUnmanaged),
+					still_read_by_unmanaged: Array.from(allUnmanaged),
+					byGroup,
+				});
 				setLoadingHolders(false);
 			})
 			.catch((err) => {
@@ -66,7 +125,7 @@ export function BulkDeleteDialog({
 				);
 				setLoadingHolders(false);
 			});
-	}, [api, isOpen]);
+	}, [api, isOpen, groups, resourceType, projectPath]);
 
 	const unmanagedItems = useMemo(
 		() =>

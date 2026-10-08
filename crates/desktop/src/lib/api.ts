@@ -61,6 +61,7 @@ import type {
 	PruneLockRequest,
 	PruneLockResponse,
 	ReconcileRequest,
+	SkillHoldersResponse,
 	SkillResponse,
 	SkillTreeNodeResponse,
 	SkillUpdateResponse,
@@ -98,11 +99,17 @@ export function bulkApplyTimeoutMs(count: number): number {
 	return Math.min(120_000 + count * 30_000, 900_000);
 }
 
+export interface RejectedTargetReader {
+	agent: string;
+	managed: boolean;
+}
+
 export interface RejectedTarget {
 	agent: string;
 	reason: string;
 	kind?: string;
 	path?: string;
+	readers?: RejectedTargetReader[];
 }
 
 export interface ApiErrorBody {
@@ -239,6 +246,22 @@ export function createApi(baseUrl: string) {
 			},
 		},
 		skills: {
+			holders(
+				name: string,
+				scope: "global" | "project" = "global",
+				projectRoot?: string | null,
+			): Promise<SkillHoldersResponse> {
+				return client
+					.get(`skills/${encodeURIComponent(name)}/holders`, {
+						searchParams: {
+							scope,
+							...(projectRoot
+								? { project_root: projectRoot }
+								: {}),
+						},
+					})
+					.json();
+			},
 			listAll(
 				scope: "global" | "project" | "all" = "global",
 				projectRoot?: string,

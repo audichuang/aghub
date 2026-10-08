@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// A reader of a kept path
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectedTargetReader {
+	pub agent: String,
+	pub managed: bool,
+}
+
 /// A target rejected during preflight validation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RejectedTarget {
@@ -11,6 +18,8 @@ pub struct RejectedTarget {
 	pub kind: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub path: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub readers: Option<Vec<RejectedTargetReader>>,
 }
 
 /// Errors that can occur in the core library

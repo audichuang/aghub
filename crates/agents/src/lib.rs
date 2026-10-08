@@ -14,7 +14,7 @@ pub use descriptor::{
 	SkillCapabilities, SubAgentCapabilities,
 };
 pub use env_overrides::PATH_OVERRIDE_VARS;
-pub use errors::{ConfigError, Result};
+pub use errors::{ConfigError, RejectedTarget, RejectedTargetReader, Result};
 pub use models::{
 	AgentConfig, AgentType, ConfigSource, McpServer, McpTransport,
 	ResourceScope, Skill, SubAgent,
