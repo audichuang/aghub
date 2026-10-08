@@ -1,3 +1,4 @@
+use aghub_core::scope::WriteScope;
 use aghub_core::transfer::{
 	InstallScope, InstallTarget, OperationAction, OperationBatchResult,
 	OperationResult, ResourceLocator,
@@ -13,6 +14,19 @@ use crate::error::ApiError;
 pub enum InstallScopeDto {
 	Global,
 	Project,
+}
+
+impl InstallScopeDto {
+	pub fn to_write_scope(
+		self,
+		project_root: Option<&str>,
+	) -> Result<WriteScope, ApiError> {
+		let scope_str = match self {
+			Self::Global => "global",
+			Self::Project => "project",
+		};
+		crate::extractors::resolve_write_scope(scope_str, project_root)
+	}
 }
 
 impl From<InstallScopeDto> for InstallScope {
@@ -43,23 +57,10 @@ pub struct TargetDto {
 
 impl TargetDto {
 	pub fn to_core(&self) -> Result<InstallTarget, ApiError> {
-		let agents = crate::extractors::resolve_agent_strings(&[&self.agent])?;
-		let agent = agents.into_iter().next().ok_or_else(|| {
-			ApiError::new(
-				rocket::http::Status::BadRequest,
-				"agent must not be empty",
-				"INVALID_PARAM",
-			)
-		})?;
-
-		let scope_str = match self.scope {
-			InstallScopeDto::Global => "global",
-			InstallScopeDto::Project => "project",
-		};
-		let write_scope = crate::extractors::resolve_write_scope(
-			scope_str,
-			self.project_root.as_deref(),
-		)?;
+		let agent =
+			crate::extractors::resolve_agent_strings(&[&self.agent])?.remove(0);
+		let write_scope =
+			self.scope.to_write_scope(self.project_root.as_deref())?;
 		let project_root =
 			write_scope.project_root().map(std::path::Path::to_path_buf);
 
@@ -82,23 +83,10 @@ pub struct ResourceLocatorDto {
 
 impl ResourceLocatorDto {
 	pub fn to_core(&self) -> Result<ResourceLocator, ApiError> {
-		let agents = crate::extractors::resolve_agent_strings(&[&self.agent])?;
-		let agent = agents.into_iter().next().ok_or_else(|| {
-			ApiError::new(
-				rocket::http::Status::BadRequest,
-				"agent must not be empty",
-				"INVALID_PARAM",
-			)
-		})?;
-
-		let scope_str = match self.scope {
-			InstallScopeDto::Global => "global",
-			InstallScopeDto::Project => "project",
-		};
-		let write_scope = crate::extractors::resolve_write_scope(
-			scope_str,
-			self.project_root.as_deref(),
-		)?;
+		let agent =
+			crate::extractors::resolve_agent_strings(&[&self.agent])?.remove(0);
+		let write_scope =
+			self.scope.to_write_scope(self.project_root.as_deref())?;
 		let project_root =
 			write_scope.project_root().map(std::path::Path::to_path_buf);
 

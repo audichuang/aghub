@@ -2178,8 +2178,9 @@ pub async fn git_sync_skill(
 
 	// Snapshot the entry's identity BEFORE the fetch, so the resync can prove
 	// under the mutation lock that it is still writing to the coordinates this
-	// request started from. Absent = there was no such entry AT THAT POINT; the
-	// scope/lock validation below reports the still-absent case with the route's
+	// request started from. Scope is validated before this capture; only lock
+	// validation follows. Absent = there was no such entry AT THAT POINT; the
+	// lock validation below reports the still-absent case with the route's
 	// historical precedence, and the appeared-during-the-fetch case is answered
 	// after it.
 	let write_scope = crate::extractors::resolve_write_scope(
@@ -5846,95 +5847,6 @@ mod tests {
 			assert!(std::fs::read_to_string(target.join("SKILL.md"))
 				.unwrap()
 				.contains("old"));
-		});
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn git_sync_relative_project_root_is_absolutized() {
-		with_isolated_env(|_, _| {
-			with_pinned_data_dir(|_| {
-				let temp = tempdir().unwrap();
-				let temp_path = temp.path().canonicalize().unwrap();
-				let project = temp_path.join("project");
-				let skills_root = project.join(".claude/skills");
-				let target = skills_root.join("sync-me");
-				std::fs::create_dir_all(&target).unwrap();
-				std::fs::write(
-					target.join("SKILL.md"),
-					"---\nname: sync-me\ndescription: old\n---\n\nold\n",
-				)
-				.unwrap();
-				skill::add_skill_to_local_lock(
-					"sync-me",
-					skill::LocalSkillLockEntry {
-						source_url: None,
-						ref_commit: None,
-						source: "owner/repo".to_string(),
-						ref_name: Some("main".to_string()),
-						source_type: "github".to_string(),
-						computed_hash: "old".to_string(),
-						skill_path: Some("sync-me/SKILL.md".to_string()),
-					},
-					Some(&project),
-				)
-				.unwrap();
-
-				let fixture = tempdir().unwrap();
-				let cloned_skill = fixture.path().join("sync-me");
-				std::fs::create_dir_all(&cloned_skill).unwrap();
-				std::fs::write(
-					cloned_skill.join("SKILL.md"),
-					"---\nname: sync-me\ndescription: new\n---\n\nnew\n",
-				)
-				.unwrap();
-
-				let app_data = tempdir().unwrap();
-				let client = rocket::local::blocking::Client::tracked(
-					crate::build_rocket(
-						rocket::Config::default(),
-						app_data.path().to_path_buf(),
-					),
-				)
-				.expect("client");
-				let sessions = client
-					.rocket()
-					.state::<PinnedSourceSessions>()
-					.expect("git clone sessions");
-				sessions.insert(
-					"sync-session".to_string(),
-					session_from_fixture(
-						fixture.path(),
-						"https://github.com/owner/repo.git",
-						"main",
-					),
-				);
-
-				let response = {
-					let _cwd = crate::routes::CwdGuard::change_to(&temp_path);
-					client
-						.post("/api/v1/skills/git/sync")
-						.json(&serde_json::json!({
-							"session_id": "sync-session",
-							"name": "sync-me",
-							"scope": "project",
-							"project_root": "project",
-							"skill_path": "sync-me/SKILL.md",
-							"source_paths": [skills_root.display().to_string()],
-						}))
-						.dispatch()
-				};
-
-				assert_eq!(response.status(), rocket::http::Status::Ok);
-				assert!(std::fs::read_to_string(target.join("SKILL.md"))
-					.unwrap()
-					.contains("new"));
-				let lock = skill::lock::local::read_local_lock(Some(&project));
-				assert_ne!(
-					lock.skills["sync-me"].computed_hash, "old",
-					"project lock hash must advance after sync with relative project_root"
-				);
-			});
 		});
 	}
 

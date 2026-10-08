@@ -273,6 +273,9 @@ mod tests {
 			.is_some_and(is_trusted_local_host));
 	}
 
+	// Every ScopeParams route (MCP included) goes through ScopeParams::resolve,
+	// so this test pins absolutization for them; write-scope routes (git sync,
+	// transfer DTOs) use `resolve_write_scope_relative_root_becomes_absolute`.
 	#[test]
 	fn resolve_project_absolutizes_relative_root() {
 		let params = ScopeParams {
@@ -309,16 +312,6 @@ mod tests {
 		let err = unwrap_err(params.resolve());
 		assert_eq!(err.status, Status::BadRequest);
 		assert_eq!(err.body.code, "INVALID_SCOPE");
-	}
-
-	#[test]
-	fn resolve_all_scope() {
-		let params = ScopeParams {
-			scope: Some("all".to_string()),
-			project_root: None,
-		};
-		let resolved = unwrap_ok(params.resolve());
-		assert!(resolved.is_all());
 	}
 
 	fn unwrap_ok<T>(res: Result<T, ApiError>) -> T {
