@@ -755,14 +755,7 @@ pub fn remove_skill_batch(
 		SkillRemovalTarget::ByPath(raw_path) => {
 			remove_skill_by_path(request, raw_path)
 		}
-		SkillRemovalTarget::ByName(name) => {
-			if let Some(ref plugin_name) = request.plugin_owner {
-				return Err(ConfigError::InvalidConfig(format!(
-					"Cannot delete plugin-managed skill from plugin '{plugin_name}'"
-				)));
-			}
-			remove_skill_by_name(request, name)
-		}
+		SkillRemovalTarget::ByName(name) => remove_skill_by_name(request, name),
 	}
 }
 
@@ -949,7 +942,7 @@ fn remove_skill_by_path(
 				return Err(ConfigError::unsupported_operation(
 					"remove for this agent alone",
 					reason,
-					first_agent.as_str(),
+					crate::create_adapter(first_agent).name(),
 				));
 			}
 		}
@@ -993,16 +986,6 @@ fn remove_skill_by_path(
 			!request.dry_run,
 			&target_agents,
 		)?;
-
-		if !request.dry_run {
-			if let Verdict::Refused { ref reason } = outcome.verdict {
-				return Err(ConfigError::unsupported_operation(
-					"remove for this agent alone",
-					reason,
-					first_agent.as_str(),
-				));
-			}
-		}
 
 		let all_in_scope = agent_skill_dirs_in_scope(
 			request.scope,

@@ -52,7 +52,7 @@ test("isSharedMasterRefusal matches 422 UNSUPPORTED_OPERATION HTTP error", () =>
 	assert.equal(isSharedMasterRefusal(new Error("generic")), false);
 });
 
-test("keptDeleteMessageFromError formats localized shared master or git message from error", () => {
+test("keptDeleteMessageFromError formats localized shared master message from 422 error", () => {
 	const errShared = new HTTPError(
 		new Response(null, { status: 422 }),
 		new Request("http://x"),
@@ -60,32 +60,14 @@ test("keptDeleteMessageFromError formats localized shared master or git message 
 	);
 	errShared.data = {
 		code: "UNSUPPORTED_OPERATION",
+		error: "Cannot remove for this agent alone shared slot .agents/skills/foo is also read by other agents for Cursor agent",
 	};
 
 	assert.equal(
-		keptDeleteMessageFromError(errShared, "foo", "/p/foo", t),
+		keptDeleteMessageFromError(errShared, "foo", t),
 		"deleteSkillKeptSharedMaster|foo|",
 	);
 
-	const errGit = new HTTPError(
-		new Response(null, { status: 422 }),
-		new Request("http://x"),
-		{} as any,
-	);
-	errGit.data = {
-		code: "UNSUPPORTED_OPERATION",
-		error: "path is tracked by git",
-	};
-	errGit.message = "path is tracked by git";
-
-	assert.equal(
-		keptDeleteMessageFromError(errGit, "foo", "/p/foo", t),
-		"deleteSkillKeptGit|foo|/p/foo",
-	);
-
 	const errOther = new Error("other");
-	assert.equal(
-		keptDeleteMessageFromError(errOther, "foo", "/p/foo", t),
-		null,
-	);
+	assert.equal(keptDeleteMessageFromError(errOther, "foo", t), null);
 });

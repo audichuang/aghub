@@ -43,15 +43,10 @@ export function isSharedMasterRefusal(error: unknown): boolean {
 export function keptDeleteMessageFromError(
 	error: unknown,
 	name: string,
-	sourcePath: string | undefined,
 	t: KeptDeleteTranslate,
 ): string | null {
 	if (!isSharedMasterRefusal(error)) {
 		return null;
-	}
-	const body = (error as { data?: { error?: string } }).data;
-	if (body?.error && sourcePath) {
-		return t("deleteSkillKeptGit", { name, path: sourcePath });
 	}
 	return t("deleteSkillKeptSharedMaster", { name });
 }

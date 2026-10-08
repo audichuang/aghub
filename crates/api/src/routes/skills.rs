@@ -252,7 +252,6 @@ pub async fn delete_skill_by_path(
 
 	let confirm = req.confirm.unwrap_or(false);
 	let dry_run = !confirm;
-	let all_agents = req.all_agents.unwrap_or(false);
 
 	in_mutation_pool(move || {
 		let request = aghub_core::skills::removal::SkillRemovalRequest {
@@ -263,7 +262,7 @@ pub async fn delete_skill_by_path(
 			project_root,
 			agents: requested_agents,
 			dry_run,
-			all_agents,
+			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
 			plugin_owner,
@@ -3164,8 +3163,7 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn delete_by_name_absent_has_no_code_and_by_path_refused_preview_has_code()
-	{
+	fn delete_by_name_answers_carry_no_code() {
 		with_isolated_env(|home, _state| {
 			let proj = home;
 			let slot = proj.join(".agents/skills/shared");

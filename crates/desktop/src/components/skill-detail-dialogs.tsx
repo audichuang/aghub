@@ -117,12 +117,7 @@ export function DeleteSkillLocationDialog({
 					throw new Error(result.error || t("failedToDeleteSkill"));
 				}
 			} catch (error) {
-				const keptMsg = keptDeleteMessageFromError(
-					error,
-					skillName,
-					deleteRequest.source_path,
-					t,
-				);
+				const keptMsg = keptDeleteMessageFromError(error, skillName, t);
 				if (keptMsg) {
 					throw new Error(keptMsg);
 				}
