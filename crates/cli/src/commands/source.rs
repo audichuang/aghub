@@ -108,7 +108,7 @@ fn is_github_host(host: &str) -> bool {
 /// runtime env hook lets `assert_cmd` e2e tests point at a local dir (no
 /// network). The hook is gated on `cfg(debug_assertions)` (NOT `cfg(test)`):
 /// assert_cmd spawns the real binary, which is not built under `cfg(test)`.
-struct CliFetcher;
+pub(crate) struct CliFetcher;
 impl skill_update::Fetcher for CliFetcher {
 	fn fetch(
 		&self,
@@ -1430,37 +1430,28 @@ fn apply_update_row(
 ///
 /// Only the wording is this surface's (a CLI row may name the skill and quote
 /// detail; the API owes a path-free sentence). The code is
-/// `aghub_core::skills::resync::resync_error_code`'s.
+/// `error.code()` from skill-update.
 fn resync_row_error(
 	name: &str,
 	error: skill_update::mutation::ResyncMutationError,
 ) -> (String, &'static str) {
-	use aghub_core::skills::resync::{resync_error_code, ResyncError};
+	use aghub_core::skills::resync::ResyncError;
 	use skill_update::mutation::ResyncMutationError;
 
-	match error {
-		// Not a `ResyncError` at all: the fetched tree simply has no such path.
-		// Same code the API's git-sync route answers with.
-		ResyncMutationError::InvalidSkillPath => (
-			"locked skillPath was not found in source".to_string(),
-			"SKILL_PATH_NOT_FOUND",
-		),
-		ResyncMutationError::Resync(error) => {
-			let code = resync_error_code(&error);
-			let message = match error {
-				ResyncError::NotInstalled => format!(
-					"skill '{name}' is locked but no installed copy was found"
-				),
-				ResyncError::Renamed { new_name } => {
-					aghub_core::skills::update::skill_renamed_message(
-						name, &new_name,
-					)
-				}
-				other => other.to_string(),
-			};
-			(message, code)
+	let code = error.code();
+	let message = match error {
+		ResyncMutationError::InvalidSkillPath => {
+			"locked skillPath was not found in source".to_string()
 		}
-	}
+		ResyncMutationError::Resync(ResyncError::NotInstalled) => {
+			format!("skill '{name}' is locked but no installed copy was found")
+		}
+		ResyncMutationError::Resync(ResyncError::Renamed { new_name }) => {
+			aghub_core::skills::update::skill_renamed_message(name, &new_name)
+		}
+		ResyncMutationError::Resync(other) => other.to_string(),
+	};
+	(message, code)
 }
 
 // ──────────────────────────── source accept-rename ─────────────────────────

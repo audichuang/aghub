@@ -29,7 +29,7 @@ use crate::dto::skill::{
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
-use crate::skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE};
+use crate::skills::rename::skill_renamed_message;
 use crate::skills::resync::safe_resync_error;
 use skill_update::mutation::{
 	accept_fetched_rename, fetch_for_rename, resync_locked_skill,
@@ -62,14 +62,11 @@ const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
 const CACHE_TTL: Duration = Duration::from_secs(60);
-/// Wire code for a bulk row whose entry no longer belongs to the Source the
-/// caller named. Distinct from `SOURCE_CHANGED_DURING_FETCH`: nothing moved
-/// mid-flight, the caller's Sources view is simply stale.
-const SKILL_SOURCE_VIEW_STALE_CODE: &str = "SKILL_SOURCE_VIEW_STALE";
 /// Upper bound on one batch's `names`. Defined ONCE, in `dto::limits`, and
 /// generated into the desktop's `generated/dto/limits.ts` — `source-detail.tsx`
 /// chunks to it, and hand-copying the number here would let the two drift.
 use crate::dto::limits::MAX_BATCH_NAMES;
+pub use skill_update::mutation::SKILL_SOURCE_VIEW_STALE_CODE;
 
 /// Query parameters for the update check. `offline` short-circuits every entry
 /// to `Uncheckable { network }` without touching the network (useful for tests
@@ -320,88 +317,63 @@ fn apply_locked_resync_error(
 	scope: &str,
 	error: &LockedResyncError,
 ) -> Result<ApplySkillUpdateResponse, ApiError> {
-	match error {
+	if matches!(error, LockedResyncError::CredentialBackendUnavailable) {
+		return Err(crate::credentials::CredentialStoreError::Unavailable(
+			"credential backend unreachable".to_string(),
+		)
+		.into());
+	}
+	let message = match error {
 		LockedResyncError::LockEntryNotFound {
 			scope: locked_scope,
 		} => {
-			let message = if *locked_scope == ResourceScope::GlobalOnly {
+			if *locked_scope == ResourceScope::GlobalOnly {
 				"Skill is not in global lock"
 			} else {
 				"Skill is not in project lock"
-			};
-			Ok(apply_error(name, scope, message))
+			}
 		}
-		LockedResyncError::MissingSkillPath => {
-			Ok(apply_error(name, scope, "Locked skill has no skillPath"))
+		LockedResyncError::MissingSkillPath => "Locked skill has no skillPath",
+		LockedResyncError::NotInstalled => {
+			"Skill is locked but no installed copy was found"
 		}
-		// Same condition as `ResyncError::NotInstalled` below, reached earlier by
-		// the batch's advisory pre-fetch check. It must carry the SAME wire code,
-		// or whether a client can machine-distinguish it depends on which of two
-		// identically-worded arms happened to fire.
-		LockedResyncError::NotInstalled => Ok(apply_error_with_code(
-			name,
-			scope,
-			"Skill is locked but no installed copy was found",
-			Some(
-				crate::skills::resync::safe_resync_error(
-					&aghub_core::skills::resync::ResyncError::NotInstalled,
-				)
-				.code,
-			),
-		)),
-		LockedResyncError::CredentialBackendUnavailable => {
-			Err(crate::credentials::CredentialStoreError::Unavailable(
-				"credential backend unreachable".to_string(),
-			)
-			.into())
+		LockedResyncError::InvalidSkillPath => {
+			"Locked skillPath is not a valid skill folder"
 		}
-		LockedResyncError::InvalidSkillPath => Ok(apply_error(
-			name,
-			scope,
-			"Locked skillPath is not a valid skill folder",
-		)),
-		LockedResyncError::SourceSkillNotFound => Ok(apply_error(
-			name,
-			scope,
-			"Locked skillPath was not found in fetched source",
-		)),
-		// The only row state that is worth RETRYING after a refresh, so it must
-		// be machine-distinguishable from the terminal ones.
-		LockedResyncError::SourceGroupMismatch => Ok(apply_error_with_code(
-			name,
-			scope,
-			"Skill source changed; refresh Sources and retry",
-			Some(SKILL_SOURCE_VIEW_STALE_CODE),
-		)),
-		LockedResyncError::Fetch(error) => {
-			Ok(apply_error(name, scope, fetch_error_text(error)))
+		LockedResyncError::SourceSkillNotFound => {
+			"Locked skillPath was not found in fetched source"
 		}
+		LockedResyncError::SourceGroupMismatch => {
+			"Skill source changed; refresh Sources and retry"
+		}
+		LockedResyncError::Fetch(error) => fetch_error_text(error),
 		LockedResyncError::Resync(
 			aghub_core::skills::resync::ResyncError::Renamed { new_name },
-		) => Ok(apply_error_with_code(
-			name,
-			scope,
-			&skill_renamed_message(name, new_name),
-			Some(SKILL_RENAMED_CODE),
-		)),
-		LockedResyncError::Resync(error) => {
-			let mapped = safe_resync_error(error);
-			Ok(apply_error_with_code(
+		) => {
+			return Ok(apply_error_with_code(
 				name,
 				scope,
-				mapped.message,
-				Some(mapped.code),
-			))
+				&skill_renamed_message(name, new_name),
+				error.code(),
+			));
 		}
-		LockedResyncError::ProjectRootRequired => Ok(apply_error(
-			name,
-			scope,
-			"project_root is required when scope is project",
-		)),
+		LockedResyncError::Resync(resync_err) => {
+			return Ok(apply_error_with_code(
+				name,
+				scope,
+				safe_resync_error(resync_err).message,
+				error.code(),
+			));
+		}
+		LockedResyncError::ProjectRootRequired => {
+			"project_root is required when scope is project"
+		}
 		LockedResyncError::UnsupportedScope(_) => {
-			Ok(apply_error(name, scope, "scope must be global or project"))
+			"scope must be global or project"
 		}
-	}
+		LockedResyncError::CredentialBackendUnavailable => unreachable!(),
+	};
+	Ok(apply_error_with_code(name, scope, message, error.code()))
 }
 
 fn apply_success(
@@ -464,7 +436,7 @@ fn apply_locked_resync_batch_error(
 			name,
 			scope,
 			"Credential backend unavailable",
-			Some("KEYCHAIN_UNAVAILABLE"),
+			error.code(),
 		);
 	}
 	match apply_locked_resync_error(name, scope, error) {
@@ -1144,9 +1116,12 @@ mod tests {
 	/// dropped the code once: the message was identical, so nothing looked wrong.
 	#[test]
 	fn both_not_installed_arms_carry_one_wire_code() {
-		let expected = crate::skills::resync::safe_resync_error(
+		let expected_message = crate::skills::resync::safe_resync_error(
 			&aghub_core::skills::resync::ResyncError::NotInstalled,
-		);
+		)
+		.message;
+		let expected_code =
+			aghub_core::skills::resync::ResyncError::NotInstalled.code();
 		for error in [
 			LockedResyncError::NotInstalled,
 			LockedResyncError::Resync(
@@ -1159,10 +1134,10 @@ mod tests {
 				panic!("a not-installed row is a row, not a request failure");
 			};
 			assert!(!response.success);
-			assert_eq!(response.error.as_deref(), Some(expected.message));
+			assert_eq!(response.error.as_deref(), Some(expected_message));
 			assert_eq!(
 				response.code.as_deref(),
-				Some(expected.code),
+				Some(expected_code),
 				"{error:?} must be machine-distinguishable"
 			);
 		}
@@ -2618,7 +2593,10 @@ mod tests {
 			}
 
 			assert!(!resp.success, "rename must be rejected");
-			assert_eq!(resp.code.as_deref(), Some(SKILL_RENAMED_CODE));
+			assert_eq!(
+				resp.code.as_deref(),
+				Some(aghub_core::skills::update::SKILL_RENAMED_CODE)
+			);
 			let err = resp.error.expect("error message required");
 			assert!(err.contains("some-skill"), "error: {err}");
 			assert!(err.contains("different-skill"), "error: {err}");

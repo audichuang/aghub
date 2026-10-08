@@ -69,6 +69,16 @@ pub fn mutation_guard(
 				.push(skill::lock::MutationScope::Project(root.to_path_buf()));
 		}
 	}
+	#[cfg(debug_assertions)]
+	if let Ok(ms) = std::env::var("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS") {
+		if let Ok(ms) = ms.parse::<u64>() {
+			return skill::lock::mutation_guard_with_timeout(
+				op,
+				&scopes,
+				std::time::Duration::from_millis(ms),
+			);
+		}
+	}
 	skill::lock::mutation_guard(op, &scopes)
 }
 

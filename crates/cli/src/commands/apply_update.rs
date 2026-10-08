@@ -31,7 +31,7 @@ pub fn execute(
 			scope,
 			project_root,
 		},
-		&skill_update::GitFetcher::new(),
+		&crate::commands::source::CliFetcher,
 		&crate::commands::source::EnvTokenResolver,
 	)
 	.map_err(|error| locked_resync_error(&name, error))?;
@@ -175,7 +175,7 @@ pub fn execute_outdated(
 			scope,
 			project_root,
 		},
-		&skill_update::GitFetcher::new(),
+		&crate::commands::source::CliFetcher,
 		&crate::commands::source::EnvTokenResolver,
 	)
 	.map_err(|error| match error {
@@ -187,13 +187,30 @@ pub fn execute_outdated(
 		}
 	})?;
 
-	let rows: Vec<(String, Result<String, String>)> = outcomes
+	struct FailureRow {
+		message: String,
+		code: Option<&'static str>,
+		retryable: bool,
+	}
+
+	let rows: Vec<(String, Result<String, FailureRow>)> = outcomes
 		.into_iter()
 		.map(|row| {
-			let result = row.outcome.map(|report| report.updated_hash).map_err(
-				|error| locked_resync_error(&row.name, error).to_string(),
-			);
-			(row.name, result)
+			let name = row.name;
+			let result = match row.outcome {
+				Ok(report) => Ok(report.updated_hash),
+				Err(error) => {
+					let code = error.code();
+					let retryable = error.retryable();
+					let message = locked_resync_error_message(&name, &error);
+					Err(FailureRow {
+						message,
+						code,
+						retryable,
+					})
+				}
+			};
+			(name, result)
 		})
 		.collect();
 	let failed = rows.iter().filter(|(_, r)| r.is_err()).count();
@@ -207,12 +224,15 @@ pub fn execute_outdated(
 					"success": true,
 					"updatedHash": hash,
 					"error": null,
+					"code": null,
 				}),
-				Err(error) => json!({
+				Err(failure) => json!({
 					"name": name,
 					"success": false,
 					"updatedHash": null,
-					"error": error,
+					"error": failure.message,
+					"code": failure.code,
+					"retryable": failure.retryable,
 				}),
 			})
 			.collect();
@@ -231,7 +251,9 @@ pub fn execute_outdated(
 		for (name, result) in &rows {
 			match result {
 				Ok(_) => println!("updated: {name}"),
-				Err(error) => println!("failed: {name} — {error}"),
+				Err(failure) => {
+					println!("failed: {name} — {}", failure.message)
+				}
 			}
 		}
 		println!(
@@ -265,67 +287,73 @@ fn print_uncheckable_note(uncheckable: &[(String, String)]) {
 	}
 }
 
-fn locked_resync_error(
+fn locked_resync_error_message(
 	name: &str,
-	error: skill_update::mutation::LockedResyncError,
-) -> anyhow::Error {
+	error: &skill_update::mutation::LockedResyncError,
+) -> String {
 	use aghub_core::skills::resync::ResyncError;
 	use skill_update::mutation::LockedResyncError;
 
 	match error {
 		LockedResyncError::UnsupportedScope(_) => {
-			anyhow!("apply-update requires --global or --project, not --all")
+			"apply-update requires --global or --project, not --all".to_string()
 		}
 		LockedResyncError::ProjectRootRequired => {
-			anyhow!("project root is required")
+			"project root is required".to_string()
 		}
 		LockedResyncError::LockEntryNotFound { scope } => match scope {
 			ResourceScope::GlobalOnly => {
-				anyhow!("skill '{name}' is not in global lock")
+				format!("skill '{name}' is not in global lock")
 			}
 			ResourceScope::ProjectOnly => {
-				anyhow!("skill '{name}' is not in project lock")
+				format!("skill '{name}' is not in project lock")
 			}
-			ResourceScope::Both => anyhow!("skill '{name}' is not in lock"),
+			ResourceScope::Both => format!("skill '{name}' is not in lock"),
 		},
 		LockedResyncError::MissingSkillPath => {
-			anyhow!("locked skill has no skillPath")
+			"locked skill has no skillPath".to_string()
 		}
 		LockedResyncError::NotInstalled
 		| LockedResyncError::Resync(ResyncError::NotInstalled) => {
-			anyhow!("skill '{name}' is locked but no installed copy was found")
+			format!("skill '{name}' is locked but no installed copy was found")
 		}
 		LockedResyncError::CredentialBackendUnavailable
 		| LockedResyncError::Fetch(
 			skill_update::FetchError::BackendUnavailable,
-		) => anyhow!("Credential backend is unavailable; retry later."),
+		) => "Credential backend is unavailable; retry later.".to_string(),
 		LockedResyncError::InvalidSkillPath => {
-			anyhow!("locked skillPath is not a valid skill folder")
+			"locked skillPath is not a valid skill folder".to_string()
 		}
 		LockedResyncError::SourceGroupMismatch => {
-			anyhow!("skill source changed while updating; retry the command")
+			"skill source changed while updating; retry the command".to_string()
 		}
 		LockedResyncError::SourceSkillNotFound => {
-			anyhow!("locked skillPath was not found in source")
+			"locked skillPath was not found in source".to_string()
 		}
 		LockedResyncError::Fetch(skill_update::FetchError::Auth) => {
-			anyhow!("failed to fetch source repository: authentication failed")
+			"failed to fetch source repository: authentication failed"
+				.to_string()
 		}
 		LockedResyncError::Fetch(skill_update::FetchError::Network(detail)) => {
 			// The detail can quote the locked source URL verbatim, and a lock
 			// written from `https://user:token@host/repo` carries that userinfo.
-			anyhow!(
+			format!(
 				"failed to fetch source repository: {}",
-				aghub_git::redact_url_userinfo(&detail)
+				aghub_git::redact_url_userinfo(detail)
 			)
 		}
 		LockedResyncError::Resync(ResyncError::Renamed { new_name }) => {
-			anyhow!(aghub_core::skills::update::skill_renamed_message(
-				name, &new_name
-			))
+			aghub_core::skills::update::skill_renamed_message(name, new_name)
 		}
-		LockedResyncError::Resync(other) => anyhow!(other.to_string()),
+		LockedResyncError::Resync(other) => other.to_string(),
 	}
+}
+
+fn locked_resync_error(
+	name: &str,
+	error: skill_update::mutation::LockedResyncError,
+) -> anyhow::Error {
+	anyhow!(locked_resync_error_message(name, &error))
 }
 
 fn scope_name(scope: ResourceScope) -> &'static str {

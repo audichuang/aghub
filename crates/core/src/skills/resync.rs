@@ -92,6 +92,20 @@ impl std::fmt::Display for ResyncError {
 	}
 }
 
+impl ResyncError {
+	/// The stable machine code for a resync failure — ONE classification, read
+	/// by every surface.
+	pub fn code(&self) -> &'static str {
+		resync_error_code(self)
+	}
+
+	/// Whether this failure is a transient lock contention that is retryable
+	/// by waiting without re-reading or re-fetching.
+	pub fn retryable(&self) -> bool {
+		matches!(self, Self::Locked(_))
+	}
+}
+
 /// The stable machine code for a resync failure — ONE classification, read by
 /// every surface.
 ///
@@ -396,33 +410,58 @@ mod tests {
 	#[test]
 	fn every_resync_error_has_its_published_code() {
 		let cases = [
-			(ResyncError::Locked("x".into()), "SKILL_MUTATION_LOCK_BUSY"),
+			(
+				ResyncError::Locked("x".into()),
+				"SKILL_MUTATION_LOCK_BUSY",
+				true,
+			),
 			(
 				ResyncError::StaleFetch("x".into()),
 				"SKILL_SOURCE_CHANGED_DURING_FETCH",
+				false,
 			),
-			(ResyncError::NotInstalled, "SKILL_NOT_INSTALLED"),
+			(ResyncError::NotInstalled, "SKILL_NOT_INSTALLED", false),
 			(
 				ResyncError::Renamed {
 					new_name: "n".into(),
 				},
 				"SKILL_RENAMED_IN_SOURCE",
+				false,
 			),
-			(ResyncError::Parse("x".into()), "SKILL_PARSE_FAILED"),
-			(ResyncError::Conflict("x".into()), "SKILL_UPDATE_CONFLICT"),
+			(ResyncError::Parse("x".into()), "SKILL_PARSE_FAILED", false),
+			(
+				ResyncError::Conflict("x".into()),
+				"SKILL_UPDATE_CONFLICT",
+				false,
+			),
 			(
 				ResyncError::OutOfTree("x".into()),
 				"SKILL_TARGET_OUT_OF_TREE",
+				false,
 			),
-			(ResyncError::Hash("x".into()), "SKILL_SYNC_ERROR"),
-			(ResyncError::Swap("x".into()), "SKILL_SYNC_ERROR"),
-			(ResyncError::LockUpdate("x".into()), "SKILL_LOCK_ERROR"),
+			(ResyncError::Hash("x".into()), "SKILL_SYNC_ERROR", false),
+			(ResyncError::Swap("x".into()), "SKILL_SYNC_ERROR", false),
+			(
+				ResyncError::LockUpdate("x".into()),
+				"SKILL_LOCK_ERROR",
+				false,
+			),
 		];
-		for (error, expected) in cases {
+		for (error, expected_code, expected_retryable) in cases {
 			assert_eq!(
 				resync_error_code(&error),
-				expected,
+				expected_code,
 				"{error:?} must keep the code both surfaces publish"
+			);
+			assert_eq!(
+				error.code(),
+				expected_code,
+				"{error:?}.code() must match resync_error_code"
+			);
+			assert_eq!(
+				error.retryable(),
+				expected_retryable,
+				"{error:?}.retryable() must match expected retryability"
 			);
 		}
 	}

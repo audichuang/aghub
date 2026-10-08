@@ -113,6 +113,10 @@ line** — don't reword it). Pass `--port N` to pin one.
 - `POST /skills/updates/check` deliberately reads the lock fail-OPEN (a corrupted
   or unreadable lock is treated as empty/missing; the CLI `check` is fail-closed,
   because CLI check presents lock contents as its answer and probes first).
+- Route-level parameter validation guards (`confirm=true` required, batch `names`
+  cap) remain purely within the API layer rather than the shared skill-update
+  mapping because they enforce HTTP endpoint boundary requirements rather than
+  skill mutation semantics.
 
 ## ANTI-PATTERNS
 

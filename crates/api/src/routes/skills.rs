@@ -45,7 +45,7 @@ use crate::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope,
 	},
-	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
+	skills::rename::skill_renamed_message,
 	source_sessions::{
 		PinnedSourceFetchError, PinnedSourceSession, PinnedSourceSessions,
 	},
@@ -2579,33 +2579,36 @@ pub async fn git_sync_skill(
 				expected: pre_fetch_identity,
 			},
 		)
-		.map_err(|e| match e {
-			ResyncMutationError::InvalidSkillPath => ApiError::new(
-				Status::NotFound,
-				format!(
-					"Skill path '{skill_path}' not found in cloned repository"
-				),
-				"SKILL_PATH_NOT_FOUND",
-			),
-			ResyncMutationError::Resync(ResyncError::NotInstalled) => {
-				ApiError::new(
+		.map_err(|e| {
+			let code = e.code();
+			match e {
+				ResyncMutationError::InvalidSkillPath => ApiError::new(
 					Status::NotFound,
 					format!(
-						"Skill '{name}' is locked but no installed copy was found"
+						"Skill path '{skill_path}' not found in cloned repository"
 					),
-					"SKILL_NOT_INSTALLED",
-				)
-			}
-			ResyncMutationError::Resync(ResyncError::Renamed { new_name }) => {
-				ApiError::new(
+					code,
+				),
+				ResyncMutationError::Resync(ResyncError::NotInstalled) => {
+					ApiError::new(
+						Status::NotFound,
+						format!(
+							"Skill '{name}' is locked but no installed copy was found"
+						),
+						code,
+					)
+				}
+				ResyncMutationError::Resync(ResyncError::Renamed {
+					new_name,
+				}) => ApiError::new(
 					Status::BadRequest,
 					skill_renamed_message(&name, &new_name),
-					SKILL_RENAMED_CODE,
-				)
-			}
-			ResyncMutationError::Resync(error) => {
-				let mapped = safe_resync_error(&error);
-				ApiError::new(mapped.status, mapped.message, mapped.code)
+					code,
+				),
+				ResyncMutationError::Resync(error) => {
+					let mapped = safe_resync_error(&error);
+					ApiError::new(mapped.status, mapped.message, code)
+				}
 			}
 		})
 	})

@@ -363,7 +363,8 @@ pub(crate) fn collect_update_views(
 	let git_fetcher = GitFetcher::new();
 	let ref_resolver: Arc<dyn RefResolver> =
 		Arc::new(git_fetcher.ref_resolver());
-	let fetcher: Arc<dyn Fetcher> = Arc::new(git_fetcher);
+	let fetcher: Arc<dyn Fetcher> =
+		Arc::new(crate::commands::source::CliFetcher);
 	let resolver = EnvTokenResolver;
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {

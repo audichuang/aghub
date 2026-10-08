@@ -17410,3 +17410,158 @@ fn test_cli_delete_skills_git_tracked_shared_slot_preview_commit_parity() {
 		"the git-tracked SKILL.md must still exist"
 	);
 }
+
+/// Task #36 / Ticket C2: `apply-update --outdated --json` and `source sync --update`
+/// share the exact same mutation lock busy error code (`SKILL_MUTATION_LOCK_BUSY`),
+/// and `apply-update` failure rows carry both `code` and `retryable: true`.
+#[cfg(unix)]
+#[test]
+fn apply_update_outdated_and_source_sync_share_mutation_lock_busy_code_and_retryability(
+) {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let install = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"alpha",
+	);
+	assert!(
+		install.status.success(),
+		"seed install: {}",
+		String::from_utf8_lossy(&install.stderr)
+	);
+
+	let lock_path = state.path().join("skills/.skill-lock.json");
+	let before_raw = std::fs::read_to_string(&lock_path)
+		.expect("lock file must exist after seed install");
+	let lock_json: Value = serde_json::from_str(&before_raw).unwrap();
+	assert!(
+		lock_json["skills"]["alpha"]["contentHash"]
+			.as_str()
+			.is_some_and(|h| !h.is_empty()),
+		"seed install must produce a valid lock entry with contentHash"
+	);
+
+	// Upstream moves so both check/outdated and source sync see a pending update.
+	std::fs::write(
+		src.path().join("alpha/SKILL.md"),
+		"---\nname: alpha\ndescription: d\n---\nupdated body\n",
+	)
+	.unwrap();
+
+	// Hold the mutation lock externally to simulate another aghub process in flight.
+	let mutation_lock = state.path().join("skills/.aghub-mutation.lock");
+	std::fs::create_dir_all(mutation_lock.parent().unwrap()).unwrap();
+	let held_file = std::fs::File::options()
+		.read(true)
+		.write(true)
+		.create(true)
+		.truncate(false)
+		.open(&mutation_lock)
+		.unwrap();
+	held_file
+		.try_lock()
+		.expect("must acquire external file lock");
+
+	// 1. apply-update --outdated --json: failure row must carry `code` and `retryable: true`.
+	let apply_out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.env("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS", "100")
+		.args([
+			"-g",
+			"--json",
+			"apply-update",
+			"skills",
+			"--outdated",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!apply_out.status.success(),
+		"apply-update must exit non-zero when an update fails"
+	);
+	let apply_json: Value = serde_json::from_slice(&apply_out.stdout)
+		.unwrap_or_else(|e| {
+			panic!(
+				"apply-update stdout must be valid JSON: {e}; stdout: {}; stderr: {}",
+				String::from_utf8_lossy(&apply_out.stdout),
+				String::from_utf8_lossy(&apply_out.stderr)
+			)
+		});
+	let results = apply_json["results"]
+		.as_array()
+		.expect("apply-update results must be an array");
+	assert_eq!(results.len(), 1, "expected 1 result row: {apply_json}");
+	let apply_row = &results[0];
+	assert_eq!(apply_row["name"], "alpha");
+	assert_eq!(apply_row["success"], false);
+	assert_eq!(
+		apply_row["code"], "SKILL_MUTATION_LOCK_BUSY",
+		"apply-update failure row must carry SKILL_MUTATION_LOCK_BUSY code: {apply_row}"
+	);
+	assert_eq!(
+		apply_row["retryable"], true,
+		"mutation lock contention must be flagged as retryable: {apply_row}"
+	);
+
+	// 2. source sync --update: failure action must carry the SAME code.
+	let sync_out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.env("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS", "100")
+		.args([
+			"-g",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--update",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!sync_out.status.success(),
+		"source sync must exit non-zero when an update fails"
+	);
+	let sync_json: Value = serde_json::from_slice(&sync_out.stdout)
+		.unwrap_or_else(|e| {
+			panic!(
+				"source sync stdout must be valid JSON: {e}; stdout: {}; stderr: {}",
+				String::from_utf8_lossy(&sync_out.stdout),
+				String::from_utf8_lossy(&sync_out.stderr)
+			)
+		});
+	let actions = sync_json["actions"]
+		.as_array()
+		.expect("source sync actions must be an array");
+	assert_eq!(actions.len(), 1, "expected 1 action row: {sync_json}");
+	let sync_action = &actions[0];
+	assert_eq!(sync_action["name"], "alpha");
+	assert_eq!(sync_action["applied"], false);
+	assert_eq!(
+		sync_action["errorCode"], "SKILL_MUTATION_LOCK_BUSY",
+		"source sync failure action must carry SKILL_MUTATION_LOCK_BUSY code: {sync_action}"
+	);
+
+	// 3. Parity assertion: both surfaces return the identical error code.
+	assert_eq!(
+		apply_row["code"], sync_action["errorCode"],
+		"apply-update and source sync must share the exact same error code under mutation lock contention"
+	);
+
+	// Lock was not modified during failed updates.
+	let after_raw = std::fs::read_to_string(&lock_path).unwrap();
+	assert_eq!(
+		before_raw, after_raw,
+		"lock must remain untouched on failure"
+	);
+	drop(held_file);
+}

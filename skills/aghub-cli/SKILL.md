@@ -403,7 +403,10 @@ tell you unless you read the preview:
   non-empty `uncheckable[]` is not proof everything is current.
 
 Judge the committed run by `results[].success` per row; exit 1 means at least
-one row failed and the others still ran. Missing from `apply-update --help` on
+one row failed and the others still ran. Each failed row in `results[]` carries
+`error`, machine-readable `code`, and a `retryable` boolean (`true` when `code`
+is `SKILL_MUTATION_LOCK_BUSY` due to concurrent mutation lock contention; other
+failures report `retryable: false`). Missing from `apply-update --help` on
 an older build: fall back to one `source sync <SOURCE> --update --yes` per row
 of `source list --json`.
 

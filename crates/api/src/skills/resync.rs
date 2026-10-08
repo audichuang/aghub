@@ -5,68 +5,55 @@ use rocket::http::Status;
 ///
 /// Core errors may contain absolute target, staging, or lock paths. Keep that
 /// diagnostic detail inside the process and expose only stable, path-free
-/// messages and codes at the HTTP boundary.
+/// messages at the HTTP boundary.
 pub(crate) struct SafeResyncError {
 	pub(crate) message: &'static str,
-	pub(crate) code: &'static str,
 	pub(crate) status: Status,
 }
 
 pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
-	// The CODE is the shared classification — one table in core, so a CLI row
-	// and an HTTP body name the same failure the same way. The MESSAGE and the
-	// HTTP status stay here: only this surface owes a path-free wording, and
-	// only this surface has a status to pick.
-	let code = aghub_core::skills::resync::resync_error_code(error);
+	// The MESSAGE and the HTTP status stay here: only this surface owes a
+	// path-free wording, and only this surface has a status to pick. The CODE
+	// comes from the shared mapping on `error.code()`.
 	match error {
 		ResyncError::Locked(_) => SafeResyncError {
 			message: "Another aghub process is mutating skills; retry shortly",
-			code,
 			status: Status::Conflict,
 		},
 		ResyncError::StaleFetch(_) => SafeResyncError {
 			message:
 				"The skill's source changed while this sync was fetching; \
 			          nothing was written. Re-run to use the current source",
-			code,
 			status: Status::Conflict,
 		},
 		ResyncError::NotInstalled => SafeResyncError {
 			message: "Skill is locked but no installed copy was found",
-			code,
 			status: Status::NotFound,
 		},
 		// Unreached in production (both callers intercept `Renamed` earlier to
-		// build the name-carrying message); if reached, it uses the shared
-		// `code` like every other arm, not a hand-written literal.
+		// build the name-carrying message).
 		ResyncError::Renamed { .. } => SafeResyncError {
 			message: "Source skill was renamed",
-			code,
 			status: Status::BadRequest,
 		},
 		ResyncError::Parse(_) => SafeResyncError {
 			message: "Failed to parse synced skill",
-			code,
 			status: Status::BadRequest,
 		},
 		ResyncError::Conflict(_) => SafeResyncError {
 			message: "The update was refused because a separate installed copy differs from its Master. Both copies were kept; compare them before consolidating.",
-			code,
 			status: Status::Conflict,
 		},
 		ResyncError::OutOfTree(_) => SafeResyncError {
 			message: "Refusing to sync out-of-tree target",
-			code,
 			status: Status::BadRequest,
 		},
 		ResyncError::Hash(_) | ResyncError::Swap(_) => SafeResyncError {
 			message: "Failed to sync skill",
-			code,
 			status: Status::InternalServerError,
 		},
 		ResyncError::LockUpdate(_) => SafeResyncError {
 			message: "Failed to update skill lock after sync",
-			code,
 			status: Status::InternalServerError,
 		},
 	}
@@ -107,7 +94,7 @@ mod tests {
 			// written out here would be a second table, and the two would
 			// drift — the CLI reads the core one.
 			assert_eq!(
-				mapped.code,
+				error.code(),
 				aghub_core::skills::resync::resync_error_code(&error),
 				"the API must publish core's code for this variant",
 			);
