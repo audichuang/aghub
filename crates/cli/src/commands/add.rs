@@ -91,7 +91,7 @@ pub fn execute(
 				let added = aghub_core::skills::install_local::install_local_skill(
 					aghub_core::skills::install_local::LocalSkillInstallRequest {
 						source_path: &from_path,
-						scope: manager.write_scope(),
+						scope: manager.write_scope()?,
 						target_agents: &[agent_type],
 						install_name: name.as_deref(),
 					},

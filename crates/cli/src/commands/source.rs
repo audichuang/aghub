@@ -1486,7 +1486,8 @@ struct AcceptRenameArgs<'a> {
 /// and fetches (the fetch cannot live in core — `skill-update` depends on
 /// core), then hands the fetched tree to `rename::accept_rename`.
 fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
-	use aghub_core::skills::rename::{self, RenameRequest, RenameScope};
+	use aghub_core::skills::rename::{self, RenameRequest};
+	use aghub_core::WriteScope;
 	use skill_update::mutation::{
 		accept_fetched_rename, fetch_for_rename, FetchRenameError,
 		FetchedRenameRequest,
@@ -1496,10 +1497,10 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	// anything that is not a single write target instead of defaulting to
 	// global.
 	let scope = match args.scope.write_target()? {
-		Some(root) => RenameScope::Project {
+		Some(root) => WriteScope::Project {
 			root: root.to_path_buf(),
 		},
-		None => RenameScope::Global,
+		None => WriteScope::Global,
 	};
 	let scope_label = args.scope.label();
 

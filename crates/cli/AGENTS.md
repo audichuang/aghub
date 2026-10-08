@@ -196,7 +196,7 @@ with a typed `ResourceNotFound`. Bailing early instead rewrites `--json`'s
 
 **`Scope::write_target()`** is the ONE answer to "which store does this write?"
 (`Some(root)` = project, `None` = global) and it ERRORS on anything else.
-`source`'s `write_scope`, `accept-rename`'s `RenameScope` and `transfer`'s
+`source`'s `write_scope`, `accept-rename`'s `WriteScope` and `transfer`'s
 `install_scope` each used to close that match with `_ => …::Global`, so a scope
 the table let through became a silent write to the GLOBAL lock. Never reopen
 one of those matches with a catch-all.

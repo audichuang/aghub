@@ -770,7 +770,8 @@ pub(crate) async fn accept_rename_inner(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> ApiResult<AcceptRenameResponse> {
-	use aghub_core::skills::rename::{self, RenameRequest, RenameScope};
+	use aghub_core::skills::rename::{self, RenameRequest};
+	use aghub_core::WriteScope;
 
 	// Adapter concern: confirmation gate.
 	if !req.confirm.unwrap_or(false) {
@@ -782,11 +783,11 @@ pub(crate) async fn accept_rename_inner(
 		)));
 	}
 
-	// Adapter concern: scope string -> RenameScope (illegal states rejected).
+	// Adapter concern: scope string -> WriteScope (illegal states rejected).
 	let scope = match req.scope.as_str() {
-		"global" => RenameScope::Global,
+		"global" => WriteScope::Global,
 		"project" => match req.project_root.as_deref() {
-			Some(root) => RenameScope::Project {
+			Some(root) => WriteScope::Project {
 				root: PathBuf::from(root),
 			},
 			None => {

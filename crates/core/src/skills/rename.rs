@@ -17,10 +17,7 @@ use std::path::{Path, PathBuf};
 /// on-disk dir) OR the rename is degenerate (old/new sanitize to one dir).
 pub const RENAME_TARGET_EXISTS_CODE: &str = "RENAME_TARGET_EXISTS";
 
-pub use crate::WriteScope;
-
-/// Backward-compatible alias for [`WriteScope`].
-pub type RenameScope = WriteScope;
+use crate::WriteScope;
 
 /// Source coordinates of the OLD-name lock entry plus the fields needed to
 /// re-install under the new name. The adapter reads this (via
@@ -165,10 +162,10 @@ impl RenameError {
 /// passes the result back through [`FetchedRename`].
 pub fn rename_source_from_lock(
 	old_name: &str,
-	scope: &RenameScope,
+	scope: &WriteScope,
 ) -> Result<RenameLockSource, RenameError> {
 	match scope {
-		RenameScope::Global => {
+		WriteScope::Global => {
 			let lock = skill::lock::global::read_skill_lock();
 			let entry = lock.skills.get(old_name).ok_or_else(|| {
 				RenameError::NotLocked(
@@ -193,7 +190,7 @@ pub fn rename_source_from_lock(
 				captured,
 			})
 		}
-		RenameScope::Project { root } => {
+		WriteScope::Project { root } => {
 			let lock = skill::lock::local::read_local_lock(Some(root));
 			let entry = lock.skills.get(old_name).ok_or_else(|| {
 				RenameError::NotLocked(
@@ -327,28 +324,28 @@ pub fn accept_rename(
 	)
 	.map_err(RenameError::Snapshot)?;
 	let old_global_entry: Option<skill::SkillLockEntry> = match &req.scope {
-		RenameScope::Global => skill::lock::global::read_skill_lock()
+		WriteScope::Global => skill::lock::global::read_skill_lock()
 			.skills
 			.get(req.old_name)
 			.cloned(),
-		RenameScope::Project { .. } => None,
+		WriteScope::Project { .. } => None,
 	};
 	let old_local_entry: Option<skill::LocalSkillLockEntry> = match &req.scope {
-		RenameScope::Project { root } => {
+		WriteScope::Project { root } => {
 			skill::lock::local::read_local_lock(Some(root))
 				.skills
 				.get(req.old_name)
 				.cloned()
 		}
-		RenameScope::Global => None,
+		WriteScope::Global => None,
 	};
 
 	// Reassert the old-name lock precondition here: this is a public entry
 	// point and `RenameLockSource` is constructible, so never trust fabricated
 	// coordinates. Checked before any mutation.
 	let (old_is_locked, scope_label) = match &req.scope {
-		RenameScope::Global => (old_global_entry.is_some(), "global"),
-		RenameScope::Project { .. } => (old_local_entry.is_some(), "project"),
+		WriteScope::Global => (old_global_entry.is_some(), "global"),
+		WriteScope::Project { .. } => (old_local_entry.is_some(), "project"),
 	};
 	if !old_is_locked {
 		return Err(RenameError::NotLocked(format!(
@@ -684,13 +681,13 @@ fn new_name_exists_in_scope(
 	targets.iter().any(|p| std::fs::symlink_metadata(p).is_ok())
 }
 
-fn remove_lock_entry(name: &str, scope: &RenameScope) -> Result<(), String> {
+fn remove_lock_entry(name: &str, scope: &WriteScope) -> Result<(), String> {
 	match scope {
-		RenameScope::Global => skill::lock::global::modify_skill_lock(|lock| {
+		WriteScope::Global => skill::lock::global::modify_skill_lock(|lock| {
 			lock.skills.remove(name);
 		})
 		.map_err(|e| format!("global lock write failed: {e}")),
-		RenameScope::Project { root } => {
+		WriteScope::Project { root } => {
 			skill::lock::local::modify_local_lock(Some(root), |lock| {
 				lock.skills.remove(name);
 			})
@@ -701,12 +698,12 @@ fn remove_lock_entry(name: &str, scope: &RenameScope) -> Result<(), String> {
 
 fn restore_lock_entry(
 	name: &str,
-	scope: &RenameScope,
+	scope: &WriteScope,
 	global_entry: Option<&skill::SkillLockEntry>,
 	local_entry: Option<&skill::LocalSkillLockEntry>,
 ) -> Result<(), String> {
 	match scope {
-		RenameScope::Global => {
+		WriteScope::Global => {
 			let Some(entry) = global_entry else {
 				return Ok(());
 			};
@@ -717,7 +714,7 @@ fn restore_lock_entry(
 			})
 			.map_err(|e| format!("global lock restore failed: {e}"))
 		}
-		RenameScope::Project { root } => {
+		WriteScope::Project { root } => {
 			let Some(entry) = local_entry else {
 				return Ok(());
 			};
@@ -1198,7 +1195,7 @@ mod tests {
 			std::fs::create_dir_all(link.parent().unwrap()).unwrap();
 			std::os::unix::fs::symlink(&master_dir, link).unwrap();
 		}
-		let scope = RenameScope::Project {
+		let scope = WriteScope::Project {
 			root: root.to_path_buf(),
 		};
 		skill::lock::local::modify_local_lock(Some(root), |lock| {

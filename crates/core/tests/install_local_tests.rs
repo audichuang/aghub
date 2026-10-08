@@ -526,3 +526,153 @@ fn install_local_skill_refuses_unparseable_preexisting_master_as_invalid_config(
 		);
 	});
 }
+
+#[test]
+fn install_local_skill_refuses_when_agent_slot_occupied_by_real_directory() {
+	with_isolated_env(|home, _data| {
+		let source_skill = home.join("source-skills/occupied-slot");
+		std::fs::create_dir_all(&source_skill).unwrap();
+		std::fs::write(
+			source_skill.join("SKILL.md"),
+			"---\nname: occupied-slot\ndescription: valid\n---\n\nbody\n",
+		)
+		.unwrap();
+
+		let project = home.join("occupied-project");
+		let agent_slot = project.join(".claude/skills/occupied-slot");
+		std::fs::create_dir_all(&agent_slot).unwrap();
+		std::fs::write(
+			agent_slot.join("SKILL.md"),
+			"real occupant directory\n",
+		)
+		.unwrap();
+
+		let req = LocalSkillInstallRequest {
+			source_path: &source_skill.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+
+		let err = install_local_skill(req).expect_err(
+			"must refuse when agent slot is occupied by real directory",
+		);
+		assert!(
+			matches!(err, aghub_core::ConfigError::ResourceExists { .. }),
+			"must return ResourceExists, got: {err:?}"
+		);
+		assert!(
+			!project.join(".aghub/occupied-slot").exists(),
+			"Master must be rolled back and not left behind"
+		);
+
+		let lock = skill::lock::local::read_local_lock(Some(&project));
+		assert!(
+			!lock.skills.contains_key("occupied-slot"),
+			"lock entry must not be written when slot is occupied"
+		);
+		assert_eq!(
+			std::fs::read_to_string(agent_slot.join("SKILL.md")).unwrap(),
+			"real occupant directory\n",
+			"existing directory occupant must be preserved"
+		);
+	});
+}
+
+/// A corrupt lock must not break a re-import that writes nothing.
+///
+/// Ported from the former API route test `import_skill_no_op_survives_a_corrupt_lock`.
+/// Asserts both halves: the no-op still succeeds, and a new install (different skill)
+/// still refuses while leaving the corrupt lock byte-identical.
+#[test]
+fn install_local_skill_no_op_survives_a_corrupt_lock() {
+	with_isolated_env(|home, _data| {
+		let source_skill = home.join("source-skills/dup-skill");
+		std::fs::create_dir_all(&source_skill).unwrap();
+		std::fs::write(
+			source_skill.join("SKILL.md"),
+			"---\nname: dup-skill\ndescription: test\n---\n\nbody\n",
+		)
+		.unwrap();
+
+		let project = home.join("myproject");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+
+		let req1 = LocalSkillInstallRequest {
+			source_path: &source_skill.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+		let rep1 = install_local_skill(req1).expect("first install succeeds");
+		assert!(!rep1.already_installed);
+		assert!(rep1.wrote_master);
+		assert!(rep1.wrote_lock);
+
+		// Now corrupt the lock, exactly as an unresolved merge would.
+		let lock_path = project.join("skills-lock.json");
+		let corrupt = format!(
+			"<<<<<<< HEAD\n{}",
+			std::fs::read_to_string(&lock_path).unwrap()
+		);
+		std::fs::write(&lock_path, &corrupt).unwrap();
+
+		// Re-import the same NAME from DIFFERENT content. The Master is
+		// already there and does not match, so the install resolves this to
+		// "no-op, write no lock" — it must not be refused on the lock's
+		// account.
+		let variant = home.join("source-skills-b/dup-skill");
+		std::fs::create_dir_all(&variant).unwrap();
+		std::fs::write(
+			variant.join("SKILL.md"),
+			"---\nname: dup-skill\ndescription: test\n---\n\ndifferent\n",
+		)
+		.unwrap();
+
+		let req2 = LocalSkillInstallRequest {
+			source_path: &variant.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+		let rep2 = install_local_skill(req2).expect(
+			"a re-import writes nothing, so a corrupt lock must not fail it",
+		);
+		assert!(
+			rep2.already_installed,
+			"re-import must report already_installed"
+		);
+		assert!(
+			!rep2.wrote_master,
+			"must not write master on no-op re-import"
+		);
+		assert!(!rep2.wrote_lock, "must not write lock on no-op re-import");
+
+		// The other half: a NEW skill still refuses before materializing.
+		let fresh = home.join("source-skills/fresh-skill");
+		std::fs::create_dir_all(&fresh).unwrap();
+		std::fs::write(
+			fresh.join("SKILL.md"),
+			"---\nname: fresh-skill\ndescription: test\n---\n\nbody\n",
+		)
+		.unwrap();
+
+		let req_fresh = LocalSkillInstallRequest {
+			source_path: &fresh.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+		install_local_skill(req_fresh)
+			.expect_err("a real install must refuse while the lock is corrupt");
+		assert!(
+			!project.join(".aghub/fresh-skill").exists(),
+			"the refusal must happen before the Master is written"
+		);
+		assert_eq!(
+			std::fs::read_to_string(&lock_path).unwrap(),
+			corrupt,
+			"the corrupt lock must be left exactly as found"
+		);
+	});
+}

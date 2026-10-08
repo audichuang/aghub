@@ -2713,7 +2713,7 @@ mod tests {
 	}
 
 	/// `write_target` is the ONE answer to "which store does this write?".
-	/// `source`'s `write_scope`, `accept-rename`'s `RenameScope` and
+	/// `source`'s `write_scope`, `accept-rename`'s `WriteScope` and
 	/// `transfer`'s `install_scope` each used to close this match with
 	/// `_ => …::Global`, so a scope that got past the policy table became a
 	/// silent write to the GLOBAL lock.

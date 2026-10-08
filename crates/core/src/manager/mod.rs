@@ -77,13 +77,17 @@ impl ConfigManager {
 			.unwrap_or(crate::models::AgentType::Claude)
 	}
 
-	pub fn write_scope(&self) -> crate::WriteScope {
+	pub fn write_scope(&self) -> Result<crate::WriteScope> {
 		match self.write_scope {
-			ResourceScope::GlobalOnly => crate::WriteScope::Global,
+			ResourceScope::GlobalOnly => Ok(crate::WriteScope::Global),
 			ResourceScope::ProjectOnly | ResourceScope::Both => {
-				crate::WriteScope::Project {
-					root: self.project_root.clone().unwrap_or_default(),
-				}
+				let root = self.project_root.clone().ok_or_else(|| {
+					ConfigError::InvalidConfig(
+						"project root is required for project write scope"
+							.to_string(),
+					)
+				})?;
+				Ok(crate::WriteScope::Project { root })
 			}
 		}
 	}
@@ -464,5 +468,39 @@ impl ConfigManager {
 		self.config.as_mut().ok_or_else(|| {
 			ConfigError::InvalidConfig("No configuration loaded".to_string())
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::{create_adapter, models::AgentType};
+	use std::path::PathBuf;
+
+	#[test]
+	fn config_manager_write_scope_requires_project_root() {
+		let mut mgr =
+			ConfigManager::new(create_adapter(AgentType::Claude), false, None);
+		mgr.write_scope = ResourceScope::ProjectOnly;
+		mgr.project_root = None;
+		let err = mgr.write_scope().unwrap_err();
+		assert!(
+			matches!(err, ConfigError::InvalidConfig(_)),
+			"must return InvalidConfig when project root is missing, got: {err:?}"
+		);
+
+		mgr.project_root = Some(PathBuf::from("/test/project"));
+		let scope = mgr.write_scope().unwrap();
+		assert_eq!(
+			scope,
+			crate::WriteScope::Project {
+				root: PathBuf::from("/test/project")
+			}
+		);
+
+		mgr.write_scope = ResourceScope::GlobalOnly;
+		mgr.project_root = None;
+		let global_scope = mgr.write_scope().unwrap();
+		assert_eq!(global_scope, crate::WriteScope::Global);
 	}
 }

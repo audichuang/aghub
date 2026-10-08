@@ -9,7 +9,7 @@ use crate::scope::WriteScope;
 use crate::skills::install_fetched::{
 	materialize_universal_master, AgentInstallResult, MaterializedMaster,
 };
-use crate::skills::linker::LinkTarget;
+use crate::skills::linker::{LinkTarget, Linker};
 
 /// Request to install a local skill into the .aghub Master store and link target agents.
 pub struct LocalSkillInstallRequest<'a> {
@@ -62,6 +62,43 @@ fn write_local_install_lock(
 	}
 }
 
+fn all_targets_already_linked(
+	canonical: &Path,
+	safe_name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	target_agents: &[AgentType],
+) -> bool {
+	if target_agents.is_empty() || !canonical.exists() {
+		return false;
+	}
+	let master_real = match std::fs::canonicalize(canonical) {
+		Ok(p) => p,
+		Err(_) => return false,
+	};
+	for &agent in target_agents {
+		let link_need = crate::skills::linker::agent_link_need(
+			agent.descriptor(),
+			scope,
+			project_root,
+		);
+		match link_need {
+			crate::skills::linker::LinkNeed::NeedsLink { referrer_dir } => {
+				let slot = referrer_dir.join(safe_name);
+				if !Linker::is_link(&slot) {
+					return false;
+				}
+				match std::fs::canonicalize(&slot) {
+					Ok(target) if target == master_real => {}
+					_ => return false,
+				}
+			}
+			crate::skills::linker::LinkNeed::Unsupported => return false,
+		}
+	}
+	true
+}
+
 /// Install a skill from a local filesystem path: materializes Master in `.aghub`,
 /// links target agents, checks adoption against existing lock/disk, stamps lock,
 /// and rolls back on failure.
@@ -95,12 +132,35 @@ pub fn install_local_skill(
 		ref_name: None,
 	};
 
+	let canonical_root = if matches!(resource_scope, ResourceScope::ProjectOnly)
+	{
+		project_root
+	} else {
+		None
+	};
+	let canonical_opt = crate::skills::linker::master_store_dir(canonical_root)
+		.map(|skills_dir| skills_dir.join(&safe_name));
+
+	let is_already_installed = canonical_opt
+		.as_deref()
+		.map(|c| {
+			all_targets_already_linked(
+				c,
+				&safe_name,
+				resource_scope,
+				project_root,
+				req.target_agents,
+			)
+		})
+		.unwrap_or(false);
+
 	let adoption = crate::skills::adoption::adoption_guard(
 		effective_name,
 		&source_root,
 		resource_scope,
 		project_root,
 		&lock_source,
+		is_already_installed,
 	)?;
 
 	if let Some(canonical) = adoption.canonical.as_ref() {
@@ -112,14 +172,34 @@ pub fn install_local_skill(
 		}
 	}
 
-	skill::lock::ensure_locks_writable(
-		resource_scope != ResourceScope::ProjectOnly,
-		match resource_scope {
-			ResourceScope::GlobalOnly => None,
-			_ => project_root,
-		},
-	)
-	.map_err(ConfigError::Io)?;
+	let canonical_dir = adoption.canonical.as_ref().ok_or_else(|| {
+		ConfigError::ValidationFailed(format!(
+			"Master for skill '{effective_name}' could not be resolved"
+		))
+	})?;
+	let master_exists = canonical_dir.exists();
+	let master_hash = if master_exists {
+		Some(crate::skills::adoption::hash_master(
+			effective_name,
+			canonical_dir,
+		)?)
+	} else {
+		None
+	};
+	let is_adoption = adoption.existing_owner.is_none()
+		&& master_hash.as_deref() == Some(&adoption.installed_hash);
+	let can_write = !master_exists || is_adoption;
+
+	if can_write {
+		skill::lock::ensure_locks_writable(
+			resource_scope != ResourceScope::ProjectOnly,
+			match resource_scope {
+				ResourceScope::GlobalOnly => None,
+				_ => project_root,
+			},
+		)
+		.map_err(ConfigError::Io)?;
+	}
 
 	let link_target = match req.scope {
 		WriteScope::Project { .. } => LinkTarget::Relative,
@@ -140,6 +220,34 @@ pub fn install_local_skill(
 		created_master: wrote_master,
 		created_referrer_dirs,
 	} = materialized;
+
+	for &agent in req.target_agents {
+		let link_need = crate::skills::linker::agent_link_need(
+			agent.descriptor(),
+			resource_scope,
+			project_root,
+		);
+		let agent_res: Vec<_> = agent_results
+			.iter()
+			.filter(|r| r.agent == agent)
+			.cloned()
+			.collect();
+		if let Err(err) =
+			crate::manager::ConfigManager::ensure_single_agent_installed(
+				&agent_res,
+				&link_need,
+				effective_name,
+			) {
+			crate::skills::rename::rollback_materialized_install(
+				effective_name,
+				resource_scope,
+				project_root,
+				&created_referrer_dirs,
+				wrote_master,
+			);
+			return Err(err);
+		}
+	}
 
 	if wrote_master && effective_name != source_name {
 		let canonical_dir = adoption.canonical.as_ref().ok_or_else(|| {
@@ -162,7 +270,6 @@ pub fn install_local_skill(
 		}
 	}
 
-	let is_adoption = adoption.existing_owner.is_none() && !wrote_master;
 	let covered_any = agent_results.iter().any(|r| r.error.is_none());
 	let wrote_lock = wrote_master || (is_adoption && covered_any);
 
@@ -242,7 +349,12 @@ pub fn install_local_skill(
 		}
 	};
 
-	let already_installed = !wrote_master && created_referrer_dirs.is_empty();
+	let all_targets_linked = !req.target_agents.is_empty()
+		&& agent_results
+			.iter()
+			.all(|r| r.installed && r.error.is_none());
+	let already_installed =
+		!wrote_master && created_referrer_dirs.is_empty() && all_targets_linked;
 
 	Ok(LocalSkillInstallReport {
 		skill: installed_skill,

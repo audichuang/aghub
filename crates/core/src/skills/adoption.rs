@@ -188,6 +188,7 @@ pub fn adoption_guard(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	source: &skill::InstallLockSource,
+	is_already_installed: bool,
 ) -> Result<AdoptionCheck, ConfigError> {
 	let safe_name = sanitize_name(name);
 	let installed_hash = skill::compute_skill_folder_hash(source_root)
@@ -203,10 +204,11 @@ pub fn adoption_guard(
 		.map(|skills_dir| skills_dir.join(&safe_name));
 	let existing_owner = skill_lock_source(name, scope, project_root);
 	if let Some(existing_owner) = existing_owner.as_ref() {
-		let is_regranting_canonical = canonical
-			.as_ref()
-			.map(|c| c.as_path() == source_root)
-			.unwrap_or(false);
+		let is_regranting_canonical = source.source_type == "local"
+			&& canonical
+				.as_ref()
+				.map(|c| c.as_path() == source_root)
+				.unwrap_or(false);
 		if !is_regranting_canonical
 			&& !same_source_owner(existing_owner, source)
 		{
@@ -230,7 +232,9 @@ pub fn adoption_guard(
 		}
 		if canonical.exists() {
 			ensure_link_free_master(name, canonical)?;
-			if skill::parser::parse(canonical).is_err() {
+			if source.source_type == "local"
+				&& skill::parser::parse(canonical).is_err()
+			{
 				return Err(ConfigError::InvalidConfig(format!(
 					"the master at '{}' does not parse",
 					canonical.display()
@@ -238,7 +242,7 @@ pub fn adoption_guard(
 			}
 			let is_adoption = existing_owner.is_none();
 			let is_fetched = source.source_type != "local";
-			if is_adoption || is_fetched {
+			if is_fetched || (is_adoption && !is_already_installed) {
 				let master_hash = hash_master(name, canonical)?;
 				if master_hash != installed_hash {
 					let kind = if is_fetched { "fetched " } else { "" };

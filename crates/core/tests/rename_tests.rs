@@ -17,8 +17,8 @@ use std::sync::Mutex;
 
 use aghub_core::skills::rename::{
 	accept_rename, FetchedRename, RenameError, RenameLockSource, RenameRequest,
-	RenameScope,
 };
+use aghub_core::WriteScope;
 
 fn env_lock() -> &'static Mutex<()> {
 	static LOCK: Mutex<()> = Mutex::new(());
@@ -46,7 +46,7 @@ fn with_isolated_env<T>(f: impl FnOnce(&Path) -> T) -> T {
 fn source_for(skill_path: &str) -> RenameLockSource {
 	let mut source = aghub_core::skills::rename::rename_source_from_lock(
 		"old-skill",
-		&RenameScope::Global,
+		&WriteScope::Global,
 	)
 	.expect("seed_global_lock must run before source_for");
 	source.skill_path = skill_path.to_string();
@@ -152,7 +152,7 @@ fn accept_rename_refuses_when_the_old_entry_was_repointed_during_the_fetch() {
 			RenameRequest {
 				old_name: "old-skill",
 				new_name: "new-skill",
-				scope: RenameScope::Global,
+				scope: WriteScope::Global,
 			},
 			FetchedRename {
 				repo_root: repo.path(),
@@ -196,7 +196,7 @@ fn accept_rename_installs_new_and_removes_old() {
 			RenameRequest {
 				old_name: "old-skill",
 				new_name: "new-skill",
-				scope: RenameScope::Global,
+				scope: WriteScope::Global,
 			},
 			FetchedRename {
 				repo_root: repo.path(),
@@ -242,7 +242,7 @@ fn accept_rename_refuses_a_skill_that_is_not_lock_managed() {
 			RenameRequest {
 				old_name: "old-skill",
 				new_name: "new-skill",
-				scope: RenameScope::Global,
+				scope: WriteScope::Global,
 			},
 			FetchedRename {
 				repo_root: repo.path(),
@@ -277,7 +277,7 @@ fn accept_rename_rejects_name_mismatch_without_mutating() {
 			RenameRequest {
 				old_name: "old-skill",
 				new_name: "new-skill",
-				scope: RenameScope::Global,
+				scope: WriteScope::Global,
 			},
 			FetchedRename {
 				repo_root: repo.path(),
@@ -329,7 +329,7 @@ fn accept_rename_rolls_back_when_old_dir_cannot_be_removed() {
 			RenameRequest {
 				old_name: "old-skill",
 				new_name: "new-skill",
-				scope: RenameScope::Global,
+				scope: WriteScope::Global,
 			},
 			FetchedRename {
 				repo_root: repo.path(),
@@ -396,7 +396,7 @@ fn accept_rename_removes_the_old_master_from_the_store() {
 			RenameRequest {
 				old_name: "old-skill",
 				new_name: "new-skill",
-				scope: RenameScope::Global,
+				scope: WriteScope::Global,
 			},
 			FetchedRename {
 				repo_root: repo.path(),
@@ -464,7 +464,7 @@ fn accept_rename_rolls_back_and_restores_the_old_master_when_it_cannot_be_remove
 			RenameRequest {
 				old_name: "old-skill",
 				new_name: "new-skill",
-				scope: RenameScope::Global,
+				scope: WriteScope::Global,
 			},
 			FetchedRename {
 				repo_root: repo.path(),
@@ -620,7 +620,7 @@ fn accept_rename_rolls_back_when_one_of_two_agents_fails_to_install() {
 			RenameRequest {
 				old_name: "old-skill",
 				new_name: "new-skill",
-				scope: RenameScope::Global,
+				scope: WriteScope::Global,
 			},
 			FetchedRename {
 				repo_root: repo.path(),

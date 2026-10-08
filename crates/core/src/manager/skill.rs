@@ -1154,7 +1154,7 @@ impl ConfigManager {
 	/// A `NeedsLink` agent must link cleanly (a foreign occupant or hard link
 	/// failure is an error). `Unsupported` is rejected earlier in the
 	/// materializer's preflight, so its arm here is defensive only.
-	fn ensure_single_agent_installed(
+	pub(crate) fn ensure_single_agent_installed(
 		results: &[crate::skills::install_fetched::AgentInstallResult],
 		link_need: &crate::skills::linker::LinkNeed,
 		skill_name: &str,
