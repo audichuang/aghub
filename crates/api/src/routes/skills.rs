@@ -254,6 +254,7 @@ pub async fn delete_skill_by_path(
 	let dry_run = !confirm;
 
 	in_mutation_pool(move || {
+		let is_plugin_refusal = plugin_owner.is_some();
 		let request = aghub_core::skills::removal::SkillRemovalRequest {
 			target: aghub_core::skills::removal::SkillRemovalTarget::ByPath(
 				raw_path,
@@ -268,7 +269,16 @@ pub async fn delete_skill_by_path(
 			plugin_owner,
 		};
 		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
-			.map_err(ApiError::from)?;
+			.map_err(|err| match err {
+				ConfigError::InvalidConfig(ref msg) if is_plugin_refusal => {
+					ApiError::new(
+						Status::BadRequest,
+						msg.clone(),
+						"MANAGED_RESOURCE",
+					)
+				}
+				other => ApiError::from(other),
+			})?;
 
 		let single = resp.to_single_view(dry_run).map_err(ApiError::from)?;
 
@@ -3249,48 +3259,148 @@ mod tests {
 			assert_eq!(absent.code, None);
 
 			// 2. Parity on refused shared-slot preview: both by-path and by-name
-			// answer outcome Kept and code UNSUPPORTED_OPERATION.
-			let by_path_preview = block_on(delete_skill_by_path(
-				TrustedLocalOrigin,
-				Json(DeleteSkillByPathRequest {
-					source_path: slot.join("SKILL.md").display().to_string(),
-					agents: vec!["cursor".to_string()],
-					scope: "project".to_string(),
-					project_root: Some(proj.display().to_string()),
-					all_agents: None,
-					confirm: None,
-				}),
-			))
-			.ok()
-			.expect("by-path preview returns ok")
-			.into_inner();
+			// answer outcome Kept and code UNSUPPORTED_OPERATION, and report
+			// identical managed/unmanaged holders when an unmanaged holder exists.
+			with_pinned_data_dir(|data| {
+				let mut disabled = std::collections::BTreeSet::new();
+				disabled.insert("opencode".to_string());
+				aghub_core::agent_settings::write_disabled_agents_in(
+					data, &disabled,
+				)
+				.unwrap();
 
-			let by_name_preview = block_on(delete_skill(
-				TrustedLocalOrigin,
-				AgentParam(AgentType::Cursor),
-				"shared",
-				DeleteSkillParams {
-					scope: Some("project".to_string()),
-					project_root: Some(proj.display().to_string()),
-					confirm: None,
-					all_agents: None,
-					agents: Some("cursor".to_string()),
-				},
-			))
-			.ok()
-			.expect("by-name preview returns ok")
-			.into_inner();
+				let by_path_preview = block_on(delete_skill_by_path(
+					TrustedLocalOrigin,
+					Json(DeleteSkillByPathRequest {
+						source_path: slot
+							.join("SKILL.md")
+							.display()
+							.to_string(),
+						agents: vec!["cursor".to_string()],
+						scope: "project".to_string(),
+						project_root: Some(proj.display().to_string()),
+						all_agents: None,
+						confirm: None,
+					}),
+				))
+				.ok()
+				.expect("by-path preview returns ok")
+				.into_inner();
 
-			assert_eq!(
-				by_name_preview.outcome,
-				crate::dto::skill::RemovalOutcomeKind::Kept
+				let by_name_preview = block_on(delete_skill(
+					TrustedLocalOrigin,
+					AgentParam(AgentType::Cursor),
+					"shared",
+					DeleteSkillParams {
+						scope: Some("project".to_string()),
+						project_root: Some(proj.display().to_string()),
+						confirm: None,
+						all_agents: None,
+						agents: Some("cursor".to_string()),
+					},
+				))
+				.ok()
+				.expect("by-name preview returns ok")
+				.into_inner();
+
+				assert_eq!(
+					by_name_preview.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Kept
+				);
+				assert_eq!(by_name_preview.outcome, by_path_preview.outcome);
+				assert_eq!(
+					by_name_preview.code.as_deref(),
+					Some("UNSUPPORTED_OPERATION")
+				);
+				assert_eq!(by_name_preview.code, by_path_preview.code);
+				assert_eq!(
+					by_name_preview.still_read_by_unmanaged,
+					Some(vec!["opencode".to_string()])
+				);
+				assert_eq!(
+					by_name_preview.still_read_by_unmanaged,
+					by_path_preview.still_read_by_unmanaged
+				);
+				assert_eq!(
+					by_name_preview.still_read_by_managed,
+					by_path_preview.still_read_by_managed
+				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_by_path_plugin_refusal_is_managed_resource() {
+		with_isolated_env(|home, _state| {
+			use std::os::unix::fs::PermissionsExt;
+			let bin_dir = home.join(".local/bin");
+			std::fs::create_dir_all(&bin_dir).unwrap();
+			let mock_claude = bin_dir.join("claude");
+
+			let skill_dir = home.join(".claude/skills/my-plugin-skill");
+			std::fs::create_dir_all(&skill_dir).unwrap();
+			std::fs::write(
+				skill_dir.join("SKILL.md"),
+				"---\nname: my-plugin-skill\ndescription: plugin skill\n---\n",
+			)
+			.unwrap();
+
+			let claude_dir = home.join(".claude");
+			std::fs::create_dir_all(&claude_dir).unwrap();
+			std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
+
+			let script = format!(
+				"#!/bin/sh\n\
+				if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"list\" ]; then\n\
+					echo '[{{\"id\":\"test-plugin@official\",\"version\":\"1.0.0\",\"scope\":\"user\",\"enabled\":true,\"installPath\":\"{}\",\"installedAt\":\"2026-01-01\",\"lastUpdated\":\"2026-01-01\"}}]'\n\
+					exit 0\n\
+				fi\n\
+				exit 0\n",
+				skill_dir.display()
 			);
-			assert_eq!(by_name_preview.outcome, by_path_preview.outcome);
-			assert_eq!(
-				by_name_preview.code.as_deref(),
-				Some("UNSUPPORTED_OPERATION")
-			);
-			assert_eq!(by_name_preview.code, by_path_preview.code);
+			std::fs::write(&mock_claude, script).unwrap();
+			let mut perms =
+				std::fs::metadata(&mock_claude).unwrap().permissions();
+			perms.set_mode(0o755);
+			std::fs::set_permissions(&mock_claude, perms).unwrap();
+
+			// Prepend bin_dir to PATH for ClaudeCli discovery
+			let old_path = std::env::var_os("PATH");
+			let new_path = match &old_path {
+				Some(p) => {
+					let mut v = bin_dir.clone().into_os_string();
+					v.push(":");
+					v.push(p);
+					v
+				}
+				None => bin_dir.into_os_string(),
+			};
+			std::env::set_var("PATH", &new_path);
+			struct PathRestore(Option<std::ffi::OsString>);
+			impl Drop for PathRestore {
+				fn drop(&mut self) {
+					match self.0.take() {
+						Some(p) => std::env::set_var("PATH", p),
+						None => std::env::remove_var("PATH"),
+					}
+				}
+			}
+			let _restore = PathRestore(old_path);
+
+			// By-path delete on plugin-owned skill refuses with BadRequest + MANAGED_RESOURCE,
+			// matching by-name's ensure_skill_not_plugin_managed behavior.
+			let by_path_err = by_path_refused(DeleteSkillByPathRequest {
+				source_path: skill_dir.join("SKILL.md").display().to_string(),
+				agents: vec!["claude".to_string()],
+				scope: "global".to_string(),
+				project_root: None,
+				all_agents: None,
+				confirm: Some(true),
+			});
+
+			assert_eq!(by_path_err.status, Status::BadRequest);
+			assert_eq!(by_path_err.body.code, "MANAGED_RESOURCE");
 		});
 	}
 

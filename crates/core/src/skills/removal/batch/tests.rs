@@ -492,6 +492,25 @@ fn test_disabled_agent_removal_behavior() {
 		"Master must survive while disabled holder is the only remaining reader"
 	);
 
+	let single_disabled = res_disabled
+		.to_single_view(false)
+		.expect("to_single_view on disabled holders");
+	assert_eq!(
+		single_disabled.removal_view.outcome,
+		crate::dto::RemovalKind::Kept,
+		"projected outcome must be Kept when only disabled holders remain"
+	);
+	assert!(
+		single_disabled.removal_view.success,
+		"Kept outcome is reported as success: true"
+	);
+	let (_, _, unmanaged) = single_disabled.holders.to_options();
+	assert_eq!(
+		unmanaged,
+		Some(vec!["opencode".to_string()]),
+		"disabled holder must be reported in unmanaged holders"
+	);
+
 	let req_named = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByName("notebooklm".to_string()),
 		scope: ResourceScope::ProjectOnly,
@@ -1531,6 +1550,14 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 	);
 	assert!(res_path.rows[0].verdict.shared_master_kept());
 	assert!(slot.join("SKILL.md").exists(), "dry run must not delete");
+	assert_eq!(
+		res_name.keepers, res_path.keepers,
+		"by-path must report the same keepers as by-name"
+	);
+	assert!(
+		!res_path.keepers.is_empty(),
+		"by-path keepers must not be empty on shared slot refusal"
+	);
 
 	// Both must fail on commit with unsupported operation
 	let mut commit_name = req_name.clone();
@@ -1623,6 +1650,10 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 		res_path_ext_commit.rows[0].verdict,
 		Verdict::Kept { .. }
 	));
+	assert_eq!(
+		res_name_ext_commit.keepers, res_path_ext_commit.keepers,
+		"by-path commit must report the same keepers as by-name"
+	);
 	assert!(copy.join("SKILL.md").exists(), "copy dir must survive");
 }
 
@@ -2016,5 +2047,67 @@ fn test_lock_only_skill_removal_prune_preview_and_commit_parity() {
 	assert!(
 		!lock_bytes_after.contains("orphan-skill"),
 		"commit must prune orphan-skill from the lock file"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_by_name_multi_agent_removed_and_kept_folds_to_partial() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+
+	let name = "shared-skill";
+	setup_master_and_referrers(&root, name, &["claude"]);
+
+	let slot = root.join(".agents/skills").join(name);
+	fs::create_dir_all(slot.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(root.join(".aghub").join(name), &slot).unwrap();
+
+	let claude_referrer = root.join(".claude/skills").join(name);
+	assert!(claude_referrer.exists());
+	assert!(slot.exists());
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName(name.to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(root.clone()),
+		agents: vec![AgentType::Claude, AgentType::Cursor],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_owner: None,
+	};
+
+	let res =
+		remove_skill_batch(&req).expect("commit batch removal should succeed");
+	let single = res
+		.to_single_view(false)
+		.expect("to_single_view must project the mixed outcome");
+
+	assert_eq!(
+		single.removal_view.outcome,
+		crate::dto::RemovalKind::Partial,
+		"mixed Removed and Kept must fold to Partial outcome"
+	);
+	assert!(
+		!single.removal_view.success,
+		"partial outcome must report success: false"
+	);
+
+	assert!(
+		!claude_referrer.exists(),
+		"Claude's private Referrer must be deleted"
+	);
+	assert!(
+		slot.exists(),
+		"Shared Referrer must survive for unnamed reader OpenCode"
+	);
+	assert!(
+		root.join(".aghub").join(name).exists(),
+		"Master must survive while shared Referrer exists"
 	);
 }

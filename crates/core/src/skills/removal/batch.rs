@@ -413,6 +413,23 @@ impl SkillRemovalResponse {
 		&self,
 		dry_run: bool,
 	) -> Result<SingleSkillRemovalView> {
+		let has_removed = self
+			.rows
+			.iter()
+			.any(|r| r.outcome == crate::dto::RemovalKind::Removed);
+		let has_kept = self
+			.rows
+			.iter()
+			.any(|r| r.outcome == crate::dto::RemovalKind::Kept);
+		let has_refused_or_error = self
+			.rows
+			.iter()
+			.any(|r| r.typed_error.is_some() || r.error.is_some());
+		let has_partial = self
+			.rows
+			.iter()
+			.any(|r| r.outcome == crate::dto::RemovalKind::Partial);
+
 		for row in &self.rows {
 			let is_absent_noop =
 				matches!(row.verdict, Verdict::Absent | Verdict::LockOnly)
@@ -423,11 +440,12 @@ impl SkillRemovalResponse {
 			let is_refused_preview =
 				dry_run && matches!(row.verdict, Verdict::Refused { .. });
 			let is_partial = matches!(row.verdict, Verdict::Partial);
-			let is_fatal_error = (row.typed_error.is_some()
-				|| row.error.is_some())
-				&& !is_absent_noop
-				&& !is_refused_preview
-				&& !is_partial;
+			let is_partial_mixed = !dry_run && has_removed;
+			let is_fatal_error =
+				(row.typed_error.is_some() || row.error.is_some())
+					&& !is_absent_noop
+					&& !is_refused_preview
+					&& !is_partial && !is_partial_mixed;
 			if is_fatal_error {
 				if let Some(ref err) = row.typed_error {
 					return Err(clone_config_error(err));
@@ -467,17 +485,13 @@ impl SkillRemovalResponse {
 		};
 
 		// Outcome precedence across rows: Partial > Removed > Preview > Kept > Absent.
-		let outcome = if self
-			.rows
-			.iter()
-			.any(|r| r.outcome == crate::dto::RemovalKind::Partial)
+		// When not dry-run, if rows contain both Removed and Kept (or a refused/error
+		// row alongside a Removed row), fold into outcome=Partial, success=false.
+		let outcome = if has_partial
+			|| (!dry_run && has_removed && (has_kept || has_refused_or_error))
 		{
 			crate::dto::RemovalKind::Partial
-		} else if self
-			.rows
-			.iter()
-			.any(|r| r.outcome == crate::dto::RemovalKind::Removed)
-		{
+		} else if has_removed {
 			crate::dto::RemovalKind::Removed
 		} else if self
 			.rows
@@ -485,10 +499,7 @@ impl SkillRemovalResponse {
 			.any(|r| r.outcome == crate::dto::RemovalKind::Preview)
 		{
 			crate::dto::RemovalKind::Preview
-		} else if self
-			.rows
-			.iter()
-			.any(|r| r.outcome == crate::dto::RemovalKind::Kept)
+		} else if has_kept || (self.rows.is_empty() && !self.keepers.is_empty())
 		{
 			crate::dto::RemovalKind::Kept
 		} else {
@@ -1064,7 +1075,7 @@ fn remove_skill_by_path(
 		)?
 	};
 
-	let rows = target_agents
+	let rows: Vec<SkillRemovalRow> = target_agents
 		.into_iter()
 		.map(|agent| {
 			let mut row =
@@ -1076,11 +1087,34 @@ fn remove_skill_by_path(
 		})
 		.collect();
 
+	let (keepers, unreadable) = if request.dry_run {
+		let mut planned_deletions: Vec<PathBuf> = Vec::new();
+		for row in &rows {
+			for p in &row.paths {
+				if !planned_deletions.contains(p) {
+					planned_deletions.push(p.clone());
+				}
+			}
+		}
+		find_skill_holders_crediting(
+			&skill_name,
+			request.scope,
+			request.project_root.as_deref(),
+			&planned_deletions,
+		)
+	} else {
+		find_skill_holders(
+			&skill_name,
+			request.scope,
+			request.project_root.as_deref(),
+		)
+	};
+
 	Ok(SkillRemovalResponse {
 		rows,
 		prune: outcome.prune,
-		keepers: Vec::new(),
-		unreadable: Vec::new(),
+		keepers,
+		unreadable,
 		master_reclaimed: false,
 		would_reclaim_master: false,
 	})
