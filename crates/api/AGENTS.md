@@ -115,7 +115,7 @@ line** — don't reword it). Pass `--port N` to pin one.
   because CLI check presents lock contents as its answer and probes first).
 - Codes that legitimately remain API-only (request-shape/policy checks owned by the HTTP surface, not outcomes of a Resync):
     - `SKILL_SOURCE_MISMATCH`: the API session URL does not match what the skill is locked to; request validation owned by the HTTP sync session guard.
-    - `MISSING_PARAM`: `project_root` is required when `scope` is project; request-shape validation owned by the HTTP boundary.
+    - `PROJECT_ROOT_REQUIRED`: `project_root` is required when `scope` is project; request-shape validation owned by the HTTP boundary.
     - `INVALID_SCOPE`: scope must be global or project; request-shape validation owned by the HTTP boundary.
     - `confirm=true` requirement (`CONFIRMATION_REQUIRED`): safety gate requiring explicit confirmation to overwrite installed skills or accept renames; policy check owned by the HTTP surface.
     - batch-names cap (`INVALID_PARAM`): limit of 256 names per batch request; payload policy check owned by the HTTP boundary.

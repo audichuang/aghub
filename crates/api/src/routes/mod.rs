@@ -94,11 +94,20 @@ pub(crate) fn requested_delete_agents(
 	agents: Option<&str>,
 ) -> Result<Vec<aghub_core::models::AgentType>, ApiError> {
 	let mut requested = vec![agent];
-	if let Some(agents_str) = agents {
-		for parsed in crate::extractors::resolve_agent_list(agents_str)? {
-			if !requested.contains(&parsed) {
-				requested.push(parsed);
-			}
+	for id in agents
+		.unwrap_or_default()
+		.split(',')
+		.map(str::trim)
+		.filter(|id| !id.is_empty())
+	{
+		let parsed =
+			id.parse::<aghub_core::models::AgentType>().map_err(|_| {
+				ApiError::bad_request(format!(
+					"unknown agent in `agents`: {id}"
+				))
+			})?;
+		if !requested.contains(&parsed) {
+			requested.push(parsed);
 		}
 	}
 	Ok(requested)

@@ -215,6 +215,9 @@ pub async fn delete_skill_by_path(
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let req = body.into_inner();
 
+	let requested_agents =
+		crate::extractors::resolve_agent_strings(&req.agents)?;
+
 	let write_scope = crate::extractors::resolve_write_scope(
 		&req.scope,
 		req.project_root.as_deref(),
@@ -222,9 +225,6 @@ pub async fn delete_skill_by_path(
 	let resource_scope = write_scope.resource_scope();
 	let project_root =
 		write_scope.project_root().map(std::path::Path::to_path_buf);
-
-	let requested_agents =
-		crate::extractors::resolve_agent_strings(&req.agents)?;
 
 	let raw_path = std::path::PathBuf::from(&req.source_path);
 	let expanded_path = expand_tilde_path(&req.source_path);
@@ -388,18 +388,6 @@ fn resolve_git_install_target_dir(
 ) -> Option<std::path::PathBuf> {
 	create_adapter(agent_type)
 		.target_skills_dir(project_root.map(|p| p.as_path()), resource_scope)
-}
-
-fn parse_install_scope(scope: &str) -> Result<ResourceScope, ApiError> {
-	match scope {
-		"global" => Ok(ResourceScope::GlobalOnly),
-		"project" => Ok(ResourceScope::ProjectOnly),
-		other => Err(ApiError::new(
-			Status::BadRequest,
-			format!("Invalid scope '{other}'. Use 'global' or 'project'"),
-			"INVALID_PARAM",
-		)),
-	}
 }
 
 fn map_remote_source_error(error: aghub_git::SourceError) -> ApiError {
@@ -1199,19 +1187,13 @@ pub(crate) async fn install_skill_with_repo(
 	repo: std::sync::Arc<skill_update::SkillRepository>,
 	token: Option<String>,
 ) -> ApiResult<InstallSkillResponse> {
-	let resource_scope = parse_install_scope(&req.scope)?;
-
-	let project_root = req
-		.project_path
-		.as_ref()
-		.map(|r| crate::extractors::absolutize_root(r));
-	if resource_scope == ResourceScope::ProjectOnly && project_root.is_none() {
-		return Err(ApiError::new(
-			Status::BadRequest,
-			"project_path is required for project skill installs",
-			"INVALID_PARAM",
-		));
-	}
+	let write_scope = crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_path.as_deref(),
+	)?;
+	let resource_scope = write_scope.resource_scope();
+	let project_root =
+		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	// Raw agent ids are part of the predictable target preflight. If any id is
 	// unknown, attribute the rejection to every requested agent in request order
@@ -2053,12 +2035,13 @@ pub async fn git_install_skills(
 		.map_err(map_remote_source_error)?;
 	let source = install_lock_source_from_resolved(&resolved, ref_name);
 
-	let resource_scope = parse_install_scope(&req.scope)?;
-
-	let project_root: Option<std::path::PathBuf> = req
-		.project_root
-		.as_ref()
-		.map(|r| crate::extractors::absolutize_root(r));
+	let write_scope = crate::extractors::resolve_write_scope(
+		&req.scope,
+		req.project_root.as_deref(),
+	)?;
+	let resource_scope = write_scope.resource_scope();
+	let project_root =
+		write_scope.project_root().map(std::path::Path::to_path_buf);
 
 	// Reject absolute / `..` paths BEFORE any fetch or install write.
 	// Security: out-of-tree paths must fail with 400 without I/O.

@@ -29,16 +29,15 @@ impl ResolvedScope {
 	}
 
 	pub fn to_write_scope(&self) -> Result<WriteScope, ApiError> {
+		crate::routes::require_writable_scope(self)?;
 		match self {
 			ResolvedScope::Global => Ok(WriteScope::Global),
 			ResolvedScope::Project { root } => {
 				Ok(WriteScope::project(root.clone()))
 			}
-			ResolvedScope::All { .. } => Err(ApiError::new(
-				Status::MethodNotAllowed,
-				"scope 'all' is read-only; use 'global' or 'project' for write operations",
-				"READ_ONLY_SCOPE",
-			)),
+			ResolvedScope::All { .. } => {
+				unreachable!("guarded by require_writable_scope")
+			}
 		}
 	}
 }
@@ -108,20 +107,28 @@ pub fn resolve_agent_list(s: &str) -> Result<Vec<AgentType>, ApiError> {
 
 /// Parse a slice of agent ID strings into [`AgentType`]s.
 ///
-/// Delegates to [`resolve_agent_list`] so empty tokens and duplicate rules stay
-/// identical to CLI `-a`.
+/// Rejects any element containing a comma, applies the same token rules as
+/// CLI `-a`, and deduplicates preserving order.
 pub fn resolve_agent_strings<S: AsRef<str>>(
 	agents: &[S],
 ) -> Result<Vec<AgentType>, ApiError> {
-	if agents.is_empty() {
-		return Ok(Vec::new());
+	let mut out = Vec::new();
+	for raw in agents {
+		let s = raw.as_ref();
+		if s.contains(',') {
+			return Err(ApiError::new(
+				Status::BadRequest,
+				format!("invalid agent '{s}': comma not allowed"),
+				"INVALID_PARAM",
+			));
+		}
+		for agent in resolve_agent_list(s)? {
+			if !out.contains(&agent) {
+				out.push(agent);
+			}
+		}
 	}
-	let joined = agents
-		.iter()
-		.map(|s| s.as_ref())
-		.collect::<Vec<_>>()
-		.join(",");
-	resolve_agent_list(&joined)
+	Ok(out)
 }
 
 impl ScopeParams {
@@ -377,6 +384,20 @@ mod tests {
 	#[test]
 	fn resolve_agent_list_duplicate_agents_deduplicated() {
 		let agents = unwrap_ok(resolve_agent_list("claude,claude,grok"));
+		assert_eq!(agents, vec![AgentType::Claude, AgentType::Grok]);
+	}
+
+	#[test]
+	fn resolve_agent_strings_rejects_comma_in_element() {
+		let err = unwrap_err(resolve_agent_strings(&["claude,grok"]));
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_PARAM");
+	}
+
+	#[test]
+	fn resolve_agent_strings_deduplicates_and_preserves_order() {
+		let agents =
+			unwrap_ok(resolve_agent_strings(&["claude", "claude", "grok"]));
 		assert_eq!(agents, vec![AgentType::Claude, AgentType::Grok]);
 	}
 }
