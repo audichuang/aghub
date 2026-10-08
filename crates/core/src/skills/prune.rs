@@ -21,18 +21,10 @@
 //! per-scope dirs from the agent descriptors.
 
 use crate::models::ResourceScope;
+use crate::WriteScope;
 use skill::ScanError;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-
-/// Which lock + disk set a prune operates on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PruneScope {
-	/// Global lock (`.skill-lock.json`) reconciled against all agents' global dirs.
-	Global,
-	/// Project lock (`skills-lock.json`) reconciled against the project's dirs only.
-	Project,
-}
 
 /// Why a prune did not run (the lock is always left unchanged on error).
 #[derive(Debug, thiserror::Error)]
@@ -48,9 +40,6 @@ pub enum PruneError {
 	/// message cannot claim a write that never happened.
 	#[error("{0}")]
 	Locked(String),
-	/// A project-scope prune was requested without a project root.
-	#[error("project prune requires a project root")]
-	MissingProjectRoot,
 	/// The lock itself could not be read. Distinct from [`PruneError::Scan`],
 	/// which would blame the disk scan for a merely unparseable file.
 	#[error(
@@ -64,14 +53,12 @@ pub enum PruneError {
 /// `disk_names`. Returns the pruned keys. `disk_names` MUST come from a provably
 /// successful scan (see [`prune_lock_from_dirs`]).
 pub fn prune_lock(
-	scope: PruneScope,
+	scope: &WriteScope,
 	disk_names: &BTreeSet<String>,
-	project_root: Option<&Path>,
 ) -> Result<Vec<String>, PruneError> {
 	match scope {
-		PruneScope::Global => Ok(skill::retain_locked_skills(disk_names)?),
-		PruneScope::Project => {
-			let root = project_root.ok_or(PruneError::MissingProjectRoot)?;
+		WriteScope::Global => Ok(skill::retain_locked_skills(disk_names)?),
+		WriteScope::Project { root } => {
 			Ok(skill::retain_local_locked_skills(disk_names, Some(root))?)
 		}
 	}
@@ -109,46 +96,35 @@ where
 }
 
 /// Scan `dirs` with `scan`, then prune. Any scan error aborts before the lock is
-/// touched. A `Project` scope requires `project_root`.
+/// touched.
 pub fn prune_lock_from_dirs<F>(
-	scope: PruneScope,
+	scope: &WriteScope,
 	dirs: &[PathBuf],
-	project_root: Option<&Path>,
 	scan: F,
 ) -> Result<Vec<String>, PruneError>
 where
 	F: Fn(&Path) -> Result<Vec<PathBuf>, ScanError>,
 {
-	if scope == PruneScope::Project && project_root.is_none() {
-		return Err(PruneError::MissingProjectRoot);
-	}
 	// Hold the interprocess mutation lock across scan AND rewrite (window 3 in
 	// the module docs): otherwise a skill another process installs in between is
 	// pruned from the lock by a disk set that predates it.
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"prune lock",
-		match scope {
-			PruneScope::Global => ResourceScope::GlobalOnly,
-			PruneScope::Project => ResourceScope::ProjectOnly,
-		},
-		project_root,
+		scope.resource_scope(),
+		scope.project_root(),
 	)
 	.map_err(|e| PruneError::Locked(e.to_string()))?;
 	let disk = collect_disk_dir_names(dirs, scan)?;
-	prune_lock(scope, &disk, project_root)
+	prune_lock(scope, &disk)
 }
 
 /// Production entry point: derive the per-scope skill dirs from the agent
 /// descriptors and prune against them with the real scanner.
 pub fn prune_lock_scanning(
-	scope: PruneScope,
-	project_root: Option<&Path>,
+	scope: &WriteScope,
 ) -> Result<Vec<String>, PruneError> {
-	if scope == PruneScope::Project && project_root.is_none() {
-		return Err(PruneError::MissingProjectRoot);
-	}
-	let dirs = scope_skill_dirs(scope, project_root);
-	prune_lock_from_dirs(scope, &dirs, project_root, top_level_skill_dirs)
+	let dirs = scope_skill_dirs(scope);
+	prune_lock_from_dirs(scope, &dirs, top_level_skill_dirs)
 }
 
 /// Map a single prune result into a [`PruneStatus`]: success → `Pruned(keys)`,
@@ -218,19 +194,20 @@ pub fn prune_lock_for_scope(
 	use crate::skills::removal::PruneStatus;
 	match scope {
 		ResourceScope::GlobalOnly => {
-			prune_status(prune_lock_scanning(PruneScope::Global, None))
+			prune_status(prune_lock_scanning(&WriteScope::Global))
 		}
 		ResourceScope::ProjectOnly => match project_root {
 			Some(r) => {
-				prune_status(prune_lock_scanning(PruneScope::Project, Some(r)))
+				prune_status(prune_lock_scanning(&WriteScope::project(r)))
 			}
 			None => PruneStatus::NotRun,
 		},
 		ResourceScope::Both => {
-			let global = prune_lock_scanning(PruneScope::Global, None);
+			let global = prune_lock_scanning(&WriteScope::Global);
 			// Lazy: runs ONLY if `global` succeeded.
 			let project = project_root.map(|r| {
-				move || prune_lock_scanning(PruneScope::Project, Some(r))
+				let target = WriteScope::project(r);
+				move || prune_lock_scanning(&target)
 			});
 			combine_prune(global, project)
 		}
@@ -282,10 +259,10 @@ pub fn preview_prune_for_removal(
 
 	// Mirrors `prune_lock_for_scope`'s mapping exactly (incl. `None` for the
 	// Global half of `Both`), or it previews different dirs than it commits.
-	let preview_one = |prune_scope: PruneScope, root: Option<&Path>| {
+	let preview_one = |write_scope: &WriteScope| {
 		// Fail-CLOSED on the lock too: unreadable → `NotRun`, not "nothing".
-		let keys = locked_keys_checked(prune_scope, root)?;
-		let dirs = scope_skill_dirs(prune_scope, root);
+		let keys = locked_keys_checked(write_scope)?;
+		let dirs = scope_skill_dirs(write_scope);
 		let disk = collect_disk_dir_names(&dirs, &scan).ok()?;
 		Some(
 			keys.into_iter()
@@ -295,16 +272,16 @@ pub fn preview_prune_for_removal(
 	};
 
 	let keys = match scope {
-		ResourceScope::GlobalOnly => preview_one(PruneScope::Global, None),
+		ResourceScope::GlobalOnly => preview_one(&WriteScope::Global),
 		ResourceScope::ProjectOnly => match project_root {
-			Some(root) => preview_one(PruneScope::Project, Some(root)),
+			Some(root) => preview_one(&WriteScope::project(root)),
 			None => None,
 		},
 		ResourceScope::Both => {
-			let global = preview_one(PruneScope::Global, None);
+			let global = preview_one(&WriteScope::Global);
 			match (global, project_root) {
 				(Some(mut g), Some(root)) => {
-					match preview_one(PruneScope::Project, Some(root)) {
+					match preview_one(&WriteScope::project(root)) {
 						Some(p) => {
 							g.extend(p);
 							Some(g)
@@ -343,24 +320,20 @@ fn normalize_ancestors(path: &Path) -> PathBuf {
 /// Dry-run: report which lock entries WOULD be pruned, without mutating the lock.
 /// Uses an injectable scanner for deterministic tests.
 pub fn preview_prune_from_dirs<F>(
-	scope: PruneScope,
+	scope: &WriteScope,
 	dirs: &[PathBuf],
-	project_root: Option<&Path>,
 	scan: F,
 ) -> Result<Vec<String>, PruneError>
 where
 	F: Fn(&Path) -> Result<Vec<PathBuf>, ScanError>,
 {
-	if scope == PruneScope::Project && project_root.is_none() {
-		return Err(PruneError::MissingProjectRoot);
-	}
 	let disk = collect_disk_dir_names(dirs, scan)?;
 	// Fail CLOSED on the lock, like the commit this previews (see
 	// `locked_keys_checked`).
-	let keys = locked_keys_checked(scope, project_root).ok_or_else(|| {
+	let keys = locked_keys_checked(scope).ok_or_else(|| {
 		PruneError::UnreadableLock(match scope {
-			PruneScope::Global => "global skill lock".to_string(),
-			PruneScope::Project => "skills-lock.json".to_string(),
+			WriteScope::Global => "global skill lock".to_string(),
+			WriteScope::Project { .. } => "skills-lock.json".to_string(),
 		})
 	})?;
 	Ok(keys
@@ -370,34 +343,25 @@ where
 }
 
 /// Dry-run preview against the real per-scope dirs + scanner.
-pub fn preview_prune(
-	scope: PruneScope,
-	project_root: Option<&Path>,
-) -> Result<Vec<String>, PruneError> {
-	if scope == PruneScope::Project && project_root.is_none() {
-		return Err(PruneError::MissingProjectRoot);
-	}
-	let dirs = scope_skill_dirs(scope, project_root);
-	preview_prune_from_dirs(scope, &dirs, project_root, top_level_skill_dirs)
+pub fn preview_prune(scope: &WriteScope) -> Result<Vec<String>, PruneError> {
+	let dirs = scope_skill_dirs(scope);
+	preview_prune_from_dirs(scope, &dirs, top_level_skill_dirs)
 }
 
 /// Lock keys for a PREVIEW, failing CLOSED: an empty result means "no
 /// orphans", so an unreadable lock must not read as one — the commit's
 /// fail-CLOSED modify seam reports `Failed` for the same file.
 /// See docs/history/core-install-linker.md#prune-preview-trusted-an-unreadable-lock
-fn locked_keys_checked(
-	scope: PruneScope,
-	project_root: Option<&Path>,
-) -> Option<Vec<String>> {
+fn locked_keys_checked(scope: &WriteScope) -> Option<Vec<String>> {
 	match scope {
-		PruneScope::Global => skill::lock::read_global_lock_checked()
+		WriteScope::Global => skill::lock::read_global_lock_checked()
 			.ok()
 			.map(|lock| lock.skills.keys().cloned().collect()),
-		PruneScope::Project => project_root.and_then(|root| {
+		WriteScope::Project { root } => {
 			skill::lock::local::read_local_lock_checked(Some(root))
 				.ok()
 				.map(|lock| lock.skills.keys().cloned().collect())
-		}),
+		}
 	}
 }
 
@@ -407,21 +371,12 @@ fn locked_keys_checked(
 /// The store is not optional: agent dirs hold only Referrers, so without it
 /// every installed skill reads as an orphan and a prune wipes the lock.
 /// See docs/history/core-install-linker.md#prune-scan-missed-the-master-store
-fn scope_skill_dirs(
-	scope: PruneScope,
-	project_root: Option<&Path>,
-) -> Vec<PathBuf> {
-	let resource_scope = match scope {
-		PruneScope::Global => ResourceScope::GlobalOnly,
-		PruneScope::Project => ResourceScope::ProjectOnly,
-	};
+fn scope_skill_dirs(scope: &WriteScope) -> Vec<PathBuf> {
+	let resource_scope = scope.resource_scope();
+	let project_root = scope.project_root();
 	let mut dirs =
 		super::removal::agent_skill_dirs_in_scope(resource_scope, project_root);
-	let store_root = match scope {
-		PruneScope::Global => None,
-		PruneScope::Project => project_root,
-	};
-	if let Some(store) = super::linker::master_store_dir(store_root) {
+	if let Some(store) = super::linker::master_store_dir(project_root) {
 		dirs.push(store);
 	}
 	dirs
@@ -560,11 +515,11 @@ mod tests {
 		// not a Failed that pretends the lock is untouched.
 		let out = combine_prune(
 			Ok(vec!["g1".into()]),
-			Some(|| Err(PruneError::MissingProjectRoot)),
+			Some(|| Err(PruneError::Locked("failed".into()))),
 		);
 		match out {
 			PruneStatus::Failed { reason, pruned } => {
-				assert!(!reason.is_empty());
+				assert_eq!(reason, "failed");
 				assert_eq!(
 					pruned,
 					vec!["g1".to_string()],
@@ -584,7 +539,7 @@ mod tests {
 		// closure was not invoked.
 		let mut project_ran = false;
 		let out = combine_prune(
-			Err(PruneError::MissingProjectRoot),
+			Err(PruneError::Locked("failed".into())),
 			Some(|| {
 				project_ran = true;
 				Ok(vec![])
@@ -597,7 +552,7 @@ mod tests {
 		assert_eq!(
 			out,
 			PruneStatus::Failed {
-				reason: PruneError::MissingProjectRoot.to_string(),
+				reason: "failed".to_string(),
 				pruned: Vec::new(),
 			}
 		);
@@ -606,11 +561,11 @@ mod tests {
 	#[test]
 	fn prune_status_failure_reports_empty_pruned() {
 		// Single-scope failure leaves the lock unchanged: pruned is empty.
-		let out = prune_status(Err(PruneError::MissingProjectRoot));
+		let out = prune_status(Err(PruneError::Locked("failed".into())));
 		assert_eq!(
 			out,
 			PruneStatus::Failed {
-				reason: PruneError::MissingProjectRoot.to_string(),
+				reason: "failed".to_string(),
 				pruned: Vec::new(),
 			}
 		);
@@ -668,7 +623,7 @@ mod tests {
 		skill::lock::add_skill_to_lock("gone", global_entry()).unwrap();
 
 		let pruned =
-			prune_lock(PruneScope::Global, &names(&["keep"]), None).unwrap();
+			prune_lock(&WriteScope::Global, &names(&["keep"])).unwrap();
 
 		assert_eq!(pruned, vec!["gone".to_string()]);
 		let lock = skill::read_skill_lock();
@@ -681,8 +636,7 @@ mod tests {
 		let _g = GlobalLockGuard::new();
 		skill::lock::add_skill_to_lock("x", global_entry()).unwrap();
 		// disk has "x" (present) → kept even though scan never consulted the lock.
-		let pruned =
-			prune_lock(PruneScope::Global, &names(&["x"]), None).unwrap();
+		let pruned = prune_lock(&WriteScope::Global, &names(&["x"])).unwrap();
 		assert!(pruned.is_empty());
 		assert!(skill::read_skill_lock().skills.contains_key("x"));
 	}
@@ -693,8 +647,7 @@ mod tests {
 		skill::lock::add_skill_to_lock("İstanbul", global_entry()).unwrap();
 
 		let pruned =
-			prune_lock(PruneScope::Global, &names(&["i-stanbul"]), None)
-				.unwrap();
+			prune_lock(&WriteScope::Global, &names(&["i-stanbul"])).unwrap();
 
 		assert!(pruned.is_empty());
 		assert!(skill::read_skill_lock().skills.contains_key("İstanbul"));
@@ -703,8 +656,15 @@ mod tests {
 	#[test]
 	fn prune_lock_project_requires_project_root() {
 		let _g = GlobalLockGuard::new();
-		let err = prune_lock(PruneScope::Project, &names(&[]), None);
-		assert!(matches!(err, Err(PruneError::MissingProjectRoot)));
+		let project = tempdir().unwrap();
+		let scope = WriteScope::project(project.path());
+		assert_eq!(scope.project_root(), Some(project.path()));
+		assert_eq!(
+			scope.resource_scope(),
+			crate::models::ResourceScope::ProjectOnly
+		);
+		let pruned = prune_lock(&scope, &names(&[])).unwrap();
+		assert!(pruned.is_empty());
 	}
 
 	#[test]
@@ -726,7 +686,7 @@ mod tests {
 		)
 		.unwrap();
 		// global prune with an empty disk set must not touch the project lock.
-		prune_lock(PruneScope::Global, &names(&[]), None).unwrap();
+		prune_lock(&WriteScope::Global, &names(&[])).unwrap();
 		let local = skill::read_local_lock(Some(project.path()));
 		assert!(local.skills.contains_key("proj-only"));
 	}
@@ -752,7 +712,7 @@ mod tests {
 		.unwrap();
 
 		let pruned =
-			prune_lock(PruneScope::Project, &names(&[]), Some(project.path()))
+			prune_lock(&WriteScope::project(project.path()), &names(&[]))
 				.unwrap();
 
 		assert_eq!(pruned, vec!["proj-gone".to_string()]);
@@ -809,9 +769,8 @@ mod tests {
 		write_skill_md(&skills.join("foo/bundled"), "bundled");
 
 		let pruned = prune_lock_from_dirs(
-			PruneScope::Global,
+			&WriteScope::Global,
 			std::slice::from_ref(&skills),
-			None,
 			top_level_skill_dirs,
 		)
 		.unwrap();
@@ -877,9 +836,8 @@ mod tests {
 		let inaccessible = file.join("subdir");
 
 		let res = prune_lock_from_dirs(
-			PruneScope::Global,
+			&WriteScope::Global,
 			std::slice::from_ref(&inaccessible),
-			None,
 			top_level_skill_dirs,
 		);
 
@@ -901,9 +859,8 @@ mod tests {
 		let existing = tempdir().unwrap();
 		// Injected scanner errors deterministically (no chmod, root-CI safe).
 		let res = prune_lock_from_dirs(
-			PruneScope::Global,
+			&WriteScope::Global,
 			&[existing.path().to_path_buf()],
-			None,
 			|d: &Path| Err(ScanError::PermissionDenied(d.to_path_buf())),
 		);
 
@@ -922,9 +879,8 @@ mod tests {
 
 		let dir = tempdir().unwrap();
 		let would = preview_prune_from_dirs(
-			PruneScope::Global,
+			&WriteScope::Global,
 			&[dir.path().to_path_buf()],
-			None,
 			|_d: &Path| Ok(vec![PathBuf::from("present")]),
 		)
 		.unwrap();
@@ -943,9 +899,8 @@ mod tests {
 		let dir = tempdir().unwrap();
 		// scanner reports only "present" on disk.
 		let pruned = prune_lock_from_dirs(
-			PruneScope::Global,
+			&WriteScope::Global,
 			&[dir.path().to_path_buf()],
-			None,
 			|_d: &Path| Ok(vec![PathBuf::from("present")]),
 		)
 		.unwrap();

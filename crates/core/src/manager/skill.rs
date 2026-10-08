@@ -164,7 +164,7 @@ impl ConfigManager {
 		} = self.universal_install_prep()?;
 		// Capture materializer inputs BEFORE the mutable `config` borrow so the
 		// shared materializer can run during the install.
-		let scope = self.write_scope;
+		let scope = self.write_resource_scope();
 		let project_root = self.project_root.clone();
 		let agent_type = self.agent_type();
 
@@ -312,7 +312,7 @@ impl ConfigManager {
 		// (which needs the in-scope agent dirs + link style) can run without
 		// re-borrowing `self`.
 		let scope = self.scope;
-		let write_scope = self.write_scope;
+		let write_scope = self.write_resource_scope();
 		let project_root = self.project_root.clone();
 		let config = self.config.as_ref().ok_or_else(|| {
 			ConfigError::InvalidConfig("No configuration loaded".to_string())
@@ -1007,7 +1007,7 @@ impl ConfigManager {
 		} = self.universal_install_prep()?;
 		// Capture the materializer inputs BEFORE borrowing `config` mutably so
 		// the shared materializer can run while the config check is in flight.
-		let scope = self.write_scope;
+		let scope = self.write_resource_scope();
 		let project_root = self.project_root.clone();
 		let agent_type = self.agent_type();
 
@@ -1198,7 +1198,7 @@ impl ConfigManager {
 	}
 
 	fn universal_install_prep(&self) -> Result<UniversalPrep> {
-		let project_root_for_canonical = match self.write_scope {
+		let project_root_for_canonical = match self.write_resource_scope() {
 			crate::models::ResourceScope::ProjectOnly => {
 				self.project_root.clone()
 			}
@@ -1217,7 +1217,7 @@ impl ConfigManager {
 		let descriptor = crate::registry::get(self.agent_type());
 		let link_need = crate::skills::linker::agent_link_need(
 			descriptor,
-			self.write_scope,
+			self.write_resource_scope(),
 			self.project_root.as_deref(),
 		);
 		Ok(UniversalPrep {
@@ -1239,7 +1239,7 @@ impl ConfigManager {
 				} => crate::skills::linker::shared_with(
 					self.agent_type().as_str(),
 					referrer_dir,
-					self.write_scope,
+					self.write_resource_scope(),
 					self.project_root.as_deref(),
 				),
 				crate::skills::linker::LinkNeed::Unsupported => Vec::new(),

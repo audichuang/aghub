@@ -12,15 +12,17 @@
 // ponytail: render the OperationBatchResult directly via tabled + serde_json;
 // do NOT drag the api transfer DTO crate into the CLI.
 
+use aghub_core::errors::ConfigError;
 use aghub_core::models::{AgentType, ResourceScope};
 use aghub_core::transfer::{
 	ensure_disjoint, ensure_mcp_exists, ensure_mcp_reconcile_spares,
 	ensure_skill_reconcile_spares, ensure_sub_agent_exists,
 	ensure_sub_agent_reconcile_spares, reconcile_mcp, reconcile_skill,
 	reconcile_skill_preview, reconcile_sub_agent, transfer_mcp, transfer_skill,
-	transfer_sub_agent, InstallScope, InstallTarget, OperationBatchResult,
+	transfer_sub_agent, InstallTarget, OperationBatchResult,
 	OperationBatchView, ResourceLocator,
 };
+use aghub_core::WriteScope;
 use anyhow::{bail, Result};
 use clap::Subcommand;
 use tabled::builder::Builder;
@@ -118,18 +120,27 @@ fn parse_agent(value: &str) -> Result<AgentType, String> {
 	value.parse()
 }
 
-/// The transfer-local [`InstallScope`] for an already-resolved [`crate::Scope`].
+/// The transfer-local [`WriteScope`] for an already-resolved [`crate::Scope`].
 ///
 /// `--all` is refused by `TRANSFER_SCOPE` in `main`'s policy table.
 ///
-/// Maps the scope itself rather than calling [`crate::Scope::write_scope`]:
-/// this is the one `rootless_project_passthrough` policy, so a rootless `-p`
-/// must reach core and get a typed `RESOURCE_NOT_FOUND`. Total match, never a
-/// `_ => Global` catch-all.
-fn install_scope(resolved: &crate::Scope) -> Result<InstallScope> {
+/// Maps the scope into a [`WriteScope`]: this is the one
+/// `rootless_project_passthrough` policy, so a rootless `-p` resolves here
+/// to a typed `RESOURCE_NOT_FOUND` (preserving the API-shared error code that
+/// `rootless_project_transfer_keeps_resource_not_found_code` pins) rather than
+/// the generic `NO_PROJECT_ROOT` sentence. Total match, never a `_ => Global`
+/// catch-all.
+fn resolve_transfer_scope(
+	resolved: &crate::Scope,
+	kind: &str,
+	name: &str,
+) -> Result<WriteScope> {
 	match resolved.resource_scope() {
-		ResourceScope::GlobalOnly => Ok(InstallScope::Global),
-		ResourceScope::ProjectOnly => Ok(InstallScope::Project),
+		ResourceScope::GlobalOnly => Ok(WriteScope::Global),
+		ResourceScope::ProjectOnly => match resolved.project_root() {
+			Some(root) => Ok(WriteScope::project(root)),
+			None => Err(ConfigError::resource_not_found(kind, name).into()),
+		},
 		ResourceScope::Both => bail!(
 			"internal: transfer/reconcile resolved 'both' scope, which is not \
 			 one install target — the scope policy table should have refused it"
@@ -143,19 +154,16 @@ pub fn execute_transfer(
 	resolved: &crate::Scope,
 	json: bool,
 ) -> Result<()> {
-	let scope = install_scope(resolved)?;
-	let project_root =
-		resolved.project_root().map(std::path::Path::to_path_buf);
-	let (args, run): (&TransferArgs, TransferFn) = match action {
-		TransferAction::Skill(a) => (a, transfer_skill),
-		TransferAction::Mcp(a) => (a, transfer_mcp),
-		TransferAction::SubAgent(a) => (a, transfer_sub_agent),
+	let (args, run, kind): (&TransferArgs, TransferFn, &str) = match action {
+		TransferAction::Skill(a) => (a, transfer_skill, "skill"),
+		TransferAction::Mcp(a) => (a, transfer_mcp, "MCP server"),
+		TransferAction::SubAgent(a) => (a, transfer_sub_agent, "sub-agent"),
 	};
+	let scope = resolve_transfer_scope(resolved, kind, &args.name)?;
 
 	let source = ResourceLocator {
 		agent: args.from_agent,
-		scope,
-		project_root: project_root.clone(),
+		scope: scope.clone(),
 		name: args.name.clone(),
 	};
 	let destinations = args
@@ -163,8 +171,7 @@ pub fn execute_transfer(
 		.iter()
 		.map(|agent| InstallTarget {
 			agent: *agent,
-			scope,
-			project_root: project_root.clone(),
+			scope: scope.clone(),
 		})
 		.collect();
 
@@ -178,14 +185,12 @@ pub fn execute_reconcile(
 	resolved: &crate::Scope,
 	json: bool,
 ) -> Result<()> {
-	let scope = install_scope(resolved)?;
-	let project_root =
-		resolved.project_root().map(std::path::Path::to_path_buf);
-	let (args, run, exists, spares): (
+	let (args, run, exists, spares, kind): (
 		&ReconcileArgs,
 		ReconcileFn,
 		ExistsFn,
 		SpareFn,
+		&str,
 	) = match action {
 		ReconcileAction::Skill(a) => (
 			a,
@@ -193,18 +198,21 @@ pub fn execute_reconcile(
 			// existence is decided by reconcile_skill_preview (same planner as the commit)
 			|_| Ok(()),
 			ensure_skill_reconcile_spares,
+			"skill",
 		),
 		ReconcileAction::Mcp(a) => (
 			a,
 			reconcile_mcp,
 			ensure_mcp_exists,
 			ensure_mcp_reconcile_spares,
+			"MCP server",
 		),
 		ReconcileAction::SubAgent(a) => (
 			a,
 			reconcile_sub_agent,
 			ensure_sub_agent_exists,
 			ensure_sub_agent_reconcile_spares,
+			"sub-agent",
 		),
 	};
 
@@ -219,10 +227,11 @@ pub fn execute_reconcile(
 		);
 	}
 
+	let scope = resolve_transfer_scope(resolved, kind, &args.name)?;
+
 	let source = ResourceLocator {
 		agent: args.from_agent,
 		scope,
-		project_root,
 		name: args.name.clone(),
 	};
 

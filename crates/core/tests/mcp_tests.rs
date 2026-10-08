@@ -2002,7 +2002,8 @@ fn mcp_and_sub_agent_writes_leave_no_lock_beside_config_files() {
 /// copy as changed or the source as holding unmovable fields.
 #[test]
 fn reconcile_moves_a_server_with_an_empty_env_object() {
-	use aghub_core::transfer::{reconcile_mcp, InstallScope, ResourceLocator};
+	use aghub_core::transfer::{reconcile_mcp, ResourceLocator};
+	use aghub_core::WriteScope;
 	let project = tempfile::tempdir().unwrap();
 	let root = project.path();
 	std::fs::create_dir_all(root.join(".cursor")).unwrap();
@@ -2014,8 +2015,7 @@ fn reconcile_moves_a_server_with_an_empty_env_object() {
 	let result = reconcile_mcp(
 		ResourceLocator {
 			agent: AgentType::Cursor,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 			name: "srv".into(),
 		},
 		vec![AgentType::OpenCode],

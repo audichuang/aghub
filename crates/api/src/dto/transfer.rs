@@ -1,7 +1,7 @@
 use aghub_core::scope::WriteScope;
 use aghub_core::transfer::{
-	InstallScope, InstallTarget, OperationAction, OperationBatchResult,
-	OperationResult, ResourceLocator,
+	InstallTarget, OperationAction, OperationBatchResult, OperationResult,
+	ResourceLocator,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -29,21 +29,18 @@ impl InstallScopeDto {
 	}
 }
 
-impl From<InstallScopeDto> for InstallScope {
-	fn from(value: InstallScopeDto) -> Self {
+impl From<&WriteScope> for InstallScopeDto {
+	fn from(value: &WriteScope) -> Self {
 		match value {
-			InstallScopeDto::Global => InstallScope::Global,
-			InstallScopeDto::Project => InstallScope::Project,
+			WriteScope::Global => InstallScopeDto::Global,
+			WriteScope::Project { .. } => InstallScopeDto::Project,
 		}
 	}
 }
 
-impl From<InstallScope> for InstallScopeDto {
-	fn from(value: InstallScope) -> Self {
-		match value {
-			InstallScope::Global => InstallScopeDto::Global,
-			InstallScope::Project => InstallScopeDto::Project,
-		}
+impl From<WriteScope> for InstallScopeDto {
+	fn from(value: WriteScope) -> Self {
+		InstallScopeDto::from(&value)
 	}
 }
 
@@ -59,16 +56,9 @@ impl TargetDto {
 	pub fn to_core(&self) -> Result<InstallTarget, ApiError> {
 		let agent =
 			crate::extractors::resolve_agent_strings(&[&self.agent])?.remove(0);
-		let write_scope =
-			self.scope.to_write_scope(self.project_root.as_deref())?;
-		let project_root =
-			write_scope.project_root().map(std::path::Path::to_path_buf);
+		let scope = self.scope.to_write_scope(self.project_root.as_deref())?;
 
-		Ok(InstallTarget {
-			agent,
-			scope: self.scope.into(),
-			project_root,
-		})
+		Ok(InstallTarget { agent, scope })
 	}
 }
 
@@ -85,15 +75,11 @@ impl ResourceLocatorDto {
 	pub fn to_core(&self) -> Result<ResourceLocator, ApiError> {
 		let agent =
 			crate::extractors::resolve_agent_strings(&[&self.agent])?.remove(0);
-		let write_scope =
-			self.scope.to_write_scope(self.project_root.as_deref())?;
-		let project_root =
-			write_scope.project_root().map(std::path::Path::to_path_buf);
+		let scope = self.scope.to_write_scope(self.project_root.as_deref())?;
 
 		Ok(ResourceLocator {
 			agent,
-			scope: self.scope.into(),
-			project_root,
+			scope,
 			name: self.name.clone(),
 		})
 	}
@@ -193,10 +179,11 @@ impl From<OperationResult> for OperationResultDto {
 	fn from(value: OperationResult) -> Self {
 		OperationResultDto {
 			agent: value.target.agent.as_str().to_string(),
-			scope: value.target.scope.into(),
+			scope: (&value.target.scope).into(),
 			project_root: value
 				.target
-				.project_root
+				.scope
+				.project_root()
 				.map(|path| path.to_string_lossy().to_string()),
 			action: value.action.into(),
 			success: value.success,
@@ -246,8 +233,7 @@ mod tests {
 				OperationResult {
 					target: InstallTarget {
 						agent: "claude".parse().unwrap(),
-						scope: InstallScope::Project,
-						project_root: Some(PathBuf::from("/tmp/proj")),
+						scope: WriteScope::project(PathBuf::from("/tmp/proj")),
 					},
 					action: OperationAction::Copy,
 					success: true,
@@ -263,8 +249,7 @@ mod tests {
 				OperationResult {
 					target: InstallTarget {
 						agent: "opencode".parse().unwrap(),
-						scope: InstallScope::Global,
-						project_root: None,
+						scope: WriteScope::Global,
 					},
 					action: OperationAction::Delete,
 					success: false,
@@ -295,8 +280,7 @@ mod tests {
 		let result = OperationResult {
 			target: InstallTarget {
 				agent: "cursor".parse().unwrap(),
-				scope: InstallScope::Project,
-				project_root: Some(PathBuf::from("/x")),
+				scope: WriteScope::project(PathBuf::from("/x")),
 			},
 			action: OperationAction::Copy,
 			success: true,
@@ -313,5 +297,16 @@ mod tests {
 		let view =
 			serde_json::to_string(&OperationResultView::from(&result)).unwrap();
 		assert_eq!(dto, view);
+	}
+
+	#[test]
+	fn target_dto_to_core_rejects_missing_project_root() {
+		let dto = TargetDto {
+			agent: "claude".into(),
+			scope: InstallScopeDto::Project,
+			project_root: None,
+		};
+		let err = dto.to_core().unwrap_err();
+		assert_eq!(err.body.code, "PROJECT_ROOT_REQUIRED");
 	}
 }

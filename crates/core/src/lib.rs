@@ -40,8 +40,8 @@ pub use all_agents::{load_all_agents, load_managed_agents, AgentResources};
 pub use manager::ConfigManager;
 pub use scope::WriteScope;
 pub use transfer::{
-	InstallScope, InstallTarget, OperationAction, OperationBatchResult,
-	OperationResult, ResourceLocator,
+	InstallTarget, OperationAction, OperationBatchResult, OperationResult,
+	ResourceLocator,
 };
 
 /// Convert a skill::Skill to core::models::Skill

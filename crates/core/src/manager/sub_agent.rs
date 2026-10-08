@@ -22,7 +22,10 @@ impl ConfigManager {
 				"No configuration loaded".to_string(),
 			));
 		}
-		Self::ensure_sub_agent_supported(&*self.adapter, self.write_scope)?;
+		Self::ensure_sub_agent_supported(
+			&*self.adapter,
+			self.write_resource_scope(),
+		)?;
 		let guard = self.scoped_write_guard("sub-agent write")?;
 		self.reload_sub_agents()?;
 		Ok(guard)
@@ -51,9 +54,10 @@ impl ConfigManager {
 	}
 
 	fn reload_sub_agents(&mut self) -> Result<()> {
-		let current = self
-			.adapter
-			.load_sub_agents(self.project_root.as_deref(), self.write_scope)?;
+		let current = self.adapter.load_sub_agents(
+			self.project_root.as_deref(),
+			self.write_resource_scope(),
+		)?;
 		self.config_mut()?.sub_agents = current;
 		Ok(())
 	}
@@ -90,7 +94,7 @@ impl ConfigManager {
 		info!(
 			"added sub-agent, saving for agent '{}' in scope {:?}",
 			self.adapter.name(),
-			self.write_scope
+			self.write_resource_scope()
 		);
 		let updated = self
 			.config
@@ -151,7 +155,7 @@ impl ConfigManager {
 			"updated sub-agent '{}', saving for agent '{}' in scope {:?}",
 			name,
 			self.adapter.name(),
-			self.write_scope
+			self.write_resource_scope()
 		);
 		let updated = self
 			.get_sub_agent(&effective_name)
@@ -170,7 +174,7 @@ impl ConfigManager {
 					.adapter
 					.load_sub_agents(
 						self.project_root.as_deref(),
-						self.write_scope,
+						self.write_resource_scope(),
 					)?
 					.into_iter()
 					.find(|agent| agent.name == effective_name)
@@ -255,7 +259,10 @@ impl ConfigManager {
 		// read, source comparison, tombstone move, save, and rollback. Preview
 		// refreshes without blocking another writer.
 		let _guard = if dry_run {
-			Self::ensure_sub_agent_supported(&*self.adapter, self.write_scope)?;
+			Self::ensure_sub_agent_supported(
+				&*self.adapter,
+				self.write_resource_scope(),
+			)?;
 			self.reload_sub_agents()?;
 			None
 		} else {
@@ -383,7 +390,7 @@ impl ConfigManager {
 			"removed sub-agent '{}', saving for agent '{}' in scope {:?}",
 			name,
 			self.adapter.name(),
-			self.write_scope
+			self.write_resource_scope()
 		);
 		if let Err(e) = self.save_sub_agents_current() {
 			// Roll back: restore the on-disk file(s) and the in-memory agent so a
@@ -425,7 +432,7 @@ impl ConfigManager {
 	fn save_sub_agent_entry(&self, agent: &SubAgent) -> Result<()> {
 		self.adapter.save_sub_agents(
 			self.project_root.as_deref(),
-			self.write_scope,
+			self.write_resource_scope(),
 			std::slice::from_ref(agent),
 		)
 	}

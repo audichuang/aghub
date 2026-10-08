@@ -19,7 +19,8 @@
 //! environment variable of its own — the child gets its project root through
 //! `Command::env`.
 
-use aghub_core::skills::prune::{prune_lock_from_dirs, PruneScope};
+use aghub_core::skills::prune::prune_lock_from_dirs;
+use aghub_core::WriteScope;
 use skill::lock::{mutation_guard, MutationScope};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -141,13 +142,9 @@ fn a_prune_waits_for_another_process_and_keeps_its_entry() {
 
 	let dirs = vec![skills_dir(root)];
 	let started = Instant::now();
-	let pruned = prune_lock_from_dirs(
-		PruneScope::Project,
-		&dirs,
-		Some(root),
-		top_level_dirs,
-	)
-	.expect("prune");
+	let pruned =
+		prune_lock_from_dirs(&WriteScope::project(root), &dirs, top_level_dirs)
+			.expect("prune");
 	let waited = started.elapsed();
 	child.wait().unwrap();
 
@@ -192,9 +189,8 @@ fn a_prune_takes_the_guard_before_it_scans_disk() {
 
 	let scanned = std::cell::Cell::new(false);
 	let result = prune_lock_from_dirs(
-		PruneScope::Project,
+		&WriteScope::project(&root),
 		&[skills_dir(&root)],
-		Some(&root),
 		|dir| {
 			scanned.set(true);
 			top_level_dirs(dir)
@@ -251,8 +247,7 @@ fn a_skill_reconcile_takes_the_guard_before_it_plans() {
 	let result = aghub_core::transfer::reconcile_skill(
 		aghub_core::transfer::ResourceLocator {
 			agent: aghub_core::models::AgentType::Claude,
-			scope: aghub_core::transfer::InstallScope::Project,
-			project_root: Some(root.clone()),
+			scope: WriteScope::project(root.clone()),
 			name: "mover".to_string(),
 		},
 		vec![],
@@ -293,8 +288,7 @@ fn a_skill_reconcile_reports_the_lock_before_it_looks_the_skill_up() {
 	let message = aghub_core::transfer::reconcile_skill(
 		aghub_core::transfer::ResourceLocator {
 			agent: aghub_core::models::AgentType::Claude,
-			scope: aghub_core::transfer::InstallScope::Project,
-			project_root: Some(root.clone()),
+			scope: WriteScope::project(root.clone()),
 			name: "never-installed".to_string(),
 		},
 		vec![],

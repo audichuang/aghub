@@ -3,7 +3,7 @@ use crate::{
 	create_adapter,
 	errors::{ConfigError, Result},
 	manager::{sub_agent::same_sub_agent_content, ConfigManager},
-	models::{AgentType, McpServer, ResourceScope, Skill, SubAgent},
+	models::{AgentType, McpServer, Skill, SubAgent},
 	registry, WriteScope,
 };
 use log::{info, warn};
@@ -11,24 +11,16 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InstallScope {
-	Global,
-	Project,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallTarget {
 	pub agent: AgentType,
-	pub scope: InstallScope,
-	pub project_root: Option<PathBuf>,
+	pub scope: WriteScope,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResourceLocator {
 	pub agent: AgentType,
-	pub scope: InstallScope,
-	pub project_root: Option<PathBuf>,
+	pub scope: WriteScope,
 	pub name: String,
 }
 
@@ -130,14 +122,11 @@ impl From<&OperationResult> for OperationResultView {
 	fn from(r: &OperationResult) -> Self {
 		OperationResultView {
 			agent: r.target.agent.as_str().to_string(),
-			scope: match r.target.scope {
-				InstallScope::Global => "global",
-				InstallScope::Project => "project",
-			},
+			scope: r.target.scope.label(),
 			project_root: r
 				.target
-				.project_root
-				.as_ref()
+				.scope
+				.project_root()
 				.map(|p| p.display().to_string()),
 			action: r.action.to_string(),
 			success: r.success,
@@ -171,42 +160,18 @@ impl From<&OperationBatchResult> for OperationBatchView {
 
 fn build_manager(target: &InstallTarget) -> ConfigManager {
 	let adapter = create_adapter(target.agent);
-	match target.scope {
-		InstallScope::Global => ConfigManager::new(adapter, true, None),
-		InstallScope::Project => {
-			ConfigManager::new(adapter, false, target.project_root.as_deref())
+	match &target.scope {
+		WriteScope::Global => ConfigManager::new(adapter, true, None),
+		WriteScope::Project { root } => {
+			ConfigManager::new(adapter, false, Some(root))
 		}
 	}
-}
-
-fn target_write_scope(
-	scope: InstallScope,
-	project_root: Option<&Path>,
-) -> Result<WriteScope> {
-	match scope {
-		InstallScope::Global => Ok(WriteScope::Global),
-		InstallScope::Project => {
-			let root = project_root.ok_or_else(|| {
-				ConfigError::InvalidConfig(
-					"project_root is required for project targets".to_string(),
-				)
-			})?;
-			Ok(WriteScope::project(root))
-		}
-	}
-}
-
-fn validate_target(target: &InstallTarget) -> Result<()> {
-	target_write_scope(target.scope, target.project_root.as_deref()).map(|_| ())
 }
 
 fn target_resource_scope(
 	target: &InstallTarget,
 ) -> crate::models::ResourceScope {
-	match target.scope {
-		InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-		InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-	}
+	target.scope.resource_scope()
 }
 
 fn mcp_supported_for_target(
@@ -277,8 +242,7 @@ fn sub_agent_supported_for_target(
 fn load_source_mcp(source: &ResourceLocator) -> Result<McpServer> {
 	let mut manager = build_manager(&InstallTarget {
 		agent: source.agent,
-		scope: source.scope,
-		project_root: source.project_root.clone(),
+		scope: source.scope.clone(),
 	});
 	manager.load()?;
 	manager.get_mcp(&source.name).cloned().ok_or_else(|| {
@@ -292,8 +256,7 @@ fn ensure_mcp_source_fields_representable(
 ) -> Result<()> {
 	let path = build_manager(&InstallTarget {
 		agent: source.agent,
-		scope: source.scope,
-		project_root: source.project_root.clone(),
+		scope: source.scope.clone(),
 	})
 	.config_path()
 	.ok_or_else(|| {
@@ -344,8 +307,7 @@ fn ensure_sub_agent_source_fields_representable(
 fn load_source_skill(source: &ResourceLocator) -> Result<Skill> {
 	let mut manager = build_manager(&InstallTarget {
 		agent: source.agent,
-		scope: source.scope,
-		project_root: source.project_root.clone(),
+		scope: source.scope.clone(),
 	});
 	manager.load()?;
 	manager
@@ -627,12 +589,8 @@ fn ensure_reconcile_spares<F>(
 where
 	F: Fn(&InstallTarget) -> Backed,
 {
-	let (copies, deletes) = reconcile_plans(
-		added.to_vec(),
-		removed.to_vec(),
-		source.scope,
-		source.project_root.clone(),
-	);
+	let (copies, deletes) =
+		reconcile_plans(added.to_vec(), removed.to_vec(), &source.scope);
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
 	let protect = protected_targets(
@@ -653,12 +611,8 @@ pub fn ensure_mcp_delete_spares(
 	source: &ResourceLocator,
 	requested: &[AgentType],
 ) -> Result<()> {
-	let (_, deletes) = reconcile_plans(
-		Vec::new(),
-		requested.to_vec(),
-		source.scope,
-		source.project_root.clone(),
-	);
+	let (_, deletes) =
+		reconcile_plans(Vec::new(), requested.to_vec(), &source.scope);
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
 	let protect = protected_targets(&[], source, true, &removing, true);
@@ -741,8 +695,7 @@ fn protected_targets(
 		protect.push(Protected {
 			target: InstallTarget {
 				agent: source.agent,
-				scope: source.scope,
-				project_root: source.project_root.clone(),
+				scope: source.scope.clone(),
 			},
 			named: true,
 		});
@@ -760,8 +713,7 @@ fn protected_targets(
 			protect.push(Protected {
 				target: InstallTarget {
 					agent,
-					scope: source.scope,
-					project_root: source.project_root.clone(),
+					scope: source.scope.clone(),
 				},
 				named: false,
 			});
@@ -911,8 +863,7 @@ fn delete_reconciled_mcp(
 			{
 				let source_target = InstallTarget {
 					agent: source.agent,
-					scope: source.scope,
-					project_root: source.project_root.clone(),
+					scope: source.scope.clone(),
 				};
 				let same_backing = match (
 					mcp_backing_path(&source_target),
@@ -1123,11 +1074,8 @@ fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
 fn skill_target_dir(target: &InstallTarget) -> Result<PathBuf> {
 	let adapter = create_adapter(target.agent);
 	let dir = adapter.target_skills_dir(
-		target.project_root.as_deref(),
-		match target.scope {
-			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-		},
+		target.scope.project_root(),
+		target.scope.resource_scope(),
 	);
 
 	dir.ok_or_else(|| {
@@ -1146,10 +1094,10 @@ fn unique_targets(targets: Vec<InstallTarget>) -> Vec<InstallTarget> {
 		let key = format!(
 			"{}|{:?}|{}",
 			target.agent.as_str(),
-			target.scope,
+			target.scope.label(),
 			target
-				.project_root
-				.as_ref()
+				.scope
+				.project_root()
 				.map(|path| path.display().to_string())
 				.unwrap_or_default()
 		);
@@ -1232,16 +1180,14 @@ fn copy_plans(destinations: Vec<InstallTarget>) -> Vec<OperationPlan> {
 fn reconcile_plans(
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
-	scope: InstallScope,
-	project_root: Option<PathBuf>,
+	scope: &WriteScope,
 ) -> (Vec<OperationPlan>, Vec<OperationPlan>) {
 	let copies = added
 		.into_iter()
 		.map(|agent| OperationPlan {
 			target: InstallTarget {
 				agent,
-				scope,
-				project_root: project_root.clone(),
+				scope: scope.clone(),
 			},
 			action: OperationAction::Copy,
 		})
@@ -1254,8 +1200,7 @@ fn reconcile_plans(
 			.into_iter()
 			.map(|agent| InstallTarget {
 				agent,
-				scope,
-				project_root: project_root.clone(),
+				scope: scope.clone(),
 			})
 			.collect(),
 	)
@@ -1315,10 +1260,7 @@ fn batch_preflight_error(
 		.failures
 		.into_iter()
 		.map(|failure| {
-			let scope = match failure.target.target.scope {
-				InstallScope::Global => "global",
-				InstallScope::Project => "project",
-			};
+			let scope = failure.target.target.scope.label();
 			format!(
 				"{} {} ({scope}): {}",
 				failure.target.action,
@@ -1386,10 +1328,7 @@ fn log_operation_outcome(
 	outcome: &Result<bool>,
 ) {
 	let target_agent = registry::get(target.agent).id;
-	let target_scope = match target.scope {
-		InstallScope::Global => "global",
-		InstallScope::Project => "project",
-	};
+	let target_scope = target.scope.label();
 	match outcome {
 		Ok(_) => info!(
 			"{} {} '{}' for agent '{}' in {} scope succeeded",
@@ -1416,10 +1355,7 @@ pub fn transfer_mcp(
 	);
 	let report = crate::batch::run_multi_target_mutation(
 		&destinations,
-		|target| {
-			validate_target(target)?;
-			mcp_supported_for_target(target, &mcp, false)
-		},
+		|target| mcp_supported_for_target(target, &mcp, false),
 		|target| {
 			let outcome = copy_mcp_into(target, &mcp);
 			log_operation_outcome(
@@ -1437,10 +1373,7 @@ pub fn transfer_mcp(
 			.failures
 			.into_iter()
 			.map(|failure| {
-				let scope = match failure.target.scope {
-					InstallScope::Global => "global",
-					InstallScope::Project => "project",
-				};
+				let scope = failure.target.scope.label();
 				format!(
 					"{} ({scope}): {}",
 					failure.target.agent.as_str(),
@@ -1498,12 +1431,7 @@ pub fn reconcile_mcp(
 	// best-effort as a plain transfer.
 	let deletes_source = removed.contains(&source.agent);
 	let source_removed = deletes_source;
-	let (copies, deletes) = reconcile_plans(
-		added,
-		removed,
-		source.scope,
-		source.project_root.clone(),
-	);
+	let (copies, deletes) = reconcile_plans(added, removed, &source.scope);
 	if deletes_source && !copies.is_empty() {
 		ensure_mcp_source_fields_representable(&source, &mcp)?;
 	}
@@ -1531,7 +1459,6 @@ pub fn reconcile_mcp(
 		&copies,
 		&deletes,
 		|plan| {
-			validate_target(&plan.target)?;
 			if plan.action == OperationAction::Copy {
 				// Only a reconcile that REMOVES something can delete a source;
 				// an add-only one is as best-effort as a plain copy.
@@ -1591,8 +1518,7 @@ pub fn reconcile_mcp(
 fn load_source_sub_agent(source: &ResourceLocator) -> Result<SubAgent> {
 	let mut manager = build_manager(&InstallTarget {
 		agent: source.agent,
-		scope: source.scope,
-		project_root: source.project_root.clone(),
+		scope: source.scope.clone(),
 	});
 	manager.load()?;
 	manager.get_sub_agent(&source.name).cloned().ok_or_else(|| {
@@ -1615,10 +1541,7 @@ pub fn transfer_sub_agent(
 	let plans = copy_plans(destinations);
 	let report = crate::batch::run_multi_target_mutation(
 		&plans,
-		|plan| {
-			validate_target(&plan.target)?;
-			sub_agent_supported_for_target(&plan.target, &sub_agent, false)
-		},
+		|plan| sub_agent_supported_for_target(&plan.target, &sub_agent, false),
 		|plan| {
 			let outcome = copy_sub_agent_into(&plan.target, &sub_agent);
 			log_operation_outcome(
@@ -1650,12 +1573,7 @@ pub fn reconcile_sub_agent(
 		removed.len()
 	);
 	let source_removed = removed.contains(&source.agent);
-	let (copies, deletes) = reconcile_plans(
-		added,
-		removed,
-		source.scope,
-		source.project_root.clone(),
-	);
+	let (copies, deletes) = reconcile_plans(added, removed, &source.scope);
 	if source_removed && !copies.is_empty() {
 		ensure_sub_agent_source_fields_representable(&source, &sub_agent)?;
 	}
@@ -1681,7 +1599,6 @@ pub fn reconcile_sub_agent(
 		&copies,
 		&deletes,
 		|plan| {
-			validate_target(&plan.target)?;
 			if plan.action == OperationAction::Copy {
 				sub_agent_supported_for_target(
 					&plan.target,
@@ -1754,10 +1671,7 @@ pub fn transfer_skill(
 	let plans = copy_plans(destinations);
 	let report = crate::batch::run_multi_target_mutation(
 		&plans,
-		|plan| {
-			validate_target(&plan.target)?;
-			skill_target_dir(&plan.target).map(|_| ())
-		},
+		|plan| skill_target_dir(&plan.target).map(|_| ()),
 		|plan| {
 			let outcome = (|| -> Result<bool> {
 				let mut manager = build_manager(&plan.target);
@@ -1803,14 +1717,10 @@ fn skill_holders(
 	name: &str,
 	source: &ResourceLocator,
 ) -> (Vec<AgentType>, Vec<&'static str>) {
-	let scope = match source.scope {
-		InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-		InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-	};
 	crate::skills::removal::find_skill_holders(
 		name,
-		scope,
-		source.project_root.as_deref(),
+		source.scope.resource_scope(),
+		source.scope.project_root(),
 	)
 }
 
@@ -1832,8 +1742,7 @@ struct ReconcileSkillPlan {
 	deletes: Vec<OperationPlan>,
 	dry_run_delete_response:
 		Option<crate::skills::removal::SkillRemovalResponse>,
-	scope: ResourceScope,
-	project_root: Option<PathBuf>,
+	scope: WriteScope,
 }
 
 /// Load the skill for reconcile: uses the caller's source if present, or
@@ -1859,8 +1768,7 @@ fn load_reconcile_skill(
 					if holders.contains(&agent) {
 						let fallback_source = ResourceLocator {
 							agent,
-							scope: source.scope,
-							project_root: source.project_root.clone(),
+							scope: source.scope.clone(),
 							name: source.name.clone(),
 						};
 						if let Ok(skill) = load_source_skill(&fallback_source) {
@@ -1869,10 +1777,7 @@ fn load_reconcile_skill(
 					}
 				}
 			}
-			let scope_str = match source.scope {
-				InstallScope::Global => "global",
-				InstallScope::Project => "project",
-			};
+			let scope_str = source.scope.label();
 			let (managed_holders, disabled_holders): (Vec<_>, Vec<_>) = holders
 				.iter()
 				.map(|h| h.as_str())
@@ -1909,21 +1814,10 @@ fn plan_reconcile_skill(
 	let skill = load_reconcile_skill(source, added, removed)?;
 	let source_root = resolve_skill_root(&skill)?;
 
-	let (copies, deletes) = reconcile_plans(
-		added.to_vec(),
-		removed.to_vec(),
-		source.scope,
-		source.project_root.clone(),
-	);
+	let (copies, deletes) =
+		reconcile_plans(added.to_vec(), removed.to_vec(), &source.scope);
 	// Output rows follow request order; the entry sorts only internally.
 	// See docs/history/core-transfer.md#reconcile-delete-rows-preserve-request-order
-
-	let write_scope =
-		target_write_scope(source.scope, source.project_root.as_deref())?;
-	let scope = match source.scope {
-		InstallScope::Global => ResourceScope::GlobalOnly,
-		InstallScope::Project => ResourceScope::ProjectOnly,
-	};
 
 	let (keepers, unreadable, dry_run_delete_response) = if !deletes.is_empty()
 	{
@@ -1931,7 +1825,7 @@ fn plan_reconcile_skill(
 			target: crate::skills::removal::SkillRemovalTarget::ByName(
 				skill.name.clone(),
 			),
-			scope: write_scope,
+			scope: source.scope.clone(),
 			agents: removed.to_vec(),
 			dry_run: true,
 			all_agents: false,
@@ -1962,8 +1856,7 @@ fn plan_reconcile_skill(
 		copies,
 		deletes,
 		dry_run_delete_response,
-		scope,
-		project_root: source.project_root.clone(),
+		scope: source.scope.clone(),
 	})
 }
 
@@ -1971,7 +1864,6 @@ impl ReconcileSkillPlan {
 	/// The read-only verdict for ONE row, run before any write in the batch and
 	/// reused verbatim by [`reconcile_skill_preview`].
 	fn preflight(&self, plan: &OperationPlan) -> Result<()> {
-		validate_target(&plan.target)?;
 		match plan.action {
 			OperationAction::Copy => {
 				skill_target_dir(&plan.target)?;
@@ -2041,7 +1933,7 @@ impl ReconcileSkillPlan {
 		}
 		create_adapter(target.agent)
 			.get_skills_paths(
-				target.project_root.as_deref(),
+				target.scope.project_root(),
 				target_resource_scope(target),
 			)
 			.iter()
@@ -2070,12 +1962,7 @@ impl ReconcileSkillPlan {
 		};
 		for copy in &self.copies {
 			let scope = target_resource_scope(&copy.target);
-			let canonical_root = match scope {
-				crate::models::ResourceScope::ProjectOnly => {
-					copy.target.project_root.as_deref()
-				}
-				_ => None,
-			};
+			let canonical_root = copy.target.scope.project_root();
 			let Some(master) =
 				crate::skills::linker::master_store_dir(canonical_root)
 			else {
@@ -2085,7 +1972,7 @@ impl ReconcileSkillPlan {
 				crate::skills::linker::agent_link_need(
 					crate::registry::get(copy.target.agent),
 					scope,
-					copy.target.project_root.as_deref(),
+					copy.target.scope.project_root(),
 				) {
 				push(&referrer_dir);
 			}
@@ -2156,8 +2043,8 @@ impl ReconcileSkillPlan {
 				&message,
 				Some("shared"),
 				still_read_from.first().map(|p| p.as_path()),
-				self.scope,
-				self.project_root.as_deref(),
+				self.scope.resource_scope(),
+				self.scope.project_root(),
 				&excluding,
 			);
 		ConfigError::UnsupportedOperation {
@@ -2213,11 +2100,8 @@ pub fn reconcile_skill(
 	// See crates/core/AGENTS.md "Mutation attribution".
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"reconcile skill",
-		match source.scope {
-			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-		},
-		source.project_root.as_deref(),
+		source.scope.resource_scope(),
+		source.scope.project_root(),
 	)
 	.map_err(ConfigError::Io)?;
 	let plan = plan_reconcile_skill(&source, &added, &removed)?;
@@ -2258,21 +2142,14 @@ pub fn reconcile_skill(
 		|row| {
 			let outcome = match row.action {
 				OperationAction::Copy => (|| -> Result<bool> {
-					let target_scope = match row.target.scope {
-						InstallScope::Global => {
-							crate::models::ResourceScope::GlobalOnly
-						}
-						InstallScope::Project => {
-							crate::models::ResourceScope::ProjectOnly
-						}
-					};
+					let target_scope = row.target.scope.resource_scope();
 					// ONE guard across check → write → rollback; the manager's
 					// own guard ends when `add_skill_from_path` returns.
 					// See crates/core/AGENTS.md "Mutation attribution".
 					let _copy_guard = crate::skills::lock::mutation_guard(
 						"reconcile skill copy",
 						target_scope,
-						row.target.project_root.as_deref(),
+						row.target.scope.project_root(),
 					)
 					.map_err(ConfigError::Io)?;
 					let mut manager = build_manager(&row.target);
@@ -2328,7 +2205,7 @@ pub fn reconcile_skill(
 							crate::skills::rename::rollback_materialized_install(
 								&plan.skill.name,
 								target_scope,
-								row.target.project_root.as_deref(),
+								row.target.scope.project_root(),
 								&added.created_referrer_dirs,
 								false,
 							);
@@ -2367,10 +2244,7 @@ pub fn reconcile_skill(
 							})
 							.map(|r| r.target.agent)
 							.collect();
-						let scope = target_write_scope(
-							row.target.scope,
-							row.target.project_root.as_deref(),
-						)?;
+						let scope = row.target.scope.clone();
 						let req = crate::skills::removal::SkillRemovalRequest {
 							target: crate::skills::removal::SkillRemovalTarget::ByName(
 								plan.skill.name.clone(),
@@ -2502,26 +2376,26 @@ mod tests {
 	use tempfile::tempdir;
 
 	#[test]
-	fn target_write_scope_rejects_rootless_project_target() {
-		let err = target_write_scope(InstallScope::Project, None)
-			.expect_err("rootless project must be rejected");
-		match err {
-			ConfigError::InvalidConfig(msg) => {
-				assert_eq!(msg, "project_root is required for project targets");
-			}
-			other => panic!("expected InvalidConfig, got {other:?}"),
-		}
-
+	fn install_target_and_locator_hold_exact_write_scope() {
+		let temp = tempdir().unwrap();
+		let target = InstallTarget {
+			agent: AgentType::Claude,
+			scope: WriteScope::project(temp.path()),
+		};
+		assert_eq!(target.scope, WriteScope::project(temp.path()));
 		assert_eq!(
-			target_write_scope(InstallScope::Global, None).unwrap(),
-			WriteScope::Global
+			target.scope.resource_scope(),
+			crate::models::ResourceScope::ProjectOnly
 		);
 
-		let temp = tempdir().unwrap();
+		let global_target = InstallTarget {
+			agent: AgentType::Claude,
+			scope: WriteScope::Global,
+		};
+		assert_eq!(global_target.scope, WriteScope::Global);
 		assert_eq!(
-			target_write_scope(InstallScope::Project, Some(temp.path()))
-				.unwrap(),
-			WriteScope::project(temp.path())
+			global_target.scope.resource_scope(),
+			crate::models::ResourceScope::GlobalOnly
 		);
 	}
 
@@ -2536,8 +2410,7 @@ mod tests {
 		let copies = vec![OperationPlan {
 			target: InstallTarget {
 				agent: AgentType::OpenCode,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root),
 			},
 			action: OperationAction::Copy,
 		}];
@@ -2574,8 +2447,7 @@ mod tests {
 		let copies = vec![OperationPlan {
 			target: InstallTarget {
 				agent: AgentType::OpenCode,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root),
 			},
 			action: OperationAction::Copy,
 		}];
@@ -2657,14 +2529,12 @@ mod tests {
 		let result = transfer_mcp(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root.clone()),
+				scope: WriteScope::project(source_root.clone()),
 				name: "filesystem".to_string(),
 			},
 			vec![InstallTarget {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(dest_root.clone()),
+				scope: WriteScope::project(dest_root.clone()),
 			}],
 		)
 		.unwrap();
@@ -2706,8 +2576,7 @@ mod tests {
 		let result = transfer_mcp(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root.clone()),
+				scope: WriteScope::project(source_root.clone()),
 				name: "filesystem".to_string(),
 			},
 			vec![], // no destinations
@@ -2746,20 +2615,17 @@ mod tests {
 		let result = transfer_mcp(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root),
+				scope: WriteScope::project(source_root),
 				name: "filesystem".to_string(),
 			},
 			vec![
 				InstallTarget {
 					agent: AgentType::Cursor,
-					scope: InstallScope::Project,
-					project_root: Some(valid_root.clone()),
+					scope: WriteScope::project(valid_root.clone()),
 				},
 				InstallTarget {
 					agent: AgentType::AugmentCode,
-					scope: InstallScope::Project,
-					project_root: Some(unsupported_root),
+					scope: WriteScope::project(unsupported_root),
 				},
 			],
 		);
@@ -2813,8 +2679,7 @@ mod tests {
 		let error = reconcile_mcp(
 			ResourceLocator {
 				agent: AgentType::Codex,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "filesystem".to_string(),
 			},
 			vec![AgentType::Cursor], // added — cannot hold the timeout
@@ -2855,14 +2720,12 @@ mod tests {
 		let copied = transfer_mcp(
 			ResourceLocator {
 				agent: AgentType::Codex,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "filesystem".to_string(),
 			},
 			vec![InstallTarget {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 			}],
 		)
 		.unwrap();
@@ -2897,8 +2760,7 @@ mod tests {
 		let error = reconcile_mcp(
 			ResourceLocator {
 				agent: AgentType::OpenCode,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root),
 				name: "remote-srv".to_string(),
 			},
 			vec![AgentType::Cursor],
@@ -2917,8 +2779,7 @@ mod tests {
 		let result = reconcile_mcp(
 			ResourceLocator {
 				agent: AgentType::OpenCode,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root),
 				name: "remote-srv".to_string(),
 			},
 			vec![AgentType::Cursor],
@@ -2944,8 +2805,7 @@ mod tests {
 		let error = reconcile_mcp(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root),
 				name: "remote-srv".to_string(),
 			},
 			vec![AgentType::OpenCode],
@@ -2972,8 +2832,7 @@ mod tests {
 		let error = reconcile_mcp(
 			ResourceLocator {
 				agent: AgentType::Codex,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root),
 				name: "remote-srv".to_string(),
 			},
 			vec![AgentType::Cursor],
@@ -2999,14 +2858,12 @@ mod tests {
 		let root = temp.path();
 		let source = ResourceLocator {
 			agent: AgentType::Cursor,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 			name: "filesystem".to_string(),
 		};
 		let target = InstallTarget {
 			agent: AgentType::OpenCode,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 		};
 		let copies = vec![OperationPlan {
 			target: target.clone(),
@@ -3014,8 +2871,7 @@ mod tests {
 		}];
 		let mut source_manager = build_manager(&InstallTarget {
 			agent: source.agent,
-			scope: source.scope,
-			project_root: source.project_root.clone(),
+			scope: source.scope.clone(),
 		});
 		ensure_loaded(&mut source_manager).unwrap();
 		source_manager
@@ -3041,8 +2897,7 @@ mod tests {
 			&source,
 			&InstallTarget {
 				agent: source.agent,
-				scope: source.scope,
-				project_root: source.project_root.clone(),
+				scope: source.scope.clone(),
 			},
 			&original,
 			&[],
@@ -3062,8 +2917,7 @@ mod tests {
 			&source,
 			&InstallTarget {
 				agent: source.agent,
-				scope: source.scope,
-				project_root: source.project_root.clone(),
+				scope: source.scope.clone(),
 			},
 			&latest,
 			&[],
@@ -3084,24 +2938,20 @@ mod tests {
 		let root = temp.path();
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 			name: "filesystem".to_string(),
 		};
 		let sibling = InstallTarget {
 			agent: AgentType::Copilot,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 		};
 		let target = InstallTarget {
 			agent: AgentType::Cursor,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 		};
 		let mut manager = build_manager(&InstallTarget {
 			agent: source.agent,
-			scope: source.scope,
-			project_root: source.project_root.clone(),
+			scope: source.scope.clone(),
 		});
 		ensure_loaded(&mut manager).unwrap();
 		manager
@@ -3148,14 +2998,12 @@ mod tests {
 		let root = temp.path();
 		let source = ResourceLocator {
 			agent: AgentType::Cursor,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 			name: "remote-srv".to_string(),
 		};
 		let target = InstallTarget {
 			agent: AgentType::OpenCode,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 		};
 		let source_path = root.join(".cursor/mcp.json");
 		fs::create_dir_all(source_path.parent().unwrap()).unwrap();
@@ -3172,8 +3020,7 @@ mod tests {
 			&source,
 			&InstallTarget {
 				agent: source.agent,
-				scope: source.scope,
-				project_root: source.project_root.clone(),
+				scope: source.scope.clone(),
 			},
 			&expected,
 			&[],
@@ -3211,8 +3058,7 @@ mod tests {
 		let result = reconcile_mcp(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "filesystem".to_string(),
 			},
 			vec![],                  // added
@@ -3287,8 +3133,7 @@ mod tests {
 		let result = reconcile_mcp(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "filesystem".to_string(),
 			},
 			vec![AgentType::Claude], // added: fails at runtime
@@ -3363,14 +3208,12 @@ mod tests {
 		let result = transfer_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root.clone()),
+				scope: WriteScope::project(source_root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			vec![InstallTarget {
 				agent: AgentType::Windsurf,
-				scope: InstallScope::Project,
-				project_root: Some(dest_root.clone()),
+				scope: WriteScope::project(dest_root.clone()),
 			}],
 		)
 		.unwrap();
@@ -3436,14 +3279,12 @@ mod tests {
 			let result = transfer_skill(
 				ResourceLocator {
 					agent,
-					scope: InstallScope::Project,
-					project_root: Some(root.to_path_buf()),
+					scope: WriteScope::project(root.to_path_buf()),
 					name: "independent".into(),
 				},
 				vec![InstallTarget {
 					agent: AgentType::Claude,
-					scope: InstallScope::Project,
-					project_root: Some(root.to_path_buf()),
+					scope: WriteScope::project(root.to_path_buf()),
 				}],
 			);
 			assert!(result.unwrap().results.iter().all(|row| row.success));
@@ -3481,8 +3322,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			vec![],                  // added
@@ -3536,8 +3376,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "never".to_string(),
 			},
 			vec![],
@@ -3588,8 +3427,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "never".to_string(),
 			},
 			vec![],
@@ -3676,8 +3514,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root.to_path_buf()),
 				name: "my-skill".to_string(),
 			},
 			vec![],
@@ -3739,8 +3576,7 @@ mod tests {
 		}
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root.to_path_buf()),
 			name: "notebooklm".into(),
 		};
 		// Private readers deliberately precede the shared-slot writers.
@@ -3803,8 +3639,7 @@ mod tests {
 
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root.to_path_buf()),
 			name: "notebooklm".into(),
 		};
 
@@ -3861,8 +3696,7 @@ mod tests {
 		}
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root.to_path_buf()),
 			name: "notebooklm".into(),
 		};
 		// Private readers deliberately precede the shared-slot writers.
@@ -3937,8 +3771,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![AgentType::Windsurf],
@@ -4026,8 +3859,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![],
@@ -4070,8 +3902,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Windsurf,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![],
@@ -4114,8 +3945,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "solo".to_string(),
 			},
 			vec![AgentType::Windsurf],
@@ -4184,8 +4014,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "solo".to_string(),
 			},
 			vec![AgentType::Amp],
@@ -4233,8 +4062,7 @@ mod tests {
 	fn an_undeterminable_protected_backing_refuses_the_removal() {
 		let target = |agent| InstallTarget {
 			agent,
-			scope: InstallScope::Global,
-			project_root: None,
+			scope: WriteScope::Global,
 		};
 		let removing = vec![target(AgentType::Claude)];
 		let protect = vec![Protected {
@@ -4346,8 +4174,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![],
@@ -4422,8 +4249,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![],
@@ -4496,8 +4322,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![],
@@ -4559,8 +4384,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Codex,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![AgentType::Claude],
@@ -4657,8 +4481,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::OpenCode,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![],
@@ -4719,8 +4542,7 @@ mod tests {
 		let message = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::OpenCode,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![],
@@ -4773,8 +4595,7 @@ mod tests {
 		let outcome = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Codex,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "mover".to_string(),
 			},
 			vec![AgentType::Windsurf],
@@ -4822,8 +4643,7 @@ mod tests {
 		let error = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			vec![],
@@ -4875,8 +4695,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			// Windsurf NEEDS a Referrer — a NativeReader destination would
@@ -4953,8 +4772,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			vec![AgentType::Windsurf], // added: fails at runtime
@@ -5046,8 +4864,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root.to_path_buf()),
 				name: "my-skill".to_string(),
 			},
 			vec![],
@@ -5115,8 +4932,7 @@ mod tests {
 		let error = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root.to_path_buf()),
 				name: "my-skill".to_string(),
 			},
 			vec![],
@@ -5216,8 +5032,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root.to_path_buf()),
 				name: "my-skill".to_string(),
 			},
 			vec![],
@@ -5269,14 +5084,12 @@ mod tests {
 		let result = transfer_sub_agent(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root.clone()),
+				scope: WriteScope::project(source_root.clone()),
 				name: "coder".to_string(),
 			},
 			vec![InstallTarget {
 				agent: AgentType::OpenCode,
-				scope: InstallScope::Project,
-				project_root: Some(dest_root.clone()),
+				scope: WriteScope::project(dest_root.clone()),
 			}],
 		)
 		.unwrap();
@@ -5314,8 +5127,7 @@ mod tests {
 		let result = reconcile_sub_agent(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "coder".to_string(),
 			},
 			vec![AgentType::OpenCode], // added
@@ -5355,8 +5167,7 @@ mod tests {
 		let result = reconcile_sub_agent(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "coder".into(),
 			},
 			vec![AgentType::Codex],
@@ -5385,8 +5196,7 @@ mod tests {
 		let result = reconcile_sub_agent(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root.to_path_buf()),
 				name: "coder".to_string(),
 			},
 			vec![AgentType::OpenCode],
@@ -5424,15 +5234,13 @@ mod tests {
 
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root.to_path_buf()),
 			name: "coder".to_string(),
 		};
 		let expected = load_source_sub_agent(&source)?;
 		let target = InstallTarget {
 			agent: AgentType::OpenCode,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root.to_path_buf()),
 		};
 		copy_sub_agent_into(&target, &expected)?;
 		let copies = vec![OperationPlan {
@@ -5448,8 +5256,7 @@ mod tests {
 
 		let source_target = InstallTarget {
 			agent: source.agent,
-			scope: source.scope,
-			project_root: source.project_root.clone(),
+			scope: source.scope.clone(),
 		};
 		let error = delete_reconciled_sub_agent(
 			&source,
@@ -5482,8 +5289,7 @@ mod tests {
 		let error = reconcile_sub_agent(
 			ResourceLocator {
 				agent: AgentType::Codex,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root.to_path_buf()),
 				name: "coder".to_string(),
 			},
 			vec![AgentType::OpenCode],
@@ -5505,8 +5311,7 @@ mod tests {
 		let result = reconcile_sub_agent(
 			ResourceLocator {
 				agent: AgentType::Codex,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root.to_path_buf()),
 				name: "coder".to_string(),
 			},
 			vec![AgentType::OpenCode],
@@ -5531,8 +5336,7 @@ mod tests {
 		let error = reconcile_sub_agent(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.to_path_buf()),
+				scope: WriteScope::project(root.to_path_buf()),
 				name: "coder".to_string(),
 			},
 			vec![AgentType::Codex],
@@ -5576,20 +5380,17 @@ mod tests {
 		let result = transfer_mcp(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root.clone()),
+				scope: WriteScope::project(source_root.clone()),
 				name: "filesystem".to_string(),
 			},
 			vec![
 				InstallTarget {
 					agent: AgentType::Cursor,
-					scope: InstallScope::Project,
-					project_root: Some(dest_root_cursor.clone()),
+					scope: WriteScope::project(dest_root_cursor.clone()),
 				},
 				InstallTarget {
 					agent: AgentType::Copilot,
-					scope: InstallScope::Project,
-					project_root: Some(dest_root_copilot.clone()),
+					scope: WriteScope::project(dest_root_copilot.clone()),
 				},
 			],
 		)
@@ -5638,20 +5439,17 @@ mod tests {
 		let result = transfer_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root.clone()),
+				scope: WriteScope::project(source_root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			vec![
 				InstallTarget {
 					agent: AgentType::Cursor,
-					scope: InstallScope::Project,
-					project_root: Some(dest_root_cursor.clone()),
+					scope: WriteScope::project(dest_root_cursor.clone()),
 				},
 				InstallTarget {
 					agent: AgentType::Windsurf,
-					scope: InstallScope::Project,
-					project_root: Some(dest_root_windsurf.clone()),
+					scope: WriteScope::project(dest_root_windsurf.clone()),
 				},
 			],
 		)
@@ -5703,14 +5501,12 @@ mod tests {
 		let result = transfer_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root.clone()),
+				scope: WriteScope::project(source_root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			vec![InstallTarget {
 				agent: AgentType::Cursor,
-				scope: InstallScope::Project,
-				project_root: Some(dest_root.clone()),
+				scope: WriteScope::project(dest_root.clone()),
 			}],
 		)
 		.unwrap();
@@ -5777,8 +5573,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(root.clone()),
+				scope: WriteScope::project(root.clone()),
 				name: "shared-skill".to_string(),
 			},
 			vec![AgentType::Cursor, AgentType::Windsurf],
@@ -5837,20 +5632,17 @@ mod tests {
 		let result = transfer_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(source_root.clone()),
+				scope: WriteScope::project(source_root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			vec![
 				InstallTarget {
 					agent: AgentType::Cursor,
-					scope: InstallScope::Project,
-					project_root: Some(dest_root.clone()),
+					scope: WriteScope::project(dest_root.clone()),
 				},
 				InstallTarget {
 					agent: AgentType::Cursor,
-					scope: InstallScope::Project,
-					project_root: Some(dest_root.clone()),
+					scope: WriteScope::project(dest_root.clone()),
 				},
 			],
 		)
@@ -5907,8 +5699,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Global,
-				project_root: None,
+				scope: WriteScope::Global,
 				name: "solo".to_string(),
 			},
 			vec![AgentType::Amp],
@@ -5963,8 +5754,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Global,
-				project_root: None,
+				scope: WriteScope::Global,
 				name: "solo".to_string(),
 			},
 			vec![AgentType::Hermes],
@@ -5991,8 +5781,7 @@ mod tests {
 	fn global_target(agent: AgentType) -> InstallTarget {
 		InstallTarget {
 			agent,
-			scope: InstallScope::Global,
-			project_root: None,
+			scope: WriteScope::Global,
 		}
 	}
 
@@ -6013,8 +5802,7 @@ mod tests {
 				.collect(),
 			deletes: vec![],
 			dry_run_delete_response: None,
-			scope: ResourceScope::GlobalOnly,
-			project_root: None,
+			scope: WriteScope::Global,
 		}
 	}
 
@@ -6136,8 +5924,7 @@ mod tests {
 
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.clone()),
+			scope: WriteScope::project(root.clone()),
 			name: "gone-src".to_string(),
 		};
 
@@ -6179,8 +5966,7 @@ mod tests {
 
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.clone()),
+			scope: WriteScope::project(root.clone()),
 			name: "gone-src".to_string(),
 		};
 
@@ -6236,8 +6022,7 @@ mod tests {
 
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.clone()),
+			scope: WriteScope::project(root.clone()),
 			name: "gone-src".to_string(),
 		};
 
@@ -6282,8 +6067,7 @@ mod tests {
 
 		let source = ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.clone()),
+			scope: WriteScope::project(root.clone()),
 			name: "gone-src".to_string(),
 		};
 
@@ -6361,8 +6145,7 @@ mod tests {
 	fn claude_source(root: &Path) -> ResourceLocator {
 		ResourceLocator {
 			agent: AgentType::Claude,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root.to_path_buf()),
 			name: "gone-src".to_string(),
 		}
 	}
@@ -6558,8 +6341,7 @@ mod tests {
 
 		let source = ResourceLocator {
 			agent: AgentType::Codex,
-			scope: InstallScope::Project,
-			project_root: Some(root.clone()),
+			scope: WriteScope::project(root.clone()),
 			name: "test-skill".to_string(),
 		};
 
@@ -6655,8 +6437,7 @@ mod tests {
 
 		let source = ResourceLocator {
 			agent: AgentType::Codex,
-			scope: InstallScope::Project,
-			project_root: Some(root.clone()),
+			scope: WriteScope::project(root.clone()),
 			name: "test-skill".to_string(),
 		};
 

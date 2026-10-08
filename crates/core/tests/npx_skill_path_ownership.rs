@@ -586,9 +586,8 @@ fn delete_still_works_with_an_empty_lookalike_folder_in_a_read_dir() {
 /// manage-agents dialog allows exactly this shape (deselect all, no adds).
 #[test]
 fn reconcile_removing_every_holder_takes_the_master() {
-	use aghub_core::transfer::{
-		reconcile_skill, InstallScope, ResourceLocator,
-	};
+	use aghub_core::transfer::{reconcile_skill, ResourceLocator};
+	use aghub_core::WriteScope;
 
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
@@ -615,8 +614,7 @@ fn reconcile_removing_every_holder_takes_the_master() {
 	let result = reconcile_skill(
 		ResourceLocator {
 			agent: AgentType::Cursor,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 			name: "shared".to_string(),
 		},
 		vec![],
@@ -961,9 +959,8 @@ fn preview_of_a_shadowing_copy_removal_discloses_the_lock_prune() {
 #[cfg(unix)]
 #[test]
 fn reconcile_removes_a_private_copy_that_shadows_the_master() {
-	use aghub_core::transfer::{
-		reconcile_skill, InstallScope, ResourceLocator,
-	};
+	use aghub_core::transfer::{reconcile_skill, ResourceLocator};
+	use aghub_core::WriteScope;
 
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
@@ -976,8 +973,7 @@ fn reconcile_removes_a_private_copy_that_shadows_the_master() {
 	reconcile_skill(
 		ResourceLocator {
 			agent: AgentType::Cursor,
-			scope: InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: WriteScope::project(root),
 			name: "foo".to_string(),
 		},
 		vec![],
@@ -1150,8 +1146,7 @@ fn the_reconcile_preflight_names_the_compat_dir_too() {
 	let error = reconcile_skill_preview(
 		&ResourceLocator {
 			agent: AgentType::Cline,
-			scope: aghub_core::transfer::InstallScope::Project,
-			project_root: Some(root.to_path_buf()),
+			scope: aghub_core::WriteScope::project(root),
 			name: "legacy-skill".to_string(),
 		},
 		&[],

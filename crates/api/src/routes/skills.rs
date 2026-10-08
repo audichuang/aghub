@@ -284,9 +284,7 @@ pub async fn prune_lock_route(
 	_origin: TrustedLocalOrigin,
 	body: Json<PruneLockRequest>,
 ) -> ApiResult<PruneLockResponse> {
-	use aghub_core::skills::prune::{
-		preview_prune, prune_lock_scanning, PruneScope,
-	};
+	use aghub_core::skills::prune::{preview_prune, prune_lock_scanning};
 	let req = body.into_inner();
 
 	let write_scope = match crate::extractors::resolve_write_scope(
@@ -302,21 +300,15 @@ pub async fn prune_lock_route(
 			}));
 		}
 	};
-	let (scope, project_root) = match write_scope {
-		aghub_core::WriteScope::Global => (PruneScope::Global, None),
-		aghub_core::WriteScope::Project { root } => {
-			(PruneScope::Project, Some(root))
-		}
-	};
 	let dry_run = !req.confirm.unwrap_or(false);
 
 	// A commit takes the mutation lock across scan + rewrite; the dry-run preview
 	// does not, but it still scans disk, so both belong off the async worker.
 	in_mutation_pool(move || {
 		let result = if dry_run {
-			preview_prune(scope, project_root.as_deref())
+			preview_prune(&write_scope)
 		} else {
-			prune_lock_scanning(scope, project_root.as_deref())
+			prune_lock_scanning(&write_scope)
 		};
 
 		match result {
@@ -2349,9 +2341,7 @@ mod tests {
 	use super::*;
 	#[cfg(unix)]
 	use crate::routes::skills_test_git::{test_git, test_has_git};
-	use aghub_core::transfer::{
-		reconcile_skill, InstallScope, ResourceLocator,
-	};
+	use aghub_core::transfer::{reconcile_skill, ResourceLocator};
 	use tempfile::tempdir;
 
 	// ---- F2.5: delete (containment/dry-run/confirm/prune) + prune-lock ------
@@ -5960,8 +5950,7 @@ mod tests {
 		let result = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
-				scope: InstallScope::Project,
-				project_root: Some(project_root.clone()),
+				scope: WriteScope::project(project_root.clone()),
 				name: "repo-helper".to_string(),
 			},
 			vec![AgentType::OpenCode],

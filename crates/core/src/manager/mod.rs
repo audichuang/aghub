@@ -21,7 +21,7 @@ pub struct ConfigManager {
 	pub(crate) project_root: Option<PathBuf>,
 	pub(crate) config: Option<AgentConfig>,
 	pub(crate) scope: ResourceScope,
-	pub(crate) write_scope: ResourceScope,
+	pub(crate) write_scope: Option<crate::WriteScope>,
 }
 
 impl ConfigManager {
@@ -45,22 +45,47 @@ impl ConfigManager {
 		project_root: Option<&Path>,
 		scope: ResourceScope,
 	) -> Self {
+		let write_scope = if global {
+			Some(crate::WriteScope::Global)
+		} else {
+			project_root.map(crate::WriteScope::project)
+		};
 		Self {
 			adapter,
 			project_root: project_root.map(|p| p.to_path_buf()),
 			config: None,
 			scope,
-			write_scope: if global {
-				ResourceScope::GlobalOnly
-			} else {
-				ResourceScope::ProjectOnly
-			},
+			write_scope,
 		}
 	}
 
+	/// Create a ConfigManager targeting exactly one [`WriteScope`]
+	pub fn for_write(
+		adapter: Box<dyn AgentAdapter>,
+		write_scope: crate::WriteScope,
+	) -> Self {
+		let scope = write_scope.resource_scope();
+		let project_root = write_scope.project_root().map(Path::to_path_buf);
+		Self {
+			adapter,
+			project_root,
+			config: None,
+			scope,
+			write_scope: Some(write_scope),
+		}
+	}
+
+	pub(crate) fn write_resource_scope(&self) -> ResourceScope {
+		self.write_scope
+			.as_ref()
+			.map(|w| w.resource_scope())
+			.unwrap_or(self.scope)
+	}
+
 	pub fn config_path(&self) -> Option<PathBuf> {
+		let scope = self.write_resource_scope();
 		self.adapter
-			.mcp_config_path(self.project_root.as_deref(), self.write_scope)
+			.mcp_config_path(self.project_root.as_deref(), scope)
 	}
 
 	pub fn agent_name(&self) -> &str {
@@ -77,19 +102,12 @@ impl ConfigManager {
 			.unwrap_or(crate::models::AgentType::Claude)
 	}
 
-	pub fn write_scope(&self) -> Result<crate::WriteScope> {
-		match self.write_scope {
-			ResourceScope::GlobalOnly => Ok(crate::WriteScope::Global),
-			ResourceScope::ProjectOnly | ResourceScope::Both => {
-				let root = self.project_root.clone().ok_or_else(|| {
-					ConfigError::InvalidConfig(
-						"project root is required for project write scope"
-							.to_string(),
-					)
-				})?;
-				Ok(crate::WriteScope::Project { root })
-			}
-		}
+	pub fn write_scope(&self) -> Result<&crate::WriteScope> {
+		self.write_scope.as_ref().ok_or_else(|| {
+			ConfigError::InvalidConfig(
+				"project root is required for project write scope".to_string(),
+			)
+		})
 	}
 
 	pub fn load(&mut self) -> Result<&AgentConfig> {
@@ -330,8 +348,9 @@ impl ConfigManager {
 		&self,
 		op: &str,
 	) -> Result<::skill::lock::MutationGuard> {
-		let guard = match self.write_scope {
-			ResourceScope::GlobalOnly => {
+		let write_scope = self.write_scope()?;
+		let guard = match write_scope {
+			crate::WriteScope::Global => {
 				let home = dirs::home_dir();
 				let scope = if home.is_some() {
 					ResourceScope::Both
@@ -340,15 +359,12 @@ impl ConfigManager {
 				};
 				crate::skills::lock::mutation_guard(op, scope, home.as_deref())
 			}
-			ResourceScope::ProjectOnly => crate::skills::lock::mutation_guard(
-				op,
-				ResourceScope::ProjectOnly,
-				self.project_root.as_deref(),
-			),
-			ResourceScope::Both => {
-				return Err(ConfigError::InvalidConfig(format!(
-					"{op} requires one write scope"
-				)))
+			crate::WriteScope::Project { root } => {
+				crate::skills::lock::mutation_guard(
+					op,
+					ResourceScope::ProjectOnly,
+					Some(root),
+				)
 			}
 		};
 		Ok(guard?)
@@ -363,10 +379,11 @@ impl ConfigManager {
 	}
 
 	pub(crate) fn save_unlocked(&self, config: &AgentConfig) -> Result<()> {
+		let scope = self.write_resource_scope();
 		debug!(
 			"saving config for agent '{}' to scope {:?}",
 			self.adapter.name(),
-			self.write_scope
+			scope
 		);
 		if !self.adapter.supports_mcp_operations() {
 			if config.mcps.is_empty() {
@@ -384,14 +401,14 @@ impl ConfigManager {
 		}
 		self.adapter.save_mcps(
 			self.project_root.as_deref(),
-			self.write_scope,
+			scope,
 			&config.mcps,
 		)?;
 		info!(
 			"saved {} MCPs for agent '{}' in scope {:?}",
 			config.mcps.len(),
 			self.adapter.name(),
-			self.write_scope
+			scope
 		);
 		Ok(())
 	}
@@ -412,16 +429,17 @@ impl ConfigManager {
 		let config = self.config.as_ref().ok_or_else(|| {
 			ConfigError::InvalidConfig("No configuration loaded".to_string())
 		})?;
+		let scope = self.write_resource_scope();
 		self.adapter.save_sub_agents(
 			self.project_root.as_deref(),
-			self.write_scope,
+			scope,
 			&config.sub_agents,
 		)?;
 		info!(
 			"saved {} sub-agents for agent '{}' in scope {:?}",
 			config.sub_agents.len(),
 			self.adapter.name(),
-			self.write_scope,
+			scope,
 		);
 		Ok(())
 	}
@@ -479,28 +497,47 @@ mod tests {
 
 	#[test]
 	fn config_manager_write_scope_requires_project_root() {
-		let mut mgr =
-			ConfigManager::new(create_adapter(AgentType::Claude), false, None);
-		mgr.write_scope = ResourceScope::ProjectOnly;
-		mgr.project_root = None;
-		let err = mgr.write_scope().unwrap_err();
+		let mgr_project_none = ConfigManager::with_scope(
+			create_adapter(AgentType::Claude),
+			false,
+			None,
+			ResourceScope::ProjectOnly,
+		);
+		let err = mgr_project_none.write_scope().unwrap_err();
 		assert!(
 			matches!(err, ConfigError::InvalidConfig(_)),
 			"must return InvalidConfig when project root is missing, got: {err:?}"
 		);
 
-		mgr.project_root = Some(PathBuf::from("/test/project"));
-		let scope = mgr.write_scope().unwrap();
+		let mgr_project = ConfigManager::with_scope(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(std::path::Path::new("/test/project")),
+			ResourceScope::ProjectOnly,
+		);
+		let scope = mgr_project.write_scope().unwrap();
 		assert_eq!(
 			scope,
-			crate::WriteScope::Project {
+			&crate::WriteScope::Project {
 				root: PathBuf::from("/test/project")
 			}
 		);
 
-		mgr.write_scope = ResourceScope::GlobalOnly;
-		mgr.project_root = None;
-		let global_scope = mgr.write_scope().unwrap();
-		assert_eq!(global_scope, crate::WriteScope::Global);
+		let mgr_for_write = ConfigManager::for_write(
+			create_adapter(AgentType::Claude),
+			crate::WriteScope::project(PathBuf::from("/test/project")),
+		);
+		assert_eq!(
+			mgr_for_write.write_scope().unwrap(),
+			&crate::WriteScope::Project {
+				root: PathBuf::from("/test/project")
+			}
+		);
+		assert_eq!(mgr_for_write.scope, ResourceScope::ProjectOnly);
+
+		let mgr_global =
+			ConfigManager::new(create_adapter(AgentType::Claude), true, None);
+		let global_scope = mgr_global.write_scope().unwrap();
+		assert_eq!(global_scope, &crate::WriteScope::Global);
 	}
 }

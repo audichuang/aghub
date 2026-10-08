@@ -5,7 +5,7 @@ use crate::{
 	skills::removal::{
 		Layout, PruneStatus, RemovalOutcome, RemovalPlan, Verdict,
 	},
-	transfer::{self, InstallScope, ResourceLocator},
+	transfer::{self, ResourceLocator},
 };
 use log::info;
 
@@ -81,7 +81,7 @@ impl ConfigManager {
 		let agent_name = self.adapter.name().to_string();
 		let agent = self.agent_type();
 		let project_root = self.project_root.clone();
-		let write_scope = self.write_scope;
+		let write_scope = self.write_resource_scope();
 		self.mutate_mcp(|mcps| {
 			let index = mcps
 				.iter()
@@ -182,19 +182,10 @@ impl ConfigManager {
 				"removal request does not include the target agent".into(),
 			));
 		}
-		let scope = match self.write_scope {
-			crate::models::ResourceScope::GlobalOnly => InstallScope::Global,
-			crate::models::ResourceScope::ProjectOnly => InstallScope::Project,
-			crate::models::ResourceScope::Both => {
-				return Err(ConfigError::InvalidConfig(
-					"MCP removal requires one write scope".to_string(),
-				))
-			}
-		};
+		let write_scope = self.write_scope()?.clone();
 		let source = ResourceLocator {
 			agent: self.agent_type(),
-			scope,
-			project_root: self.project_root.clone(),
+			scope: write_scope,
 			name: name.to_string(),
 		};
 		self.remove_mcp_planned_checked(name, dry_run, confirm, |mcps| {
@@ -242,9 +233,10 @@ impl ConfigManager {
 		if !executed {
 			// Preview only reads; the executing path holds the lock across its
 			// fresh read, shared-reader guard and rewrite.
-			let current = self
-				.adapter
-				.load_mcps(self.project_root.as_deref(), self.write_scope)?;
+			let current = self.adapter.load_mcps(
+				self.project_root.as_deref(),
+				self.write_resource_scope(),
+			)?;
 			self.config_mut()?.mcps = current;
 			if !self.config_mut()?.mcps.iter().any(|m| m.name == name) {
 				return Err(ConfigError::resource_not_found(
@@ -343,9 +335,10 @@ impl ConfigManager {
 			));
 		}
 		let _guards = self.mcp_write_guards()?;
-		let current = self
-			.adapter
-			.load_mcps(self.project_root.as_deref(), self.write_scope)?;
+		let current = self.adapter.load_mcps(
+			self.project_root.as_deref(),
+			self.write_resource_scope(),
+		)?;
 		let config = self.config_mut()?;
 		config.mcps = current;
 		preflight(&config.mcps)?;
@@ -377,8 +370,10 @@ impl ConfigManager {
 			return Ok(None);
 		};
 		let descriptor = crate::registry::get(self.agent_type());
-		let native =
-			descriptor.mcp_path(self.project_root.as_deref(), self.write_scope);
+		let native = descriptor.mcp_path(
+			self.project_root.as_deref(),
+			self.write_resource_scope(),
+		);
 		if native.as_ref() != Some(&path) {
 			return Ok(None);
 		}

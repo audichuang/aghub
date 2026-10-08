@@ -24,9 +24,8 @@
 
 use crate::eprintln_verbose;
 use aghub_core::models::ResourceScope;
-use aghub_core::skills::prune::{
-	preview_prune, prune_lock_scanning, PruneScope,
-};
+use aghub_core::skills::prune::{preview_prune, prune_lock_scanning};
+use aghub_core::WriteScope;
 use anyhow::{bail, Result};
 use serde_json::json;
 use std::path::Path;
@@ -50,17 +49,17 @@ pub fn execute(
 	// second scan. The two residual windows are in the module doc.
 	if !dry_run && want_global && want_project {
 		if let Some(root) = project_root {
-			preview_prune(PruneScope::Global, None)?;
-			preview_prune(PruneScope::Project, Some(root))?;
+			preview_prune(&WriteScope::Global)?;
+			preview_prune(&WriteScope::project(root))?;
 		}
 	}
 
 	if want_global {
 		eprintln_verbose!("Pruning global skill lock (dry_run={dry_run})");
 		let names = if dry_run {
-			preview_prune(PruneScope::Global, None)?
+			preview_prune(&WriteScope::Global)?
 		} else {
-			prune_lock_scanning(PruneScope::Global, None)?
+			prune_lock_scanning(&WriteScope::Global)?
 		};
 		pruned.extend(names);
 	}
@@ -78,11 +77,12 @@ pub fn execute(
 			report(&pruned, dry_run, None, json)?;
 			return Ok(());
 		};
+		let target = WriteScope::project(root);
 		eprintln_verbose!("Pruning project skill lock (dry_run={dry_run})");
 		let names = if dry_run {
-			preview_prune(PruneScope::Project, Some(root))?
+			preview_prune(&target)?
 		} else {
-			match prune_lock_scanning(PruneScope::Project, Some(root)) {
+			match prune_lock_scanning(&target) {
 				Ok(names) => names,
 				Err(e) => {
 					// Disclose ONLY a real partial mutation (global keys
