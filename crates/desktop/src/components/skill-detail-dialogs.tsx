@@ -192,12 +192,23 @@ export function DeleteSkillDialog({
 
 	const skill = group.items[0];
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
-	const [backendHolders, setBackendHolders] = useState<BackendHolders>({});
+	const [backendHolders, setBackendHolders] = useState<BackendHolders | null>(
+		null,
+	);
+	const [loadingHolders, setLoadingHolders] = useState(false);
+	const [holdersError, setHoldersError] = useState<string | null>(null);
 
 	useEffect(() => {
-		if (!isOpen || !skill) return;
+		if (!isOpen || !skill) {
+			setBackendHolders(null);
+			setHoldersError(null);
+			setLoadingHolders(false);
+			return;
+		}
 		const firstAgent =
 			group.items.find((i) => !!i.agent)?.agent ?? "claude";
+		setLoadingHolders(true);
+		setHoldersError(null);
 		getSkillHolders({
 			api,
 			agent: firstAgent,
@@ -205,12 +216,27 @@ export function DeleteSkillDialog({
 			scope: skill.source === "project" ? "project" : "global",
 			projectRoot: projectPath,
 		})
-			.then(setBackendHolders)
-			.catch(() => {});
+			.then((holders) => {
+				setBackendHolders(holders);
+				setLoadingHolders(false);
+			})
+			.catch((err) => {
+				setHoldersError(
+					err instanceof Error ? err.message : String(err),
+				);
+				setLoadingHolders(false);
+			});
 	}, [api, isOpen, skill, group.items, projectPath]);
 
 	const targets = useMemo(
-		() => splitDeleteTargets(group.items, backendHolders, includeUnmanaged),
+		() =>
+			backendHolders
+				? splitDeleteTargets(
+						group.items,
+						backendHolders,
+						includeUnmanaged,
+					)
+				: { managed: [], unmanaged: [], named: [] },
 		[group.items, backendHolders, includeUnmanaged],
 	);
 
@@ -259,6 +285,7 @@ export function DeleteSkillDialog({
 					includeUnmanaged,
 				},
 				unmanagedAgents,
+				managedSurvivors: backendHolders?.still_read_by_managed,
 			});
 
 			if (!res.success) {
@@ -303,127 +330,153 @@ export function DeleteSkillDialog({
 					</Modal.Header>
 
 					<Modal.Body className="p-2">
-						<p className="mb-4 text-sm text-muted">
-							{t("deleteSkillWarning", {
-								count: targets.named.length,
-							})}
-						</p>
-
-						<div className="space-y-4">
-							{globalItems.length > 0 && (
-								<div>
-									<h4
-										className="
-											mb-2 text-xs font-medium tracking-wide text-muted
-											uppercase
-										"
-									>
-										{t("globalSkills")}
-									</h4>
-									<div className="space-y-2">
-										{globalItems.map((item) => (
-											<div
-												key={item.agent}
-												className="flex items-center gap-2 text-sm"
-											>
-												<XCircleIcon className="size-4 shrink-0 text-danger" />
-												<span className="text-foreground">
-													{item.agent
-														? agentName(item.agent)
-														: t("default")}
-												</span>
-												{item.source_path && (
-													<span className="flex-1 truncate text-xs text-muted">
-														{item.source_path}
-													</span>
-												)}
-											</div>
-										))}
-									</div>
-								</div>
-							)}
-
-							{projectItems.length > 0 && (
-								<div>
-									<h4
-										className="
-											mb-2 text-xs font-medium tracking-wide text-muted
-											uppercase
-										"
-									>
-										{t("projectSkills")}
-									</h4>
-									<div className="space-y-2">
-										{projectItems.map((item) => (
-											<div
-												key={item.agent}
-												className="flex items-center gap-2 text-sm"
-											>
-												<XCircleIcon className="size-4 shrink-0 text-danger" />
-												<span className="text-foreground">
-													{item.agent
-														? agentName(item.agent)
-														: t("default")}
-												</span>
-												{item.source_path && (
-													<span className="flex-1 truncate text-xs text-muted">
-														{item.source_path}
-													</span>
-												)}
-											</div>
-										))}
-									</div>
-								</div>
-							)}
-						</div>
-
-						{targets.unmanaged.length > 0 && (
-							<div className="mt-4 rounded-lg bg-surface-secondary p-3">
-								<h4
-									className="
-										mb-1 text-xs font-medium tracking-wide text-muted
-										uppercase
-									"
-								>
-									{t("deleteSkillUnmanagedTitle")}
-								</h4>
-								<p className="mb-2 text-xs text-muted">
-									{t("deleteSkillUnmanagedHint")}
-								</p>
-								<div className="mb-3 space-y-1">
-									{targets.unmanaged.map((item) => (
-										<div
-											key={`${item.source}:${item.agent}`}
-											className="flex items-center gap-2 text-sm"
-										>
-											<span className="text-foreground">
-												{item.agent
-													? agentName(item.agent)
-													: t("default")}
-											</span>
-											{item.source_path && (
-												<span className="flex-1 truncate text-xs text-muted">
-													{item.source_path}
-												</span>
-											)}
-										</div>
-									))}
-								</div>
-								<Checkbox
-									isSelected={includeUnmanaged}
-									onChange={setIncludeUnmanaged}
-									isDisabled={deleteMutation.isPending}
-								>
-									<Checkbox.Content>
-										<Checkbox.Control>
-											<Checkbox.Indicator />
-										</Checkbox.Control>
-										<span className="text-sm">
-											{t("deleteSkillIncludeUnmanaged")}
-										</span>
-									</Checkbox.Content>
-								</Checkbox>
+						{loadingHolders ? (
+							<div className="flex items-center justify-center py-8">
+								<Spinner size="md" />
 							</div>
+						) : holdersError ? (
+							<div className="rounded-lg bg-danger/10 p-3 text-sm text-danger">
+								{holdersError}
+							</div>
+						) : (
+							<>
+								<p className="mb-4 text-sm text-muted">
+									{t("deleteSkillWarning", {
+										count: targets.named.length,
+									})}
+								</p>
+
+								<div className="space-y-4">
+									{globalItems.length > 0 && (
+										<div>
+											<h4
+												className="
+													mb-2 text-xs font-medium tracking-wide text-muted
+													uppercase
+												"
+											>
+												{t("globalSkills")}
+											</h4>
+											<div className="space-y-2">
+												{globalItems.map((item) => (
+													<div
+														key={item.agent}
+														className="flex items-center gap-2 text-sm"
+													>
+														<XCircleIcon className="size-4 shrink-0 text-danger" />
+														<span className="text-foreground">
+															{item.agent
+																? agentName(
+																		item.agent,
+																	)
+																: t("default")}
+														</span>
+														{item.source_path && (
+															<span className="flex-1 truncate text-xs text-muted">
+																{
+																	item.source_path
+																}
+															</span>
+														)}
+													</div>
+												))}
+											</div>
+										</div>
+									)}
+
+									{projectItems.length > 0 && (
+										<div>
+											<h4
+												className="
+													mb-2 text-xs font-medium tracking-wide text-muted
+													uppercase
+												"
+											>
+												{t("projectSkills")}
+											</h4>
+											<div className="space-y-2">
+												{projectItems.map((item) => (
+													<div
+														key={item.agent}
+														className="flex items-center gap-2 text-sm"
+													>
+														<XCircleIcon className="size-4 shrink-0 text-danger" />
+														<span className="text-foreground">
+															{item.agent
+																? agentName(
+																		item.agent,
+																	)
+																: t("default")}
+														</span>
+														{item.source_path && (
+															<span className="flex-1 truncate text-xs text-muted">
+																{
+																	item.source_path
+																}
+															</span>
+														)}
+													</div>
+												))}
+											</div>
+										</div>
+									)}
+								</div>
+
+								{targets.unmanaged.length > 0 && (
+									<div className="mt-4 rounded-lg bg-surface-secondary p-3">
+										<h4
+											className="
+												mb-1 text-xs font-medium tracking-wide text-muted
+												uppercase
+											"
+										>
+											{t("deleteSkillUnmanagedTitle")}
+										</h4>
+										<p className="mb-2 text-xs text-muted">
+											{t("deleteSkillUnmanagedHint")}
+										</p>
+										<div className="mb-3 space-y-1">
+											{targets.unmanaged.map((item) => (
+												<div
+													key={`${item.source}:${item.agent}`}
+													className="flex items-center gap-2 text-sm"
+												>
+													<span className="text-foreground">
+														{item.agent
+															? agentName(
+																	item.agent,
+																)
+															: t("default")}
+													</span>
+													{item.source_path && (
+														<span className="flex-1 truncate text-xs text-muted">
+															{item.source_path}
+														</span>
+													)}
+												</div>
+											))}
+										</div>
+										<Checkbox
+											isSelected={includeUnmanaged}
+											onChange={setIncludeUnmanaged}
+											isDisabled={
+												deleteMutation.isPending
+											}
+										>
+											<Checkbox.Content>
+												<Checkbox.Control>
+													<Checkbox.Indicator />
+												</Checkbox.Control>
+												<span className="text-sm">
+													{t(
+														"deleteSkillIncludeUnmanaged",
+													)}
+												</span>
+											</Checkbox.Content>
+										</Checkbox>
+									</div>
+								)}
+							</>
 						)}
 					</Modal.Body>
 
@@ -440,6 +493,8 @@ export function DeleteSkillDialog({
 							variant="danger"
 							onPress={() => deleteMutation.mutate()}
 							isDisabled={
+								loadingHolders ||
+								!!holdersError ||
 								deleteMutation.isPending ||
 								targets.named.length === 0
 							}

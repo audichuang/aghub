@@ -63,7 +63,9 @@ export interface DeleteTargets<T extends DeleteTargetItem> {
 
 /**
  * Splits target items into managed and unmanaged groups using the backend's
- * classification (`still_read_by_managed`), avoiding frontend heuristics.
+ * classification (`still_read_by_unmanaged`), avoiding frontend heuristics.
+ * An agent is unmanaged if it appears in `still_read_by_unmanaged`; otherwise
+ * it is considered managed.
  */
 export function splitDeleteTargets<T extends DeleteTargetItem>(
 	items: readonly T[],
@@ -71,12 +73,12 @@ export function splitDeleteTargets<T extends DeleteTargetItem>(
 	includeUnmanaged: boolean,
 ): DeleteTargets<T> {
 	const withAgent = items.filter((item) => !!item.agent);
-	const managedSet = new Set(backendHolders.still_read_by_managed ?? []);
-	const managed = withAgent.filter((item) =>
-		managedSet.has(item.agent as string),
+	const unmanagedSet = new Set(backendHolders.still_read_by_unmanaged ?? []);
+	const unmanaged = withAgent.filter((item) =>
+		unmanagedSet.has(item.agent as string),
 	);
-	const unmanaged = withAgent.filter(
-		(item) => !managedSet.has(item.agent as string),
+	const managed = withAgent.filter(
+		(item) => !unmanagedSet.has(item.agent as string),
 	);
 	return {
 		managed,
@@ -250,13 +252,12 @@ export async function getBulkSkillHolders(
 	const skillGroups = groups.filter(
 		(g) => (g.resourceType ?? resourceType) === "skill",
 	);
-	const managedSet = new Set<string>();
 	const unmanagedSet = new Set<string>();
 
-	for (const group of skillGroups) {
-		const firstItem = group.items.find((i) => !!i.agent);
-		if (!firstItem || !firstItem.agent) continue;
-		try {
+	await Promise.all(
+		skillGroups.map(async (group) => {
+			const firstItem = group.items.find((i) => !!i.agent);
+			if (!firstItem || !firstItem.agent) return;
 			const res = await getSkillHolders({
 				api,
 				agent: firstItem.agent,
@@ -264,16 +265,13 @@ export async function getBulkSkillHolders(
 				scope: firstItem.source === "project" ? "project" : "global",
 				projectRoot: projectPath,
 			});
-			for (const a of res.still_read_by_managed ?? []) managedSet.add(a);
-			for (const a of res.still_read_by_unmanaged ?? [])
+			for (const a of res.still_read_by_unmanaged ?? []) {
 				unmanagedSet.add(a);
-		} catch {
-			// Ignore preview failure for individual item
-		}
-	}
+			}
+		}),
+	);
 
 	return {
-		still_read_by_managed: [...managedSet],
 		still_read_by_unmanaged: [...unmanagedSet],
 	};
 }
@@ -325,6 +323,7 @@ export interface RefusalInterpretation {
 export interface InterpretRefusalOptions {
 	intent?: DeleteSkillIntent;
 	unmanagedAgents?: readonly string[];
+	managedSurvivors?: readonly string[];
 	skillName?: string;
 	t?: TranslateFn;
 }
@@ -369,21 +368,18 @@ export function interpretRefusal(
 		};
 	}
 
-	// 2. Check if refusal was genuinely caused by a shared slot held by unticked unmanaged readers
-	let retryWithUnmanaged = false;
-	if (
+	// 2. Check if refusal was genuinely caused by unticked unmanaged (disabled) agents
+	const unmanagedList = options?.unmanagedAgents ?? [];
+	const managedSurvivors = options?.managedSurvivors ?? [];
+	const hasShared = rejectedTargets.some((tgt) => tgt.kind === "shared");
+
+	const retryWithUnmanaged =
 		code === "UNSUPPORTED_OPERATION" &&
 		!includeUnmanaged &&
-		rejectedTargets.length > 0 &&
-		(options?.unmanagedAgents?.length ?? 0) > 0
-	) {
-		const isSharedRefusal = rejectedTargets.every(
-			(tgt) => tgt.kind === "shared",
-		);
-		if (isSharedRefusal) {
-			retryWithUnmanaged = true;
-		}
-	}
+		!gitTarget &&
+		hasShared &&
+		unmanagedList.length > 0 &&
+		managedSurvivors.length === 0;
 
 	let message: string | undefined;
 	if (retryWithUnmanaged) {
@@ -414,9 +410,6 @@ export interface FormatDeleteMessageOptions {
 	error?: unknown;
 	t: TranslateFn;
 	retryWithUnmanaged?: boolean;
-	projectError?: string;
-	writtenScope?: string;
-	failedScope?: string;
 	context?: "single" | "bulk";
 }
 
@@ -424,8 +417,7 @@ export function formatDeleteMessage(
 	verdict: DeleteSkillVerdict,
 	options: FormatDeleteMessageOptions,
 ): string {
-	const { name, path, isGit, t, retryWithUnmanaged, projectError, context } =
-		options;
+	const { name, path, isGit, t, retryWithUnmanaged, context } = options;
 
 	if (retryWithUnmanaged) {
 		return t("deleteSkillRetryWithUnmanaged");
@@ -443,21 +435,13 @@ export function formatDeleteMessage(
 			}
 			return t("deleteSkillKeptSharedMaster", { name });
 		case "partial":
-			if (projectError) {
-				return t("deleteSkillCrossScopePartial", {
-					writtenScope: options.writtenScope ?? "global",
-					failedScope: options.failedScope ?? "project",
-					reason: projectError,
-					error: projectError,
-				});
-			}
 			return t("deleteSkillPartial", { name });
 		case "lock-only":
 			return t("sourceRemovedCleanLockOnly", { name });
 		case "refused":
 			if (options.error instanceof Error) return options.error.message;
 			if (typeof options.error === "string") return options.error;
-			return "Failed to delete skill";
+			return t("failedToDeleteSkill");
 		case "removed":
 		case "absent":
 			return "";
@@ -488,16 +472,14 @@ export interface DeleteSkillResult {
 export interface DeleteSkillOptions {
 	api: ApiClient;
 	queryClient?: QueryClient;
-	skillName?: string;
-	name?: string;
+	skillName: string;
 	agent?: string;
 	scope?: "global" | "project";
 	projectRoot?: string | null;
-	sourcePath?: string | null;
 	scopes?: readonly ScopeTarget[];
 	intent: DeleteSkillIntent;
 	unmanagedAgents?: readonly string[];
-	backendHolders?: BackendHolders;
+	managedSurvivors?: readonly string[];
 	context?: "single" | "bulk";
 	t?: TranslateFn;
 }
@@ -510,8 +492,8 @@ export interface DeleteSkillOptions {
 export async function deleteSkill(
 	options: DeleteSkillOptions,
 ): Promise<DeleteSkillResult> {
-	const { api, queryClient, intent, t } = options;
-	const name = options.skillName ?? options.name ?? "";
+	const { api, queryClient, intent, t, skillName } = options;
+	const name = skillName;
 
 	const invalidate = async () => {
 		if (queryClient) {
@@ -521,22 +503,13 @@ export async function deleteSkill(
 
 	// 1. By-path deletion
 	if (intent.kind === "by-path") {
-		const sourcePath = intent.sourcePath ?? options.sourcePath;
+		const sourcePath = intent.sourcePath;
 		if (!sourcePath) {
 			throw new Error("sourcePath is required for by-path deletion");
 		}
-		const scope =
-			intent.scope ??
-			options.scope ??
-			options.scopes?.[0]?.scope ??
-			"global";
+		const scope = intent.scope ?? "global";
 		const projectRoot =
-			scope === "project"
-				? (intent.projectRoot ??
-					options.projectRoot ??
-					options.scopes?.[0]?.projectRoot ??
-					null)
-				: null;
+			scope === "project" ? (intent.projectRoot ?? null) : null;
 		const agents = intent.agents ? [...intent.agents] : [];
 
 		try {
@@ -607,6 +580,7 @@ export async function deleteSkill(
 			const refusal = interpretRefusal(error, {
 				intent,
 				unmanagedAgents: options.unmanagedAgents,
+				managedSurvivors: options.managedSurvivors,
 				skillName: name,
 				t,
 			});
@@ -668,19 +642,19 @@ export async function deleteSkill(
 					}
 				}
 
-				const anyRemovedOrAbsent = deleteRows.some(
-					(r) => r.outcome === "removed" || r.outcome === "absent",
+				const rowVerdicts = deleteRows.map((r) =>
+					interpretRemovalVerdict(r.outcome, intent.kind),
 				);
+
+				const allAbsent =
+					rowVerdicts.length > 0 &&
+					rowVerdicts.every((v) => v === "absent");
 				const allRemovedOrAbsent =
-					deleteRows.length > 0 &&
-					deleteRows.every(
-						(r) =>
-							r.outcome === "removed" || r.outcome === "absent",
-					);
-				const hasKept = deleteRows.some((r) => r.outcome === "kept");
-				const hasPartial = deleteRows.some(
-					(r) => r.outcome === "partial",
-				);
+					rowVerdicts.length > 0 &&
+					rowVerdicts.every((v) => v === "removed" || v === "absent");
+				const anyRemoved = rowVerdicts.some((v) => v === "removed");
+				const hasKept = rowVerdicts.some((v) => v === "kept");
+				const hasPartial = rowVerdicts.some((v) => v === "partial");
 				const anyFailed =
 					reconcileRes.failed_count > 0 ||
 					deleteRows.some(
@@ -691,12 +665,19 @@ export async function deleteSkill(
 				let scopeSuccess = false;
 				let scopeError: string | undefined;
 
-				if (allRemovedOrAbsent && reconcileRes.failed_count === 0) {
+				if (allAbsent && reconcileRes.failed_count === 0) {
+					scopeVerdict = "absent";
+					scopeSuccess = true;
+				} else if (
+					allRemovedOrAbsent &&
+					anyRemoved &&
+					reconcileRes.failed_count === 0
+				) {
 					scopeVerdict = "removed";
 					scopeSuccess = true;
 				} else if (
 					hasPartial ||
-					(anyRemovedOrAbsent && (hasKept || anyFailed))
+					(anyRemoved && (hasKept || anyFailed))
 				) {
 					scopeVerdict = "partial";
 					scopeSuccess = false;
@@ -705,7 +686,8 @@ export async function deleteSkill(
 							(r) =>
 								!r.success ||
 								r.outcome === "partial" ||
-								r.outcome === "kept",
+								r.outcome === "kept" ||
+								r.outcome === "failed",
 						)
 						.map((r) =>
 							r.error
@@ -725,11 +707,14 @@ export async function deleteSkill(
 				} else {
 					scopeVerdict = "refused";
 					scopeSuccess = false;
+					const fallbackError = t
+						? t("failedToDeleteSkill")
+						: "Failed to delete skill";
 					scopeError =
 						deleteRows
 							.map((r) => r.error)
 							.filter(Boolean)
-							.join("; ") || "failed";
+							.join("; ") || fallbackError;
 				}
 
 				scopeResults.push({
@@ -746,6 +731,7 @@ export async function deleteSkill(
 				const refusal = interpretRefusal(error, {
 					intent,
 					unmanagedAgents: options.unmanagedAgents,
+					managedSurvivors: options.managedSurvivors,
 					skillName: name,
 					t,
 				});
@@ -770,18 +756,28 @@ export async function deleteSkill(
 		const failedScope = scopeResults.find((s) => !s.success);
 
 		if (failedScope) {
-			const projectError = failedScope.error ?? "failed";
+			const fallbackError = t
+				? t("failedToDeleteSkill")
+				: "Failed to delete skill";
+			const projectError = failedScope.error ?? fallbackError;
+			const formatScopeLabel = (scope: "global" | "project"): string => {
+				if (t) {
+					return scope === "project"
+						? t("scopeProject")
+						: t("scopeGlobal");
+				}
+				return scope === "project" ? "Project" : "Global";
+			};
 			const writtenScopeName = writtenScopes
-				.map((s) => s.scope)
+				.map((s) => formatScopeLabel(s.scope))
 				.join(", ");
-			const failedScopeName = failedScope.scope;
+			const failedScopeName = formatScopeLabel(failedScope.scope);
 			const msg = anyWritten
 				? t
 					? t("deleteSkillCrossScopePartial", {
 							writtenScope: writtenScopeName,
 							failedScope: failedScopeName,
 							reason: projectError,
-							error: projectError,
 						})
 					: `${writtenScopeName} scope deleted, but ${failedScopeName} scope failed: ${projectError}`
 				: projectError;
@@ -797,8 +793,12 @@ export async function deleteSkill(
 			};
 		}
 
+		const allScopesAbsent =
+			scopeResults.length > 0 &&
+			scopeResults.every((s) => s.verdict === "absent");
+
 		return {
-			verdict: "removed",
+			verdict: allScopesAbsent ? "absent" : "removed",
 			success: true,
 			scopeResults,
 			unmanagedKept: allStillReadByUnmanaged.length > 0,
@@ -820,7 +820,11 @@ export async function deleteSkill(
 	const agents = intent.kind === "from-agents" ? [...intent.agents] : [];
 
 	let unmanagedAgents = options.unmanagedAgents;
-	if (intent.kind === "all-agents" && !unmanagedAgents) {
+	let managedSurvivors = options.managedSurvivors;
+	if (
+		intent.kind === "all-agents" &&
+		(!unmanagedAgents || !managedSurvivors)
+	) {
 		try {
 			const preview = await getSkillHolders({
 				api,
@@ -829,7 +833,12 @@ export async function deleteSkill(
 				scope,
 				projectRoot,
 			});
-			unmanagedAgents = preview.still_read_by_unmanaged;
+			if (!unmanagedAgents) {
+				unmanagedAgents = preview.still_read_by_unmanaged;
+			}
+			if (!managedSurvivors) {
+				managedSurvivors = preview.still_read_by_managed;
+			}
 		} catch {
 			// Ignore preview error
 		}
@@ -917,6 +926,7 @@ export async function deleteSkill(
 		const refusal = interpretRefusal(error, {
 			intent,
 			unmanagedAgents,
+			managedSurvivors,
 			skillName: name,
 			t,
 		});

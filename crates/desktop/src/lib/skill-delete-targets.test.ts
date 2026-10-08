@@ -13,7 +13,7 @@ const items = [
 	{ agent: null, source: "global" },
 ];
 const managed = {
-	still_read_by_managed: ["claude"],
+	still_read_by_managed: [],
 	still_read_by_unmanaged: ["cursor", "opencode"],
 };
 
@@ -45,7 +45,7 @@ test("a row with no agent is never named", () => {
 	} = splitDeleteTargets(
 		items,
 		{
-			still_read_by_managed: ["claude", "cursor", "opencode"],
+			still_read_by_managed: [],
 			still_read_by_unmanaged: [],
 		},
 		true,
@@ -76,7 +76,7 @@ test("bulk delete: disabled agent is not named and its source_path delete is not
 		},
 	];
 	const managed = {
-		still_read_by_managed: ["claude"],
+		still_read_by_managed: [],
 		still_read_by_unmanaged: ["cursor"],
 	};
 
@@ -124,7 +124,7 @@ test("bulk delete: disabled agent is named and its source_path delete is sent wh
 		},
 	];
 	const managed = {
-		still_read_by_managed: ["claude"],
+		still_read_by_managed: [],
 		still_read_by_unmanaged: ["cursor"],
 	};
 
@@ -167,7 +167,7 @@ test("bulk delete: shared source_path is deduplicated but carries consented agen
 		},
 	];
 	const managed = {
-		still_read_by_managed: ["claude"],
+		still_read_by_managed: [],
 		still_read_by_unmanaged: ["cursor"],
 	};
 
@@ -207,7 +207,7 @@ test("bulk delete: a group held only by a disabled agent is skipped without cons
 		},
 	];
 	const managed = {
-		still_read_by_managed: ["claude"],
+		still_read_by_managed: [],
 		still_read_by_unmanaged: ["cursor"],
 	};
 
@@ -272,7 +272,7 @@ test("bulk delete: mixed selection filters skill group but leaves mcp group unch
 		},
 	];
 	const managed = {
-		still_read_by_managed: ["claude"],
+		still_read_by_managed: [],
 		still_read_by_unmanaged: ["cursor"],
 	};
 
@@ -314,7 +314,7 @@ test("collectUnmanagedDeleteTargets returns unmanaged items across skill groups"
 		},
 	];
 	const managed = {
-		still_read_by_managed: ["claude"],
+		still_read_by_managed: [],
 		still_read_by_unmanaged: ["cursor", "opencode"],
 	};
 	const unmanaged = collectUnmanagedDeleteTargets(groups, managed, "skill");

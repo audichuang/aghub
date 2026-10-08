@@ -194,7 +194,7 @@ function WithheldSkillItem({
 					kind: "all-agents",
 				},
 			});
-			if (!res.success) {
+			if (res.verdict !== "removed") {
 				throw new Error(res.message || t("failedToDeleteSkill"));
 			}
 			toast.success(t("withheldSkillsDeleted", { name: skill.name }));

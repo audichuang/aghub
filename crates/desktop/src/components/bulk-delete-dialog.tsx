@@ -39,18 +39,43 @@ export function BulkDeleteDialog({
 	const queryClient = useQueryClient();
 
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
-	const [backendHolders, setBackendHolders] = useState<BackendHolders>({});
+	const [backendHolders, setBackendHolders] = useState<BackendHolders | null>(
+		null,
+	);
+	const [loadingHolders, setLoadingHolders] = useState(false);
+	const [holdersError, setHoldersError] = useState<string | null>(null);
 
 	useEffect(() => {
-		if (!isOpen) return;
+		if (!isOpen) {
+			setBackendHolders(null);
+			setHoldersError(null);
+			setLoadingHolders(false);
+			return;
+		}
+		setLoadingHolders(true);
+		setHoldersError(null);
 		getBulkSkillHolders(api, groups, resourceType, projectPath)
-			.then(setBackendHolders)
-			.catch(() => {});
+			.then((holders) => {
+				setBackendHolders(holders);
+				setLoadingHolders(false);
+			})
+			.catch((err) => {
+				setHoldersError(
+					err instanceof Error ? err.message : String(err),
+				);
+				setLoadingHolders(false);
+			});
 	}, [api, isOpen, groups, resourceType, projectPath]);
 
 	const unmanagedItems = useMemo(
 		() =>
-			collectUnmanagedDeleteTargets(groups, backendHolders, resourceType),
+			backendHolders
+				? collectUnmanagedDeleteTargets(
+						groups,
+						backendHolders,
+						resourceType,
+					)
+				: [],
 		[groups, backendHolders, resourceType],
 	);
 
@@ -73,13 +98,15 @@ export function BulkDeleteDialog({
 
 	const { requests, skippedGroupKeys } = useMemo(
 		() =>
-			buildBulkDeleteRequests({
-				groups,
-				resourceType,
-				backendHolders,
-				includeUnmanaged,
-				projectPath,
-			}),
+			backendHolders
+				? buildBulkDeleteRequests({
+						groups,
+						resourceType,
+						backendHolders,
+						includeUnmanaged,
+						projectPath,
+					})
+				: { requests: [], skippedGroupKeys: [] },
 		[groups, resourceType, backendHolders, includeUnmanaged, projectPath],
 	);
 
@@ -118,6 +145,10 @@ export function BulkDeleteDialog({
 								kind: "from-agents",
 								agents: req.agents,
 							},
+							unmanagedAgents:
+								backendHolders?.still_read_by_unmanaged,
+							managedSurvivors:
+								backendHolders?.still_read_by_managed,
 						}).then((res) => {
 							if (!res.success) {
 								throw new Error(
@@ -219,51 +250,67 @@ export function BulkDeleteDialog({
 						</div>
 					</Modal.Header>
 					<Modal.Body>
-						<p className="text-sm text-muted">
-							{t(confirmKey, {
-								count: groups.length,
-							})}
-						</p>
-						{hasUnmanaged && (
-							<div className="mt-4 rounded-lg bg-surface-secondary p-3">
-								<h4
-									className="
-										mb-1 text-xs font-medium tracking-wide text-muted
-										uppercase
-									"
-								>
-									{t("bulkDeleteUnmanagedTitle")}
-								</h4>
-								<p className="mb-2 text-xs text-muted">
-									{t("bulkDeleteUnmanagedHint")}
-								</p>
-								<div className="mb-3 space-y-1">
-									{unmanagedAgents.map((agent) => (
-										<div
-											key={agent}
-											className="flex items-center gap-2 text-sm"
-										>
-											<span className="text-foreground">
-												{agentName(agent)}
-											</span>
-										</div>
-									))}
-								</div>
-								<Checkbox
-									isSelected={includeUnmanaged}
-									onChange={setIncludeUnmanaged}
-									isDisabled={deleteMutation.isPending}
-								>
-									<Checkbox.Content>
-										<Checkbox.Control>
-											<Checkbox.Indicator />
-										</Checkbox.Control>
-										<span className="text-sm">
-											{t("deleteSkillIncludeUnmanaged")}
-										</span>
-									</Checkbox.Content>
-								</Checkbox>
+						{loadingHolders ? (
+							<div className="flex items-center justify-center py-8">
+								<Spinner size="md" />
 							</div>
+						) : holdersError ? (
+							<div className="rounded-lg bg-danger/10 p-3 text-sm text-danger">
+								{holdersError}
+							</div>
+						) : (
+							<>
+								<p className="text-sm text-muted">
+									{t(confirmKey, {
+										count: groups.length,
+									})}
+								</p>
+								{hasUnmanaged && (
+									<div className="mt-4 rounded-lg bg-surface-secondary p-3">
+										<h4
+											className="
+												mb-1 text-xs font-medium tracking-wide text-muted
+												uppercase
+											"
+										>
+											{t("bulkDeleteUnmanagedTitle")}
+										</h4>
+										<p className="mb-2 text-xs text-muted">
+											{t("bulkDeleteUnmanagedHint")}
+										</p>
+										<div className="mb-3 space-y-1">
+											{unmanagedAgents.map((agent) => (
+												<div
+													key={agent}
+													className="flex items-center gap-2 text-sm"
+												>
+													<span className="text-foreground">
+														{agentName(agent)}
+													</span>
+												</div>
+											))}
+										</div>
+										<Checkbox
+											isSelected={includeUnmanaged}
+											onChange={setIncludeUnmanaged}
+											isDisabled={
+												deleteMutation.isPending
+											}
+										>
+											<Checkbox.Content>
+												<Checkbox.Control>
+													<Checkbox.Indicator />
+												</Checkbox.Control>
+												<span className="text-sm">
+													{t(
+														"deleteSkillIncludeUnmanaged",
+													)}
+												</span>
+											</Checkbox.Content>
+										</Checkbox>
+									</div>
+								)}
+							</>
 						)}
 					</Modal.Body>
 					<Modal.Footer>
@@ -282,6 +329,8 @@ export function BulkDeleteDialog({
 							size="md"
 							onPress={() => deleteMutation.mutate()}
 							isDisabled={
+								loadingHolders ||
+								!!holdersError ||
 								deleteMutation.isPending ||
 								requests.length === 0
 							}

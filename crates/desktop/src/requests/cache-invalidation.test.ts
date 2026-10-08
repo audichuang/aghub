@@ -239,8 +239,7 @@ test("deleteSkill centralizes invalidation in the request layer and refetches no
 	await deleteSkill({
 		api,
 		queryClient: client,
-		name: "my-skill",
-		sourcePath: "/path",
+		skillName: "my-skill",
 		intent: { kind: "by-path", sourcePath: "/path", agents: ["claude"] },
 	});
 
@@ -282,8 +281,7 @@ test("deleteSkill invalidates queries even on partial deletion failure", async (
 	const result = await deleteSkill({
 		api,
 		queryClient: client,
-		name: "my-skill",
-		sourcePath: "/path",
+		skillName: "my-skill",
 		intent: { kind: "by-path", sourcePath: "/path", agents: ["claude"] },
 	});
 
