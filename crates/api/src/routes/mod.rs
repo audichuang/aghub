@@ -19,6 +19,7 @@ use aghub_core::{
 	manager::ConfigManager,
 	models::ResourceScope,
 	skills::removal::{PruneStatus, RemovalOutcome},
+	WriteScope,
 };
 use rocket::http::Status;
 use rocket::response::status::NoContent;
@@ -168,10 +169,13 @@ pub fn build_manager_from_resolved(
 ) -> Result<ConfigManager, ApiError> {
 	let adapter = create_adapter(agent.0);
 	match scope {
-		ResolvedScope::Global => Ok(ConfigManager::new(adapter, true, None)),
-		ResolvedScope::Project { root } => {
-			Ok(ConfigManager::new(adapter, false, Some(root)))
+		ResolvedScope::Global => {
+			Ok(ConfigManager::for_write(adapter, WriteScope::Global))
 		}
+		ResolvedScope::Project { root } => Ok(ConfigManager::for_write(
+			adapter,
+			WriteScope::project(root.clone()),
+		)),
 		ResolvedScope::All {
 			project_root: Some(root),
 		} => Ok(ConfigManager::with_scope(

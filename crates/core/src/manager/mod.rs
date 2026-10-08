@@ -21,6 +21,10 @@ pub struct ConfigManager {
 	pub(crate) project_root: Option<PathBuf>,
 	pub(crate) config: Option<AgentConfig>,
 	pub(crate) scope: ResourceScope,
+	/// Single write target for this manager. Managers built via [`ConfigManager::for_write`]
+	/// always hold a write target (so [`ConfigManager::write_scope`] is infallible for them).
+	/// `None` only occurs for read-only managers built through `new`/`with_scope`
+	/// (All/Both, or project with no root), which surfaces reject at resolution time.
 	pub(crate) write_scope: Option<crate::WriteScope>,
 }
 
@@ -39,8 +43,7 @@ impl ConfigManager {
 	}
 
 	/// Create a new ConfigManager with resource scope.
-	/// The manager's write target is derived from (global, project_root) and is
-	/// intentionally still built that way (deferred: MCP/sub-agent entries taking WriteScope directly).
+	/// This is the read-only/All/Both constructor; write paths use [`ConfigManager::for_write`].
 	pub fn with_scope(
 		adapter: Box<dyn AgentAdapter>,
 		global: bool,
@@ -58,6 +61,22 @@ impl ConfigManager {
 			config: None,
 			scope,
 			write_scope,
+		}
+	}
+
+	/// Create a ConfigManager targeting exactly one [`WriteScope`]
+	pub fn for_write(
+		adapter: Box<dyn AgentAdapter>,
+		write_scope: crate::WriteScope,
+	) -> Self {
+		let scope = write_scope.resource_scope();
+		let project_root = write_scope.project_root().map(Path::to_path_buf);
+		Self {
+			adapter,
+			project_root,
+			config: None,
+			scope,
+			write_scope: Some(write_scope),
 		}
 	}
 
@@ -88,6 +107,12 @@ impl ConfigManager {
 			.unwrap_or(crate::models::AgentType::Claude)
 	}
 
+	/// Returns the [`WriteScope`] this manager targets.
+	///
+	/// Managers built via [`ConfigManager::for_write`] always hold a write target
+	/// (making the `InvalidConfig` error unreachable for them). `None` only occurs
+	/// for read-only managers built through `new`/`with_scope` (All/Both, or project
+	/// with no root), which surfaces reject at resolution time.
 	pub fn write_scope(&self) -> Result<&crate::WriteScope> {
 		self.write_scope.as_ref().ok_or_else(|| {
 			ConfigError::InvalidConfig(

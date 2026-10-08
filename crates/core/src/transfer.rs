@@ -160,12 +160,7 @@ impl From<&OperationBatchResult> for OperationBatchView {
 
 fn build_manager(target: &InstallTarget) -> ConfigManager {
 	let adapter = create_adapter(target.agent);
-	match &target.scope {
-		WriteScope::Global => ConfigManager::new(adapter, true, None),
-		WriteScope::Project { root } => {
-			ConfigManager::new(adapter, false, Some(root))
-		}
-	}
+	ConfigManager::for_write(adapter, target.scope.clone())
 }
 
 fn target_resource_scope(

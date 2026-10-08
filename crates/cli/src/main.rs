@@ -1729,12 +1729,15 @@ fn run_for_agent(
 
 	// Create adapter and manager with scope
 	let adapter = create_adapter(agent_type);
-	let mut manager = ConfigManager::with_scope(
-		adapter,
-		resolved.writes_global(),
-		resolved.project_root(),
-		scope,
-	);
+	let mut manager = match resolved.write_scope() {
+		Ok(write_scope) => ConfigManager::for_write(adapter, write_scope),
+		Err(_) => ConfigManager::with_scope(
+			adapter,
+			resolved.writes_global(),
+			resolved.project_root(),
+			scope,
+		),
+	};
 	eprintln_verbose!("Config manager created");
 	if let Some(config_path) = manager.config_path() {
 		eprintln_verbose!("Config file: {}", config_path.display());
