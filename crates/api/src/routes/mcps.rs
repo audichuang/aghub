@@ -1083,6 +1083,38 @@ mod tests {
 		assert!(!mcp_exists(root, "goner"), "confirm deletes the mcp");
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn delete_mcp_project_root_with_trailing_space_targets_only_that_dir() {
+		let tmp = tempfile::tempdir().unwrap();
+		let plain = tmp.path().join("proj");
+		let spaced = tmp.path().join("proj ");
+		std::fs::create_dir_all(&plain).unwrap();
+		std::fs::create_dir_all(&spaced).unwrap();
+		seed_mcp(&plain, "shared");
+		seed_mcp(&spaced, "shared");
+
+		let resp = delete_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Cursor),
+			"shared",
+			delete_params(&spaced, Some(true)),
+		)
+		.ok()
+		.expect("confirm ok")
+		.into_inner();
+
+		assert!(resp.executed, "confirm=true must execute");
+		assert!(
+			!mcp_exists(&spaced, "shared"),
+			"entry in 'proj ' is removed"
+		);
+		assert!(
+			mcp_exists(&plain, "shared"),
+			"sibling 'proj' must be untouched"
+		);
+	}
+
 	#[test]
 	fn delete_mcp_refuses_to_remove_unnamed_shared_reader() {
 		let project = tempfile::tempdir().unwrap();

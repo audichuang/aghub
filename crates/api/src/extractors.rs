@@ -85,9 +85,9 @@ pub fn resolve_write_scope(
 	match scope {
 		"global" => Ok(WriteScope::Global),
 		"project" => {
+			// Trim only for the blank check: a trailing space is a distinct directory.
 			let root = project_root
-				.map(str::trim)
-				.filter(|r| !r.is_empty())
+				.filter(|r| !r.trim().is_empty())
 				.ok_or_else(|| {
 					ApiError::new(
 						Status::BadRequest,
