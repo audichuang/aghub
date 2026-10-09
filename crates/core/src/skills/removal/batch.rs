@@ -860,6 +860,22 @@ fn remove_skill_by_path(
 
 	let skill_path = expand_tilde_path(raw_path);
 
+	// A plugin-owned path answers MANAGED_RESOURCE for every refusal below;
+	// only the idempotent absent no-op stays Ok.
+	let refuse_plugin = || {
+		super::refuse_plugin_owned(
+			&skill_path,
+			&by_path_skill_dir(&skill_path)
+				.map(|dir| {
+					by_path_skill_name(&dir)
+						.unwrap_or_else(|_| dir.display().to_string())
+				})
+				.unwrap_or_else(|_| skill_path.display().to_string()),
+			"delete",
+			&request.plugin_roots,
+		)
+	};
+
 	// See docs/history/api.md#delete-by-path-parent-dir-rule
 	if skill_path
 		.components()
@@ -873,6 +889,7 @@ fn remove_skill_by_path(
 			})
 		});
 		if !safe {
+			refuse_plugin()?;
 			return Err(ConfigError::InvalidConfig(
 				"Refusing to delete: source_path must not contain '..' under the agent skills directories"
 					.to_string(),
@@ -880,8 +897,13 @@ fn remove_skill_by_path(
 		}
 	}
 
-	let skill_dir = by_path_skill_dir(&skill_path)
-		.map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
+	let skill_dir = match by_path_skill_dir(&skill_path) {
+		Ok(dir) => dir,
+		Err(e) => {
+			refuse_plugin()?;
+			return Err(ConfigError::InvalidConfig(e.to_string()));
+		}
+	};
 
 	// Idempotent: nothing on disk to remove. Answer through the shared
 	// no-op seam (`outcome: "absent"`), never a hand-built body.
@@ -902,13 +924,7 @@ fn remove_skill_by_path(
 	}
 
 	// Before containment: a plugin install root is outside every allow-listed root.
-	super::refuse_plugin_owned(
-		&skill_path,
-		&by_path_skill_name(&skill_dir)
-			.unwrap_or_else(|_| skill_dir.display().to_string()),
-		"delete",
-		&request.plugin_roots,
-	)?;
+	refuse_plugin()?;
 
 	let roots = allowed_skill_roots(&agent_dirs, project_root);
 
