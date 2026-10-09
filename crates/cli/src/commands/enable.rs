@@ -13,7 +13,7 @@ pub fn execute(
 	let payload = match resource {
 		ResourceType::Skills => {
 			eprintln_verbose!("Enabling skill: {}", name);
-			manager.enable_skill(&name)?;
+			manager.enable_skill(&name, &super::plugin_roots())?;
 			eprintln_verbose!("Skill enabled successfully");
 			json!({"enabled": true, "name": name, "type": "skill" })
 		}

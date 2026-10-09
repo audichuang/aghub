@@ -342,7 +342,8 @@ fn test_missing_resource_detection() {
 	assert!(result.is_err());
 	assert!(result.unwrap_err().to_string().contains("not found"));
 
-	let result = manager.update_skill("nonexistent", create_test_skill("test"));
+	let result =
+		manager.update_skill("nonexistent", create_test_skill("test"), &[]);
 	assert!(result.is_err());
 }
 

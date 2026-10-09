@@ -288,7 +288,23 @@ impl ConfigManager {
 		self.config.as_ref()?.skills.iter().find(|s| s.name == name)
 	}
 
-	pub fn update_skill(&mut self, name: &str, skill: Skill) -> Result<()> {
+	pub fn update_skill(
+		&mut self,
+		name: &str,
+		skill: Skill,
+		plugin_roots: &[(String, PathBuf)],
+	) -> Result<()> {
+		if let Some(path) = self
+			.get_skill(name)
+			.and_then(crate::skills::removal::skill_root)
+		{
+			crate::skills::removal::refuse_plugin_owned(
+				&path,
+				name,
+				"update",
+				plugin_roots,
+			)?;
+		}
 		// A rename here is `rename_skill_master` + a relink of every Referrer —
 		// itself transactional, so it must not interleave with another process's
 		// install of either name. Scope (not write_scope) because the relink
@@ -936,14 +952,28 @@ impl ConfigManager {
 	///
 	/// `save()` serializes MCPs only, so a flipped flag cannot persist; an
 	/// honest refusal beats a silent no-op that rewrites `.mcp.json`.
+	/// Refusal order: not-found → plugin-managed → unsupported.
 	/// See docs/history/core-manager.md#skill-mutations-rewrote-mcp-config
-	fn set_skill_enabled(&mut self, name: &str, enabled: bool) -> Result<()> {
+	fn set_skill_enabled(
+		&mut self,
+		name: &str,
+		enabled: bool,
+		plugin_roots: &[(String, PathBuf)],
+	) -> Result<()> {
 		// Resolve the name FIRST: a missing skill is a not-found, and callers
 		// (including the API's 404) depend on that answer winning over the
-		// unsupported-operation refusal below.
+		// refusals below.
 		let config = self.config_mut()?;
-		if !config.skills.iter().any(|s| s.name == name) {
+		let Some(skill) = config.skills.iter().find(|s| s.name == name) else {
 			return Err(ConfigError::resource_not_found("skill", name));
+		};
+		if let Some(path) = crate::skills::removal::skill_root(skill) {
+			crate::skills::removal::refuse_plugin_owned(
+				&path,
+				name,
+				if enabled { "enable" } else { "disable" },
+				plugin_roots,
+			)?;
 		}
 		Err(ConfigError::unsupported_operation(
 			if enabled { "enable" } else { "disable" },
@@ -952,12 +982,20 @@ impl ConfigManager {
 		))
 	}
 
-	pub fn disable_skill(&mut self, name: &str) -> Result<()> {
-		self.set_skill_enabled(name, false)
+	pub fn disable_skill(
+		&mut self,
+		name: &str,
+		plugin_roots: &[(String, PathBuf)],
+	) -> Result<()> {
+		self.set_skill_enabled(name, false, plugin_roots)
 	}
 
-	pub fn enable_skill(&mut self, name: &str) -> Result<()> {
-		self.set_skill_enabled(name, true)
+	pub fn enable_skill(
+		&mut self,
+		name: &str,
+		plugin_roots: &[(String, PathBuf)],
+	) -> Result<()> {
+		self.set_skill_enabled(name, true, plugin_roots)
 	}
 
 	pub fn add_skill_from_path(&mut self, path: &Path) -> Result<SkillAdd> {

@@ -64,7 +64,11 @@ pub fn execute(
 			}
 			.apply_to(existing.clone());
 
-			manager.update_skill(&name, skill.clone())?;
+			manager.update_skill(
+				&name,
+				skill.clone(),
+				&super::plugin_roots(),
+			)?;
 			eprintln_verbose!("Skill updated successfully");
 			// Same SkillView shape as add/describe/get; update does no
 			// install prep, so native_reader stays false.

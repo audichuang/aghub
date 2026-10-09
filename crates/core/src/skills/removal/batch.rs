@@ -42,7 +42,10 @@ pub struct SkillRemovalRequest {
 	/// A copy in this batch keeps the Master alive; skips the exhaustiveness
 	/// preflight holder scan (surviving holders are still computed for outcome rows).
 	pub keeps_master: bool,
-	pub plugin_owner: Option<String>,
+	/// `(plugin name, install root)` of every installed Claude Code plugin; a
+	/// target under one is refused with `MANAGED_RESOURCE`. Empty = unknown,
+	/// refuses nothing. See `removal::refuse_plugin_owned`.
+	pub plugin_roots: Vec<(String, PathBuf)>,
 }
 
 /// Outcome row for a single agent in a batch skill removal.
@@ -265,6 +268,9 @@ pub fn clone_config_error(err: &ConfigError) -> ConfigError {
 			message: message.clone(),
 			rejected_targets: rejected_targets.clone(),
 		},
+		ConfigError::ManagedResource(s) => {
+			ConfigError::ManagedResource(s.clone())
+		}
 		ConfigError::Io(e) => {
 			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
 		}
@@ -904,11 +910,13 @@ fn remove_skill_by_path(
 		));
 	}
 
-	if let Some(ref plugin_name) = request.plugin_owner {
-		return Err(ConfigError::InvalidConfig(format!(
-			"Cannot delete plugin-managed skill from plugin '{plugin_name}'"
-		)));
-	}
+	super::refuse_plugin_owned(
+		&skill_path,
+		&by_path_skill_name(&skill_dir)
+			.unwrap_or_else(|_| skill_dir.display().to_string()),
+		"delete",
+		&request.plugin_roots,
+	)?;
 
 	for agent in &target_agents {
 		let paths =
@@ -1126,6 +1134,31 @@ fn remove_skill_by_name(
 	} else {
 		target_agents
 	};
+
+	// Refused before any plan, preview included (the API always did this).
+	// Skipped when no plugin is known, so plugin-free runs load nothing extra.
+	if !request.plugin_roots.is_empty() {
+		for &agent in &target_agents {
+			if !registry::get(agent).supports_skill_scope(scope) {
+				continue;
+			}
+			let mut manager = create_manager(agent, scope, project_root);
+			// A load failure is reported per row by the batch below.
+			if manager.load().is_err() {
+				continue;
+			}
+			if let Some(path) =
+				manager.get_skill(name).and_then(super::skill_root)
+			{
+				super::refuse_plugin_owned(
+					&path,
+					name,
+					"delete",
+					&request.plugin_roots,
+				)?;
+			}
+		}
+	}
 
 	let is_exhaustive = !request.keeps_master
 		&& (request.all_agents

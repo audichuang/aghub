@@ -8099,6 +8099,10 @@ fn collect_disk_state(
 			for entry in rd.flatten() {
 				let p = entry.path();
 				let rel = p.strip_prefix(base).unwrap().to_path_buf();
+				// The real `claude` CLI, spawned by the plugin-ownership probe, writes a timestamped backup here.
+				if rel.starts_with(".claude/backups") {
+					continue;
+				}
 				let meta = std::fs::symlink_metadata(&p).unwrap();
 				let kind = if meta.file_type().is_symlink() {
 					"symlink".to_string()
@@ -16285,6 +16289,88 @@ fn sub_agent_describe_missing_uses_core_wording() {
 			.contains("sub_agent 'nope'"),
 		"{json}"
 	);
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_owned_skill_delete_and_update_refuse_with_managed_resource() {
+	use std::os::unix::fs::PermissionsExt;
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let skill_dir = home.path().join(".claude/skills/my-plugin-skill");
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	let skill_md = skill_dir.join("SKILL.md");
+	std::fs::write(
+		&skill_md,
+		"---\nname: my-plugin-skill\ndescription: plugin skill\n---\n",
+	)
+	.unwrap();
+	std::fs::write(home.path().join(".claude/settings.json"), "{}").unwrap();
+
+	// Mock `claude` reporting the skill's folder as an installed plugin root.
+	let bin = home.path().join("bin");
+	std::fs::create_dir_all(&bin).unwrap();
+	let mock = bin.join("claude");
+	std::fs::write(
+		&mock,
+		format!(
+			"#!/bin/sh\n\
+			if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"list\" ]; then\n\
+				echo '[{{\"id\":\"test-plugin@official\",\"version\":\"1.0.0\",\"scope\":\"user\",\"enabled\":true,\"installPath\":\"{}\",\"installedAt\":\"2026-01-01\",\"lastUpdated\":\"2026-01-01\"}}]'\n\
+				exit 0\n\
+			fi\n\
+			exit 0\n",
+			skill_dir.display()
+		),
+	)
+	.unwrap();
+	std::fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o755))
+		.unwrap();
+	let path = format!(
+		"{}:{}",
+		bin.display(),
+		std::env::var("PATH").unwrap_or_default()
+	);
+	let original = std::fs::read(&skill_md).unwrap();
+
+	for args in [
+		vec![
+			"--json",
+			"-g",
+			"-a",
+			"claude",
+			"delete",
+			"skills",
+			"my-plugin-skill",
+			"--yes",
+		],
+		vec![
+			"--json",
+			"-g",
+			"-a",
+			"claude",
+			"update",
+			"skills",
+			"my-plugin-skill",
+			"-d",
+			"changed",
+		],
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			.env("PATH", &path)
+			.args(&args)
+			.output()
+			.unwrap();
+		assert!(!out.status.success(), "{args:?} must refuse");
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(json["error"]["code"], "MANAGED_RESOURCE", "{json}");
+		assert_eq!(
+			std::fs::read(&skill_md).unwrap(),
+			original,
+			"{args:?} must leave SKILL.md untouched"
+		);
+	}
 }
 
 #[cfg(unix)]

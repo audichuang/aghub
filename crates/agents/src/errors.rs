@@ -57,6 +57,11 @@ pub enum ConfigError {
 		message: String,
 		rejected_targets: Option<Vec<RejectedTarget>>,
 	},
+
+	/// The resource belongs to another installer (a Claude Code plugin);
+	/// aghub refuses to mutate it.
+	#[error("{0}")]
+	ManagedResource(String),
 }
 
 impl ConfigError {

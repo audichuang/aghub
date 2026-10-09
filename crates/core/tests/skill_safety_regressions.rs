@@ -340,7 +340,7 @@ fn project_store_symlink_cannot_redirect_update() {
 	assert!(manager.get_skill("escaped").is_some());
 	let mut updated = Skill::new("escaped");
 	updated.description = Some("changed".into());
-	let result = manager.update_skill("escaped", updated);
+	let result = manager.update_skill("escaped", updated, &[]);
 	assert!(result.is_err(), "update escaped through project/.aghub");
 	assert_eq!(std::fs::read(master.join("SKILL.md")).unwrap(), before);
 }
@@ -410,7 +410,7 @@ fn global_store_symlink_keeps_install_update_and_delete_working() {
 	let mut updated = claude.get_skill("dotted").unwrap().clone();
 	updated.description = Some("changed".into());
 	claude
-		.update_skill("dotted", updated)
+		.update_skill("dotted", updated, &[])
 		.expect("global update through a user-linked store");
 	assert!(std::fs::read_to_string(dotfiles.join("dotted/SKILL.md"))
 		.unwrap()

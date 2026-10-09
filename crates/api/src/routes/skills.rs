@@ -102,13 +102,6 @@ fn expand_tilde_path(path: &str) -> std::path::PathBuf {
 	aghub_core::skills::removal::expand_tilde_path(std::path::Path::new(path))
 }
 
-async fn detect_plugin_for_path(path: &std::path::Path) -> Option<String> {
-	let plugins = ClaudePluginManager::new().await.ok()?;
-	plugins
-		.plugin_owning_path(path)
-		.map(|plugin| plugin.display_name.clone())
-}
-
 async fn list_branches_for_scan<F>(
 	cached_branches: Option<Vec<String>>,
 	fetcher: F,
@@ -201,14 +194,12 @@ pub async fn delete_skill_by_path(
 		crate::extractors::resolve_agent_strings(&req.agents)?;
 
 	let raw_path = std::path::PathBuf::from(&req.source_path);
-	let expanded_path = expand_tilde_path(&req.source_path);
-	let plugin_owner = detect_plugin_for_path(&expanded_path).await;
+	let plugin_roots = ClaudePluginManager::owned_roots().await;
 
 	let confirm = req.confirm.unwrap_or(false);
 	let dry_run = !confirm;
 
 	in_mutation_pool(move || {
-		let is_plugin_refusal = plugin_owner.is_some();
 		let request = aghub_core::skills::removal::SkillRemovalRequest {
 			target: aghub_core::skills::removal::SkillRemovalTarget::ByPath(
 				raw_path,
@@ -219,19 +210,10 @@ pub async fn delete_skill_by_path(
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
-			plugin_owner,
+			plugin_roots,
 		};
 		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
-			.map_err(|err| match err {
-				ConfigError::InvalidConfig(ref msg) if is_plugin_refusal => {
-					ApiError::new(
-						Status::BadRequest,
-						msg.clone(),
-						"MANAGED_RESOURCE",
-					)
-				}
-				other => ApiError::from(other),
-			})?;
+			.map_err(ApiError::from)?;
 
 		let single = resp.to_single_view(dry_run).map_err(ApiError::from)?;
 
@@ -760,15 +742,15 @@ pub async fn update_skill(
 			ApiError::from(ConfigError::resource_not_found("skill", name))
 		})?
 		.clone();
-	ensure_skill_not_plugin_managed(&existing, "update").await?;
 	let updated = SkillPatch::from(body.into_inner()).apply_to(existing);
 	let response = SkillResponse::from(&updated);
 	let name = name.to_string();
+	let plugin_roots = ClaudePluginManager::owned_roots().await;
 	// `update_skill` takes the mutation lock (a rename is a Master move plus a
 	// relink of every Referrer).
 	in_mutation_pool(move || {
 		manager
-			.update_skill(&name, updated)
+			.update_skill(&name, updated, &plugin_roots)
 			.map_err(ApiError::from)?;
 		Ok(Json(response))
 	})
@@ -793,15 +775,13 @@ pub async fn delete_skill(
 	// No `ConfigError::NotFound` arm: nothing constructs that variant; a missing
 	// config surfaces as `Io(NotFound)` and takes the normal error path.
 	manager.load().map_err(ApiError::from)?;
-	if let Some(skill) = manager.get_skill(name) {
-		ensure_skill_not_plugin_managed(skill, "delete").await?;
-	}
 	let requested =
 		super::requested_delete_agents(agent.0, params.agents.as_deref())?;
 	let confirm = params.confirm.unwrap_or(false);
 	let dry_run = !confirm;
 	let name = name.to_string();
 	let all_agents = params.all_agents.unwrap_or(false);
+	let plugin_roots = ClaudePluginManager::owned_roots().await;
 
 	in_mutation_pool(move || {
 		// Shared batch removal entry; projects outcome and managed/unmanaged holders.
@@ -816,7 +796,7 @@ pub async fn delete_skill(
 			all_agents,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
-			plugin_owner: None,
+			plugin_roots,
 		};
 		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
 			.map_err(ApiError::from)?;
@@ -868,12 +848,12 @@ pub async fn enable_skill(
 		&write_scope.clone().into(),
 	)?;
 	manager.load().map_err(ApiError::from)?;
-	if let Some(skill) = manager.get_skill(name) {
-		ensure_skill_not_plugin_managed(skill, "enable").await?;
-	}
-	manager.enable_skill(name).map_err(ApiError::from)?;
-	// `enable_skill` always refuses (nothing persists the flag); the call stays
-	// here so the plugin-managed check above keeps error precedence.
+	let plugin_roots = ClaudePluginManager::owned_roots().await;
+	manager
+		.enable_skill(name, &plugin_roots)
+		.map_err(ApiError::from)?;
+	// `enable_skill` always refuses (nothing persists the flag); the refusal
+	// order (not-found, plugin-managed, unsupported) lives in core.
 	let skill = manager.get_skill(name).expect("skill present after enable");
 	Ok(Json(SkillResponse::from(skill)))
 }
@@ -894,43 +874,16 @@ pub async fn disable_skill(
 		&write_scope.clone().into(),
 	)?;
 	manager.load().map_err(ApiError::from)?;
-	if let Some(skill) = manager.get_skill(name) {
-		ensure_skill_not_plugin_managed(skill, "disable").await?;
-	}
-	manager.disable_skill(name).map_err(ApiError::from)?;
-	// Unreachable today — see `enable_skill` above for why the refusal happens
-	// here instead of at the top of the handler.
+	let plugin_roots = ClaudePluginManager::owned_roots().await;
+	manager
+		.disable_skill(name, &plugin_roots)
+		.map_err(ApiError::from)?;
+	// Unreachable today — the refusal order (not-found, plugin-managed,
+	// unsupported) lives in core; see `enable_skill` above.
 	let skill = manager
 		.get_skill(name)
 		.expect("skill present after disable");
 	Ok(Json(SkillResponse::from(skill)))
-}
-
-/// Reject mutations on skills owned by a Claude plugin.
-async fn ensure_skill_not_plugin_managed(
-	skill: &Skill,
-	action: &str,
-) -> Result<(), ApiError> {
-	if let Some(plugin_name) = detect_plugin_for_path_if_present(skill).await {
-		return Err(ApiError::new(
-			Status::BadRequest,
-			format!(
-				"Cannot {action} skill '{}' managed by plugin '{plugin_name}'",
-				skill.name
-			),
-			"MANAGED_RESOURCE",
-		));
-	}
-	Ok(())
-}
-
-async fn detect_plugin_for_path_if_present(skill: &Skill) -> Option<String> {
-	let source_path = skill
-		.canonical_path
-		.as_deref()
-		.or(skill.source_path.as_deref())?;
-	let full_path = expand_tilde_path(source_path);
-	detect_plugin_for_path(&full_path).await
 }
 
 fn is_plugin_managed_skill(
@@ -3129,7 +3082,7 @@ mod tests {
 			let _restore = PathRestore(old_path);
 
 			// By-path delete on plugin-owned skill refuses with BadRequest + MANAGED_RESOURCE,
-			// matching by-name's ensure_skill_not_plugin_managed behavior.
+			// matching the by-name delete refusal (core `refuse_plugin_owned`).
 			let by_path_err = by_path_refused(DeleteSkillByPathRequest {
 				source_path: skill_dir.join("SKILL.md").display().to_string(),
 				agents: vec!["claude".to_string()],

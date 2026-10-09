@@ -204,6 +204,11 @@ branch.
   locks when a project root exists, global only (project silently skipped,
   still exit 0) when there is none. It stays lock-only: never deletes skill
   files or edits agent config, and previews unless `--yes`.
+- A skill whose files sit under an installed Claude Code plugin is the
+  plugin's, not aghub's: `delete` and `update` refuse it with
+  `MANAGED_RESOURCE` (exit 1, nothing written) — the same code the HTTP API
+  returns. Manage it with `aghub-cli plugin`. When the plugin list cannot be
+  read (no `claude` CLI), the check is skipped and the command proceeds.
 - Plain `delete` discovers a skill through the AGENT CONFIGS and never looks up
   `.aghub/<name>` directly, so a Master with no Referrer left anywhere is
   reported `absent` and stays on disk. `delete --all-agents` DOES reach it: the
@@ -238,7 +243,7 @@ branch.
   listed before shared-slot writers succeed without ordering shared slots first
   or re-running. Whole-batch preflight rejection exits 1, states that nothing was
   written, and lists every refused target; under `--json`, the whole-batch failure
-  appears in the top-level `error.code` envelope (`UNSUPPORTED_OPERATION` or `INVALID_CONFIG`
+  appears in the top-level `error.code` envelope (`UNSUPPORTED_OPERATION`, `INVALID_CONFIG` or `MANAGED_RESOURCE`
   lives there, not in `results[].code`). In `--json`, every row in `results[]`
   carries `outcome`, a row-level `code` appearing only on row failure (`partial` or config load error,
   null on success; missing skills report no-op success with `outcome: "absent"` and exit 0 without an error code,

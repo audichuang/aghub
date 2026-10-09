@@ -407,7 +407,7 @@ fn test_source_path_update_targets_original_directory() {
 	// Update it
 	let mut updated = skill.clone();
 	updated.description = Some("updated".to_string());
-	manager.update_skill("codex-skill", updated).unwrap();
+	manager.update_skill("codex-skill", updated, &[]).unwrap();
 
 	// Verify the file was updated in place at the original source_path
 	let skill_file = test.skills_dir().join("codex-skill/SKILL.md");
@@ -434,7 +434,7 @@ fn test_rename_skill_migrates_sanitized_directory() {
 	let mut renamed = skill;
 	renamed.name = "beta-skill".to_string();
 	renamed.description = Some("renamed".to_string());
-	manager.update_skill("alpha-skill", renamed).unwrap();
+	manager.update_skill("alpha-skill", renamed, &[]).unwrap();
 
 	assert!(
 		!test.skills_dir().join("alpha-skill").exists(),

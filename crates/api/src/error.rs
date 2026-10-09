@@ -138,6 +138,9 @@ impl ApiError {
 				code,
 				rejected_targets.clone(),
 			),
+			ConfigError::ManagedResource(msg) => {
+				ApiError::new(Status::BadRequest, msg.clone(), code)
+			}
 			ConfigError::Json(e) => {
 				ApiError::new(Status::BadRequest, e.to_string(), code)
 			}

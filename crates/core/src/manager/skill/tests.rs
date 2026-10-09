@@ -41,7 +41,7 @@ fn disable_skill_refuses_and_leaves_the_mcp_config_untouched() {
 	);
 
 	let error = mgr
-		.disable_skill("demo-skill")
+		.disable_skill("demo-skill", &[])
 		.expect_err("skill enable/disable has no writer; it must refuse");
 	assert!(
 		matches!(error, ConfigError::UnsupportedOperation { .. }),
@@ -53,6 +53,71 @@ fn disable_skill_refuses_and_leaves_the_mcp_config_untouched() {
 		original,
 		"a skill command must not rewrite the agent's MCP config"
 	);
+}
+
+// A skill whose files sit under an installed Claude Code plugin belongs to the
+// plugin: update/enable/disable refuse with `MANAGED_RESOURCE` and leave
+// SKILL.md untouched. An empty plugin list (plugin list unreadable) refuses
+// nothing.
+#[test]
+fn plugin_owned_skill_refuses_update_enable_disable_and_empty_list_fails_open()
+{
+	use crate::create_adapter;
+	use crate::models::AgentType;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+
+	let skill_dir = root.join(".claude/skills/demo-skill");
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	let skill_md = skill_dir.join("SKILL.md");
+	std::fs::write(
+		&skill_md,
+		"---\nname: demo-skill\ndescription: fixture\n---\n\nbody\n",
+	)
+	.unwrap();
+
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+	let roots = vec![(
+		"demo-plugin".to_string(),
+		root.join(".claude/skills/demo-skill"),
+	)];
+	assert!(
+		crate::skills::removal::skill_root(mgr.get_skill("demo-skill").unwrap())
+			.unwrap()
+			.starts_with(&roots[0].1),
+		"fixture must sit under the plugin root, or the refusals below prove nothing"
+	);
+	let original = std::fs::read_to_string(&skill_md).unwrap();
+
+	let mut updated = mgr.get_skill("demo-skill").unwrap().clone();
+	updated.description = Some("after".to_string());
+	let err = mgr
+		.update_skill("demo-skill", updated.clone(), &roots)
+		.expect_err("plugin-owned skill must refuse update");
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+	assert_eq!(std::fs::read_to_string(&skill_md).unwrap(), original);
+
+	let err = mgr
+		.enable_skill("demo-skill", &roots)
+		.expect_err("plugin-owned skill must refuse enable");
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+
+	let err = mgr
+		.disable_skill("demo-skill", &roots)
+		.expect_err("plugin-owned skill must refuse disable");
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+
+	// Fail open: with no known plugin the same update goes through.
+	mgr.update_skill("demo-skill", updated, &[]).unwrap();
+	assert!(std::fs::read_to_string(&skill_md)
+		.unwrap()
+		.contains("description: after"));
 }
 
 #[cfg(unix)]
@@ -1623,7 +1688,7 @@ fn update_skill_universal_rename_relinks_agents_and_keeps_canonical() {
 	// Rename old-uni -> new-uni via the update path.
 	let mut renamed = Skill::new("new-uni");
 	renamed.description = Some("universal".to_string());
-	mgr.update_skill("old-uni", renamed).unwrap();
+	mgr.update_skill("old-uni", renamed, &[]).unwrap();
 
 	// Canonical master is renamed (old gone, new present).
 	assert!(root.join(".aghub/new-uni/SKILL.md").exists());
@@ -1688,7 +1753,7 @@ fn update_skill_rename_rolls_back_when_a_referrer_slot_is_occupied() {
 
 	let mut renamed = Skill::new("new-uni");
 	renamed.description = Some("universal".to_string());
-	mgr.update_skill("old-uni", renamed).expect_err(
+	mgr.update_skill("old-uni", renamed, &[]).expect_err(
 		"a referrer that cannot be re-pointed must fail the rename",
 	);
 
@@ -1752,7 +1817,7 @@ fn update_skill_preserves_frontmatter_keys_aghub_does_not_model() {
 	// Clearing a MODELED key must still clear it — preservation may not
 	// resurrect a field the caller deliberately dropped.
 	updated.author = None;
-	mgr.update_skill("keeper", updated).unwrap();
+	mgr.update_skill("keeper", updated, &[]).unwrap();
 
 	let md = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
 	assert!(md.contains("license: MIT"), "unmodeled scalar lost: {md}");
@@ -1790,7 +1855,7 @@ fn update_skill_rename_refuses_when_target_dir_already_exists() {
 	// clobber it; the rename must refuse instead.
 	std::fs::create_dir_all(root.join(".aghub/collide-new")).unwrap();
 
-	let res = mgr.update_skill("collide-old", Skill::new("collide-new"));
+	let res = mgr.update_skill("collide-old", Skill::new("collide-new"), &[]);
 
 	assert!(res.is_err(), "must refuse to rename onto an existing dir");
 	assert!(
@@ -1859,7 +1924,7 @@ fn update_skill_universal_rename_rolls_back_when_relink_fails() {
 	)
 	.unwrap();
 
-	let res = mgr.update_skill("roll-old", Skill::new("roll-new"));
+	let res = mgr.update_skill("roll-old", Skill::new("roll-new"), &[]);
 
 	// Restore perms before asserting so tempdir teardown always works.
 	std::fs::set_permissions(&referrer_dir, orig).unwrap();
@@ -1960,7 +2025,7 @@ fn update_skill_universal_rename_rollback_restores_removed_referrer() {
 	std::fs::set_permissions(&roo_dir, std::fs::Permissions::from_mode(0o555))
 		.unwrap();
 
-	let res = mgr.update_skill("roll2-old", Skill::new("roll2-new"));
+	let res = mgr.update_skill("roll2-old", Skill::new("roll2-new"), &[]);
 
 	std::fs::set_permissions(&roo_dir, roo_orig).unwrap();
 
@@ -2155,7 +2220,7 @@ fn update_skill_universal_rename_relinks_junction_and_keeps_canonical() {
 	// Rename old-uni-win -> new-uni-win via the update path.
 	let mut renamed = Skill::new("new-uni-win");
 	renamed.description = Some("universal".to_string());
-	mgr.update_skill("old-uni-win", renamed).unwrap();
+	mgr.update_skill("old-uni-win", renamed, &[]).unwrap();
 
 	// Canonical master is renamed (old gone, new present). The store is
 	// `.aghub`, not `.agents\skills` — that slot is now an ordinary

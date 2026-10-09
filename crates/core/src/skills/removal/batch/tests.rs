@@ -166,7 +166,7 @@ fn test_removal_ordering_independence() {
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
-			plugin_owner: None,
+			plugin_roots: Vec::new(),
 		};
 		remove_skill_batch(&req_a)
 			.expect("order_shared_first batch should succeed")
@@ -186,7 +186,7 @@ fn test_removal_ordering_independence() {
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
-			plugin_owner: None,
+			plugin_roots: Vec::new(),
 		};
 		remove_skill_batch(&req_b)
 			.expect("order_private_first batch should succeed")
@@ -279,7 +279,7 @@ fn test_prior_row_credit_turns_refused_into_removed() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_without = remove_skill_batch(&req_without_credit).unwrap();
 	assert!(
@@ -296,7 +296,7 @@ fn test_prior_row_credit_turns_refused_into_removed() {
 		all_agents: false,
 		prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_with = remove_skill_batch(&req_with_credit).unwrap();
 	assert_eq!(
@@ -333,7 +333,7 @@ fn test_internal_accumulation_credits_later_row() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_alone = remove_skill_batch(&req_alone).unwrap();
 	assert!(
@@ -353,7 +353,7 @@ fn test_internal_accumulation_credits_later_row() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_batch = remove_skill_batch(&req_batch).unwrap();
 	let amp_row = res_batch
@@ -398,7 +398,7 @@ fn test_whole_batch_preflight_rejection_writes_nothing() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 
 	let err = remove_skill_batch(&req).unwrap_err();
@@ -452,7 +452,7 @@ fn test_disabled_agent_removal_behavior() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_unnamed = remove_skill_batch(&req_unnamed).unwrap();
 	assert_eq!(res_unnamed.rows[0].verdict, Verdict::Removed);
@@ -471,7 +471,7 @@ fn test_disabled_agent_removal_behavior() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_disabled = remove_skill_batch(&req_all_disabled).unwrap();
 	assert!(res_disabled.rows.is_empty());
@@ -511,7 +511,7 @@ fn test_disabled_agent_removal_behavior() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_named = remove_skill_batch(&req_named).unwrap();
 	assert_eq!(res_named.rows[0].verdict, Verdict::Removed);
@@ -532,7 +532,7 @@ fn test_disabled_agent_removal_behavior() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_enabled = remove_skill_batch(&req_all_enabled).unwrap();
 	assert_eq!(res_enabled.rows.len(), 1);
@@ -567,7 +567,7 @@ fn test_master_gc_and_prune_failure_reported_independently() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res1 = remove_skill_batch(&req1).unwrap();
 	assert_eq!(res1.rows[0].verdict, Verdict::Removed);
@@ -589,7 +589,7 @@ fn test_master_gc_and_prune_failure_reported_independently() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res2 = remove_skill_batch(&req2).unwrap();
 	assert_eq!(res2.rows[0].verdict, Verdict::Removed);
@@ -642,7 +642,7 @@ fn test_preview_does_not_take_write_lock() {
 		all_agents: false,
 		prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 
 	let (preview_tx, preview_rx) = std::sync::mpsc::channel();
@@ -670,7 +670,7 @@ fn test_preview_does_not_take_write_lock() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_commit =
 		remove_skill_batch(&req_commit).expect("commit should succeed");
@@ -717,7 +717,7 @@ fn test_commit_follows_replan_after_disk_state_changes() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 
 	// Spawn commit thread.
@@ -809,7 +809,7 @@ fn test_in_lock_replan_refuses_when_holder_becomes_unreadable() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 
 	let (commit_tx, commit_rx) = std::sync::mpsc::channel();
@@ -872,7 +872,7 @@ fn test_dry_run_reports_preflight_failure_in_row_error() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 
 	let res = remove_skill_batch(&req).unwrap();
@@ -915,7 +915,7 @@ fn test_commit_mode_ignores_prior_removed_paths() {
 		all_agents: false,
 		prior_removed_paths: vec![root.join(".agents/skills/notebooklm")],
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	// In commit mode, prior_removed_paths is ignored so preflight fails because .agents/skills/notebooklm actually exists on disk.
 	let err = remove_skill_batch(&req).unwrap_err();
@@ -949,7 +949,7 @@ fn test_keeps_master_skips_unreadable_holder_scan_refusal() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	assert!(remove_skill_batch(&req_false).is_err());
 
@@ -962,7 +962,7 @@ fn test_keeps_master_skips_unreadable_holder_scan_refusal() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: true,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res = remove_skill_batch(&req_true)
 		.expect("keeps_master skips unreadable scan refusal");
@@ -1008,7 +1008,7 @@ fn test_in_lock_replan_holder_appearing_with_all_agents() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 
 	let (commit_tx, commit_rx) = std::sync::mpsc::channel();
@@ -1237,7 +1237,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let resp_preview = remove_skill_batch(&req_preview).unwrap();
 	assert!(resp_preview.would_reclaim_master);
@@ -1260,7 +1260,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let resp_non_exhaustive = remove_skill_batch(&req_non_exhaustive).unwrap();
 	assert!(!resp_non_exhaustive.would_reclaim_master);
@@ -1287,7 +1287,7 @@ fn test_master_reclaimed_preview_commit_and_surviving_master() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let resp_exhaustive = remove_skill_batch(&req_exhaustive).unwrap();
 	assert!(!resp_exhaustive.would_reclaim_master);
@@ -1345,7 +1345,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_without = remove_skill_batch(&req_without).unwrap();
 	assert!(
@@ -1363,7 +1363,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_preview = remove_skill_batch(&req_preview).unwrap();
 	assert_eq!(
@@ -1386,7 +1386,7 @@ fn test_orphan_master_reclaimed_with_all_agents_and_kept_without() {
 		all_agents: true,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_with = remove_skill_batch(&req_with).unwrap();
 	assert_eq!(
@@ -1495,7 +1495,7 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_name = remove_skill_batch(&req_name).unwrap();
 
@@ -1507,7 +1507,7 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_path = remove_skill_batch(&req_path).unwrap();
 
@@ -1577,7 +1577,7 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_name_ext = remove_skill_batch(&req_name_ext).unwrap();
 
@@ -1589,7 +1589,7 @@ fn test_by_path_matches_by_name_verdict_on_shared_slot() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res_path_ext = remove_skill_batch(&req_path_ext).unwrap();
 
@@ -1644,7 +1644,7 @@ fn test_by_path_refuses_dir_outside_allowed_roots() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let err = remove_skill_batch(&req)
 		.expect_err("must refuse to remove a dir outside roots");
@@ -1683,7 +1683,7 @@ fn test_by_path_removes_contained_dir() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let res = remove_skill_batch(&req);
 	assert!(
@@ -1717,7 +1717,7 @@ fn test_by_path_repeated_delete_returns_absent_outcome() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let first = remove_skill_batch(&req).expect("first removal should succeed");
 	assert!(
@@ -1782,7 +1782,7 @@ fn test_by_path_unlinks_junction_keeps_master() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	remove_skill_batch(&req).unwrap();
 
@@ -1822,7 +1822,7 @@ fn test_by_path_refuses_dotdot_escape() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let err =
 		remove_skill_batch(&req).expect_err("must refuse .. escaping roots");
@@ -1863,7 +1863,7 @@ fn test_by_path_refuses_skills_root_itself() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let preview_err = remove_skill_batch(&req)
 		.expect_err("must refuse skills root itself in dry-run");
@@ -1919,13 +1919,66 @@ fn test_by_path_refuses_plugin_owned_skill_leaving_disk_unchanged() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: Some("claude-official-plugin".to_string()),
+		plugin_roots: vec![(
+			"claude-official-plugin".to_string(),
+			plugin_skill.clone(),
+		)],
 	};
 	let res = remove_skill_batch(&req);
-	assert!(res.is_err(), "must refuse plugin-owned skill");
+	let err = res.expect_err("must refuse plugin-owned skill");
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
 	assert!(
 		plugin_skill.join("SKILL.md").exists(),
 		"disk must remain unchanged"
+	);
+}
+
+#[test]
+fn test_by_name_refuses_plugin_owned_skill_leaving_disk_and_lock_unchanged() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let skills = root.join(".claude/skills");
+	let plugin_skill = skills.join("my-plugin-skill");
+	fs::create_dir_all(&plugin_skill).unwrap();
+	fs::write(
+		plugin_skill.join("SKILL.md"),
+		"---\nname: my-plugin-skill\ndescription: plugin skill\n---\n",
+	)
+	.unwrap();
+	let lock_path = root.join("skills-lock.json");
+	fs::write(
+		&lock_path,
+		r#"{"version":1,"skills":{"my-plugin-skill":{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}"#,
+	)
+	.unwrap();
+	let lock_before = fs::read(&lock_path).unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName("my-plugin-skill".to_string()),
+		scope: WriteScope::project(&root),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_roots: vec![(
+			"claude-official-plugin".to_string(),
+			plugin_skill.clone(),
+		)],
+	};
+	let err = remove_skill_batch(&req)
+		.expect_err("must refuse plugin-owned skill by name");
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+	assert!(
+		plugin_skill.join("SKILL.md").exists(),
+		"disk must remain unchanged"
+	);
+	assert_eq!(
+		fs::read(&lock_path).unwrap(),
+		lock_before,
+		"lock must remain unchanged"
 	);
 }
 
@@ -1959,7 +2012,7 @@ fn test_by_name_shared_refusal_excludes_all_requested_agents_from_readers() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let err = remove_skill_batch(&req).unwrap_err();
 	let rejected = err.rejected_targets().expect("rejected_targets on refusal");
@@ -2000,7 +2053,7 @@ fn test_lock_only_skill_removal_prune_preview_and_commit_parity() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let preview_res =
 		remove_skill_batch(&preview_req).expect("preview removal must succeed");
@@ -2037,7 +2090,7 @@ fn test_lock_only_skill_removal_prune_preview_and_commit_parity() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 	let commit_res =
 		remove_skill_batch(&commit_req).expect("commit removal must succeed");
@@ -2094,7 +2147,7 @@ fn test_by_name_multi_agent_removed_and_kept_folds_to_partial() {
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
-		plugin_owner: None,
+		plugin_roots: Vec::new(),
 	};
 
 	let res =

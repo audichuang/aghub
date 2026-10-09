@@ -1826,7 +1826,7 @@ fn plan_reconcile_skill(
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: !added.is_empty(),
-			plugin_owner: None,
+			plugin_roots: Vec::new(),
 		};
 		let resp = crate::skills::removal::remove_skill_batch(&req)?;
 		let keepers: Vec<&'static str> = resp
@@ -2250,7 +2250,7 @@ pub fn reconcile_skill(
 							all_agents: false,
 							prior_removed_paths: Vec::new(),
 							keeps_master: !added.is_empty(),
-							plugin_owner: None,
+							plugin_roots: Vec::new(),
 						};
 						delete_batch_result = Some(
 							crate::skills::removal::remove_skill_batch(&req),

@@ -109,6 +109,26 @@ pub fn skill_root(skill: &crate::models::Skill) -> Option<PathBuf> {
 	})
 }
 
+/// Refuse to `action` a skill that a Claude Code plugin owns. `plugin_roots` is
+/// injected by the surface as `(plugin name, install root)` pairs — core does not
+/// depend on the plugin crate. An empty list (the plugin list could not be read)
+/// refuses nothing: the API's behaviour before this guard moved into core.
+pub(crate) fn refuse_plugin_owned(
+	path: &Path,
+	skill: &str,
+	action: &str,
+	plugin_roots: &[(String, PathBuf)],
+) -> crate::errors::Result<()> {
+	match plugin_roots.iter().find(|(_, root)| path.starts_with(root)) {
+		Some((plugin, _)) => {
+			Err(crate::errors::ConfigError::ManagedResource(format!(
+				"Cannot {action} skill '{skill}' managed by plugin '{plugin}'"
+			)))
+		}
+		None => Ok(()),
+	}
+}
+
 /// Resolve the on-disk roots of every installed skill named `name` in the given
 /// scope. A lock→disk resolver: loads all agents' skills, filters by name, and
 /// returns each distinct skill folder root. The single home shared by the CLI

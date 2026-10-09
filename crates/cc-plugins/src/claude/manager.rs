@@ -38,6 +38,26 @@ impl ClaudePluginManager {
 		self.installed.iter().find(|plugin| plugin.owns_path(path))
 	}
 
+	/// `(plugin name, install root)` for every installed plugin — the ownership
+	/// list core's skill mutation entries take (same roots `owns_path` checks).
+	/// Fails open: when the plugin list cannot be read (no `claude` CLI, bad
+	/// settings) it returns an empty list, which refuses nothing.
+	pub async fn owned_roots() -> Vec<(String, PathBuf)> {
+		let Ok(manager) = Self::new().await else {
+			return Vec::new();
+		};
+		manager
+			.installed
+			.iter()
+			.flat_map(|plugin| {
+				plugin
+					.all_install_paths()
+					.into_iter()
+					.map(|root| (plugin.display_name.clone(), root))
+			})
+			.collect()
+	}
+
 	pub fn is_enabled(&self, id: &PluginId) -> bool {
 		self.installed
 			.iter()
