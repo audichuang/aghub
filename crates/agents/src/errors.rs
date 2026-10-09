@@ -62,6 +62,11 @@ pub enum ConfigError {
 	/// aghub refuses to mutate it.
 	#[error("{0}")]
 	ManagedResource(String),
+
+	/// Writing the skill lock failed after the install changed disk; the
+	/// caller rolled its own writes back.
+	#[error("Failed to update skill lock: {0}")]
+	SkillLock(std::io::Error),
 }
 
 impl ConfigError {

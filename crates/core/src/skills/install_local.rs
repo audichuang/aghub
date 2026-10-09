@@ -41,12 +41,12 @@ fn write_local_install_lock(
 			skill_name, source, None, source_dir, None,
 		)
 		.map(|_| ())
-		.map_err(ConfigError::Io),
+		.map_err(ConfigError::SkillLock),
 		WriteScope::Project { root } => skill::write_project_install_lock(
 			skill_name, source, None, source_dir, root, None,
 		)
 		.map(|_| ())
-		.map_err(ConfigError::Io),
+		.map_err(ConfigError::SkillLock),
 	}
 }
 

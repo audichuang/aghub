@@ -21,6 +21,7 @@ pub fn wire_code(error: &ConfigError) -> &'static str {
 		| ConfigError::InvalidConfigWithTargets { .. } => "INVALID_CONFIG",
 		ConfigError::ManagedResource(_) => "MANAGED_RESOURCE",
 		ConfigError::Json(_) => "JSON_PARSE_ERROR",
+		ConfigError::SkillLock(_) => "SKILL_LOCK_ERROR",
 		// Mutation-lock contention arrives as `Io(WouldBlock)` — `skill::lock::
 		// guard` is its only producer. It is a RETRYABLE conflict, not a fault:
 		// another aghub process simply held the lock and nothing was written.

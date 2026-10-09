@@ -271,6 +271,9 @@ pub fn clone_config_error(err: &ConfigError) -> ConfigError {
 		ConfigError::ManagedResource(s) => {
 			ConfigError::ManagedResource(s.clone())
 		}
+		ConfigError::SkillLock(e) => {
+			ConfigError::SkillLock(std::io::Error::new(e.kind(), e.to_string()))
+		}
 		ConfigError::Io(e) => {
 			ConfigError::Io(std::io::Error::new(e.kind(), e.to_string()))
 		}

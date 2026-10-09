@@ -144,6 +144,9 @@ impl ApiError {
 			ConfigError::Json(e) => {
 				ApiError::new(Status::BadRequest, e.to_string(), code)
 			}
+			ConfigError::SkillLock(_) => {
+				ApiError::new(Status::InternalServerError, e.to_string(), code)
+			}
 			// Mutation-lock contention (`Io(WouldBlock)`, produced only by
 			// `skill::lock::guard`) is a RETRYABLE 409, not a 500.
 			// `lock_unavailable` (no lock possible at all) stays 500 on purpose.

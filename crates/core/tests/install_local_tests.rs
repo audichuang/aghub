@@ -224,7 +224,13 @@ fn install_local_skill_rolls_back_when_the_lock_write_fails() {
 			return;
 		}
 
-		result.expect_err("a failed lock write must fail the install");
+		let error =
+			result.expect_err("a failed lock write must fail the install");
+		assert_eq!(
+			aghub_core::error_codes::wire_code(&error),
+			"SKILL_LOCK_ERROR",
+			"a late lock-write failure keeps its baseline wire code"
+		);
 		assert!(
 			!project.join(".aghub/rollback-skill").exists(),
 			"the Master this call created must be rolled back"
