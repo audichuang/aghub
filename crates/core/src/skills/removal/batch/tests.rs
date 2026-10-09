@@ -1934,6 +1934,43 @@ fn test_by_path_refuses_plugin_owned_skill_leaving_disk_unchanged() {
 }
 
 #[test]
+fn test_by_path_refuses_plugin_skill_outside_agent_dirs_as_managed_resource() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(root.join(".claude/skills")).unwrap();
+	// Where Claude Code actually installs plugins: outside every allow-listed
+	// skills root, so containment alone would answer INVALID_CONFIG.
+	let plugin_root = temp.path().join("home/.claude/plugins/cache/p/1.0.0");
+	let plugin_skill = plugin_root.join("skills/my-plugin-skill");
+	fs::create_dir_all(&plugin_skill).unwrap();
+	fs::write(
+		plugin_skill.join("SKILL.md"),
+		"---\nname: my-plugin-skill\n---\n",
+	)
+	.unwrap();
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(plugin_skill.join("SKILL.md")),
+		scope: WriteScope::project(&root),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+		plugin_roots: vec![("p".to_string(), plugin_root.clone())],
+	};
+	let err =
+		remove_skill_batch(&req).expect_err("must refuse plugin-owned skill");
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+	assert!(
+		plugin_skill.join("SKILL.md").exists(),
+		"disk must remain unchanged"
+	);
+}
+
+#[test]
 fn test_by_name_refuses_plugin_owned_skill_leaving_disk_and_lock_unchanged() {
 	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 	let temp = tempdir().unwrap();

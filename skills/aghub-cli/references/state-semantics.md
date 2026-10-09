@@ -205,10 +205,13 @@ branch.
   still exit 0) when there is none. It stays lock-only: never deletes skill
   files or edits agent config, and previews unless `--yes`.
 - A skill whose files sit under an installed Claude Code plugin is the
-  plugin's, not aghub's: `delete` and `update` refuse it with
-  `MANAGED_RESOURCE` (exit 1, nothing written) — the same code the HTTP API
-  returns. Manage it with `aghub-cli plugin`. When the plugin list cannot be
-  read (no `claude` CLI), the check is skipped and the command proceeds.
+  plugin's, not aghub's: `delete`, `update`, `enable` and `disable` refuse it
+  with `MANAGED_RESOURCE` (exit 1, nothing written) — the same code the HTTP
+  API returns. For `enable`/`disable` this replaces the `UNSUPPORTED_OPERATION`
+  they answer otherwise: the refusal order is not-found, then plugin-managed,
+  then unsupported. Manage it with `aghub-cli plugin`. When the plugin list
+  cannot be read (no `claude` CLI), the check is skipped and the command
+  proceeds.
 - Plain `delete` discovers a skill through the AGENT CONFIGS and never looks up
   `.aghub/<name>` directly, so a Master with no Referrer left anywhere is
   reported `absent` and stays on disk. `delete --all-agents` DOES reach it: the

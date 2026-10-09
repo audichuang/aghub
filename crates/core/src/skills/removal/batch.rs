@@ -901,6 +901,15 @@ fn remove_skill_by_path(
 		});
 	}
 
+	// Before containment: a plugin install root is outside every allow-listed root.
+	super::refuse_plugin_owned(
+		&skill_path,
+		&by_path_skill_name(&skill_dir)
+			.unwrap_or_else(|_| skill_dir.display().to_string()),
+		"delete",
+		&request.plugin_roots,
+	)?;
+
 	let roots = allowed_skill_roots(&agent_dirs, project_root);
 
 	if assert_strictly_contained(&skill_dir, &roots).is_none() {
@@ -909,14 +918,6 @@ fn remove_skill_by_path(
 				.to_string(),
 		));
 	}
-
-	super::refuse_plugin_owned(
-		&skill_path,
-		&by_path_skill_name(&skill_dir)
-			.unwrap_or_else(|_| skill_dir.display().to_string()),
-		"delete",
-		&request.plugin_roots,
-	)?;
 
 	for agent in &target_agents {
 		let paths =

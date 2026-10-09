@@ -419,6 +419,32 @@ fn isolated_cli(home: &std::path::Path, state: &std::path::Path) -> Command {
 	// reads; an ambient `$XDG_DATA_HOME` would hand the test the developer's.
 	cmd.env("AGHUB_DATA_DIR", state.join("data"));
 	clear_agent_home_overrides(&mut cmd);
+	// Every skill delete/update/enable/disable probes `claude plugin list`;
+	// a stub reporting no plugins keeps the developer's real `claude` (and
+	// its network calls and writes under HOME) out of the suite.
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		let bin = state.join("stub-bin");
+		let stub = bin.join("claude");
+		if !stub.exists() {
+			std::fs::create_dir_all(&bin).unwrap();
+			std::fs::write(&stub, "#!/bin/sh\necho '[]'\n").unwrap();
+			std::fs::set_permissions(
+				&stub,
+				std::fs::Permissions::from_mode(0o755),
+			)
+			.unwrap();
+		}
+		cmd.env(
+			"PATH",
+			format!(
+				"{}:{}",
+				bin.display(),
+				std::env::var("PATH").unwrap_or_default()
+			),
+		);
+	}
 	cmd.current_dir(home);
 	cmd
 }
@@ -8099,10 +8125,6 @@ fn collect_disk_state(
 			for entry in rd.flatten() {
 				let p = entry.path();
 				let rel = p.strip_prefix(base).unwrap().to_path_buf();
-				// The real `claude` CLI, spawned by the plugin-ownership probe, writes a timestamped backup here.
-				if rel.starts_with(".claude/backups") {
-					continue;
-				}
 				let meta = std::fs::symlink_metadata(&p).unwrap();
 				let kind = if meta.file_type().is_symlink() {
 					"symlink".to_string()
