@@ -10480,6 +10480,44 @@ fn malformed_agent_config_fails_delete_instead_of_reporting_success() {
 		"add must not silently start from a blank config either: {}",
 		String::from_utf8_lossy(&added.stdout)
 	);
+
+	// Parity pin: `add skills --from` refuses the same malformed config with
+	// the same wire code the core install now enforces.
+	let source_skill = home.path().join("source-skills/s");
+	std::fs::create_dir_all(&source_skill).unwrap();
+	std::fs::write(
+		source_skill.join("SKILL.md"),
+		"---\nname: s\ndescription: test\n---\n\nbody\n",
+	)
+	.unwrap();
+	let skill_out = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"-a",
+			"claude",
+			"--json",
+			"add",
+			"skills",
+			"--from",
+			source_skill.join("SKILL.md").to_str().unwrap(),
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!skill_out.status.success(),
+		"add skills must refuse a malformed agent config"
+	);
+	let skill_json: Value = serde_json::from_slice(&skill_out.stdout)
+		.expect("stdout must be valid JSON");
+	assert_eq!(
+		skill_json["error"]["code"], "INVALID_CONFIG",
+		"{skill_json}"
+	);
+	assert!(
+		!project.path().join(".aghub/s").exists(),
+		"no Master may be written"
+	);
 }
 
 /// `-p` with no project root must fail on READ commands too, not answer `[]`.

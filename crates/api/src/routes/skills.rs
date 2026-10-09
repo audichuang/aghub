@@ -5277,6 +5277,61 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn import_skill_refuses_a_malformed_agent_config_like_the_cli() {
+		with_isolated_env(|home, _state| {
+			let source_skill = home.join("source-skills/my-skill");
+			std::fs::create_dir_all(&source_skill).unwrap();
+			std::fs::write(
+				source_skill.join("SKILL.md"),
+				"---\nname: my-skill\ndescription: test\n---\n\nbody\n",
+			)
+			.unwrap();
+
+			let project = home.join("myproject");
+			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+			let mcp =
+				r#"{ "mcpServers": { "keepme": { "command": "echo" } } } OOPS"#;
+			std::fs::write(project.join(".mcp.json"), mcp).unwrap();
+
+			let err = match block_on(import_skill(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Claude),
+				ScopeParams {
+					scope: Some("project".to_string()),
+					project_root: Some(project.display().to_string()),
+				},
+				Json(crate::dto::skill::ImportSkillRequest {
+					path: source_skill.join("SKILL.md").display().to_string(),
+					name: None,
+				}),
+			)) {
+				Ok(_) => {
+					panic!("a malformed agent config must refuse the import")
+				}
+				Err(err) => err,
+			};
+
+			assert_eq!(err.body.code, "INVALID_CONFIG");
+			assert!(!err.status.class().is_success(), "status must not be 2xx");
+			assert!(!project.join(".aghub/my-skill").exists());
+			assert!(
+				std::fs::symlink_metadata(
+					project.join(".claude/skills/my-skill")
+				)
+				.is_err(),
+				"no referrer, not even a dangling link"
+			);
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert!(!lock.skills.contains_key("my-skill"));
+			assert_eq!(
+				std::fs::read_to_string(project.join(".mcp.json")).unwrap(),
+				mcp
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn import_skill_with_name_installs_under_requested_name() {
 		with_isolated_env(|home, _state| {
 			let source_skill = home.join("source-skills/my-skill");

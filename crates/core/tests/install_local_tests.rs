@@ -676,3 +676,137 @@ fn install_local_skill_no_op_survives_a_corrupt_lock() {
 		);
 	});
 }
+
+#[test]
+fn install_local_skill_accepts_a_source_with_npx_excluded_files() {
+	with_isolated_env(|home, _data| {
+		let source_skill = home.join("source-skills/my-local-skill");
+		std::fs::create_dir_all(&source_skill).unwrap();
+		std::fs::write(
+			source_skill.join("SKILL.md"),
+			"---\nname: my-local-skill\ndescription: test\n---\n\n# Body\n",
+		)
+		.unwrap();
+		// Files the copier drops but the npx hash keeps: must not refuse the install.
+		std::fs::write(source_skill.join("metadata.json"), "{}").unwrap();
+		std::fs::create_dir_all(source_skill.join("__pycache__")).unwrap();
+		std::fs::write(source_skill.join("__pycache__/x.pyc"), b"\0\x01")
+			.unwrap();
+
+		let project = home.join("myproject");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+
+		let req = LocalSkillInstallRequest {
+			source_path: &source_skill.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+
+		install_local_skill(req).expect("install_local_skill must succeed");
+		assert!(project.join(".aghub/my-local-skill/SKILL.md").exists());
+		assert!(!project.join(".aghub/my-local-skill/__pycache__").exists());
+		assert!(!project.join(".aghub/my-local-skill/metadata.json").exists());
+
+		let lock = skill::lock::local::read_local_lock(Some(&project));
+		let entry = lock
+			.skills
+			.get("my-local-skill")
+			.expect("lock entry must exist");
+		assert_eq!(entry.source_type, "local");
+	});
+}
+
+#[test]
+fn install_local_skill_refuses_a_malformed_agent_config() {
+	with_isolated_env(|home, _data| {
+		let source_skill = home.join("source-skills/my-local-skill");
+		std::fs::create_dir_all(&source_skill).unwrap();
+		std::fs::write(
+			source_skill.join("SKILL.md"),
+			"---\nname: my-local-skill\ndescription: test\n---\n\n# Body\n",
+		)
+		.unwrap();
+
+		let project = home.join("myproject");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+		let mcp =
+			r#"{ "mcpServers": { "keepme": { "command": "echo" } } } OOPS"#;
+		std::fs::write(project.join(".mcp.json"), mcp).unwrap();
+
+		let req = LocalSkillInstallRequest {
+			source_path: &source_skill.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+
+		let err = install_local_skill(req)
+			.expect_err("a malformed agent config must refuse the install");
+		assert_eq!(aghub_core::error_codes::wire_code(&err), "INVALID_CONFIG");
+		assert!(!project.join(".aghub/my-local-skill").exists());
+		assert!(
+			std::fs::symlink_metadata(
+				project.join(".claude/skills/my-local-skill")
+			)
+			.is_err(),
+			"no referrer, not even a dangling link"
+		);
+		assert!(
+			!skill::lock::local::read_local_lock(Some(&project))
+				.skills
+				.contains_key("my-local-skill"),
+			"lock must not be written"
+		);
+		assert_eq!(
+			std::fs::read_to_string(project.join(".mcp.json")).unwrap(),
+			mcp
+		);
+	});
+}
+
+#[test]
+fn install_local_skill_leaves_no_lock_entry_when_the_master_does_not_parse() {
+	with_isolated_env(|home, _data| {
+		// SKILL.md is a symlink: the parser follows it, but the hasher and
+		// copier skip symlinks, so the materialized Master has no SKILL.md.
+		let real = home.join("real");
+		std::fs::create_dir_all(&real).unwrap();
+		std::fs::write(
+			real.join("SKILL.md"),
+			"---\nname: linked-skill\ndescription: test\n---\n\nbody\n",
+		)
+		.unwrap();
+		let source_dir = home.join("source-skills/linked-skill");
+		std::fs::create_dir_all(&source_dir).unwrap();
+		std::os::unix::fs::symlink(
+			real.join("SKILL.md"),
+			source_dir.join("SKILL.md"),
+		)
+		.unwrap();
+
+		let project = home.join("myproject");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+
+		let req = LocalSkillInstallRequest {
+			source_path: &source_dir.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+
+		let err = install_local_skill(req)
+			.expect_err("must refuse a Master that does not parse");
+		assert!(
+			err.to_string().contains("does not parse"),
+			"must fail at the master_on_disk check: {err}"
+		);
+		assert!(
+			!skill::lock::local::read_local_lock(Some(&project))
+				.skills
+				.contains_key("linked-skill"),
+			"no ghost lock entry"
+		);
+		assert!(!project.join(".aghub/linked-skill").exists());
+	});
+}

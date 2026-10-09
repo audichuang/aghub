@@ -88,10 +88,27 @@ fn all_targets_already_linked(
 
 /// Install a skill from a local filesystem path: materializes Master in `.aghub`,
 /// links target agents, checks adoption against existing lock/disk, stamps lock,
-/// and rolls back on failure.
+/// and rolls back on failure. Refuses first if a target agent's config
+/// exists but does not parse.
 pub fn install_local_skill(
 	req: LocalSkillInstallRequest<'_>,
 ) -> Result<LocalSkillInstallReport, ConfigError> {
+	// Same precondition as the CLI preload: a target agent config that exists but
+	// does not parse refuses the install; only a missing config is tolerated.
+	// See docs/history/cli.md#malformed-config-is-not-missing
+	for &agent in req.target_agents {
+		let mut manager = crate::ConfigManager::for_write(
+			crate::create_adapter(agent),
+			req.scope.clone(),
+		);
+		match manager.load() {
+			Ok(_) | Err(ConfigError::NotFound { .. }) => {}
+			Err(ConfigError::Io(e))
+				if e.kind() == std::io::ErrorKind::NotFound => {}
+			Err(e) => return Err(e),
+		}
+	}
+
 	let expanded_path =
 		crate::skills::removal::expand_tilde_path(req.source_path);
 	let skill_pkg = skill::parser::parse(&expanded_path).map_err(|e| {
@@ -105,6 +122,7 @@ pub fn install_local_skill(
 	let resource_scope = req.scope.resource_scope();
 	let project_root = req.scope.project_root();
 
+	// Request validation (config load, source parse) precedes the guard on purpose: a bad request is not retryable, so it must not report lock contention.
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"install local skill",
 		resource_scope,
@@ -255,59 +273,8 @@ pub fn install_local_skill(
 		}
 	}
 
-	let covered_any = agent_results.iter().any(|r| r.error.is_none());
-	let wrote_lock = wrote_master || (is_adoption && covered_any);
-
-	if wrote_lock {
-		let canonical = adoption.canonical.as_ref().ok_or_else(|| {
-			ConfigError::ValidationFailed(format!(
-				"Master for skill '{effective_name}' could not be resolved before the \
-				 source lock write; the lock was not written"
-			))
-		})?;
-		crate::skills::adoption::ensure_link_free_master(
-			effective_name,
-			canonical,
-		)?;
-		let master_hash =
-			crate::skills::adoption::hash_master(effective_name, canonical)?;
-		if effective_name == source_name
-			&& master_hash != adoption.installed_hash
-		{
-			crate::skills::rename::rollback_materialized_install(
-				effective_name,
-				resource_scope,
-				project_root,
-				&created_referrer_dirs,
-				wrote_master,
-			);
-			return Err(ConfigError::ValidationFailed(format!(
-				"Master for skill '{effective_name}' does not match the source \
-				 content before the source lock write; the lock was not written"
-			)));
-		}
-		let lock_source_dir = if effective_name != source_name {
-			canonical.as_path()
-		} else {
-			&source_root
-		};
-		if let Err(error) = write_local_install_lock(
-			effective_name,
-			&req.scope,
-			&lock_source,
-			lock_source_dir,
-		) {
-			crate::skills::rename::rollback_materialized_install(
-				effective_name,
-				resource_scope,
-				project_root,
-				&created_referrer_dirs,
-				wrote_master,
-			);
-			return Err(error);
-		}
-	}
-
+	// Parse the materialized Master before the lock write, so a Master that
+	// does not parse rolls back without leaving a ghost lock entry.
 	let canonical_dir = adoption.canonical.as_ref().ok_or_else(|| {
 		ConfigError::ValidationFailed(format!(
 			"Master for skill '{effective_name}' could not be resolved"
@@ -332,6 +299,43 @@ pub fn install_local_skill(
 			)));
 		}
 	};
+
+	let covered_any = agent_results.iter().any(|r| r.error.is_none());
+	let wrote_lock = wrote_master || (is_adoption && covered_any);
+
+	if wrote_lock {
+		let canonical = adoption.canonical.as_ref().ok_or_else(|| {
+			ConfigError::ValidationFailed(format!(
+				"Master for skill '{effective_name}' could not be resolved before the \
+				 source lock write; the lock was not written"
+			))
+		})?;
+		crate::skills::adoption::ensure_link_free_master(
+			effective_name,
+			canonical,
+		)?;
+		// No re-hash here: a fresh Master is the copier's output of source_root (which drops npx-excluded files), and an adopted Master was already hash-matched above under the same guard.
+		let lock_source_dir = if effective_name != source_name {
+			canonical.as_path()
+		} else {
+			&source_root
+		};
+		if let Err(error) = write_local_install_lock(
+			effective_name,
+			&req.scope,
+			&lock_source,
+			lock_source_dir,
+		) {
+			crate::skills::rename::rollback_materialized_install(
+				effective_name,
+				resource_scope,
+				project_root,
+				&created_referrer_dirs,
+				wrote_master,
+			);
+			return Err(error);
+		}
+	}
 
 	let all_targets_linked = !req.target_agents.is_empty()
 		&& agent_results
