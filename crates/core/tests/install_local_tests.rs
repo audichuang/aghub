@@ -772,6 +772,55 @@ fn install_local_skill_refuses_a_malformed_agent_config() {
 }
 
 #[test]
+fn install_local_skill_refuses_a_name_already_discovered_in_another_folder() {
+	with_isolated_env(|home, _data| {
+		let source_skill = home.join("source-skills/duplicate");
+		std::fs::create_dir_all(&source_skill).unwrap();
+		std::fs::write(
+			source_skill.join("SKILL.md"),
+			"---\nname: duplicate\ndescription: new\n---\n\nNEW\n",
+		)
+		.unwrap();
+
+		let project = home.join("myproject");
+		let legacy = project.join(".claude/skills/legacy-folder");
+		std::fs::create_dir_all(&legacy).unwrap();
+		std::fs::write(
+			legacy.join("SKILL.md"),
+			"---\nname: duplicate\ndescription: legacy\n---\n\nLEGACY\n",
+		)
+		.unwrap();
+
+		let req = LocalSkillInstallRequest {
+			source_path: &source_skill.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+
+		let err = install_local_skill(req)
+			.expect_err("a name an agent already discovers must be refused");
+		assert_eq!(aghub_core::error_codes::wire_code(&err), "RESOURCE_EXISTS");
+		assert!(!project.join(".aghub/duplicate").exists());
+		assert!(
+			std::fs::symlink_metadata(project.join(".claude/skills/duplicate"))
+				.is_err(),
+			"no referrer, not even a dangling link"
+		);
+		assert!(
+			!skill::lock::local::read_local_lock(Some(&project))
+				.skills
+				.contains_key("duplicate"),
+			"lock must not be written"
+		);
+		assert_eq!(
+			std::fs::read_to_string(legacy.join("SKILL.md")).unwrap(),
+			"---\nname: duplicate\ndescription: legacy\n---\n\nLEGACY\n"
+		);
+	});
+}
+
+#[test]
 fn install_local_skill_leaves_no_lock_entry_when_the_master_does_not_parse() {
 	with_isolated_env(|home, _data| {
 		// SKILL.md is a symlink: the parser follows it, but the hasher and

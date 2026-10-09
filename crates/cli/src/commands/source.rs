@@ -984,10 +984,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 				&target_agents,
 				write_scope.resource_scope(),
 			)
-			.map_err(|error| error.to_string())
 		},
 		|(kind, d)| {
-			Ok::<SyncActionView, String>(match *kind {
+			Ok::<SyncActionView, aghub_core::ConfigError>(match *kind {
 				"install" => apply_install(
 					&fetched,
 					d,
@@ -1006,13 +1005,16 @@ fn sync(args: SyncArgs) -> Result<()> {
 		},
 	)
 	.map_err(|error| {
-		let mut reasons = error
-			.failures
-			.into_iter()
-			.map(|failure| failure.reason)
-			.collect::<Vec<_>>();
-		reasons.dedup();
-		anyhow::anyhow!(reasons.join("; "))
+		// Every rejected row carries the same skill_batch_preflight error; keep
+		// it typed so report_failure emits its wire code.
+		anyhow::Error::from(
+			error
+				.failures
+				.into_iter()
+				.next()
+				.expect("a preflight rejection names at least one target")
+				.reason,
+		)
 	})?;
 	let actions: Vec<SyncActionView> = action_report
 		.results

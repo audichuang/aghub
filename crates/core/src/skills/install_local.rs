@@ -89,7 +89,8 @@ fn all_targets_already_linked(
 /// Install a skill from a local filesystem path: materializes Master in `.aghub`,
 /// links target agents, checks adoption against existing lock/disk, stamps lock,
 /// and rolls back on failure. Refuses first if a target agent's config
-/// exists but does not parse.
+/// exists but does not parse, and refuses a name a target agent already
+/// discovers unless its Referrer already links to this Master.
 pub fn install_local_skill(
 	req: LocalSkillInstallRequest<'_>,
 ) -> Result<LocalSkillInstallReport, ConfigError> {
@@ -145,6 +146,43 @@ pub fn install_local_skill(
 	};
 	let canonical_opt = crate::skills::linker::master_store_dir(canonical_root)
 		.map(|skills_dir| skills_dir.join(&safe_name));
+
+	// Under the guard, re-read each target agent's discovered skills: a name the
+	// agent already sees (in any folder) is taken. Idempotent only when THIS
+	// agent's Referrer slot already links to the intended Master; an explicit
+	// name always refuses. Restores the base add_skill_from_path_universal rule.
+	for &agent in req.target_agents {
+		let mut manager = crate::ConfigManager::for_write(
+			crate::create_adapter(agent),
+			req.scope.clone(),
+		);
+		let taken = match manager.load() {
+			Ok(config) => {
+				config.skills.iter().any(|s| s.name == effective_name)
+			}
+			Err(ConfigError::NotFound { .. }) => false,
+			Err(ConfigError::Io(e))
+				if e.kind() == std::io::ErrorKind::NotFound =>
+			{
+				false
+			}
+			Err(e) => return Err(e),
+		};
+		if !taken {
+			continue;
+		}
+		let linked_to_master = canonical_opt.as_deref().is_some_and(|c| {
+			all_targets_already_linked(
+				c,
+				&safe_name,
+				&req.scope,
+				std::slice::from_ref(&agent),
+			)
+		});
+		if req.install_name.is_some() || !linked_to_master {
+			return Err(ConfigError::resource_exists("skill", effective_name));
+		}
+	}
 
 	let is_already_installed = canonical_opt
 		.as_deref()

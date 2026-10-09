@@ -1600,6 +1600,7 @@ fn source_sync_agent_list_preflights_before_writing_master() {
 	let out = isolated_cli(home.path(), state.path())
 		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", source.path())
 		.args([
+			"--json",
 			"-g",
 			"-a",
 			"claude,jetbrains-ai",
@@ -1615,6 +1616,9 @@ fn source_sync_agent_list_preflights_before_writing_master() {
 		.unwrap();
 
 	assert!(!out.status.success(), "unsupported target must reject sync");
+	let json: Value =
+		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+	assert_eq!(json["error"]["code"], "UNSUPPORTED_OPERATION", "{json}");
 	assert!(
 		!home.path().join(".aghub/alpha").exists(),
 		"capability preflight must happen before the shared Master write",
@@ -2042,6 +2046,52 @@ fn add_skill_from_path_outputs_skill_view_with_shared_with() {
 	assert_eq!(json["description"], "imported");
 	// Claude's global skills dir is private, so this grant reaches nobody else.
 	assert_eq!(json["shared_with"], serde_json::json!([]));
+}
+
+#[cfg(unix)]
+#[test]
+fn add_skill_from_path_refuses_a_name_already_discovered_in_another_folder() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = home.path().join("src/duplicate");
+	std::fs::create_dir_all(&src).unwrap();
+	std::fs::write(
+		src.join("SKILL.md"),
+		"---\nname: duplicate\ndescription: new\n---\n\nNEW\n",
+	)
+	.unwrap();
+	// A skill the agent already discovers under a differently named folder.
+	let legacy = home.path().join(".claude/skills/legacy-folder");
+	std::fs::create_dir_all(&legacy).unwrap();
+	std::fs::write(
+		legacy.join("SKILL.md"),
+		"---\nname: duplicate\ndescription: legacy\n---\n\nLEGACY\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"--json",
+			"-a",
+			"claude",
+			"add",
+			"skills",
+			"--from",
+			src.to_str().unwrap(),
+		])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "a taken name must refuse the import");
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["error"]["code"], "RESOURCE_EXISTS", "{json}");
+	assert!(!home.path().join(".aghub/duplicate").exists());
+	assert!(
+		std::fs::symlink_metadata(home.path().join(".claude/skills/duplicate"))
+			.is_err(),
+		"no referrer may be created"
+	);
 }
 
 /// Root bypasses `0o555`, so probe + skip (CI often runs as root).
