@@ -4239,8 +4239,9 @@ fn a_source_spanning_two_forges_diffs_each_scope_against_its_own_origin() {
 }
 
 /// Two scopes that record the same repository share ONE fetch (the memo), and
-/// each scope still judges the complete catalog. A selective fetch leaking
-/// into the shared memo would starve one of the scopes of `alpha` or `beta`.
+/// each scope still judges the complete catalog. Both scopes fetch the whole
+/// catalog; the selection split is pinned by the unit test
+/// `memo_shares_only_a_whole_catalog_fetch`.
 #[cfg(unix)]
 #[test]
 fn source_diff_across_two_scopes_fetches_once_and_both_scopes_are_complete() {

@@ -157,9 +157,11 @@ only and is unaffected.
 
 `sync`'s refusal prints the pin set. `(default branch)` in that list is how a
 lock entry with NO recorded ref displays — not a value you can pass back; use
-the repo's real default branch name. An install records the ref it resolved
-(from `--ref`, else the entry's existing lock ref) and records nothing when
-there is neither, while `--update` re-stamps only hash and `refCommit`. So the
+the repo's real default branch name. An install records the ref it resolved:
+`--ref`, else the source's existing lock ref in that scope (a recorded none
+stays none), else — for a source new to the scope — the repo's real
+default-branch name, and nothing when the remote does not advertise one,
+while `--update` re-stamps only hash and `refCommit`. So the
 pin set does not converge on its own: a source stays mixed until every entry has
 been reinstalled.
 

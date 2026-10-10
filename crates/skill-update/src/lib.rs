@@ -268,6 +268,17 @@ pub trait Fetcher: Send + Sync {
 	) -> Result<FetchedRepo, FetchError> {
 		self.fetch(source_ref, token, selection)
 	}
+
+	/// The remote default branch's real name for `source_ref` (its `ref_` is
+	/// ignored), or `None` when unknown. Defaulted so test stubs record no ref;
+	/// [`GitFetcher`] asks the remote.
+	fn default_branch(
+		&self,
+		_source_ref: &SourceRef,
+		_token: Option<&str>,
+	) -> Option<String> {
+		None
+	}
 }
 
 /// Outcome of a fail-closed-aware token resolution: distinguishes "no

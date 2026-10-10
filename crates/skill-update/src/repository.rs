@@ -402,9 +402,9 @@ impl SkillRepository {
 			.map_err(map_git_error)
 	}
 
-	/// The ref an import records for `claim`: the ref it was resolved from, else
-	/// the remote default branch's REAL name (one ref advertisement), else `None`
-	/// — the next check then follows the default branch. Never guesses
+	/// The claim's branch, else the remote default branch's REAL name (one ref
+	/// advertisement), else `None` — the remote-default input to
+	/// `sources::import_ref`, which owns the cohort rule. Never guesses
 	/// main/master: a repo whose default is `develop` but which also has `main`
 	/// would record `main`, report a false update, and update onto the wrong
 	/// branch. REST serves no ref advertisement (it declines, as for
@@ -416,6 +416,21 @@ impl SkillRepository {
 		let (git_sr, auth) = &claim.origin;
 		self.gix
 			.default_branch(git_sr, auth.as_ref())
+			.ok()
+			.flatten()
+	}
+
+	/// The remote default branch's real name for `sr` (`sr.ref_` ignored), or
+	/// `None` when the remote does not say. One ref advertisement on the gix slot
+	/// (REST serves none), no objects.
+	pub fn default_branch(
+		&self,
+		sr: &SourceRef,
+		token: Option<&str>,
+	) -> Option<String> {
+		let (git_sr, auth, _) = self.coordinates(sr, token).ok()?;
+		self.gix
+			.default_branch(&git_sr, auth.as_ref())
 			.ok()
 			.flatten()
 	}

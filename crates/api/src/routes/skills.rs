@@ -1188,8 +1188,6 @@ pub(crate) async fn install_skill_with_repo(
 		InstallMaterialization,
 	) = match aghub_git::resolve_remote_source(&req.source) {
 		Ok(resolved) => {
-			let lock_source =
-				install_lock_source_from_resolved(&resolved, None);
 			let source_ref = skill_update::SourceRef {
 				source: req.source.clone(),
 				ref_: None,
@@ -1198,13 +1196,23 @@ pub(crate) async fn install_skill_with_repo(
 			let requested = req.skills.clone();
 			let repo_for_task = repo.clone();
 			let token_for_task = token;
+			let scope_for_task = write_scope.clone();
+			let source_for_task = req.source.clone();
 
-			let (selected, fetched) = match timeout(
+			let (selected, fetched, ref_name) = match timeout(
 				Duration::from_secs(300),
 				tokio::task::spawn_blocking(move || {
 					let claim = repo_for_task
 						.resolve_pinned(&source_ref, token_for_task.as_deref())
 						.map_err(InstallFetchError::Repo)?;
+					let ref_name = skill_update::sources::import_ref(
+						None,
+						&skill_update::sources::recorded_refs(
+							&scope_for_task,
+							&source_for_task,
+						),
+						|| repo_for_task.import_ref(&claim),
+					);
 					let catalog = repo_for_task
 						.list_pinned(&claim)
 						.map_err(InstallFetchError::Repo)?;
@@ -1221,7 +1229,7 @@ pub(crate) async fn install_skill_with_repo(
 							skill_update::FetchSelection::Skills(&paths),
 						)
 						.map_err(InstallFetchError::Repo)?;
-					Ok::<_, InstallFetchError>((selected, fetched))
+					Ok::<_, InstallFetchError>((selected, fetched, ref_name))
 				}),
 			)
 			.await
@@ -1254,6 +1262,8 @@ pub(crate) async fn install_skill_with_repo(
 				})
 				.collect();
 
+			let lock_source =
+				install_lock_source_from_resolved(&resolved, ref_name);
 			(
 				lock_source,
 				items,
@@ -1795,8 +1805,7 @@ pub async fn git_scan_skills(
 	})
 	.await?;
 
-	// The shared import-ref decision: the asked branch, else the remote's real
-	// default branch, else "" (install then records no ref). Never a guess.
+	// Display + session: the asked branch, else the remote's real default branch, else "". The install decides what the lock records (`sources::import_ref`).
 	let current_branch = import_ref.unwrap_or_default();
 
 	// Store the commit-pinned repository handle until install/sync.
@@ -1947,17 +1956,21 @@ pub async fn git_install_skills(
 			"SESSION_NOT_FOUND",
 		)
 	})?;
-	let ref_name = (!session.current_branch().is_empty())
-		.then(|| session.current_branch().to_string());
 	let resolved = aghub_git::resolve_remote_source(session.url())
 		.map_err(map_remote_source_error)?;
-	let source = install_lock_source_from_resolved(&resolved, ref_name);
 
 	let write_scope = crate::extractors::resolve_write_scope(
 		&req.scope,
 		req.project_root.as_deref(),
 	)?;
 	let resource_scope = write_scope.resource_scope();
+	let ref_name = skill_update::sources::import_ref(
+		session.requested_branch(),
+		&skill_update::sources::recorded_refs(&write_scope, session.url()),
+		// The scan already paid for the default branch's name.
+		|| Some(session.current_branch().to_string()).filter(|b| !b.is_empty()),
+	);
+	let source = install_lock_source_from_resolved(&resolved, ref_name);
 
 	// Reject absolute / `..` paths BEFORE any fetch or install write.
 	// Security: out-of-tree paths must fail with 400 without I/O.
@@ -6800,6 +6813,99 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn git_install_keeps_the_scopes_none_cohort_over_the_default_branch() {
+		with_isolated_env(|home, _state| {
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let app_sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("sessions state");
+			let fixture = tempdir().unwrap();
+			let dst = fixture.path().join("my-skill");
+			std::fs::create_dir_all(&dst).unwrap();
+			std::fs::write(
+				dst.join("SKILL.md"),
+				"---\nname: my-skill\ndescription: d\n---\n",
+			)
+			.unwrap();
+
+			// The project already records `other` with NO ref: its cohort is `None`.
+			let project = home.join("proj");
+			std::fs::create_dir_all(&project).unwrap();
+			let mut lock = skill::LocalSkillLockFile::new();
+			lock.skills.insert(
+				"other".to_string(),
+				skill::LocalSkillLockEntry {
+					source: "o/r".to_string(),
+					source_url: Some("https://github.com/o/r".to_string()),
+					source_type: "github".to_string(),
+					ref_name: None,
+					skill_path: Some("other/SKILL.md".to_string()),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+				},
+			);
+			skill::write_local_lock(&lock, Some(&project)).unwrap();
+
+			// The scan found `develop` as the default branch; nothing was asked for.
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(SessionLocalBackend::new(
+						fixture.path(),
+					)),
+				),
+			);
+			let claim = repo
+				.resolve_pinned(
+					&skill_update::SourceRef {
+						source: "https://github.com/o/r".to_string(),
+						ref_: None,
+					},
+					None,
+				)
+				.expect("resolve fixture session");
+			app_sessions.insert(
+				"sess-1".to_string(),
+				PinnedSourceSession::new(
+					repo,
+					claim,
+					"https://github.com/o/r".to_string(),
+					None,
+					vec!["develop".to_string()],
+					"develop".to_string(),
+				),
+			);
+			let response = client
+				.post("/api/v1/skills/git/install")
+				.json(&serde_json::json!({
+					"session_id": "sess-1",
+					"skill_paths": ["my-skill"],
+					"agents": ["claude"],
+					"scope": "project",
+					"project_root": project.to_str().unwrap()
+				}))
+				.dispatch();
+			assert_eq!(
+				response.status(),
+				rocket::http::Status::Ok,
+				"handler returned ok"
+			);
+			// A scope whose entries record no ref must not gain `develop`:
+			// that would be a mixed cohort the next `source sync` refuses.
+			let recorded = skill::read_local_lock(Some(&project));
+			assert_eq!(recorded.skills["my-skill"].ref_name, None);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn git_install_failure_identifies_every_target_without_source_contents() {
 		with_isolated_env(|home, _state| {
 			let app_data = tempdir().unwrap();
@@ -8450,8 +8556,9 @@ mod tests {
 			});
 
 			// Surface B: desktop /skills/git/install, selecting by skill PATH.
-			// current_branch is empty so ref_name is None (== surface A), making
-			// the whole lock entry directly comparable.
+			// The scan asked for no branch and the REST backend advertises no
+			// default, so ref is None (== surface A), making the whole lock
+			// entry directly comparable.
 			let (entry_b, master_b) = with_isolated_env(|home, _state| {
 				let (t, _rec) = record_transport(happy_responder());
 				let rest: Arc<dyn RepoFetchBackend> =
@@ -8461,7 +8568,13 @@ mod tests {
 					Arc::new(NoGixBackend),
 				));
 				let snap = repo
-					.resolve_pinned(&github_source(), None)
+					.resolve_pinned(
+						&SourceRef {
+							source: "https://github.com/acme/skills.git".into(),
+							ref_: None,
+						},
+						None,
+					)
 					.expect("resolve");
 				assert_eq!(snap.commit_oid(), COMMIT_OID);
 				let project = home.join("proj-b");
@@ -8655,8 +8768,16 @@ mod tests {
 				std::collections::BTreeMap<String, String>,
 			) {
 				with_isolated_env(|home, _state| {
+					// The session asked for no branch (`ref_: None`), so it records
+					// none, as surface A does; asking for "main" would record "main".
 					let snap = repo
-						.resolve_pinned(&github_source(), None)
+						.resolve_pinned(
+							&SourceRef {
+								source: github_source().source,
+								ref_: None,
+							},
+							None,
+						)
 						.expect("resolve");
 					assert_eq!(snap.commit_oid(), FB_COMMIT);
 					let project = home.join("proj");

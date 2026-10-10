@@ -92,6 +92,14 @@ impl Fetcher for GitFetcher {
 			.fetch_pinned(pinned, selection)
 			.map_err(skill_repo_to_fetch_error)
 	}
+
+	fn default_branch(
+		&self,
+		source_ref: &SourceRef,
+		token: Option<&str>,
+	) -> Option<String> {
+		self.repo.default_branch(source_ref, token)
+	}
 }
 
 /// Production [`RefResolver`]: the tip OID of the requested

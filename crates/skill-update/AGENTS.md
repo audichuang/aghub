@@ -96,7 +96,6 @@ CLI and API call the same entries; these are the ONLY intended divergences.
   does — check does not write the lock. A busy mutation lock is reported in the
   response's `healError` (retryable `SKILL_MUTATION_LOCK_BUSY`), never a 500, and
   the results are still returned.
-- **import ref**: the desktop git import records the remote's real default-branch name (`SkillRepository::import_ref`); `aghub-cli source sync` records `--ref`, else the existing lock ref, else nothing — it must stay in the source's ref cohort. Neither guesses.
 
 ## TESTING
 

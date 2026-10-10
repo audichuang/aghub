@@ -1382,6 +1382,32 @@ fn prepare_from(
 	})
 }
 
+/// The ref an import records in the lock — the ONE decision behind the desktop
+/// git install, `/skills/install` and `source sync`. An explicit ref wins; else
+/// the scope's existing cohort for this source (`recorded`, from
+/// [`recorded_refs`]; a recorded `None` stays `None`, or the next `source sync`
+/// meets a mixed cohort); else, for a source new to the scope, the remote's real
+/// default-branch name (`remote_default`, called only then), or `None` when the
+/// remote does not say. Never guesses main/master.
+pub fn import_ref(
+	explicit: Option<&str>,
+	recorded: &[Option<String>],
+	remote_default: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+	if let Some(r) = explicit {
+		return Some(r.to_string());
+	}
+	match recorded.first() {
+		Some(cohort) => cohort.clone(),
+		None => remote_default(),
+	}
+}
+
+/// The distinct refs `scope`'s lock entries for `source` are pinned to.
+pub fn recorded_refs(scope: &WriteScope, source: &str) -> Vec<Option<String>> {
+	read_scope_lock(scope).recorded_refs(source)
+}
+
 /// One `source sync`'s whole pre-decision read: the fetched tree, what it is,
 /// and the lock identities captured before any of it happened.
 #[derive(Debug)]
@@ -1389,8 +1415,9 @@ pub struct SourceSyncPlan {
 	/// The fetched tree. Reused for classification AND for every install /
 	/// update the caller then applies — a sync fetches exactly once.
 	pub repo: crate::FetchedRepo,
-	/// The ref that was fetched (explicit, else recorded, else None). Callers
-	/// record THIS in the lock, so a source pinned to a tag stays pinned.
+	/// The ref that was fetched (explicit, else recorded, else the remote default
+	/// branch name for a source new to the scope). Callers record THIS in the
+	/// lock, so a source pinned to a tag stays pinned.
 	pub git_ref: Option<String>,
 	/// The coordinate actually fetched. Callers normalize the lock source from
 	/// this, never from the raw argument.
@@ -1510,12 +1537,33 @@ pub fn plan_source_sync(
 		return SourceSyncOutcome::MultipleRefs { refs };
 	}
 
+	// The ref this sync fetches AND records (see `import_ref`).
+	let git_ref = import_ref(
+		input.git_ref.as_deref(),
+		&scope_lock.recorded_refs(&source),
+		|| {
+			let token = match deps.resolver.resolve(&prepared.fetch_source) {
+				TokenResolution::Token(token) => Some(token),
+				TokenResolution::NoToken => None,
+				// The fetch below reports the unreachable backend.
+				TokenResolution::BackendUnavailable => return None,
+			};
+			deps.fetcher.default_branch(
+				&SourceRef {
+					source: prepared.fetch_source.clone(),
+					ref_: None,
+				},
+				token.as_deref(),
+			)
+		},
+	);
+
 	// Fetch ONCE; the tree is reused for classification AND every install or
 	// update the caller applies. `CatalogSnapshot` because classification needs
 	// the whole tree (renames/removals).
 	let source_ref = SourceRef {
 		source: prepared.fetch_source.clone(),
-		ref_: prepared.git_ref.clone(),
+		ref_: git_ref.clone(),
 	};
 	let fetched = fetch_source_with_resolver(
 		&source_ref,
@@ -1558,7 +1606,7 @@ pub fn plan_source_sync(
 		repo.upstream_commit_time(),
 	);
 	SourceSyncOutcome::Ok(Box::new(SourceSyncPlan {
-		git_ref: prepared.git_ref,
+		git_ref,
 		fetch_source: prepared.fetch_source,
 		diffs,
 		pre_fetch_identities,
@@ -2799,6 +2847,105 @@ mod diff_tests {
 			}
 		));
 	}
+	/// A [`Fetcher`] whose remote default branch is `develop`, recording every
+	/// `ref_` a fetch is asked for.
+	struct DefaultDevelopFetcher {
+		root: std::path::PathBuf,
+		seen: std::sync::Mutex<Vec<Option<String>>>,
+	}
+	impl Fetcher for DefaultDevelopFetcher {
+		fn fetch(
+			&self,
+			sr: &SourceRef,
+			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			self.seen.lock().unwrap().push(sr.ref_.clone());
+			Ok(crate::FetchedRepo {
+				root: self.root.clone(),
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: "test-oid".to_string(),
+					tree_oid: "test-tree-oid".to_string(),
+					commit_time: None,
+				},
+				_guard: None,
+			})
+		}
+		fn default_branch(
+			&self,
+			_source_ref: &SourceRef,
+			_token: Option<&str>,
+		) -> Option<String> {
+			Some("develop".to_string())
+		}
+	}
+
+	/// A source new to the scope records the remote's real default branch,
+	/// while a scope already recording `None` keeps `None` (a recorded name
+	/// beside it would be the mixed cohort the next sync refuses).
+	#[test]
+	fn sync_records_the_default_branch_only_for_a_source_new_to_the_scope() {
+		let upstream = TempDir::new().unwrap();
+		write_skill(upstream.path(), "alpha", "alpha");
+
+		let fresh = TempDir::new().unwrap();
+		let fetcher = DefaultDevelopFetcher {
+			root: upstream.path().to_path_buf(),
+			seen: std::sync::Mutex::new(Vec::new()),
+		};
+		let plan = match plan_source_sync(
+			SourceSyncInput {
+				source: "owner/repo".to_string(),
+				git_ref: None,
+				scope: WriteScope::Project {
+					root: fresh.path().to_path_buf(),
+				},
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &NoToken,
+			},
+		) {
+			SourceSyncOutcome::Ok(plan) => plan,
+			other => panic!("expected a plan, got {other:?}"),
+		};
+		assert_eq!(plan.git_ref.as_deref(), Some("develop"));
+		assert_eq!(
+			*fetcher.seen.lock().unwrap(),
+			vec![Some("develop".to_string())]
+		);
+
+		let recorded_none = TempDir::new().unwrap();
+		write_project_lock_entry_typed(
+			recorded_none.path(),
+			"owner/repo",
+			None,
+			"github",
+		);
+		let fetcher = DefaultDevelopFetcher {
+			root: upstream.path().to_path_buf(),
+			seen: std::sync::Mutex::new(Vec::new()),
+		};
+		let plan = match plan_source_sync(
+			SourceSyncInput {
+				source: "owner/repo".to_string(),
+				git_ref: None,
+				scope: WriteScope::Project {
+					root: recorded_none.path().to_path_buf(),
+				},
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &NoToken,
+			},
+		) {
+			SourceSyncOutcome::Ok(plan) => plan,
+			other => panic!("expected a plan, got {other:?}"),
+		};
+		assert_eq!(plan.git_ref, None);
+		assert_eq!(*fetcher.seen.lock().unwrap(), vec![None]);
+	}
+
 	/// A [`Fetcher`] that records the `ref_` it was asked to fetch so a test
 	/// can assert the resolved ref handed to the fetch (recorded-ref fallback).
 	struct RefCapturingFetcher {

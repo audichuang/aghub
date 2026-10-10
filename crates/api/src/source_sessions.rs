@@ -69,6 +69,11 @@ impl PinnedSourceSession {
 		&self.current_branch
 	}
 
+	/// The branch the scan was asked for (`None` = the remote default branch).
+	pub(crate) fn requested_branch(&self) -> Option<&str> {
+		self.claim.branch()
+	}
+
 	#[cfg(test)]
 	pub(crate) fn commit_oid(&self) -> &str {
 		self.claim.commit_oid()

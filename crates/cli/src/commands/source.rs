@@ -181,6 +181,19 @@ impl skill_update::Fetcher for CliFetcher {
 		// request, and exactly the tip the preflight decided about).
 		self.inner.fetch_pinned(sr, token, selection, pinned)
 	}
+
+	fn default_branch(
+		&self,
+		sr: &SourceRef,
+		token: Option<&str>,
+	) -> Option<String> {
+		// e2e tests must never reach the network for a default-branch lookup.
+		#[cfg(debug_assertions)]
+		if std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT").is_some() {
+			return None;
+		}
+		self.inner.default_branch(sr, token)
+	}
 }
 
 /// What makes two fetches the same fetch: the repository's IDENTITY and the ref
@@ -981,14 +994,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 				safe_source(&fetch_source)
 			)
 		})?;
-	// Record the RESOLVED ref (explicit `--ref` or the lock's), so a pinned
-	// source keeps its pin, as the API does.
-	//
-	// With neither, nothing is recorded and the next check follows the default
-	// branch. The CLI never guesses a name; the desktop import records the real
-	// one via `SkillRepository::import_ref`. Sync cannot: its ref must match the
-	// existing cohort, and a recorded name beside `None` entries is a mixed
-	// cohort that the next `source sync` refuses.
+	// Record the ref the plan fetched: the shared decision (`sources::import_ref`).
 	let lock_source = skill::InstallLockSource {
 		source: resolved.lock_source(),
 		source_type: resolved.source_type.as_str().to_string(),

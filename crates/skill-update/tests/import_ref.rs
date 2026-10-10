@@ -1,4 +1,4 @@
-//! The desktop import records the remote's REAL default-branch name, and the
+//! An import records the remote's REAL default-branch name, and the
 //! next update check reads that recorded ref as the tip it compares against.
 //! A guessed `main` on a repo whose default is `develop` would report a false
 //! update, so this pins the whole import → lock → check round trip.
@@ -175,8 +175,16 @@ async fn import_records_the_real_default_branch_and_check_reports_no_false_updat
 			)
 			.unwrap();
 
-		// Import exactly as the desktop API does.
-		let import_ref = repo.import_ref(&claim);
+		// Decide exactly as every import surface does.
+		let scope = aghub_core::WriteScope::project(project.path());
+		let import_ref = skill_update::sources::import_ref(
+			None,
+			&skill_update::sources::recorded_refs(
+				&scope,
+				"https://github.com/owner/repo.git",
+			),
+			|| repo.import_ref(&claim),
+		);
 		let fetched = repo
 			.fetch_pinned(
 				&claim,
@@ -196,7 +204,7 @@ async fn import_records_the_real_default_branch_and_check_reports_no_false_updat
 				},
 				lock_skill_path: "alpha/SKILL.md",
 				expected_name: None,
-				scope: aghub_core::WriteScope::project(project.path()),
+				scope,
 				target_agents: &[aghub_core::models::AgentType::Claude],
 			},
 		)
