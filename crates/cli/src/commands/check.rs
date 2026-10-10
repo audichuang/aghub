@@ -22,12 +22,10 @@ use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use skill_update::{
-	check_updates, projection, CheckDeps, EntryInput, Fetcher, RefResolver,
-	ResultCache,
+	projection, run_update_check, EntryInput, Fetcher, RefResolver,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -264,15 +262,6 @@ pub fn execute(
 	run_check(locks, project_root, scope, online, json, write_result)
 }
 
-/// Per-fetch timeout / deadline / concurrency for an online check (mirrors the
-/// desktop API defaults so both surfaces behave the same).
-const PER_FETCH: Duration = Duration::from_secs(30);
-const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
-/// See the API's constant of the same name for why this stays at 4: it is an
-/// OUTER cap over a fetch that already runs 16 blob workers, so it multiplies.
-const CONCURRENCY: usize = 4;
-const CACHE_TTL: Duration = Duration::from_secs(60);
-
 // Token policy is shared with the `source` commands (`GIT_PASSWORD` on any
 // host; `GITHUB_TOKEN` bound to github.com) so `check --online` accepts the
 // same credentials as `source diff`/`sync`. `apply-update` keeps its own
@@ -364,23 +353,16 @@ pub(crate) fn collect_update_views(
 	let ref_resolver: Arc<dyn RefResolver> =
 		Arc::new(cli_fetcher.ref_resolver());
 	let fetcher: Arc<dyn Fetcher> = Arc::new(cli_fetcher);
-	let resolver = EnvTokenResolver;
-	let mut cache = ResultCache::new(CACHE_TTL);
-	let deps = CheckDeps {
-		fetcher,
-		ref_resolver: Some(ref_resolver),
-		resolver: &resolver,
-		cache: &mut cache,
-		per_fetch: PER_FETCH,
-		concurrency: CONCURRENCY,
-		offline: !online,
-		overall_deadline: OVERALL_DEADLINE,
-	};
-
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()?;
-	let outputs = runtime.block_on(check_updates(entries, deps));
+	let outputs = runtime.block_on(run_update_check(
+		entries,
+		fetcher,
+		ref_resolver,
+		&EnvTokenResolver,
+		!online,
+	));
 
 	let mut views: Vec<SkillUpdateView> = outputs
 		.into_iter()

@@ -1,7 +1,7 @@
 //! `GET /skills/check-updates` — read-only update check for installed skills.
 //!
 //! Reads the global skill lock, projects each entry to the orchestrator's
-//! [`EntryInput`], then delegates to [`skill_update::check_updates`].
+//! [`EntryInput`], then delegates to [`skill_update::run_update_check`].
 //!
 //! Network + credential resolution stay in this crate (never in `crates/core`).
 //! The [`Fetcher`] materializes a worktree into a [`tempfile::TempDir`] (the
@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use aghub_core::models::ResourceScope;
 use chrono::Utc;
@@ -42,26 +41,10 @@ use skill_update::projection::{self, HealPrecondition, Identities};
 #[cfg(all(test, unix))]
 use skill_update::TokenResolution;
 use skill_update::{
-	check_updates, CheckDeps, CheckOutput, EntryInput, FetchError, Fetcher,
-	GitFetcher, RefResolver, ResultCache, TokenResolver,
+	run_update_check, CheckOutput, EntryInput, FetchError, Fetcher, GitFetcher,
+	RefResolver, TokenResolver,
 };
 
-/// Default per-fetch timeout. Generous enough for a small skill repo clone but
-/// bounded so a stuck remote cannot hang the request.
-const PER_FETCH: Duration = Duration::from_secs(30);
-const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
-/// Default bounded concurrency for upstream fetches.
-///
-/// Do not raise: this is the OUTER cap over fetches that each run
-/// `aghub_git::DEFAULT_CONCURRENCY` (16) blob workers, so N permits N×16
-/// requests against one forge; 8 would pass the 100-stream ceiling
-/// `github_rest.rs` documents, and a 403 after the snapshot is pinned cannot
-/// fall back to gix (`uncheckable/network`). Waves cost ~40ms each. Going
-/// higher needs the per-credential semaphore `github_rest.rs` names.
-const CONCURRENCY: usize = 4;
-/// TTL for the per-request result cache. The cache is request-scoped here, so
-/// this only dedups identical `(source, ref)` groups within one call.
-const CACHE_TTL: Duration = Duration::from_secs(60);
 /// Upper bound on one batch's `names`. Defined ONCE, in `dto::limits`, and
 /// generated into the desktop's `generated/dto/limits.ts` — `source-detail.tsx`
 /// chunks to it, and hand-copying the number here would let the two drift.
@@ -485,20 +468,10 @@ pub async fn check_skill_updates(
 		"check-updates: credential resolve took={:?}",
 		auth_started.elapsed()
 	);
-	let mut cache = ResultCache::new(CACHE_TTL);
-	let deps = CheckDeps {
-		fetcher,
-		ref_resolver: Some(ref_resolver),
-		resolver: &resolver,
-		cache: &mut cache,
-		per_fetch: PER_FETCH,
-		concurrency: CONCURRENCY,
-		offline,
-		overall_deadline: OVERALL_DEADLINE,
-	};
-
 	let check_started = std::time::Instant::now();
-	let outputs = check_updates(entries, deps).await;
+	let outputs =
+		run_update_check(entries, fetcher, ref_resolver, &resolver, offline)
+			.await;
 	log::info!(
 		"check-updates: fetch+compare results={} took={:?}",
 		outputs.len(),
@@ -1919,20 +1892,14 @@ mod tests {
 			local_comparison_hash: None,
 			ref_commit: None,
 		}];
-		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
+		let git_fetcher = GitFetcher::new();
+		let ref_resolver: Arc<dyn RefResolver> =
+			Arc::new(git_fetcher.ref_resolver());
+		let fetcher: Arc<dyn Fetcher> = Arc::new(git_fetcher);
 		let resolver = empty_keyring_resolver();
-		let mut cache = ResultCache::new(CACHE_TTL);
-		let deps = CheckDeps {
-			ref_resolver: None,
-			fetcher,
-			resolver: &resolver,
-			cache: &mut cache,
-			per_fetch: PER_FETCH,
-			concurrency: CONCURRENCY,
-			offline: true,
-			overall_deadline: OVERALL_DEADLINE,
-		};
-		let out = check_updates(entries, deps).await;
+		let out =
+			run_update_check(entries, fetcher, ref_resolver, &resolver, true)
+				.await;
 		assert_eq!(out.len(), 1);
 		assert!(matches!(
 			out[0].status,
@@ -2389,20 +2356,14 @@ mod tests {
 			local_comparison_hash: None,
 			ref_commit: None,
 		}];
-		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
+		let git_fetcher = GitFetcher::new();
+		let ref_resolver: Arc<dyn RefResolver> =
+			Arc::new(git_fetcher.ref_resolver());
+		let fetcher: Arc<dyn Fetcher> = Arc::new(git_fetcher);
 		let resolver = empty_keyring_resolver();
-		let mut cache = ResultCache::new(CACHE_TTL);
-		let deps = CheckDeps {
-			ref_resolver: None,
-			fetcher,
-			resolver: &resolver,
-			cache: &mut cache,
-			per_fetch: PER_FETCH,
-			concurrency: CONCURRENCY,
-			offline: false,
-			overall_deadline: OVERALL_DEADLINE,
-		};
-		let out = check_updates(entries, deps).await;
+		let out =
+			run_update_check(entries, fetcher, ref_resolver, &resolver, false)
+				.await;
 		// No panic; some status was produced for the entry.
 		assert!(out.iter().any(|entry| entry.key.name == "public"));
 	}
@@ -2428,20 +2389,14 @@ mod tests {
 			local_comparison_hash: None,
 			ref_commit: None,
 		}];
-		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
+		let git_fetcher = GitFetcher::new();
+		let ref_resolver: Arc<dyn RefResolver> =
+			Arc::new(git_fetcher.ref_resolver());
+		let fetcher: Arc<dyn Fetcher> = Arc::new(git_fetcher);
 		let resolver = empty_keyring_resolver();
-		let mut cache = ResultCache::new(CACHE_TTL);
-		let deps = CheckDeps {
-			ref_resolver: None,
-			fetcher,
-			resolver: &resolver,
-			cache: &mut cache,
-			per_fetch: PER_FETCH,
-			concurrency: CONCURRENCY,
-			offline: false,
-			overall_deadline: OVERALL_DEADLINE,
-		};
-		let out = check_updates(entries, deps).await;
+		let out =
+			run_update_check(entries, fetcher, ref_resolver, &resolver, false)
+				.await;
 		assert_eq!(out.len(), 1);
 		assert!(matches!(
 			out[0].status,

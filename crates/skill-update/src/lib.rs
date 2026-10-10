@@ -8,7 +8,8 @@
 //! (real network paths: the `#[ignore]` E2E tests).
 //!
 //! ONE orchestrator for the desktop API (`GET /skills/check-updates`) and the
-//! CLI (`aghub-cli check --online`). Each surface supplies its own
+//! CLI (`aghub-cli check --online`): both call [`run_update_check`], which owns
+//! the policy constants and the result cache. Each surface supplies its own
 //! [`TokenResolver`]; the default git adapters ([`GitFetcher`] /
 //! [`GitRefResolver`]) live in [`mod@git`].
 
@@ -124,7 +125,7 @@ where
 
 /// A TTL cache of per-`SourceRef` fetch outcomes, so repeated checks within the
 /// TTL window avoid re-fetching the same upstream.
-pub struct ResultCache {
+pub(crate) struct ResultCache {
 	ttl: Duration,
 	map: HashMap<SourceRef, (Instant, CachedGroup)>,
 }
@@ -320,7 +321,7 @@ pub trait RefResolver: Send + Sync {
 }
 
 /// Orchestration knobs.
-pub struct CheckDeps<'a> {
+pub(crate) struct CheckDeps<'a> {
 	pub fetcher: Arc<dyn Fetcher>,
 	/// Optional tip preflight. `None` disables the preflight entirely (the
 	/// orchestrator always fetches), preserving the pre-preflight behavior.
@@ -622,7 +623,7 @@ fn apply_cached_group(
 /// concurrency semaphore, then compare each skill's recomputed hash.
 ///
 /// The order is load-bearing — see the numbered comments in the loop.
-pub async fn check_updates(
+pub(crate) async fn check_updates(
 	entries: Vec<EntryInput>,
 	deps: CheckDeps<'_>,
 ) -> Vec<CheckOutput> {
@@ -898,6 +899,53 @@ pub async fn check_updates(
 	}
 
 	out
+}
+
+/// Per-fetch timeout. Generous enough for a small skill repo clone but bounded
+/// so a stuck remote cannot hang the check.
+const PER_FETCH: Duration = Duration::from_secs(30);
+/// Maximum wall-clock time for one whole check.
+const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
+/// Default bounded concurrency for upstream fetches.
+///
+/// Do not raise: this is the OUTER cap over fetches that each run
+/// `aghub_git::DEFAULT_CONCURRENCY` (16) blob workers, so N permits N×16
+/// requests against one forge; 8 would pass the 100-stream ceiling
+/// `github_rest.rs` documents, and a 403 after the snapshot is pinned cannot
+/// fall back to gix (`uncheckable/network`). Waves cost ~40ms each. Going
+/// higher needs the per-credential semaphore `github_rest.rs` names.
+const CONCURRENCY: usize = 4;
+/// TTL for the per-call result cache. The cache is built fresh per call, so
+/// this only dedups identical `(source, ref)` groups within one check.
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// The ONE production assembly of the update check, shared by the CLI
+/// (`check` / `apply-update --outdated`) and the API (`GET
+/// /skills/check-updates`). The policy constants and the result cache live
+/// here only; a surface supplies its git adapter, its credentials and the
+/// offline flag, then projects the returned rows.
+pub async fn run_update_check(
+	entries: Vec<EntryInput>,
+	fetcher: Arc<dyn Fetcher>,
+	ref_resolver: Arc<dyn RefResolver>,
+	resolver: &dyn TokenResolver,
+	offline: bool,
+) -> Vec<CheckOutput> {
+	let mut cache = ResultCache::new(CACHE_TTL);
+	check_updates(
+		entries,
+		CheckDeps {
+			fetcher,
+			ref_resolver: Some(ref_resolver),
+			resolver,
+			cache: &mut cache,
+			per_fetch: PER_FETCH,
+			concurrency: CONCURRENCY,
+			offline,
+			overall_deadline: OVERALL_DEADLINE,
+		},
+	)
+	.await
 }
 
 /// What a spawned per-group job produced: a preflight skip (reuse these probes),
@@ -1682,6 +1730,71 @@ mod tests {
 			}
 		);
 		assert_eq!(*fetcher.calls.lock().unwrap(), 0, "offline must not fetch");
+	}
+
+	/// The surface assembly entry: offline answers without asking the token
+	/// resolver or fetching; online goes through the resolver and the fetch.
+	#[tokio::test]
+	async fn run_update_check_offline_skips_resolver_online_uses_it() {
+		struct CountingResolver(Mutex<usize>);
+		impl TokenResolver for CountingResolver {
+			fn resolve(&self, _source: &str) -> TokenResolution {
+				*self.0.lock().unwrap() += 1;
+				TokenResolution::NoToken
+			}
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let comparison =
+			skill::compute_skill_folder_comparison_hash(dir.path()).unwrap();
+
+		for offline in [true, false] {
+			let fetcher = Arc::new(StubFetcher {
+				root: Some(dir.path().to_path_buf()),
+				err: None,
+				calls: Mutex::new(0),
+			});
+			let ref_resolver = Arc::new(StubRefResolver {
+				oid: String::new(),
+				err: None,
+				calls: Mutex::new(0),
+			});
+			let resolver = CountingResolver(Mutex::new(0));
+			let mut a = entry("a", "o/r", Some("main"));
+			a.stored_hash = Some(hash.clone());
+			a.local_hash = Some(hash.clone());
+			a.local_comparison_hash = Some(comparison.clone());
+
+			let out = run_update_check(
+				vec![a],
+				fetcher.clone(),
+				ref_resolver,
+				&resolver,
+				offline,
+			)
+			.await;
+
+			assert_eq!(out.len(), 1);
+			let (status, calls) = if offline {
+				(
+					SkillUpdateStatus::Uncheckable {
+						reason: UncheckableReason::Network,
+					},
+					0,
+				)
+			} else {
+				(SkillUpdateStatus::UpToDate, 1)
+			};
+			assert_eq!(out[0].status, status, "offline={offline}");
+			assert_eq!(*resolver.0.lock().unwrap(), calls, "offline={offline}");
+			assert_eq!(
+				*fetcher.calls.lock().unwrap(),
+				calls,
+				"offline={offline}"
+			);
+		}
 	}
 
 	/// Run one entry through the orchestrator with no network available, and

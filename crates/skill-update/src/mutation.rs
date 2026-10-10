@@ -8,19 +8,6 @@ use crate::{
 	Fetcher, SourceRef, TokenResolution, TokenResolver,
 };
 
-pub struct FetchedSourceRequest<'a> {
-	pub source: &'a str,
-	pub ref_name: Option<&'a str>,
-	pub skill_path: &'a str,
-}
-
-#[derive(Debug)]
-pub enum FetchMutationError {
-	CredentialBackendUnavailable,
-	InvalidSkillPath,
-	Fetch(FetchError),
-}
-
 pub struct FetchedRenameRequest<'a> {
 	pub source: &'a aghub_core::skills::rename::RenameLockSource,
 	pub new_name: &'a str,
@@ -170,34 +157,6 @@ fn core_install_request<'a>(
 			WriteScope::Global => LinkTarget::Absolute,
 		},
 	}
-}
-
-pub fn fetch_for_mutation(
-	request: FetchedSourceRequest<'_>,
-	fetcher: &dyn Fetcher,
-	resolver: &dyn TokenResolver,
-) -> Result<FetchedSource, FetchMutationError> {
-	let token = match resolver.resolve(request.source) {
-		TokenResolution::Token(token) => Some(token),
-		TokenResolution::NoToken => None,
-		TokenResolution::BackendUnavailable => {
-			return Err(FetchMutationError::CredentialBackendUnavailable);
-		}
-	};
-	let folder = skill_folder_from_lock_path(request.skill_path)
-		.ok_or(FetchMutationError::InvalidSkillPath)?;
-	let source_ref = SourceRef {
-		source: request.source.to_string(),
-		ref_: request.ref_name.map(str::to_string),
-	};
-	let repo = fetcher
-		.fetch(
-			&source_ref,
-			token.as_deref(),
-			FetchSelection::Skills(std::slice::from_ref(&folder)),
-		)
-		.map_err(FetchMutationError::Fetch)?;
-	Ok(FetchedSource { repo })
 }
 
 /// Fetch a complete catalog for rename acceptance and resolve the new name to
@@ -812,9 +771,8 @@ mod tests {
 	use aghub_core::WriteScope;
 
 	use super::{
-		fetch_for_mutation, fetch_for_rename, resync_fetched_source,
-		resync_locked_skill, FetchMutationError, FetchedRenameRequest,
-		FetchedResyncRequest, FetchedSource, FetchedSourceRequest,
+		fetch_for_rename, resync_fetched_source, resync_locked_skill,
+		FetchedRenameRequest, FetchedResyncRequest, FetchedSource,
 		LockedResyncError, LockedResyncRequest, ResyncMutationError,
 		KEYCHAIN_UNAVAILABLE_CODE, SKILL_LOCK_ENTRY_NOT_FOUND_CODE,
 		SKILL_PATH_NOT_FOUND_CODE, SKILL_SOURCE_VIEW_STALE_CODE,
@@ -860,52 +818,6 @@ mod tests {
 			),
 		)
 		.unwrap();
-	}
-
-	struct UnavailableResolver;
-
-	impl TokenResolver for UnavailableResolver {
-		fn resolve(&self, _source: &str) -> TokenResolution {
-			TokenResolution::BackendUnavailable
-		}
-	}
-
-	struct CountingFetcher(Mutex<usize>);
-
-	impl Fetcher for CountingFetcher {
-		fn fetch(
-			&self,
-			_source_ref: &SourceRef,
-			_token: Option<&str>,
-			_selection: FetchSelection<'_>,
-		) -> Result<crate::FetchedRepo, FetchError> {
-			*self.0.lock().unwrap() += 1;
-			Err(FetchError::network("stub"))
-		}
-	}
-
-	#[test]
-	fn unavailable_credentials_fail_before_fetching_a_source() {
-		let fetcher = CountingFetcher(Mutex::new(0));
-		let result = fetch_for_mutation(
-			FetchedSourceRequest {
-				source: "owner/private-source",
-				ref_name: Some("main"),
-				skill_path: "skills/private/SKILL.md",
-			},
-			&fetcher,
-			&UnavailableResolver,
-		);
-
-		assert!(matches!(
-			result,
-			Err(FetchMutationError::CredentialBackendUnavailable)
-		));
-		assert_eq!(
-			*fetcher.0.lock().unwrap(),
-			0,
-			"credential failure must precede Fetched Source materialization",
-		);
 	}
 
 	#[test]
