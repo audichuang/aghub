@@ -2041,3 +2041,159 @@ fn reconcile_moves_a_server_with_an_empty_env_object() {
 	let target = std::fs::read_to_string(root.join("opencode.json")).unwrap();
 	assert!(target.contains("srv"), "target missing: {target}");
 }
+
+/// Roster-level seam guard: for every agent, an MCP write through the core
+/// adapter lands on the path the descriptor DECLARES, and that is the same path
+/// the adapter reports to core for locking, backup and comparison. Agents
+/// without MCP reject reads and writes, naming themselves.
+///
+/// Runs in a child copy of this test binary with an isolated `$HOME`, XDG dirs
+/// and `$AGHUB_DATA_DIR`, every agent override var removed. The parent never
+/// mutates its own environment, so this needs no env mutex: other tests in this
+/// binary read `$HOME` and an in-process swap would race them.
+/// Deliberately avoids `set_mcp_path_override`, which bypasses the path under
+/// test.
+#[cfg(unix)]
+#[test]
+fn mcp_writes_land_on_the_declared_path_for_every_agent() {
+	use aghub_core::{create_adapter, PATH_OVERRIDE_VARS};
+	use std::path::PathBuf;
+	use std::process::Command;
+
+	const CHILD_ENV: &str = "AGHUB_E2_ROSTER_CHILD_HOME";
+	const NAME: &str = "mcp_writes_land_on_the_declared_path_for_every_agent";
+
+	let Some(child_home) = std::env::var_os(CHILD_ENV) else {
+		// Parent: spawn the child with the isolated environment.
+		let tmp = tempfile::tempdir().unwrap();
+		let home = tmp.path();
+		let mut command = Command::new(std::env::current_exe().unwrap());
+		command.args(["--exact", NAME, "--nocapture"]);
+		for key in PATH_OVERRIDE_VARS {
+			command.env_remove(key);
+		}
+		command
+			.env("HOME", home)
+			.env("XDG_CONFIG_HOME", home.join(".config"))
+			.env("XDG_DATA_HOME", home.join(".local/share"))
+			.env("XDG_STATE_HOME", home.join(".local/state"))
+			.env("AGHUB_DATA_DIR", home.join("aghub-data"))
+			.env(CHILD_ENV, home);
+		let output = command.output().unwrap();
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		let stderr = String::from_utf8_lossy(&output.stderr);
+		assert!(
+			output.status.success() && stdout.contains("1 passed"),
+			"child failed or ran no test\nstdout:\n{stdout}\nstderr:\n{stderr}"
+		);
+		return;
+	};
+
+	// Child: refuse to run anywhere but the parent's temp home.
+	let home = PathBuf::from(child_home);
+	assert_eq!(
+		std::env::var_os("HOME"),
+		Some(home.clone().into_os_string())
+	);
+	let home = std::fs::canonicalize(&home).unwrap();
+	let project = home.join("project");
+	std::fs::create_dir_all(&project).unwrap();
+
+	let mut written = 0;
+	let mut unsupported = Vec::new();
+	for &agent in AgentType::ALL {
+		let adapter = create_adapter(agent);
+		let descriptor = agent.descriptor();
+		let id = descriptor.id;
+		let scopes = [ResourceScope::GlobalOnly, ResourceScope::ProjectOnly];
+
+		if !adapter.supports_mcp_operations() {
+			for scope in scopes {
+				let errors = [
+					adapter.load_mcps(Some(&project), scope).unwrap_err(),
+					adapter
+						.save_mcps(Some(&project), scope, &[mcp_stdio("x")])
+						.unwrap_err(),
+				];
+				for error in errors {
+					match error {
+						ConfigError::UnsupportedOperation {
+							message, ..
+						} => {
+							assert!(
+								message.contains(id),
+								"{id} {scope:?}: message lacks agent id: {message}"
+							)
+						}
+						other => panic!(
+							"{id} {scope:?}: expected unsupported, got {other}"
+						),
+					}
+				}
+			}
+			unsupported.push(id);
+			continue;
+		}
+
+		for scope in scopes {
+			if !adapter.supports_mcp_scope(scope) {
+				continue;
+			}
+			let declared = match scope {
+				ResourceScope::GlobalOnly => {
+					descriptor.mcp_global_path.and_then(|path| path())
+				}
+				_ => {
+					descriptor.mcp_project_path.and_then(|path| path(&project))
+				}
+			}
+			.unwrap_or_else(|| panic!("{id} {scope:?}: no declared MCP path"));
+			let reported = adapter
+				.mcp_config_path(Some(&project), scope)
+				.unwrap_or_else(|| {
+					panic!("{id} {scope:?}: adapter reports no MCP path")
+				});
+			assert_eq!(
+				reported, declared,
+				"{id} {scope:?}: reported != declared"
+			);
+
+			let name = format!("e2-{id}-{scope:?}");
+			adapter
+				.save_mcps(Some(&project), scope, &[mcp_stdio(&name)])
+				.unwrap_or_else(|e| panic!("{id} {scope:?}: save failed: {e}"));
+
+			let written_text = std::fs::read_to_string(&declared)
+				.unwrap_or_else(|e| {
+					panic!(
+						"{id} {scope:?}: nothing at declared {declared:?}: {e}"
+					)
+				});
+			assert!(
+				written_text.contains(&name),
+				"{id} {scope:?}: {name} not in {declared:?}"
+			);
+			assert!(
+				std::fs::canonicalize(&declared).unwrap().starts_with(&home),
+				"{id} {scope:?}: {declared:?} escaped the temp home"
+			);
+			// Existence-sensitive descriptors (first existing file wins) must
+			// not move the path once the file exists.
+			assert_eq!(
+				adapter.mcp_config_path(Some(&project), scope),
+				Some(declared.clone()),
+				"{id} {scope:?}: path moved after the write"
+			);
+			let loaded = adapter.load_mcps(Some(&project), scope).unwrap();
+			assert!(
+				loaded.iter().any(|server| server.name == name),
+				"{id} {scope:?}: {name} not read back"
+			);
+			written += 1;
+		}
+	}
+
+	unsupported.sort_unstable();
+	assert_eq!(unsupported, ["dsh", "jetbrains-ai", "pi"]);
+	assert!(written > 0, "no MCP write was exercised");
+}
