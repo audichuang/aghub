@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use aghub_agents::ResourceScope;
 
+use crate::skills::agent_dirs::AgentSkillDirs;
 use crate::skills::linker::{master_store_dir, shared_referrer_dir, Linker};
 use crate::skills::path_identity::entry_identity;
 
@@ -47,7 +48,10 @@ pub struct CandidateReferrer {
 /// Path-derived, never shape-derived: each agent's own WRITE dir (private where
 /// it has one, the shared `.agents/skills` slot where it does not), so a broken
 /// Referrer is reported instead of filtered out.
+/// Asks the seam directly, never a link-need classification: an aliased store
+/// must not drop shared-slot agents out of the candidate set.
 /// See docs/history/core-skills-shape.md#candidate-referrers-were-once-shape-derived
+/// and docs/history/core-skills-shape.md#aliased-store-dropped-shared-slot-agents
 pub fn candidate_referrers(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
@@ -57,44 +61,14 @@ pub fn candidate_referrers(
 	crate::registry::ALL_AGENTS
 		.iter()
 		.filter_map(|descriptor| {
-			skill_write_dir(descriptor, scope, project_root).map(|dir| {
-				CandidateReferrer {
+			AgentSkillDirs::of(descriptor, scope, project_root)
+				.write
+				.map(|dir| CandidateReferrer {
 					agent_id: descriptor.id,
 					path: dir.join(&safe),
-				}
-			})
+				})
 		})
 		.collect()
-}
-
-/// One agent's skills WRITE dir for a scope, or `None` when it cannot hold a
-/// skill there at all.
-///
-/// Asks the adapter directly, never a link-need classification: an aliased
-/// store must not drop shared-slot agents out of the candidate set.
-/// See docs/history/core-skills-shape.md#aliased-store-dropped-shared-slot-agents
-fn skill_write_dir(
-	descriptor: &aghub_agents::AgentDescriptor,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Option<PathBuf> {
-	crate::create_adapter(descriptor.agent_type)
-		.target_skills_dir(project_root, scope)
-}
-
-/// One agent's skills READ dirs for a scope: its write dir plus every
-/// compat/legacy dir the descriptor still reads.
-///
-/// Routed through the adapter for the same reason [`skill_write_dir`] is —
-/// otherwise the test path override is bypassed and a fixture's dirs are
-/// invisible.
-fn skill_read_dirs(
-	descriptor: &aghub_agents::AgentDescriptor,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Vec<PathBuf> {
-	crate::create_adapter(descriptor.agent_type)
-		.get_skills_paths(project_root, scope)
 }
 
 /// Which root the STORE resolves against for a scope.
@@ -153,8 +127,8 @@ pub fn readers_of(
 	crate::registry::ALL_AGENTS
 		.iter()
 		.filter(|descriptor| {
-			descriptor
-				.skill_read_paths(project_root, scope)
+			AgentSkillDirs::of(descriptor, scope, project_root)
+				.read
 				.iter()
 				.any(|dir| {
 					let entry = dir.join(&safe);
@@ -756,7 +730,9 @@ mod tests {
 	#[test]
 	fn global_candidates_prefer_private_dirs_over_the_shared_slot() {
 		// Reads HOME through `master_store_dir` / the descriptors.
-		let _env = crate::skills::prune::test_lock::env_lock();
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
 		let home = dirs::home_dir().expect("home");
 
 		let by_id: std::collections::HashMap<_, _> =
@@ -1258,7 +1234,9 @@ mod tests {
 	/// one of them reads as broken.
 	#[test]
 	fn a_global_plan_ignores_the_project_root_for_the_store() {
-		let _env = crate::skills::prune::test_lock::env_lock();
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
 		let (_tmp, root) = project_fixture();
 		let home = dirs::home_dir().expect("home");
 		let master =
@@ -2197,6 +2175,25 @@ pub(crate) struct AgentDirs {
 	pub(crate) read: Vec<PathBuf>,
 }
 
+/// Every agent's dirs at a scope, snapshotted once before the compat sweep
+/// runs so guard 4 sees each entry's whole reader set.
+pub(crate) fn compat_roster(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<AgentDirs> {
+	crate::registry::ALL_AGENTS
+		.iter()
+		.map(|descriptor| {
+			let dirs = AgentSkillDirs::of(descriptor, scope, project_root);
+			AgentDirs {
+				id: descriptor.id,
+				write: dirs.write,
+				read: dirs.read,
+			}
+		})
+		.collect()
+}
+
 /// GUARD 4: will every agent that reads `entry` still be served by its OWN
 /// write slot once the plan has run?
 ///
@@ -2424,14 +2421,7 @@ pub fn plan_repair(
 		.map(|row| row.path.clone());
 	// Snapshot every agent's dirs BEFORE sweeping, so guard 4 sees each
 	// entry's whole reader set.
-	let roster: Vec<AgentDirs> = crate::registry::ALL_AGENTS
-		.iter()
-		.map(|descriptor| AgentDirs {
-			id: descriptor.id,
-			write: skill_write_dir(descriptor, scope, project_root),
-			read: skill_read_dirs(descriptor, scope, project_root),
-		})
-		.collect();
+	let roster = compat_roster(scope, project_root);
 	// An agent with no write slot at this scope is never covered, so it always
 	// vetoes. So does a disabled agent: its slot may be healthy, but detaching
 	// the compat link it reads would still be a write into its dirs.

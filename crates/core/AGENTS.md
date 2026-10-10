@@ -12,8 +12,10 @@ codegraph — enumerated trees drift):
 - `lib.rs` — re-exports aghub-agents + `convert_skill()`
 - `adapters/mod.rs` — the `AgentAdapter` trait + `create_adapter()`;
   `adapter.rs` — the `impl` for `&'static AgentDescriptor` plus the thread-local
-  test overrides (`set_skills_path_override` / `set_mcp_path_override`). Root
-  AGENTS.md calls this split the one that catches everybody
+  MCP test override (`set_mcp_path_override`). The skills override and the
+  write/read dir seam live in `skills/agent_dirs.rs` (`AgentSkillDirs::of`),
+  which the adapter's `get_skills_paths` / `target_skills_dir` delegate to.
+  Root AGENTS.md calls this split the one that catches everybody
 - `all_agents.rs` — `load_all_agents()` → `AgentResources` bulk load
 - `availability.rs` — which agent CLIs are installed
 - `batch.rs` — multi-target mutation policy: preflight-before-any-write +
@@ -73,7 +75,7 @@ It serializes aghub against aghub only — `npx skills` takes no lock of ours, s
 `--features agent-validation` additionally runs the tests that need the real
 agent CLIs installed; the `testing` feature (`TestConfig`, isolated temp dirs)
 is on by default. Per-agent path overrides via
-`set_skills_path_override(agent_id, path)` (thread-local).
+`skills::agent_dirs::set_skills_path_override(agent_id, path)` (thread-local).
 
 **Real-home pollution**: global install resolves the Master store via `dirs::home_dir()/.aghub` (override does **not** redirect that path), and writes Referrers into the agents' own dirs. Overriding `$HOME` alone is not enough either: `dirs::config_dir()` prefers `$XDG_CONFIG_HOME` and several descriptors honour their own variable ahead of both (observed: a live `~/.config/orca/...` among a test's allow-listed roots). Clearing `skills_path_override` under global scope / no `project_root` **must** isolate `$HOME` (Unix) into a temp dir, hold that binary's env lock, and Drop-clean written skill dirs — never leave junk under the developer's real `~/.aghub`, `~/.agents/skills` or agent skill dirs. Prefer `project_root = tempdir` when project scope is enough. See `test_opencode_global_creation_persists` in `tests/test_agent_paths.rs`.
 

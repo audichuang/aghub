@@ -53,7 +53,7 @@ impl TestConfig {
 		let skills_dir = temp_dir.path().join("skills");
 		if descriptor.supports_skill_scope(ResourceScope::GlobalOnly) {
 			fs::create_dir(&skills_dir).map_err(ConfigError::Io)?;
-			crate::adapter::set_skills_path_override(
+			crate::skills::agent_dirs::set_skills_path_override(
 				descriptor.id,
 				Some(skills_dir.clone()),
 			);
@@ -149,7 +149,10 @@ impl Drop for TestConfig {
 		let descriptor = registry::get(self.agent_type);
 		crate::adapter::set_mcp_path_override(descriptor.id, None);
 		if descriptor.supports_skill_scope(ResourceScope::GlobalOnly) {
-			crate::adapter::set_skills_path_override(descriptor.id, None);
+			crate::skills::agent_dirs::set_skills_path_override(
+				descriptor.id,
+				None,
+			);
 		}
 	}
 }
@@ -203,7 +206,7 @@ impl TestConfigBuilder {
 		let skills_dir = temp_dir.path().join("skills");
 		if descriptor.supports_skill_scope(ResourceScope::GlobalOnly) {
 			fs::create_dir(&skills_dir).map_err(ConfigError::Io)?;
-			crate::adapter::set_skills_path_override(
+			crate::skills::agent_dirs::set_skills_path_override(
 				descriptor.id,
 				Some(skills_dir.clone()),
 			);

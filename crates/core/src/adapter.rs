@@ -10,15 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 thread_local! {
-	static SKILLS_PATH_OVERRIDE: RefCell<Option<(String, PathBuf)>> = const { RefCell::new(None) };
 	static MCP_PATH_OVERRIDE: RefCell<Option<(String, PathBuf)>> = const { RefCell::new(None) };
-}
-
-/// Override the skills path for a specific agent (for testing)
-pub fn set_skills_path_override(agent_id: &str, path: Option<PathBuf>) {
-	SKILLS_PATH_OVERRIDE.with(|p| {
-		*p.borrow_mut() = path.map(|path| (agent_id.to_string(), path));
-	});
 }
 
 /// Override the MCP config path for a specific agent (for testing)
@@ -122,19 +114,8 @@ impl AgentAdapter for &'static AgentDescriptor {
 		project_root: Option<&Path>,
 		scope: ResourceScope,
 	) -> Vec<PathBuf> {
-		let mut paths = Vec::new();
-
-		// Check thread-local override first (for testing)
-		if let Some((id, path)) =
-			SKILLS_PATH_OVERRIDE.with(|p| p.borrow().clone())
-		{
-			if id == self.id {
-				paths.push(path);
-				return paths;
-			}
-		}
-
-		self.skill_read_paths(project_root, scope)
+		crate::skills::agent_dirs::AgentSkillDirs::of(self, scope, project_root)
+			.read
 	}
 
 	fn target_skills_dir(
@@ -142,16 +123,8 @@ impl AgentAdapter for &'static AgentDescriptor {
 		project_root: Option<&Path>,
 		scope: ResourceScope,
 	) -> Option<PathBuf> {
-		// Check thread-local override first (for testing)
-		if let Some((id, path)) =
-			SKILLS_PATH_OVERRIDE.with(|p| p.borrow().clone())
-		{
-			if id == self.id {
-				return Some(path);
-			}
-		}
-
-		self.skill_write_path(project_root, scope)
+		crate::skills::agent_dirs::AgentSkillDirs::of(self, scope, project_root)
+			.write
 	}
 
 	fn load_config(

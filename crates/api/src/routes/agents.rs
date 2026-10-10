@@ -28,31 +28,29 @@ pub fn list_agents(_origin: TrustedLocalOrigin) -> Json<Vec<AgentInfo>> {
 	let agents = registry::iter_all()
 		.map(|d| {
 			let project_root = Path::new("");
+			let project = aghub_core::skills::agent_dirs::AgentSkillDirs::of(
+				d,
+				aghub_core::models::ResourceScope::ProjectOnly,
+				Some(project_root),
+			);
+			let global = aghub_core::skills::agent_dirs::AgentSkillDirs::of(
+				d,
+				aghub_core::models::ResourceScope::GlobalOnly,
+				None,
+			);
 			// The derived list re-appends the universal `.agents/skills` that
 			// a universal agent's own list already ends with; dedup keeps this
 			// DTO field unchanged.
-			let mut project_read_paths =
-				d.project_skill_read_paths(project_root);
+			let mut project_read_paths = project.read;
 			project_read_paths.dedup();
 			let project_read =
 				project_read_paths.into_iter().map(format_path).collect();
-			let project_write_path = d.skill_write_path(
-				Some(project_root),
-				aghub_core::models::ResourceScope::ProjectOnly,
-			);
-			let mutable_project = project_write_path.is_some();
-			let project_write = project_write_path.map(format_path);
-			let global_read = d
-				.global_skill_read_paths()
-				.into_iter()
-				.map(format_path)
-				.collect();
-			let global_write = d
-				.skill_write_path(
-					None,
-					aghub_core::models::ResourceScope::GlobalOnly,
-				)
-				.map(format_path);
+			let mutable_project = project.write.is_some();
+			let project_write = project.write.map(format_path);
+			let global_read =
+				global.read.into_iter().map(format_path).collect();
+			let mutable_global = global.write.is_some();
+			let global_write = global.write.map(format_path);
 
 			AgentInfo {
 				id: d.id.to_string(),
@@ -68,12 +66,7 @@ pub fn list_agents(_origin: TrustedLocalOrigin) -> Json<Vec<AgentInfo>> {
 							),
 						},
 						universal: d.capabilities.skills.universal,
-						mutable_global: d
-							.skill_write_path(
-								None,
-								aghub_core::models::ResourceScope::GlobalOnly,
-							)
-							.is_some(),
+						mutable_global,
 						mutable_project,
 					},
 					mcp: McpCapabilitiesDto {

@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use aghub_core::adapter::set_skills_path_override;
+use aghub_core::skills::agent_dirs::set_skills_path_override;
 use aghub_core::skills::install_fetched::{
 	install_fetched_skill_and_lock, preflight_fetched_install,
 	FetchedSkillInstallRequest,

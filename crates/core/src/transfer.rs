@@ -4787,7 +4787,7 @@ mod tests {
 	// Smoke test only — the real data-loss guard is the Windows junction test below.
 	#[test]
 	fn reconcile_skill_unlinks_symlink_referrer_keeps_master() {
-		use crate::adapter::set_skills_path_override;
+		use crate::skills::agent_dirs::set_skills_path_override;
 
 		struct SkillsPathOverrideReset;
 
@@ -4861,7 +4861,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_remove_native_reader_keeps_shared_master() {
-		use crate::adapter::set_skills_path_override;
+		use crate::skills::agent_dirs::set_skills_path_override;
 
 		struct SkillsPathOverrideReset;
 
@@ -4944,7 +4944,7 @@ mod tests {
 	#[cfg(windows)]
 	#[test]
 	fn reconcile_skill_junction_referrer_removed_master_survives() {
-		use crate::adapter::set_skills_path_override;
+		use crate::skills::agent_dirs::set_skills_path_override;
 		use crate::skills::linker::create_junction;
 
 		struct SkillsPathOverrideReset;

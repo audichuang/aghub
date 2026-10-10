@@ -78,8 +78,12 @@ pub fn agent_link_need(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> LinkNeed {
-	let write_dir = crate::create_adapter(descriptor.agent_type)
-		.target_skills_dir(project_root, scope);
+	let write_dir = crate::skills::agent_dirs::AgentSkillDirs::of(
+		descriptor,
+		scope,
+		project_root,
+	)
+	.write;
 	match write_dir {
 		Some(referrer_dir) => LinkNeed::NeedsLink { referrer_dir },
 		None => LinkNeed::Unsupported,

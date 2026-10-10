@@ -2600,7 +2600,7 @@ fn remove_skill_planned_prunes_lock_on_execute() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -2619,7 +2619,7 @@ fn remove_skill_planned_prunes_lock_on_execute() {
 		.remove_skill_planned("prune-me-skill", false, false, true)
 		.unwrap();
 
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(outcome.executed, "copy single-agent removal executes");
 	let pruned = match &outcome.prune {
@@ -2673,7 +2673,7 @@ fn remove_skill_planned_failed_prune_keeps_lock_and_deletes_skill() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -2683,7 +2683,7 @@ fn remove_skill_planned_failed_prune_keeps_lock_and_deletes_skill() {
 	skill::lock::add_skill_to_lock("orphan-never-on-disk-xyz", locked_entry())
 		.unwrap();
 	if !perms_enforced(&lock_dir) {
-		crate::adapter::set_skills_path_override("claude", None);
+		crate::skills::agent_dirs::set_skills_path_override("claude", None);
 		eprintln!("skip: perms not enforced (root)");
 		return;
 	}
@@ -2701,7 +2701,7 @@ fn remove_skill_planned_failed_prune_keeps_lock_and_deletes_skill() {
 	// RESTORE perms before any assertion so a failed assert never leaks an
 	// unremovable temp dir.
 	std::fs::set_permissions(&lock_dir, orig).unwrap();
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(outcome.executed, "deletion runs even if the prune fails");
 	assert!(
@@ -2742,7 +2742,7 @@ fn remove_skill_planned_dry_run_discloses_prune_without_writing() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -2760,7 +2760,7 @@ fn remove_skill_planned_dry_run_discloses_prune_without_writing() {
 		.remove_skill_planned("keep-me-skill", false, true, false)
 		.unwrap();
 
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(!outcome.executed, "dry-run must not delete");
 	// A dry-run DISCLOSES what a commit would prune, and writes nothing.
@@ -2802,7 +2802,7 @@ fn remove_skill_planned_unconfirmed_discloses_prune_without_writing() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -2819,7 +2819,7 @@ fn remove_skill_planned_unconfirmed_discloses_prune_without_writing() {
 		.remove_skill_planned("gated-skill", true, false, false)
 		.unwrap();
 
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(!outcome.executed, "unconfirmed destructive op must not run");
 	// Same as the dry-run above: disclose, write nothing.
@@ -2863,7 +2863,7 @@ fn remove_skill_planned_project_scope_without_root_leaves_prune_notrun() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -2878,7 +2878,7 @@ fn remove_skill_planned_project_scope_without_root_leaves_prune_notrun() {
 		.remove_skill_planned("proj-no-root-skill", false, false, true)
 		.unwrap();
 
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(outcome.executed, "removal still executes");
 	assert_eq!(
@@ -3422,7 +3422,7 @@ fn remove_skill_planned_both_scope_prunes_global_and_project_locks() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -3448,7 +3448,7 @@ fn remove_skill_planned_both_scope_prunes_global_and_project_locks() {
 		.remove_skill_planned("both-skill", false, false, true)
 		.unwrap();
 
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(outcome.executed, "Both-scope removal executes");
 	let pruned = match &outcome.prune {
@@ -3502,7 +3502,7 @@ fn remove_skill_planned_both_global_failure_leaves_project_lock_untouched() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -3519,7 +3519,7 @@ fn remove_skill_planned_both_global_failure_leaves_project_lock_untouched() {
 	.unwrap();
 
 	if !perms_enforced(&lock_dir) {
-		crate::adapter::set_skills_path_override("claude", None);
+		crate::skills::agent_dirs::set_skills_path_override("claude", None);
 		eprintln!("skip: perms not enforced (root)");
 		return;
 	}
@@ -3540,7 +3540,7 @@ fn remove_skill_planned_both_global_failure_leaves_project_lock_untouched() {
 		.unwrap();
 
 	std::fs::set_permissions(&lock_dir, orig).unwrap();
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(outcome.executed, "Both-scope removal still executes");
 	match outcome.prune {
@@ -3584,7 +3584,7 @@ fn remove_skill_planned_both_project_failure_reports_partial_global_pruned() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -3600,7 +3600,7 @@ fn remove_skill_planned_both_project_failure_reports_partial_global_pruned() {
 	.unwrap();
 
 	if !perms_enforced(project.path()) {
-		crate::adapter::set_skills_path_override("claude", None);
+		crate::skills::agent_dirs::set_skills_path_override("claude", None);
 		eprintln!("skip: perms not enforced (root)");
 		return;
 	}
@@ -3626,7 +3626,7 @@ fn remove_skill_planned_both_project_failure_reports_partial_global_pruned() {
 		.unwrap();
 
 	std::fs::set_permissions(project.path(), orig).unwrap();
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(outcome.executed, "Both-scope removal still executes");
 	match outcome.prune {
@@ -3666,7 +3666,7 @@ fn remove_skill_planned_project_scope_with_root_prunes_project_lock() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -3688,7 +3688,7 @@ fn remove_skill_planned_project_scope_with_root_prunes_project_lock() {
 		.remove_skill_planned("proj-root-skill", false, false, true)
 		.unwrap();
 
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(outcome.executed, "ProjectOnly removal executes");
 	let pruned = match &outcome.prune {
@@ -3728,7 +3728,7 @@ fn remove_skill_planned_project_scope_with_root_failed_prune_keeps_lock() {
 	)
 	.unwrap();
 
-	crate::adapter::set_skills_path_override(
+	crate::skills::agent_dirs::set_skills_path_override(
 		"claude",
 		Some(skills_dir.clone()),
 	);
@@ -3742,7 +3742,7 @@ fn remove_skill_planned_project_scope_with_root_failed_prune_keeps_lock() {
 	.unwrap();
 
 	if !perms_enforced(project.path()) {
-		crate::adapter::set_skills_path_override("claude", None);
+		crate::skills::agent_dirs::set_skills_path_override("claude", None);
 		eprintln!("skip: perms not enforced (root)");
 		return;
 	}
@@ -3770,7 +3770,7 @@ fn remove_skill_planned_project_scope_with_root_failed_prune_keeps_lock() {
 	// RESTORE perms before any assertion so a failed assert never leaks an
 	// unremovable temp dir.
 	std::fs::set_permissions(project.path(), orig).unwrap();
-	crate::adapter::set_skills_path_override("claude", None);
+	crate::skills::agent_dirs::set_skills_path_override("claude", None);
 
 	assert!(outcome.executed, "deletion runs even if the prune fails");
 	assert!(

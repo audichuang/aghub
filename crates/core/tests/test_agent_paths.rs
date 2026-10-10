@@ -341,7 +341,7 @@ fn test_opencode_global_creation_persists() {
 	let test =
 		aghub_core::testing::TestConfig::new(aghub_core::AgentType::OpenCode)
 			.unwrap();
-	aghub_core::adapter::set_skills_path_override("opencode", None);
+	aghub_core::skills::agent_dirs::set_skills_path_override("opencode", None);
 
 	let mut manager = test.create_manager();
 	manager.load().unwrap();
@@ -500,7 +500,7 @@ fn write_import_skill_with_resources(dir: &Path, name: &str, body: &str) {
 
 #[test]
 fn skill_import_directory_preserves_body_and_resources() {
-	aghub_core::adapter::set_skills_path_override("claude", None);
+	aghub_core::skills::agent_dirs::set_skills_path_override("claude", None);
 	let temp = tempfile::tempdir().unwrap();
 	let project_root = temp.path().join("project");
 	std::fs::create_dir_all(&project_root).unwrap();
@@ -559,7 +559,7 @@ fn skill_import_directory_preserves_body_and_resources() {
 // record a dangling config entry against a never-written Master.
 #[test]
 fn add_skill_from_path_unsupported_scope_errors_and_writes_nothing() {
-	aghub_core::adapter::set_skills_path_override("hermes", None);
+	aghub_core::skills::agent_dirs::set_skills_path_override("hermes", None);
 	let temp = tempfile::tempdir().unwrap();
 	let project_root = temp.path().join("project");
 	std::fs::create_dir_all(&project_root).unwrap();
@@ -598,7 +598,7 @@ fn add_skill_from_path_unsupported_scope_errors_and_writes_nothing() {
 
 #[test]
 fn skill_import_skill_md_file_copies_sibling_resources() {
-	aghub_core::adapter::set_skills_path_override("claude", None);
+	aghub_core::skills::agent_dirs::set_skills_path_override("claude", None);
 	let temp = tempfile::tempdir().unwrap();
 	let project_root = temp.path().join("project");
 	std::fs::create_dir_all(&project_root).unwrap();

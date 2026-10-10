@@ -1,4 +1,5 @@
 pub mod adoption;
+pub mod agent_dirs;
 pub mod discovery;
 pub mod install_fetched;
 pub mod install_local;

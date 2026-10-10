@@ -6,12 +6,13 @@
 //! `source list` + `check` + `prune-lock`. Never writes.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use aghub_core::{
 	models::{AgentSelection, AgentType, ResourceScope},
 	registry,
 	skills::{
+		agent_dirs::private_fallback_dirs,
 		linker::{
 			classify::{agent_link_need, LinkNeed},
 			is_store_bookkeeping, master_store_dir, Linker,
@@ -316,40 +317,6 @@ fn inspect_agent_link(
 	}
 }
 
-/// The agent's own read dirs, minus the one it writes and minus every dir any
-/// OTHER descriptor also reads.
-///
-/// An agent can read more dirs than it writes (e.g. Antigravity's pre-move
-/// `.gemini/antigravity/skills`, `.gemini/antigravity-cli/skills` and its
-/// `.agent/skills` alias); auditing the write slot alone would call those
-/// loaded installs `withheld`.
-///
-/// SHARED dirs are excluded: "present in `.agents/skills` with no Referrer of
-/// my own" IS the withheld state this audit exists to surface.
-fn private_fallback_dirs(
-	agent: AgentType,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-	write_dir: &Path,
-) -> Vec<PathBuf> {
-	let descriptor = registry::get(agent);
-	descriptor
-		.skill_read_paths(project_root, scope)
-		.into_iter()
-		.filter(|dir| dir != write_dir)
-		.filter(|dir| {
-			!registry::iter_all()
-				.filter(|other| other.id != descriptor.id)
-				.any(|other| {
-					other
-						.skill_read_paths(project_root, scope)
-						.iter()
-						.any(|other_dir| other_dir == dir)
-				})
-		})
-		.collect()
-}
-
 fn resolve_roster(agent: &str) -> Result<Vec<AgentType>> {
 	match AgentSelection::parse(agent).map_err(|error| {
 		anyhow!("invalid --agent for doctor link audit: {error}")
@@ -392,10 +359,9 @@ fn audit_agent_links(
 					// dirs, and report the path where it was actually FOUND.
 					if state == AgentLinkState::Missing {
 						for dir in private_fallback_dirs(
-							*agent,
+							registry::get(*agent),
 							scope,
 							project_root,
-							&agent_skills_dir,
 						) {
 							let found = inspect_agent_link(
 								&master_skill,
@@ -1098,25 +1064,6 @@ mod tests {
 				.is_some_and(|p| p.contains(".agent/skills")),
 			"the row must name where it was FOUND, got {:?}",
 			agents[0].path
-		);
-	}
-
-	// The shared `.agents/skills` slot must NOT get the same treatment: "in the
-	// shared slot with no Referrer of my own" is exactly the withheld state
-	// this audit exists to surface, and most of the roster reads that dir.
-	#[test]
-	fn the_shared_slot_does_not_count_as_a_private_fallback() {
-		let tmp = tempfile::tempdir().unwrap();
-		let root = tmp.path();
-		let dirs = private_fallback_dirs(
-			AgentType::Grok,
-			ResourceScope::ProjectOnly,
-			Some(root),
-			&root.join(".grok/skills"),
-		);
-		assert!(
-			dirs.is_empty(),
-			"grok's only extra read dir is the shared slot, got {dirs:?}"
 		);
 	}
 

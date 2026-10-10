@@ -587,8 +587,9 @@ pub fn find_skill_holders_crediting(
 	for descriptor in registry::iter_all() {
 		let agent = descriptor.agent_type;
 		// Through the ADAPTER, never the descriptor: the skills-path test
-		// override lives only there, and bypassing it would answer about the
-		// developer's real home instead of the fixture.
+		// override is applied in `AgentSkillDirs::of`, which the adapter
+		// delegates to, and bypassing it would answer about the developer's
+		// real home instead of the fixture.
 		let dirs =
 			crate::create_adapter(agent).get_skills_paths(project_root, scope);
 		match crate::skills::discovery::load_skills_from_dirs(&dirs) {
