@@ -18,8 +18,8 @@
 use aghub_core::{
 	adapters::AgentAdapter,
 	descriptor::{
-		load_scoped_mcps, load_sub_agents_noop, mcp_strategy, save_scoped_mcps,
-		save_sub_agents_noop, Capabilities, McpCapabilities, SkillCapabilities,
+		load_sub_agents_noop, mcp_strategy, save_sub_agents_noop, Capabilities,
+		McpCapabilities, SkillCapabilities,
 	},
 	models::{AgentType, McpServer, McpTransport},
 	testing::{TestConfig, TestConfigBuilder},
@@ -59,10 +59,6 @@ fn seed_adapter_test_mcps(root: &Path) {
 }
 
 fn no_path() -> Option<PathBuf> {
-	None
-}
-
-fn no_project_path(_: &Path) -> Option<PathBuf> {
 	None
 }
 
@@ -1762,62 +1758,6 @@ fn test_remove_mcp_still_immediate() {
 
 	manager.load().unwrap();
 	assert!(manager.config().unwrap().mcps.is_empty());
-}
-
-#[test]
-fn test_load_scoped_mcps_without_path_returns_empty_for_concrete_scopes() {
-	let global = load_scoped_mcps(
-		None,
-		ResourceScope::GlobalOnly,
-		Some(no_path),
-		Some(no_project_path),
-		mcp_strategy::parse_none,
-	)
-	.unwrap();
-	assert!(global.is_empty());
-
-	let project = load_scoped_mcps(
-		None,
-		ResourceScope::ProjectOnly,
-		Some(no_path),
-		Some(no_project_path),
-		mcp_strategy::parse_none,
-	)
-	.unwrap();
-	assert!(project.is_empty());
-}
-
-#[test]
-fn test_load_scoped_mcps_rejects_both_scope() {
-	let err = load_scoped_mcps(
-		None,
-		ResourceScope::Both,
-		Some(no_path),
-		Some(no_project_path),
-		mcp_strategy::parse_none,
-	)
-	.unwrap_err();
-
-	assert!(
-		matches!(err, ConfigError::InvalidConfig(message) if message.contains("Both"))
-	);
-}
-
-#[test]
-fn test_save_scoped_mcps_rejects_both_scope() {
-	let err = save_scoped_mcps(
-		None,
-		ResourceScope::Both,
-		&[],
-		Some(no_path),
-		Some(no_project_path),
-		mcp_strategy::serialize_none,
-	)
-	.unwrap_err();
-
-	assert!(
-		matches!(err, ConfigError::InvalidConfig(message) if message.contains("Both"))
-	);
 }
 
 #[test]

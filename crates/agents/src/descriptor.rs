@@ -1,4 +1,4 @@
-use crate::errors::{ConfigError, Result};
+use crate::errors::Result;
 use crate::models::{
 	AgentConfig, McpServer, McpTransport, ResourceScope, SubAgent,
 };
@@ -132,36 +132,27 @@ impl AgentDescriptor {
 	}
 
 	pub const fn supports_skill_scope(&self, scope: ResourceScope) -> bool {
-		match scope {
-			ResourceScope::GlobalOnly => self.global_skill_paths.is_some(),
-			ResourceScope::ProjectOnly => self.project_skill_paths.is_some(),
-			ResourceScope::Both => {
-				self.global_skill_paths.is_some()
-					|| self.project_skill_paths.is_some()
-			}
-		}
+		scope_supported(
+			scope,
+			self.global_skill_paths.is_some(),
+			self.project_skill_paths.is_some(),
+		)
 	}
 
 	pub const fn supports_mcp_scope(&self, scope: ResourceScope) -> bool {
-		match scope {
-			ResourceScope::GlobalOnly => self.mcp_global_path.is_some(),
-			ResourceScope::ProjectOnly => self.mcp_project_path.is_some(),
-			ResourceScope::Both => {
-				self.mcp_global_path.is_some()
-					|| self.mcp_project_path.is_some()
-			}
-		}
+		scope_supported(
+			scope,
+			self.mcp_global_path.is_some(),
+			self.mcp_project_path.is_some(),
+		)
 	}
 
 	pub const fn supports_sub_agent_scope(&self, scope: ResourceScope) -> bool {
-		match scope {
-			ResourceScope::GlobalOnly => self.sub_agent_global_dir.is_some(),
-			ResourceScope::ProjectOnly => self.sub_agent_project_dir.is_some(),
-			ResourceScope::Both => {
-				self.sub_agent_global_dir.is_some()
-					|| self.sub_agent_project_dir.is_some()
-			}
-		}
+		scope_supported(
+			scope,
+			self.sub_agent_global_dir.is_some(),
+			self.sub_agent_project_dir.is_some(),
+		)
 	}
 
 	pub fn skill_write_path(
@@ -258,6 +249,19 @@ impl AgentDescriptor {
 				.and_then(|root| self.mcp_project_path.and_then(|p| p(root))),
 			ResourceScope::Both => None,
 		}
+	}
+}
+
+/// Whether a scope is served given which of its global/project slots exist.
+const fn scope_supported(
+	scope: ResourceScope,
+	global: bool,
+	project: bool,
+) -> bool {
+	match scope {
+		ResourceScope::GlobalOnly => global,
+		ResourceScope::ProjectOnly => project,
+		ResourceScope::Both => global || project,
 	}
 }
 
@@ -378,61 +382,6 @@ pub fn mcp_backing_path(path: &Path) -> io::Result<PathBuf> {
 		}
 		Err(error) => Err(error),
 	}
-}
-
-pub fn load_scoped_mcps(
-	project_root: Option<&Path>,
-	scope: ResourceScope,
-	global_path: Option<OptionalPathFn>,
-	project_path: Option<OptionalProjectPathFn>,
-	parse: McpParseFn,
-) -> Result<Vec<McpServer>> {
-	match scope {
-		ResourceScope::GlobalOnly => {
-			let Some(path) = global_path.and_then(|path| path()) else {
-				return Ok(Vec::new());
-			};
-			load_mcps_from_file(&path, parse)
-		}
-		ResourceScope::ProjectOnly => {
-			let Some(path) = project_root
-				.and_then(|root| project_path.and_then(|path| path(root)))
-			else {
-				return Ok(Vec::new());
-			};
-			load_mcps_from_file(&path, parse)
-		}
-		ResourceScope::Both => Err(ConfigError::InvalidConfig(
-			"MCP path unavailable for Both scope".to_string(),
-		)),
-	}
-}
-
-pub fn save_scoped_mcps(
-	project_root: Option<&Path>,
-	scope: ResourceScope,
-	mcps: &[McpServer],
-	global_path: Option<OptionalPathFn>,
-	project_path: Option<OptionalProjectPathFn>,
-	serialize: McpSerializeFn,
-) -> Result<()> {
-	let path = match scope {
-		ResourceScope::GlobalOnly => global_path.and_then(|path| path()),
-		ResourceScope::ProjectOnly => project_root
-			.and_then(|root| project_path.and_then(|path| path(root))),
-		ResourceScope::Both => {
-			return Err(ConfigError::InvalidConfig(
-				"MCP path unavailable for Both scope".to_string(),
-			))
-		}
-	}
-	.ok_or_else(|| {
-		ConfigError::InvalidConfig(format!(
-			"MCP path unavailable for {:?} scope",
-			scope
-		))
-	})?;
-	save_mcps_to_file(&path, mcps, serialize)
 }
 
 /// How completely an agent can hold a given server.
