@@ -109,9 +109,9 @@ impl Verdict {
 
 		let accounted_for = |survivor: &Path| {
 			let survivor =
-				crate::skills::linker::classify::canonicalize_lenient(survivor);
+				crate::skills::path_identity::resolved_location(survivor);
 			inputs.plan_skipped.iter().any(|kept| {
-				crate::skills::linker::classify::canonicalize_lenient(kept)
+				crate::skills::path_identity::resolved_location(kept)
 					== survivor
 			})
 		};

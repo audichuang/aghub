@@ -242,14 +242,14 @@ pub fn preview_prune_for_removal(
 	// See docs/history/core-install-linker.md#delete-preview-hid-the-lock-prune
 	let excluded: Vec<(PathBuf, PathBuf)> = removing
 		.iter()
-		.map(|p| (p.clone(), normalize_ancestors(p)))
+		.map(|p| (p.clone(), crate::skills::path_identity::entry_identity(p)))
 		.collect();
 	let scan = move |dir: &Path| -> Result<Vec<PathBuf>, ScanError> {
 		let dirs = top_level_skill_dirs(dir)?;
 		Ok(dirs
 			.into_iter()
 			.filter(|found| {
-				let real = normalize_ancestors(found);
+				let real = crate::skills::path_identity::entry_identity(found);
 				!excluded
 					.iter()
 					.any(|(raw, gone)| raw == found || gone == &real)
@@ -299,21 +299,6 @@ pub fn preview_prune_for_removal(
 	match keys {
 		Some(keys) => PruneStatus::WouldPrune(keys),
 		None => PruneStatus::NotRun,
-	}
-}
-
-/// Normalize a skill directory's ANCESTORS without resolving the directory
-/// itself.
-///
-/// A full `canonicalize` would follow a Referrer to its Master, so excluding
-/// the Referrer would exclude the Master too and prune a live key. Only the
-/// ancestors differ (macOS `/var` → `/private/var`, a symlinked HOME).
-fn normalize_ancestors(path: &Path) -> PathBuf {
-	match (path.parent(), path.file_name()) {
-		(Some(parent), Some(name)) => std::fs::canonicalize(parent)
-			.map(|real| real.join(name))
-			.unwrap_or_else(|_| path.to_path_buf()),
-		_ => path.to_path_buf(),
 	}
 }
 

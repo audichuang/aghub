@@ -598,22 +598,6 @@ pub fn run_skill_agent_mutation(
 		.map_err(ConfigError::from)
 }
 
-/// A plain `canonicalize` fails on a missing leaf and falls back to the literal
-/// path, which is how `~/.gemini/skills` and `~/.claude/skills` read as two
-/// different places while `~/.gemini` is a symlink to `~/.claude`. Falling back
-/// one level up resolves the part that DOES exist.
-pub(crate) fn resolve_through_links(path: PathBuf) -> PathBuf {
-	if let Ok(real) = std::fs::canonicalize(&path) {
-		return real;
-	}
-	match (path.parent(), path.file_name()) {
-		(Some(parent), Some(name)) => std::fs::canonicalize(parent)
-			.map(|real| real.join(name))
-			.unwrap_or(path),
-		_ => path,
-	}
-}
-
 #[cfg(unix)]
 pub(crate) fn node_id(path: &Path) -> Option<(u64, u64)> {
 	use std::os::unix::fs::MetadataExt;
@@ -646,7 +630,8 @@ pub(crate) struct Backing {
 
 impl Backing {
 	pub(crate) fn of(path: PathBuf) -> Self {
-		let path = resolve_through_links(path);
+		// `~/.gemini` symlinked to `~/.claude` must read as one place.
+		let path = crate::skills::path_identity::resolved_location(&path);
 		let node = node_id(&path);
 		Self { node, path }
 	}

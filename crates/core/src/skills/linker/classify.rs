@@ -72,35 +72,6 @@ impl AgentSkillCoverageView {
 	}
 }
 
-/// Normalize a path for comparison, tolerating a leaf that does not exist yet.
-pub(crate) fn canonicalize_lenient(p: &Path) -> PathBuf {
-	if let Ok(c) = std::fs::canonicalize(p) {
-		return c;
-	}
-	// The leaf may not exist yet: canonicalize the longest EXISTING ancestor
-	// and re-append the rest, so both sides normalize identically (macOS
-	// `/var`->`/private`, Windows 8.3 names / `\\?\` UNC).
-	let mut ancestor = p;
-	let mut tail: Vec<std::ffi::OsString> = Vec::new();
-	loop {
-		match std::fs::canonicalize(ancestor) {
-			Ok(mut out) => {
-				for part in tail.iter().rev() {
-					out.push(part);
-				}
-				return out;
-			}
-			Err(_) => match (ancestor.parent(), ancestor.file_name()) {
-				(Some(parent), Some(name)) => {
-					tail.push(name.to_os_string());
-					ancestor = parent;
-				}
-				_ => return p.to_path_buf(),
-			},
-		}
-	}
-}
-
 /// One agent's Referrer directory for a scope, WITHOUT the availability probe.
 pub fn agent_link_need(
 	descriptor: &AgentDescriptor,
@@ -126,7 +97,7 @@ pub fn shared_with(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> Vec<&'static str> {
-	let canon = canonicalize_lenient(dir);
+	let canon = crate::skills::path_identity::resolved_location(dir);
 	crate::registry::ALL_AGENTS
 		.iter()
 		.filter(|d| d.id != agent_id)
@@ -134,7 +105,7 @@ pub fn shared_with(
 			matches!(
 				agent_link_need(d, scope, project_root),
 				LinkNeed::NeedsLink { ref referrer_dir }
-					if canonicalize_lenient(referrer_dir) == canon
+					if crate::skills::path_identity::resolved_location(referrer_dir) == canon
 			)
 		})
 		.map(|d| d.id)

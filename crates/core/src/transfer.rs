@@ -1930,9 +1930,7 @@ impl ReconcileSkillPlan {
 				target_resource_scope(target),
 			)
 			.iter()
-			.map(|dir| {
-				crate::skills::linker::classify::canonicalize_lenient(dir)
-			})
+			.map(|dir| crate::skills::path_identity::resolved_location(dir))
 			.any(|read_dir| {
 				entry_dirs
 					.iter()
@@ -1948,7 +1946,7 @@ impl ReconcileSkillPlan {
 		let mut dirs: Vec<PathBuf> = Vec::new();
 		let mut push = |dir: &Path| {
 			let canonical =
-				crate::skills::linker::classify::canonicalize_lenient(dir);
+				crate::skills::path_identity::resolved_location(dir);
 			if !dirs.contains(&canonical) {
 				dirs.push(canonical);
 			}

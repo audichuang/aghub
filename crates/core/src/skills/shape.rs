@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use aghub_agents::ResourceScope;
 
 use crate::skills::linker::{master_store_dir, shared_referrer_dir, Linker};
-use crate::skills::removal::entry_identity;
+use crate::skills::path_identity::entry_identity;
 
 /// One agent's candidate Referrer for a skill at a scope.
 pub struct CandidateReferrer {
@@ -259,7 +259,7 @@ impl SkillShape {
 
 /// Resolve `path` to a real location, or `None` when it does not exist.
 ///
-/// Distinct from `linker::canonicalize_lenient`, which invents a path for a
+/// Distinct from `path_identity::resolved_location`, which invents a path for a
 /// missing leaf so two absent paths can compare equal. Here a missing path must
 /// stay unknowable — see trap 2 in the module docs.
 fn resolved(path: &Path) -> Option<PathBuf> {

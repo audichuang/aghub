@@ -13,6 +13,7 @@ pub use batch::*;
 
 use crate::models::{AgentType, ResourceScope};
 use crate::skills::linker::Linker;
+use crate::skills::path_identity::{entry_identity, resolved_location};
 
 /// The shared skill-store roots for a scope: the `.aghub` Master store plus the
 /// shared Referrer roots (`.agents/skills`, and the XDG `agents/skills`, which
@@ -378,26 +379,6 @@ pub struct RemovalPlan {
 	pub still_read_from: Vec<std::path::PathBuf>,
 }
 
-/// A path's identity for comparison, with the FINAL component left unresolved:
-/// a Referrer and its Master canonicalize to the same path, so resolving the
-/// leaf would read "delete this Referrer" as "delete the Master". The parent is
-/// resolved so two spellings of one directory (macOS `/var`, Windows short
-/// names) compare equal.
-///
-/// `pub(crate)` because `skills::shape`'s compat-Referrer sweep has the same
-/// trap (a compat dir reached through a symlinked ANCESTOR, `.agent/skills` ->
-/// `.agents/skills`, is a different `PathBuf` from the slot it aliases). There
-/// is exactly one identity rule — do not re-derive it.
-pub(crate) fn entry_identity(path: &Path) -> PathBuf {
-	match (path.parent(), path.file_name()) {
-		(Some(parent), Some(leaf)) => {
-			crate::skills::linker::classify::canonicalize_lenient(parent)
-				.join(leaf)
-		}
-		_ => path.to_path_buf(),
-	}
-}
-
 /// The folder a discovered skill was read FROM — its own entry, never the
 /// Master a Referrer resolves to.
 ///
@@ -525,8 +506,7 @@ pub fn read_effect_after(
 			let Some(entry) = discovered_entry_dir(skill) else {
 				continue;
 			};
-			let resolved =
-				crate::skills::linker::classify::canonicalize_lenient(&entry);
+			let resolved = resolved_location(&entry);
 			before.insert(resolved.clone());
 			// `starts_with`, not equality: deleting a folder takes every skill
 			// nested under it with it.
@@ -1101,7 +1081,7 @@ pub(crate) fn readers_outside(
 	include_disabled: bool,
 ) -> Vec<&'static str> {
 	let disabled = crate::agent_settings::disabled_agents();
-	let target = crate::skills::linker::classify::canonicalize_lenient(dir);
+	let target = resolved_location(dir);
 	crate::models::AgentType::ALL
 		.iter()
 		.filter(|agent| include_disabled || !disabled.contains(agent.as_str()))
@@ -1110,13 +1090,7 @@ pub(crate) fn readers_outside(
 			crate::create_adapter(**agent)
 				.get_skills_paths(project_root, scope)
 				.iter()
-				.any(|read_dir| {
-					target.starts_with(
-						crate::skills::linker::classify::canonicalize_lenient(
-							read_dir,
-						),
-					)
-				})
+				.any(|read_dir| target.starts_with(resolved_location(read_dir)))
 		})
 		.map(|agent| crate::registry::get(*agent).id)
 		.collect()

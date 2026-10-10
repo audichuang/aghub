@@ -4,6 +4,7 @@ pub mod install_fetched;
 pub mod install_local;
 pub mod linker;
 pub mod lock;
+pub(crate) mod path_identity;
 pub mod prune;
 pub mod removal;
 pub mod rename;

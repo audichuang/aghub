@@ -689,7 +689,8 @@ impl ConfigManager {
 			project_root.as_deref(),
 		);
 		let own_agent_dir = if let Some(target_entry) = target_entry {
-			let requested_entry = removal::entry_identity(target_entry);
+			let requested_entry =
+				crate::skills::path_identity::entry_identity(target_entry);
 			let target_dir = requested_agents
 				.iter()
 				.flat_map(|agent| {

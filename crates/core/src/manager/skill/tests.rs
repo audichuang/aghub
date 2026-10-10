@@ -1201,10 +1201,8 @@ fn real_dir_shared_slot_preview_lists_the_directory_when_other_readers_disabled(
 	);
 	assert!(
 		outcome.plan.paths.iter().any(|p| p == &skill_dir
-			|| crate::skills::linker::classify::canonicalize_lenient(p)
-				== crate::skills::linker::classify::canonicalize_lenient(
-					&skill_dir
-				)),
+			|| crate::skills::path_identity::resolved_location(p)
+				== crate::skills::path_identity::resolved_location(&skill_dir)),
 		"plan.paths must contain the directory: {:?}",
 		outcome.plan.paths
 	);

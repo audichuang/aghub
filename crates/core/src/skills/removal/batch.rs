@@ -580,7 +580,7 @@ pub fn find_skill_holders_crediting(
 ) -> (Vec<AgentType>, Vec<&'static str>) {
 	let doomed: Vec<PathBuf> = deleting
 		.iter()
-		.map(|path| crate::skills::removal::entry_identity(path))
+		.map(|path| crate::skills::path_identity::entry_identity(path))
 		.collect();
 	let mut holders = Vec::new();
 	let mut unreadable = Vec::new();
@@ -601,9 +601,11 @@ pub fn find_skill_holders_crediting(
 							crate::skills::removal::discovered_entry_dir(skill)
 						{
 							let id =
-								crate::skills::removal::entry_identity(&entry);
+								crate::skills::path_identity::entry_identity(
+									&entry,
+								);
 							let resolved =
-								crate::skills::linker::classify::canonicalize_lenient(
+								crate::skills::path_identity::resolved_location(
 									&entry,
 								);
 							!doomed.iter().any(|d| {
