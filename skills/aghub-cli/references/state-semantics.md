@@ -204,7 +204,11 @@ branch.
 - `--all` is read-only everywhere EXCEPT `prune-lock`, where it writes — both
   locks when a project root exists, global only (project silently skipped,
   still exit 0) when there is none. It stays lock-only: never deletes skill
-  files or edits agent config, and previews unless `--yes`.
+  files or edits agent config, and previews unless `--yes`. An entry is dropped
+  only when no top-level folder of its (sanitized) name in the scope's agent
+  skill dirs or `.aghub` holds `SKILL.md` or `skill.md` (links followed); a skill
+  folder it cannot read keeps its entry, and a skills dir it cannot list aborts
+  the whole prune with the lock unchanged.
 - A skill whose files sit under an installed Claude Code plugin is the
   plugin's, not aghub's: `delete`, `update`, `enable` and `disable` refuse it
   with `MANAGED_RESOURCE` (exit 1, nothing written) — the same code the HTTP

@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use aghub_agents::ResourceScope;
 
 use crate::skills::agent_dirs::AgentSkillDirs;
+use crate::skills::enumerate::SkillMarker;
 use crate::skills::linker::{master_store_dir, shared_referrer_dir, Linker};
 use crate::skills::path_identity::entry_identity;
 
@@ -350,40 +351,13 @@ fn referrer_or_master_exists(path: &Path) -> bool {
 	path.symlink_metadata().is_ok()
 }
 
-/// The answer to "does `entry` hold a root `SKILL.md`" — three states, not a
-/// bool, because the two callers below need OPPOSITE conservative answers
-/// when the probe genuinely cannot tell.
-///
-/// `classify_shape` treats [`Self::Unknown`] as [`Self::Present`] (an
-/// unreadable dir routes to a refusal a human sees, not a silent
-/// `ForeignDir`). `readers_of` treats it as NOT present (an unanswered probe is
-/// no evidence of a read, and counting it seeds an implicit `Create`). Never
-/// collapse this to a bool. See docs/history/core-skills-shape.md#one-bool-marker-served-two-callers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SkillMarker {
-	/// A root `SKILL.md` file is really there (`metadata` follows links, so a
-	/// healthy Referrer still passes through to the Master's own file).
-	Present,
-	/// A definite absence: either `NotFound`, or one path segment up,
-	/// `NotADirectory` — a same-named REGULAR FILE at `entry` makes
-	/// `metadata("<entry>/SKILL.md")` fail that way instead of `NotFound`,
-	/// but it is just as definite. Nothing can live under a non-directory
-	/// path, so there is no ambiguity to fail open about.
-	Absent,
-	/// The probe could not tell — most often a permission fault. Never
-	/// "present" and never "absent"; see the type doc for how each caller
-	/// resolves it.
-	Unknown,
-}
-
 /// Whether `entry` is actually serving A SKILL, by ONE rule shared by every
 /// caller in THIS module that asks this question ([`classify_shape`]'s
 /// `ForeignDir` split and [`readers_of`]'s `Present` check) — each picks its
 /// own safe direction for [`SkillMarker::Unknown`]; see that type's doc.
 ///
-/// NOT the only spelling in the crate: `prune::top_level_skill_dirs` uses a
-/// bare `is_file()` that folds EACCES into `false`. Unifying it onto this is
-/// not a mechanical change — it alters which lock keys `prune` keeps.
+/// Uppercase only, unlike `enumerate::skill_marker` (which also accepts
+/// `skill.md`); moving onto it is D4 — it changes which dirs read as `ForeignDir`.
 fn has_skill_marker(entry: &Path) -> SkillMarker {
 	match std::fs::metadata(entry.join("SKILL.md")) {
 		Ok(meta) if meta.is_file() => SkillMarker::Present,

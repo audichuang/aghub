@@ -86,8 +86,9 @@ pub fn ensure_master_store_parent(canonical: &Path) -> io::Result<()> {
 /// dot-prefixed (`.quarantine/<name>/<stamp>/`, a transient
 /// `.<name>.aghub-migrating` link).
 ///
-/// **Every enumerator of the store must apply this** — being invisible to
-/// `top_level_skill_dirs` is a property of that function, not of the layout.
+/// **Every enumerator of the store must apply this** — the walker that applies
+/// it is `enumerate::skills` in store mode; prune's one-level scan only misses
+/// `.quarantine` because it has no root marker.
 /// See docs/history/core-install-linker.md#doctor-listed-the-quarantine-as-a-skill
 pub fn is_store_bookkeeping(file_name: &str) -> bool {
 	file_name.starts_with('.')

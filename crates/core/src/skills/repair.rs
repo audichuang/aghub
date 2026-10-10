@@ -529,7 +529,7 @@ pub fn execute_repair(
 /// `.aghub/.quarantine/<name>/<stamp>/`.
 ///
 /// Invisible to the store scan only because `top_level_skill_dirs` is one
-/// level deep and needs a root `SKILL.md` — any new `.aghub` enumerator must
+/// level deep and needs a root skill marker — any new `.aghub` enumerator must
 /// skip it too (`is_store_bookkeeping`).
 fn quarantine_dir(master: &Path, name: &str) -> PathBuf {
 	master

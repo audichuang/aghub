@@ -4,9 +4,13 @@
 //! scope still has a skill on disk, its lock entry is pruned. Guarded so a
 //! VCS-committed lock is never corrupted:
 //!
-//! - Pruning runs ONLY on a provably successful scan (error-returning
-//!   [`skill::scan_skills`], never the error-swallowing discovery collector).
-//!   Any [`ScanError`] aborts ALL pruning — the lock is left untouched.
+//! - The scan is ONE level deep under each dir (`enumerate::entries(dir, false)`),
+//!   keyed by FOLDER name, with no dedupe and no recursion into groups. An entry
+//!   counts unless its marker (`enumerate::skill_marker`: root `SKILL.md` or
+//!   `skill.md`, links followed) is `Absent` — so a dangling Referrer does not
+//!   count, and a skill dir it cannot read (`Unknown`) keeps its key.
+//! - Pruning runs ONLY on a provably successful scan: a dir that cannot be listed
+//!   aborts ALL pruning and the lock is left untouched.
 //! - Per-scope disk sets are disjoint: a global prune scans the union of every
 //!   agent's *global* skill dirs; a project prune scans ONLY the project's skill
 //!   dirs. A project prune never touches the global lock and vice versa.
@@ -20,6 +24,7 @@
 //! [`prune_lock_scanning`] is the production entry point that derives the
 //! per-scope dirs from the agent descriptors.
 
+use super::enumerate::SkillMarker;
 use crate::models::ResourceScope;
 use crate::WriteScope;
 use skill::ScanError;
@@ -371,23 +376,18 @@ fn top_level_skill_dirs(dir: &Path) -> Result<Vec<PathBuf>, ScanError> {
 	if !dir.exists() {
 		return Err(ScanError::PathNotFound(dir.to_path_buf()));
 	}
-	let mut dirs = Vec::new();
-	let entries = std::fs::read_dir(dir)
-		.map_err(|_| ScanError::PermissionDenied(dir.to_path_buf()))?;
-	for entry in entries {
-		let entry = entry
-			.map_err(|_| ScanError::PermissionDenied(dir.to_path_buf()))?;
-		let file_type = entry
-			.file_type()
-			.map_err(|_| ScanError::PermissionDenied(entry.path()))?;
-		// Accept a link too (every grant is one; `is_dir()` is false for it).
-		// The `SKILL.md` probe FOLLOWS it, so a dangling Referrer still fails.
-		let usable = file_type.is_dir() || file_type.is_symlink();
-		if usable && entry.path().join("SKILL.md").is_file() {
-			dirs.push(entry.path());
-		}
+	let (entries, unlisted) = super::enumerate::entries(dir, false);
+	// `entries` reads a non-directory as empty; prune cannot prove that.
+	if unlisted || !dir.is_dir() {
+		return Err(ScanError::PermissionDenied(dir.to_path_buf()));
 	}
-	Ok(dirs)
+	// `Unknown` (a skill dir it cannot read) KEEPS its key: not proof it is gone.
+	Ok(entries
+		.into_iter()
+		.filter(|entry| {
+			super::enumerate::skill_marker(entry) != SkillMarker::Absent
+		})
+		.collect())
 }
 
 /// Test-only global-lock isolation, shared across every core test mod that
