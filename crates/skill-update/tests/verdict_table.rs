@@ -1,5 +1,5 @@
-//! One table, two surfaces: `verdict::judge` and the `check` adapter must agree
-//! on every row. Its own binary because it pins `$AGHUB_DATA_DIR` and `$HOME`
+//! One table, three surfaces: `verdict::judge`, the `check` adapter and the
+//! `source diff` adapter must agree on every row. Its own binary because it pins `$AGHUB_DATA_DIR` and `$HOME`
 //! (process-global env that must not race the lib's env-touching tests).
 
 use std::collections::BTreeSet;
@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
+use aghub_core::WriteScope;
+use skill_update::sources::{
+	diff_source, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome,
+	SourceSkillState,
+};
 use skill_update::verdict::Verdict;
 use skill_update::{
 	FetchError, FetchSelection, FetchedRepo, Fetcher, RefResolver, SourceRef,
@@ -301,6 +306,20 @@ fn status_kind(status: &SkillUpdateStatus) -> String {
 	}
 }
 
+/// The diff vocabulary mapped onto check's, so one expected column pins both.
+fn diff_as_check(state: &SourceSkillState, reason: Option<&str>) -> String {
+	match (state, reason) {
+		(SourceSkillState::InstalledCurrent, _) => "upToDate".to_string(),
+		(SourceSkillState::InstalledOutdated, _) => {
+			"updateAvailable".to_string()
+		}
+		(SourceSkillState::Uncheckable, Some("local")) => {
+			"uncheckable:local".to_string()
+		}
+		(other, reason) => format!("{other:?}/{reason:?}"),
+	}
+}
+
 fn run_row(rt: &tokio::runtime::Runtime, row: &Row) {
 	let tmp = tempfile::tempdir().unwrap();
 	let project = tmp.path().join("project");
@@ -318,6 +337,9 @@ fn run_row(rt: &tokio::runtime::Runtime, row: &Row) {
 		v1_hash
 	};
 
+	// `source diff` reads the lock from disk, so the same entry is written there.
+	skill::write_local_lock(&lock_with(stored.clone()), Some(&project))
+		.unwrap();
 	let (entries, _) = skill_update::projection::project_lock_entries(
 		false,
 		Some(&project),
@@ -325,7 +347,13 @@ fn run_row(rt: &tokio::runtime::Runtime, row: &Row) {
 	);
 	let (raw, comparison) =
 		skill::compute_skill_folder_hashes(&upstream).unwrap();
-	let verdict = skill_update::verdict::judge(&entries[0], &raw, &comparison);
+	let verdict = skill_update::verdict::judge(
+		entries[0].stored_hash.as_deref(),
+		entries[0].local_comparison_hash.as_deref(),
+		entries[0].local_ambiguous,
+		&raw,
+		&comparison,
+	);
 	let out = rt.block_on(skill_update::run_update_check(
 		entries,
 		Arc::new(DirFetcher {
@@ -351,10 +379,37 @@ fn run_row(rt: &tokio::runtime::Runtime, row: &Row) {
 		row.label,
 		row.local
 	);
+	let outcome = diff_source(
+		SourceDiffInput {
+			source: "owner/repo".to_string(),
+			git_ref: None,
+			scopes: vec![WriteScope::project(&project)],
+		},
+		SourceDiffDeps {
+			fetcher: &DirFetcher {
+				root: upstream.clone(),
+			},
+			resolver: &NoToken,
+		},
+	);
+	let skills = match outcome {
+		SourceDiffOutcome::Ok { skills, .. } => skills,
+		other => panic!("diff for row `{}`: {other:?}", row.label),
+	};
+	let diff = skills.iter().find(|d| d.name == "s").unwrap_or_else(|| {
+		panic!("diff row `s` missing for `{}`: {skills:?}", row.label)
+	});
+	assert_eq!(
+		diff_as_check(&diff.state, diff.reason.as_deref()),
+		row.check,
+		"diff for row `{}` ({:?})",
+		row.label,
+		row.local
+	);
 }
 
 #[test]
-fn verdict_table_matches_check_adapter() {
+fn verdict_table_matches_check_and_diff_adapters() {
 	let rt = tokio::runtime::Runtime::new().unwrap();
 	for row in ROWS {
 		with_isolated_env(|| run_row(&rt, row));

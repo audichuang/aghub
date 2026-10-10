@@ -517,7 +517,9 @@ fn classify_member_from_probe(
 				}
 			}
 			let status = match crate::verdict::judge(
-				member,
+				member.stored_hash.as_deref(),
+				member.local_comparison_hash.as_deref(),
+				member.local_ambiguous,
 				fresh_hash,
 				comparison_hash,
 			) {

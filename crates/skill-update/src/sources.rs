@@ -2,17 +2,17 @@
 //! so the API and the CLI share one implementation. Fetch + credentials are
 //! injected via [`crate::Fetcher`] / [`crate::TokenResolver`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
+use crate::verdict::Verdict;
 use crate::{
 	FetchError, FetchSelection, Fetcher, SourceRef, TokenResolution,
 	TokenResolver,
 };
 use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::update::{
-	compare_known_hashes, detect_rename, precheck_source, SkillUpdateStatus,
-	UncheckableReason,
+	detect_rename, precheck_source, UncheckableReason,
 };
 use aghub_core::WriteScope;
 
@@ -79,7 +79,11 @@ pub struct SourceSkillDiff {
 pub(crate) struct BaselineEntry {
 	pub installed_name: String,
 	pub stored_hash: String,
-	pub local_comparison_hashes: Vec<String>,
+	/// The verdict module's local baseline for this name (comparison digest),
+	/// `None` when no managed copy or withheld Master was readable.
+	pub local_comparison_hash: Option<String>,
+	/// Managed copies disagree (`verdict::Verdict::Ambiguous`).
+	pub local_ambiguous: bool,
 	pub scope_label: String,
 	/// The ref THIS entry is pinned to. A Sources row is one repository, but its
 	/// entries need not share a branch/tag, and an entry may only be judged
@@ -538,23 +542,6 @@ pub(crate) fn source_matches(
 	}
 }
 
-/// Local content hashes for every installed copy of `name`, against an
-/// ALREADY-loaded agent set. Taking the set rather than a scope is what keeps
-/// the caller's per-entry loop off the agent scan: that scan re-reads every
-/// registered agent's config from disk and does not vary by name, so hoisting
-/// it turns an O(entries x agents) sweep into one load per scope.
-fn local_hashes_for_installed(
-	agents: &[aghub_core::AgentResources],
-	name: &str,
-) -> Vec<String> {
-	aghub_core::skills::removal::installed_skill_roots_in(agents, name)
-		.into_iter()
-		.filter_map(|root| {
-			skill::compute_skill_folder_comparison_hash(&root).ok()
-		})
-		.collect()
-}
-
 /// Insert one scope's lock entries into a shared baseline. Reused by the merged
 /// (API) and single-scope (CLI) baseline builders so the logic stays DRY. On a
 /// duplicate `skill_path` the LAST inserted scope wins (the merged path inserts
@@ -566,21 +553,36 @@ fn insert_scope_entries(
 	scope: &WriteScope,
 	want: &str,
 ) {
-	// The agent scan is loaded at most ONCE per scope, and only if a matching
-	// entry is actually reached: a source whose rows all belong to another scope
-	// must not pay for a scan it never reads.
-	let mut agents: Option<Vec<aghub_core::AgentResources>> = None;
 	match scope {
 		WriteScope::Global => {
-			for (name, entry) in skill::get_all_locked_skills() {
-				if !source_matches(
-					want,
-					&entry.source,
-					Some(&entry.source_url),
-					&entry.source_type,
-				) {
-					continue;
-				}
+			let matching: Vec<(String, skill::SkillLockEntry)> =
+				skill::get_all_locked_skills()
+					.into_iter()
+					.filter(|(_, entry)| {
+						source_matches(
+							want,
+							&entry.source,
+							Some(&entry.source_url),
+							&entry.source_type,
+						)
+					})
+					.collect();
+			// The verdict module owns the local baseline, exactly as `check` reads it:
+			// managed agents only, a withheld Master hashed from the store, disagreeing
+			// copies reported as ambiguous. An empty set skips the agent scan.
+			let wanted: HashSet<String> = matching
+				.iter()
+				.filter(|(_, entry)| entry.skill_path.is_some())
+				.map(|(name, _)| name.clone())
+				.collect();
+			let local = crate::verdict::local_hashes_with(
+				false,
+				scope.resource_scope(),
+				scope.project_root(),
+				&wanted,
+				|| crate::mutation::scan_agents(scope),
+			);
+			for (name, entry) in matching {
 				if source_type.is_empty() {
 					*source_type = entry.source_type.clone();
 				}
@@ -588,18 +590,19 @@ fn insert_scope_entries(
 					*recorded_ref = entry.ref_name.clone();
 				}
 				if let Some(skill_path) = entry.skill_path.clone() {
-					let hash = entry.content_hash.clone().unwrap_or_default();
-					let agents = agents.get_or_insert_with(|| {
-						crate::mutation::scan_agents(scope)
-					});
-					let local_comparison_hashes =
-						local_hashes_for_installed(agents, &name);
+					let local_comparison_hash =
+						local.comparison_hashes.get(&name).cloned();
+					let local_ambiguous = local.ambiguous.contains(&name);
 					baseline.insert(
 						skill_path,
 						BaselineEntry {
 							installed_name: name,
-							stored_hash: hash,
-							local_comparison_hashes,
+							stored_hash: entry
+								.content_hash
+								.clone()
+								.unwrap_or_default(),
+							local_comparison_hash,
+							local_ambiguous,
 							scope_label: "global".to_string(),
 							ref_name: entry.ref_name.clone(),
 						},
@@ -608,15 +611,33 @@ fn insert_scope_entries(
 			}
 		}
 		WriteScope::Project { root } => {
-			for (name, entry) in skill::read_local_lock(Some(root)).skills {
-				if !source_matches(
-					want,
-					&entry.source,
-					entry.source_url.as_deref(),
-					&entry.source_type,
-				) {
-					continue;
-				}
+			let matching: Vec<(String, skill::LocalSkillLockEntry)> =
+				skill::read_local_lock(Some(root))
+					.skills
+					.into_iter()
+					.filter(|(_, entry)| {
+						source_matches(
+							want,
+							&entry.source,
+							entry.source_url.as_deref(),
+							&entry.source_type,
+						)
+					})
+					.collect();
+			// Same verdict-owned baseline as the global arm above.
+			let wanted: HashSet<String> = matching
+				.iter()
+				.filter(|(_, entry)| entry.skill_path.is_some())
+				.map(|(name, _)| name.clone())
+				.collect();
+			let local = crate::verdict::local_hashes_with(
+				false,
+				scope.resource_scope(),
+				scope.project_root(),
+				&wanted,
+				|| crate::mutation::scan_agents(scope),
+			);
+			for (name, entry) in matching {
 				if source_type.is_empty() {
 					*source_type = entry.source_type.clone();
 				}
@@ -624,17 +645,16 @@ fn insert_scope_entries(
 					*recorded_ref = entry.ref_name.clone();
 				}
 				if let Some(skill_path) = entry.skill_path.clone() {
-					let agents = agents.get_or_insert_with(|| {
-						crate::mutation::scan_agents(scope)
-					});
-					let local_comparison_hashes =
-						local_hashes_for_installed(agents, &name);
+					let local_comparison_hash =
+						local.comparison_hashes.get(&name).cloned();
+					let local_ambiguous = local.ambiguous.contains(&name);
 					baseline.insert(
 						skill_path,
 						BaselineEntry {
 							installed_name: name,
 							stored_hash: entry.computed_hash,
-							local_comparison_hashes,
+							local_comparison_hash,
+							local_ambiguous,
 							scope_label: "project".to_string(),
 							ref_name: entry.ref_name.clone(),
 						},
@@ -1123,67 +1143,32 @@ fn classify_source_skill_diff(
 	(state, None, reason)
 }
 
-/// Classify an already-installed skill by comparing its upstream folder hash to
-/// the installed baseline. Prefer actual installed folder hashes over the
-/// stored lock hash because some locks were produced by npx/JS collation, while
-/// this endpoint hashes fetched source with Rust collation. Comparing local
-/// Rust hashes to fetched Rust hash avoids false updates for unchanged skills.
+/// Map the shared verdict (`crate::verdict::judge`) onto the diff vocabulary.
+/// `Ambiguous` has no word here, so — like `check` — it becomes
+/// `Uncheckable { local }`. A fetched folder that cannot be hashed is
+/// `Uncheckable { local }` too.
 fn classify_installed(
 	entry: &BaselineEntry,
 	skill_dir: &Path,
 ) -> (SourceSkillState, Option<String>) {
-	let hash = if entry.local_comparison_hashes.is_empty() {
-		skill::compute_skill_folder_hash(skill_dir)
-	} else {
-		skill::compute_skill_folder_comparison_hash(skill_dir)
+	let uncheckable =
+		|| (SourceSkillState::Uncheckable, Some("local".to_string()));
+	let Ok((raw, comparison)) = skill::compute_skill_folder_hashes(skill_dir)
+	else {
+		return uncheckable();
 	};
-	let fresh = match hash {
-		Ok(hash) => hash,
-		Err(_) => {
-			return (SourceSkillState::Uncheckable, Some("local".to_string()))
-		}
-	};
-
-	if !entry.local_comparison_hashes.is_empty() {
-		if entry.local_comparison_hashes.iter().all(|hash| {
-			compare_known_hashes(hash, &fresh, None)
-				== SkillUpdateStatus::UpToDate
-		}) {
-			return (SourceSkillState::InstalledCurrent, None);
-		}
-		return (SourceSkillState::InstalledOutdated, None);
-	}
-
-	let baseline = if entry.stored_hash.is_empty()
-		|| skill::is_placeholder_digest(&entry.stored_hash)
-	{
-		None
-	} else {
-		Some(entry.stored_hash.as_str())
-	};
-	let Some(base_hash) = baseline else {
-		return (SourceSkillState::InstalledCurrent, None);
-	};
-
-	// The rename path short-circuits in `classify_source_skill_diff` before
-	// reaching this function (it inspects `entry.installed_name` vs the
-	// discovered name up front). `compare_known_hashes` itself never returns
-	// `Renamed` — it only yields `UpToDate` or `UpdateAvailable` — so the
-	// `Renamed` arm is unreachable here and intentionally omitted.
-	match compare_known_hashes(base_hash, &fresh, None) {
-		SkillUpdateStatus::UpToDate => {
-			(SourceSkillState::InstalledCurrent, None)
-		}
-		SkillUpdateStatus::UpdateAvailable { .. } => {
+	match crate::verdict::judge(
+		Some(entry.stored_hash.as_str()),
+		entry.local_comparison_hash.as_deref(),
+		entry.local_ambiguous,
+		&raw,
+		&comparison,
+	) {
+		Verdict::UpToDate => (SourceSkillState::InstalledCurrent, None),
+		Verdict::UpdateAvailable { .. } => {
 			(SourceSkillState::InstalledOutdated, None)
 		}
-		SkillUpdateStatus::Uncheckable { reason } => {
-			(SourceSkillState::Uncheckable, Some(reason_str(reason)))
-		}
-		SkillUpdateStatus::Renamed { .. } => unreachable!(
-			"compare_known_hashes cannot return Renamed; rename detection \
-			 happens in classify_source_skill_diff before this match"
-		),
+		Verdict::Uncheckable | Verdict::Ambiguous => uncheckable(),
 	}
 }
 
@@ -1198,19 +1183,6 @@ fn parse_meta(
 		),
 		Err(_) => (None, None, None),
 	}
-}
-
-fn reason_str(reason: UncheckableReason) -> String {
-	match reason {
-		UncheckableReason::Auth => "auth",
-		UncheckableReason::Network => "network",
-		UncheckableReason::Local => "local",
-		UncheckableReason::Ssh => "ssh",
-		UncheckableReason::UnsupportedScheme => "unsupportedScheme",
-		UncheckableReason::NoPath => "noPath",
-		UncheckableReason::Timeout => "timeout",
-	}
-	.to_string()
 }
 
 /// PUBLIC CLI entry: build the baseline for one scope and classify the fetched
@@ -1968,6 +1940,7 @@ mod list_tests {
 #[cfg(test)]
 mod classify_tests {
 	use super::*;
+	use aghub_core::skills::update::SkillUpdateStatus;
 	use std::fs;
 	use tempfile::tempdir;
 
@@ -2023,10 +1996,8 @@ mod classify_tests {
 			let baseline = BaselineEntry {
 				installed_name: "cache-test".into(),
 				stored_hash: raw.clone(),
-				local_comparison_hashes: vec![entry
-					.local_comparison_hash
-					.clone()
-					.unwrap()],
+				local_comparison_hash: entry.local_comparison_hash.clone(),
+				local_ambiguous: false,
 				scope_label: "project".into(),
 				ref_name: None,
 			};
@@ -2069,11 +2040,13 @@ mod classify_tests {
 	fn classify_prefers_local_hash_over_stale_stored_hash() {
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
-		let fresh = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let fresh =
+			skill::compute_skill_folder_comparison_hash(dir.path()).unwrap();
 		let entry = BaselineEntry {
 			installed_name: "skill".to_string(),
 			stored_hash: "stale-lock-hash".to_string(),
-			local_comparison_hashes: vec![fresh],
+			local_comparison_hash: Some(fresh),
+			local_ambiguous: false,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
@@ -2091,7 +2064,8 @@ mod classify_tests {
 		let entry = BaselineEntry {
 			installed_name: "skill".to_string(),
 			stored_hash: "stale-lock-hash".to_string(),
-			local_comparison_hashes: Vec::new(),
+			local_comparison_hash: None,
+			local_ambiguous: false,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
@@ -2102,40 +2076,46 @@ mod classify_tests {
 		);
 	}
 
+	/// ADR 0003 decision 1: a placeholder lock hash says nothing about the
+	/// installed content, so with no readable copy the skill is uncheckable.
 	#[test]
-	fn classify_unknown_lock_hash_as_current() {
+	fn classify_unknown_lock_hash_without_local_copy_is_uncheckable() {
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
 		let entry = BaselineEntry {
 			installed_name: "skill".to_string(),
 			stored_hash: skill::EMPTY_SKILLS_LOCK_DIGEST.to_string(),
-			local_comparison_hashes: Vec::new(),
+			local_comparison_hash: None,
+			local_ambiguous: false,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
 
 		assert_eq!(
 			classify_installed(&entry, dir.path()),
-			(SourceSkillState::InstalledCurrent, None)
+			(SourceSkillState::Uncheckable, Some("local".to_string()))
 		);
 	}
 
+	/// Managed copies that disagree are ambiguous, which the diff reports as
+	/// uncheckable (local), the same as `check`.
 	#[test]
-	fn classify_outdated_when_any_installed_hash_differs() {
+	fn classify_ambiguous_copies_as_uncheckable() {
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
 		let fresh = skill::compute_skill_folder_hash(dir.path()).unwrap();
 		let entry = BaselineEntry {
 			installed_name: "skill".to_string(),
 			stored_hash: fresh.clone(),
-			local_comparison_hashes: vec![fresh, "older-install".to_string()],
+			local_comparison_hash: None,
+			local_ambiguous: true,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
 
 		assert_eq!(
 			classify_installed(&entry, dir.path()),
-			(SourceSkillState::InstalledOutdated, None)
+			(SourceSkillState::Uncheckable, Some("local".to_string()))
 		);
 	}
 
@@ -2146,7 +2126,8 @@ mod classify_tests {
 		let entry = BaselineEntry {
 			installed_name: "old-skill".to_string(),
 			stored_hash: "stale-lock-hash".to_string(),
-			local_comparison_hashes: Vec::new(),
+			local_comparison_hash: None,
+			local_ambiguous: false,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
@@ -2180,7 +2161,8 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "diagnose".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_comparison_hashes: Vec::new(),
+				local_comparison_hash: None,
+				local_ambiguous: false,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2229,7 +2211,8 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "only".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_comparison_hashes: Vec::new(),
+				local_comparison_hash: None,
+				local_ambiguous: false,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2294,7 +2277,8 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "diagnose".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_comparison_hashes: Vec::new(),
+				local_comparison_hash: None,
+				local_ambiguous: false,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2349,7 +2333,8 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "write-a-skill".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_comparison_hashes: Vec::new(),
+				local_comparison_hash: None,
+				local_ambiguous: false,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2445,7 +2430,8 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "legacy".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_comparison_hashes: Vec::new(),
+				local_comparison_hash: None,
+				local_ambiguous: false,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2502,7 +2488,8 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "old-qa".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_comparison_hashes: Vec::new(),
+				local_comparison_hash: None,
+				local_ambiguous: false,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},

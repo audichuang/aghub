@@ -16,7 +16,7 @@ verdict to `SkillUpdateStatus`: `Ambiguous` and `Uncheckable` both become
   compares that copy against upstream, and check heals the lock with the raw
   local hash as before. With no readable copy, or with disagreeing copies, the
   result is `Uncheckable(Local)`, never "current". The sources test
-  `classify_unknown_lock_hash_as_current` contradicts this and is rewritten in
+  `classify_unknown_lock_hash_without_local_copy_is_uncheckable` was rewritten in
   #46, not here.
 - **Decision 2 (disabled agents).** Only managed (enabled) agents' copies form the
   baseline and the ambiguity check. A Master that no managed agent links, including

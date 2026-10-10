@@ -216,12 +216,12 @@ private directory does not count — repair leaves that alone.
 
 **Dead ends. These are disclosed, not routed — do not pick a verb for them:**
 
-- An `orphan-lock` with NOTHING on disk restores only while `source diff` still
-  calls it `installedCurrent`. If the stored hash makes the row
-  `installedOutdated`, `--install-missing` skips it and `--update` refuses
-  because there is no installed copy to resync; a `renamed` row refuses for the
-  same reason. Drop the stale entry with `prune-lock` and install it fresh, or
-  accept that the entry is stale and just prune it.
+- An `orphan-lock` with NOTHING on disk shows as `uncheckable` (`local`) in
+  `source diff` (or `installedOutdated` when upstream moved). `--install-missing`
+  skips both and `--update` refuses because there is no installed copy to
+  resync; a `renamed` row refuses for the same reason. Drop the stale entry with
+  `prune-lock` and install it fresh, or accept that the entry is stale and just
+  prune it.
 - `orphanMaster` — a Master with no lock entry and no slot for this agent — has
   no source to relink from. Wanting it tracked again is the adopt branch, and
   adoption only succeeds on an exact byte match. Not wanting it is
@@ -564,33 +564,18 @@ Two results to read rather than retry:
   `checked: false` means you omitted `--online`; `network`/`timeout` online are
   transient — retry.
   `updateAvailable` / `renamed` route back to section 3.
-- The two commands hash different things, so they disagree legitimately.
-  `source diff` hashes **every installed copy it can find across the agents** —
-  not just the Master — and reports `installedOutdated` if any of them differs.
-  The converse is weaker than it looks: a copy it could not hash is dropped
-  silently, and with no usable hash left it falls back to the lock's, or to
-  `installedCurrent` when even that is unusable. So `installedCurrent` means
-  "nothing it could measure disagreed", not "every copy matches".
-  `check --online` compares the hash recorded in the LOCK
-  (`contentHash` globally, `computedHash` in a project `skills-lock.json` —
-  assert on the right one). Read a disagreement as a question about WHICH copy,
-  and answer it by looking:
-    - diff `installedCurrent` + check `updateAvailable` → every copy diff could
-      MEASURE matches upstream and the lock hash is stale. Refresh it with
-      `apply-update skills <NAME> --yes` (no preview mode — it refuses without
-      `--yes`); `source sync --update` only prints `Nothing to do` here.
-    - diff `installedOutdated` + check `upToDate` → the lock matches upstream and
-      at least one copy on disk does not. That is an edited Master, OR a stale
-      private/forked copy in some agent's own directory that diff also hashed.
-      `doctor --verify-links` can show you that a private real directory occupies
-      a slot, but it never hashes anything, so it cannot tell you WHICH copy
-      drifted — compare the bytes yourself. `apply-update` would overwrite an
-      edited Master, so look before running it. If the edit is wanted, take the
-      authoring branch instead. With a forked private copy, `source sync
---update --yes` refuses that row (`errorCode: "SKILL_UPDATE_CONFLICT"`,
-      "different installed copy alongside its Master", exit 1) and `repair`
-      refuses too; the row stays `installedOutdated` until you move the fork
-      aside.
+- The two commands share one verdict, so on the same scope they agree row for
+  row: diff `installedCurrent` ⇔ check `upToDate`, diff `installedOutdated` ⇔
+  check `updateAvailable`, and `uncheckable` (`local`) in both. A disagreement
+  means the disk changed between the two runs — re-run both.
+    - diff `installedOutdated` on an edited Master: `apply-update` would overwrite
+      that edit, so look before running it. If the edit is wanted, take the
+      authoring branch instead.
+    - When the enabled agents' copies disagree (e.g. a forked private copy next to
+      the Master's Referrer), the row is `uncheckable` (`local`) in both commands,
+      not outdated. `source sync --update --yes` still refuses that conflict
+      (`errorCode: "SKILL_UPDATE_CONFLICT"`); move the fork aside. A lone private
+      copy with no other managed copy IS the baseline and compares normally.
 
 If the user needs proof of runtime invocation rather than file discovery, run a
 smoke prompt inside each requested agent — no aghub command can show that.

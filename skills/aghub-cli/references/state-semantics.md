@@ -92,21 +92,22 @@ Two of those are weaker than they read:
   merely moved. Look for the orphan `notInstalled` first. When that `notInstalled` row has
   the SAME name, the skill merely moved and `source sync --skill <NAME>
 --install-missing` re-points the lock's `skillPath` to the new location.
-- `uncheckable` with `reason: "local"` means hashing the FRESHLY FETCHED source
-  directory failed — it is not a statement about your installed copy (failures
-  hashing installed roots are filtered out silently while the baseline is
-  built).
+- `uncheckable` with `reason: "local"` means there is no local evidence: no
+  readable installed copy (folder gone, nothing a managed agent reads and no
+  Master), or the enabled agents' copies disagree with each other, or the
+  fetched source folder could not be hashed. It is the same verdict
+  `check --online` reports as `uncheckable` `local`.
 
 A missing credential does not reach a row; it fails the whole command. That
 failure is not proof of a missing credential either — the same error covers a
 repo or ref that the token cannot see or that does not exist.
 
-Classification hashes every installed copy it can find across the agents, not
-just the Master, and reports `installedOutdated` when any measured copy differs.
-Read `installedCurrent` as the weaker claim it is: a root that could not be
-hashed is dropped silently, and when nothing measurable is left it falls back to
-the stored lock hash — or, when that is unusable too, returns `installedCurrent`
-optimistically.
+`source diff` and `check --online` share one verdict (the `skill-update` verdict
+module): the local baseline is the copy the enabled agents read, or the Master
+when no enabled agent links it; a disabled agent's copy is ignored.
+`installedCurrent` ⇔ `upToDate`, `installedOutdated` ⇔ `updateAvailable`,
+`uncheckable` (`local`) ⇔ `uncheckable` (`local`). A placeholder or missing lock
+hash with no readable copy is `uncheckable`, never `installedCurrent`.
 
 On a `renamed` row, `name` is the NEW name and `previousName` the old one. The
 human table prints only STATE / NAME / SKILL_PATH / SCOPE, so use `--json`

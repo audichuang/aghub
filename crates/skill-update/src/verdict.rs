@@ -3,8 +3,8 @@
 //!
 //! Surfaces only map the verdict into their own vocabulary: `check` maps
 //! [`Verdict`] onto `SkillUpdateStatus` (`Ambiguous` and `Uncheckable` both
-//! become `Uncheckable{local}`), and `source diff` does the same in its own
-//! module. The baseline discovery, the withheld-Master fallback, the single
+//! become `Uncheckable{local}`), and `source diff` maps it onto its own states
+//! the same way. The baseline discovery, the withheld-Master fallback, the single
 //! folder walk per copy, the placeholder rule and the precedence all live here.
 
 use std::collections::{HashMap, HashSet};
@@ -13,8 +13,6 @@ use std::path::Path;
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::removal::skill_root;
 use aghub_core::skills::resync::stored_master_root;
-
-use crate::EntryInput;
 
 /// Folder hashes for the installed copies of the locked names, plus the two
 /// counters that make the sweep's cost assertable in a test (a timing-based
@@ -60,7 +58,7 @@ pub(crate) fn local_hashes_for_scope(
 	})
 }
 
-fn local_hashes_with(
+pub(crate) fn local_hashes_with(
 	offline: bool,
 	resource_scope: ResourceScope,
 	project_root: Option<&Path>,
@@ -207,22 +205,21 @@ pub enum Verdict {
 /// evidence (applying it restores the folder). Equality is only `UpToDate`
 /// with local evidence; otherwise `Ambiguous` / `Uncheckable`.
 pub fn judge(
-	entry: &EntryInput,
+	stored_hash: Option<&str>,
+	local_comparison_hash: Option<&str>,
+	local_ambiguous: bool,
 	upstream_raw: &str,
 	upstream_comparison: &str,
 ) -> Verdict {
 	let no_local = || {
-		if entry.local_ambiguous {
+		if local_ambiguous {
 			Verdict::Ambiguous
 		} else {
 			Verdict::Uncheckable
 		}
 	};
 	// Compare actual content when readable; stored lock digests remain raw.
-	let (baseline, upstream) = match (
-		entry.local_comparison_hash.as_deref(),
-		entry.stored_hash.as_deref(),
-	) {
+	let (baseline, upstream) = match (local_comparison_hash, stored_hash) {
 		(Some(local), _) => (local, upstream_comparison),
 		(None, Some(stored)) if !lock_hash_unknown(Some(stored)) => {
 			(stored, upstream_raw)
@@ -242,7 +239,7 @@ pub fn judge(
 	// not on disk, which is the one answer a user acts on by doing
 	// nothing. `UpdateAvailable` stays as-is: an update really does exist,
 	// and applying it restores the folder.
-	if entry.local_comparison_hash.is_none() {
+	if local_comparison_hash.is_none() {
 		return no_local();
 	}
 	Verdict::UpToDate

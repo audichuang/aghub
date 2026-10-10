@@ -3964,6 +3964,125 @@ fn a_multi_ref_source_diffs_per_ref_but_still_refuses_to_sync() {
 	);
 }
 
+/// `check --online` and `source diff` judge one fixture identically (#46): a
+/// withheld Master edited locally is outdated in both, and a lock entry whose
+/// folder is gone is `uncheckable(local)` in both — never `installedCurrent`.
+#[cfg(unix)]
+#[test]
+fn check_and_source_diff_agree_on_withheld_edit_and_missing_copy() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "edited", "edited");
+	write_source_skill(src.path(), "gone", "gone");
+	let hash = |n: &str| {
+		skill::compute_skill_folder_hash(&src.path().join(n)).unwrap()
+	};
+
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+	// Withheld Master: no agent links it, so only the store copy exists. Its
+	// content is edited locally. "gone" has no copy anywhere.
+	write_source_skill(&project.path().join(".aghub"), "edited", "edited");
+	std::fs::write(
+		project.path().join(".aghub/edited/SKILL.md"),
+		"---\nname: edited\ndescription: d\n---\nlocal edit\n",
+	)
+	.unwrap();
+	// The lock hashes MATCH upstream: the old diff said `installedCurrent`.
+	std::fs::write(
+		project.path().join("skills-lock.json"),
+		format!(
+			r#"{{"version":1,"skills":{{
+		  "edited":{{"source":"owner/repo","sourceType":"github","ref":"main",
+		    "skillPath":"edited/SKILL.md","computedHash":"{}"}},
+		  "gone":{{"source":"owner/repo","sourceType":"github","ref":"main",
+		    "skillPath":"gone/SKILL.md","computedHash":"{}"}}}}}}"#,
+			hash("edited"),
+			hash("gone"),
+		),
+	)
+	.unwrap();
+
+	let check = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["-p", "check", "skills", "--online", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		check.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&check.stderr)
+	);
+	let check_json: Value = serde_json::from_slice(&check.stdout).unwrap();
+	let check_row = |name: &str| -> Value {
+		check_json
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|e| e["name"] == name)
+			.unwrap_or_else(|| {
+				panic!("check row {name} missing from {check_json}")
+			})
+			.clone()
+	};
+	assert_eq!(
+		check_row("edited")["status"],
+		"updateAvailable",
+		"check json: {check_json}"
+	);
+	assert_eq!(
+		check_row("gone")["status"],
+		"uncheckable",
+		"check json: {check_json}"
+	);
+	assert_eq!(
+		check_row("gone")["reason"],
+		"local",
+		"check json: {check_json}"
+	);
+
+	let diff = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["-p", "source", "diff", "owner/repo", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		diff.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&diff.stderr)
+	);
+	let diff_json: Value = serde_json::from_slice(&diff.stdout).unwrap();
+	let diff_row = |name: &str| -> Value {
+		diff_json[0]["skills"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|s| s["name"] == name)
+			.unwrap_or_else(|| {
+				panic!("diff row {name} missing from {diff_json}")
+			})
+			.clone()
+	};
+	assert_eq!(
+		diff_row("edited")["state"],
+		"installedOutdated",
+		"diff json: {diff_json}"
+	);
+	assert_eq!(
+		diff_row("gone")["state"],
+		"uncheckable",
+		"diff json: {diff_json}"
+	);
+	assert_eq!(
+		diff_row("gone")["reason"],
+		"local",
+		"diff json: {diff_json}"
+	);
+}
+
 /// A host-blind source that resolves to a DIFFERENT forge in each scope.
 ///
 /// `source list` prints the lock's host-blind `SOURCE`, so pasting it back can
