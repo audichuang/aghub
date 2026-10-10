@@ -24,7 +24,6 @@ define_mcp_paths! {
 	global: ".gemini/config/mcp_config.json",
 	project: ".agents/mcp_config.json",
 	data_dir: ".gemini/antigravity",
-	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 // Write `~/.gemini/config/skills` (the vendor's current root) FIRST; the two
@@ -112,8 +111,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Antigravity",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

@@ -29,30 +29,34 @@ use aghub_core::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-fn adapter_test_load_mcps(
-	_: Option<&Path>,
-	scope: ResourceScope,
-) -> aghub_core::Result<Vec<McpServer>> {
-	match scope {
-		ResourceScope::GlobalOnly => Ok(vec![mcp_stdio("global-server")]),
-		ResourceScope::ProjectOnly => Ok(vec![mcp_stdio("project-server")]),
-		ResourceScope::Both => Err(ConfigError::InvalidConfig(
-			"adapter test descriptor should not receive Both".to_string(),
-		)),
-	}
+thread_local! {
+	// Per test thread: the global MCP file the fixture descriptor reads.
+	static ADAPTER_TEST_GLOBAL: std::cell::RefCell<Option<PathBuf>> =
+		const { std::cell::RefCell::new(None) };
 }
 
-fn adapter_test_save_mcps(
-	_: Option<&Path>,
-	scope: ResourceScope,
-	_: &[McpServer],
-) -> aghub_core::Result<()> {
-	match scope {
-		ResourceScope::GlobalOnly | ResourceScope::ProjectOnly => Ok(()),
-		ResourceScope::Both => Err(ConfigError::InvalidConfig(
-			"adapter test descriptor should not receive Both".to_string(),
-		)),
-	}
+fn adapter_test_global_path() -> Option<PathBuf> {
+	ADAPTER_TEST_GLOBAL.with(|path| path.borrow().clone())
+}
+
+fn adapter_test_project_path(root: &Path) -> Option<PathBuf> {
+	Some(root.join("project-mcp.json"))
+}
+
+/// Writes one server per scope under `root` and points the global path there.
+fn seed_adapter_test_mcps(root: &Path) {
+	std::fs::write(
+		root.join("project-mcp.json"),
+		r#"{"mcpServers":{"project-server":{"command":"echo"}}}"#,
+	)
+	.unwrap();
+	let global = root.join("global-mcp.json");
+	std::fs::write(
+		&global,
+		r#"{"mcpServers":{"global-server":{"command":"echo"}}}"#,
+	)
+	.unwrap();
+	ADAPTER_TEST_GLOBAL.with(|path| *path.borrow_mut() = Some(global));
 }
 
 fn no_path() -> Option<PathBuf> {
@@ -68,12 +72,10 @@ static ADAPTER_TEST_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	// Fixture outside the roster; identity is never read here.
 	agent_type: AgentType::Claude,
 	display_name: "Adapter Test",
-	mcp_parse_config: None,
-	mcp_serialize_config: None,
-	load_mcps: adapter_test_load_mcps,
-	save_mcps: adapter_test_save_mcps,
-	mcp_global_path: Some(no_path),
-	mcp_project_path: Some(no_project_path),
+	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
+	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
+	mcp_global_path: Some(adapter_test_global_path),
+	mcp_project_path: Some(adapter_test_project_path),
 	global_data_dir: no_path,
 	capabilities: Capabilities {
 		skills: SkillCapabilities {
@@ -1839,6 +1841,7 @@ fn test_save_scoped_mcps_rejects_both_scope() {
 fn test_adapter_load_mcps_both_merges_project_then_global() {
 	let adapter: &'static AgentDescriptor = &ADAPTER_TEST_DESCRIPTOR;
 	let temp = tempfile::TempDir::new().unwrap();
+	seed_adapter_test_mcps(temp.path());
 	let mcps = adapter
 		.load_mcps(Some(temp.path()), ResourceScope::Both)
 		.unwrap();
@@ -1852,6 +1855,7 @@ fn test_adapter_load_mcps_both_merges_project_then_global() {
 fn test_adapter_load_config_both_works_without_combined_path() {
 	let adapter: &'static AgentDescriptor = &ADAPTER_TEST_DESCRIPTOR;
 	let temp = tempfile::TempDir::new().unwrap();
+	seed_adapter_test_mcps(temp.path());
 	let config = adapter
 		.load_config(Some(temp.path()), ResourceScope::Both)
 		.unwrap();
@@ -1883,6 +1887,38 @@ fn test_adapter_mcp_config_path_hides_both_scope() {
 		adapter.mcp_config_path(Some(temp.path()), ResourceScope::Both),
 		None
 	);
+}
+
+/// MCP is refused, not silently dropped: a save that returned `Ok` would let
+/// a multi-agent batch report a server aghub never wrote anywhere.
+#[test]
+fn dsh_refuses_to_persist_mcp_servers() {
+	let adapter = aghub_core::create_adapter(AgentType::Dsh);
+	assert!(adapter
+		.load_mcps(None, ResourceScope::Both)
+		.expect("reading MCP servers is an empty list, not an error")
+		.is_empty());
+	match adapter
+		.save_mcps(None, ResourceScope::GlobalOnly, &[])
+		.expect_err("dsh has no writable MCP config")
+	{
+		ConfigError::UnsupportedOperation { message, .. } => assert!(
+			message.contains("dsh"),
+			"the refusal must name the agent: {message}"
+		),
+		other => panic!("expected unsupported, got {other}"),
+	}
+	// A concrete-scope read is refused too, naming the agent.
+	match adapter
+		.load_mcps(None, ResourceScope::GlobalOnly)
+		.expect_err("dsh has no readable MCP config at a concrete scope")
+	{
+		ConfigError::UnsupportedOperation { message, .. } => assert!(
+			message.contains("dsh"),
+			"the refusal must name the agent: {message}"
+		),
+		other => panic!("expected unsupported, got {other}"),
+	}
 }
 
 #[test]

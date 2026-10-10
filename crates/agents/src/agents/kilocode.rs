@@ -60,34 +60,6 @@ fn global_data_dir() -> Option<PathBuf> {
 	config_dir()
 }
 
-fn load_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	load_scoped_mcps(
-		project_root,
-		scope,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		json_opencode::parse,
-	)
-}
-
-fn save_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-	mcps: &[crate::McpServer],
-) -> crate::Result<()> {
-	save_scoped_mcps(
-		project_root,
-		scope,
-		mcps,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		json_opencode::serialize,
-	)
-}
-
 define_skill_paths! {
 	symmetric: ".kilocode/skills",
 }
@@ -98,8 +70,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "KiloCode",
 	mcp_parse_config: Some(json_opencode::parse),
 	mcp_serialize_config: Some(json_opencode::serialize),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

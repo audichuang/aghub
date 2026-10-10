@@ -8,10 +8,9 @@ pub mod models;
 pub mod sub_agents;
 
 pub use descriptor::{
-	AgentDescriptor, Capabilities, GlobalSkillPaths, LoadMcpsFn,
-	LoadSubAgentsFn, McpCapabilities, McpParseFn, McpSerializeFn,
-	ProjectSkillPaths, SaveMcpsFn, SaveSubAgentsFn, ScopeSupport,
-	SkillCapabilities, SubAgentCapabilities,
+	AgentDescriptor, Capabilities, GlobalSkillPaths, LoadSubAgentsFn,
+	McpCapabilities, McpParseFn, McpSerializeFn, ProjectSkillPaths,
+	SaveSubAgentsFn, ScopeSupport, SkillCapabilities, SubAgentCapabilities,
 };
 pub use env_overrides::PATH_OVERRIDE_VARS;
 pub use errors::{ConfigError, RejectedTarget, RejectedTargetReader, Result};

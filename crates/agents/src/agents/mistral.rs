@@ -29,34 +29,6 @@ fn global_data_dir() -> Option<PathBuf> {
 	vibe_home()
 }
 
-fn load_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	load_scoped_mcps(
-		project_root,
-		scope,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		toml_mistral::parse,
-	)
-}
-
-fn save_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-	mcps: &[crate::McpServer],
-) -> crate::Result<()> {
-	save_scoped_mcps(
-		project_root,
-		scope,
-		mcps,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		toml_mistral::serialize,
-	)
-}
-
 define_skill_paths! {
 	symmetric: ".vibe/skills",
 }
@@ -67,8 +39,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Mistral Le Chat",
 	mcp_parse_config: Some(toml_mistral::parse),
 	mcp_serialize_config: Some(toml_mistral::serialize),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

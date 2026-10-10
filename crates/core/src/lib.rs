@@ -26,10 +26,9 @@ pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub use aghub_agents::{descriptor, errors, format, models};
 pub use aghub_agents::{
 	AgentConfig, AgentDescriptor, AgentType, Capabilities, ConfigError,
-	ConfigSource, LoadMcpsFn, LoadSubAgentsFn, McpParseFn, McpSerializeFn,
-	McpServer, McpTransport, RejectedTarget, RejectedTargetReader,
-	ResourceScope, Result, SaveMcpsFn, SaveSubAgentsFn, Skill, SubAgent,
-	PATH_OVERRIDE_VARS,
+	ConfigSource, LoadSubAgentsFn, McpParseFn, McpSerializeFn, McpServer,
+	McpTransport, RejectedTarget, RejectedTargetReader, ResourceScope, Result,
+	SaveSubAgentsFn, Skill, SubAgent, PATH_OVERRIDE_VARS,
 };
 
 #[cfg(feature = "testing")]

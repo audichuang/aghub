@@ -40,42 +40,12 @@ fn global_data_dir() -> Option<std::path::PathBuf> {
 	zed_config_dir()
 }
 
-fn load_mcps(
-	project_root: Option<&std::path::Path>,
-	scope: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	load_scoped_mcps(
-		project_root,
-		scope,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		parse_mcp_config,
-	)
-}
-
-fn save_mcps(
-	project_root: Option<&std::path::Path>,
-	scope: crate::ResourceScope,
-	mcps: &[crate::McpServer],
-) -> crate::Result<()> {
-	save_scoped_mcps(
-		project_root,
-		scope,
-		mcps,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		serialize_mcp_config,
-	)
-}
-
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "zed",
 	agent_type: crate::AgentType::Zed,
 	display_name: "Zed",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

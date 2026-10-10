@@ -19,7 +19,6 @@ define_mcp_paths! {
 	global: ".zcode/cli/config.json",
 	project: ".zcode/config.json",
 	data_dir: ".zcode",
-	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 // Write the private `.zcode/skills` first; `.agents/skills` must stay a READ
@@ -55,8 +54,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "ZCode",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

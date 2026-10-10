@@ -1,5 +1,4 @@
 use crate::descriptor::*;
-use crate::errors::ConfigError;
 use std::path::{Path, PathBuf};
 
 // DeepSeek Harness (`@deepseek-ai/dsh`) — not Deep Code, not DeepSeek-TUI.
@@ -40,25 +39,6 @@ fn global_data_dir() -> Option<PathBuf> {
 	dsh_home()
 }
 
-fn load_mcps(
-	_: Option<&Path>,
-	_: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	Ok(Vec::new())
-}
-
-fn save_mcps(
-	_: Option<&Path>,
-	_: crate::ResourceScope,
-	_: &[crate::McpServer],
-) -> crate::Result<()> {
-	Err(ConfigError::unsupported_operation(
-		"persist",
-		"MCP server",
-		"dsh",
-	))
-}
-
 fn global_skills_paths() -> Vec<PathBuf> {
 	[dsh_home(), dsh_agents_home()]
 		.into_iter()
@@ -85,8 +65,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "DeepSeek Harness",
 	mcp_parse_config: None,
 	mcp_serialize_config: None,
-	load_mcps,
-	save_mcps,
 	mcp_global_path: None,
 	mcp_project_path: None,
 	global_data_dir,
@@ -236,20 +214,5 @@ mod tests {
 				"`$DSH_AGENTS_HOME` is ~/.agents, never the XDG dir: {paths:?}"
 			);
 		}
-	}
-
-	/// MCP is refused, not silently dropped: a save that returned `Ok` would let
-	/// a multi-agent batch report a server aghub never wrote anywhere.
-	#[test]
-	fn dsh_refuses_to_persist_mcp_servers() {
-		assert!(load_mcps(None, crate::ResourceScope::GlobalOnly)
-			.expect("reading MCP servers is an empty list, not an error")
-			.is_empty());
-		let error = save_mcps(None, crate::ResourceScope::GlobalOnly, &[])
-			.expect_err("dsh has no writable MCP config");
-		assert!(
-			error.to_string().contains("dsh"),
-			"the refusal must name the agent: {error}"
-		);
 	}
 }

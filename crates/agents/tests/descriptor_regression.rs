@@ -687,10 +687,14 @@ fn opencode_project_mcp_defaults_to_root_config() {
 		),
 	);
 
-	(agents::opencode::DESCRIPTOR.save_mcps)(
+	let opencode = &agents::opencode::DESCRIPTOR;
+	aghub_agents::descriptor::save_scoped_mcps(
 		Some(project.path()),
 		ResourceScope::ProjectOnly,
 		&[server],
+		opencode.mcp_global_path,
+		opencode.mcp_project_path,
+		opencode.mcp_serialize_config.unwrap(),
 	)
 	.unwrap();
 

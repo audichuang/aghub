@@ -34,34 +34,6 @@ fn global_data_dir() -> Option<PathBuf> {
 	grok_home()
 }
 
-fn load_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	load_scoped_mcps(
-		project_root,
-		scope,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		mcp_strategy::parse_toml_grok_mcp_servers,
-	)
-}
-
-fn save_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-	mcps: &[crate::McpServer],
-) -> crate::Result<()> {
-	save_scoped_mcps(
-		project_root,
-		scope,
-		mcps,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		mcp_strategy::serialize_toml_grok_mcp_servers,
-	)
-}
-
 // Grok's own docs (`~/.grok/docs/user-guide/08-skills.md`) say it scans
 // `.agents/skills/` "at each tier (alongside `.grok/`)" — so the universal
 // Master slot is read at BOTH global and project scope, not just project.
@@ -131,8 +103,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Grok",
 	mcp_parse_config: Some(mcp_strategy::parse_toml_grok_mcp_servers),
 	mcp_serialize_config: Some(mcp_strategy::serialize_toml_grok_mcp_servers),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

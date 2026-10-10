@@ -107,13 +107,14 @@ impl AgentAdapter for &'static AgentDescriptor {
 			));
 		}
 
-		if let Some(path) = self.mcp_config_path(project_root, scope) {
-			if let Some(parse) = self.mcp_parse_config {
-				return crate::descriptor::load_mcps_from_file(&path, parse);
+		// No declared path (or no dialect) for this scope reads as empty.
+		let path = self.mcp_config_path(project_root, scope);
+		match (path, self.mcp_parse_config) {
+			(Some(path), Some(parse)) => {
+				crate::descriptor::load_mcps_from_file(&path, parse)
 			}
+			_ => Ok(Vec::new()),
 		}
-
-		(self.load_mcps)(project_root, scope)
 	}
 
 	fn get_skills_paths(
@@ -200,26 +201,22 @@ impl AgentAdapter for &'static AgentDescriptor {
 			));
 		}
 
-		if let Some((id, path)) = MCP_PATH_OVERRIDE.with(|p| p.borrow().clone())
-		{
-			if id == self.id {
-				if let Some(serialize) = self.mcp_serialize_config {
-					return crate::descriptor::save_mcps_to_file(
-						&path, mcps, serialize,
-					);
-				}
-			}
-		}
-
-		if let Some(path) = self.mcp_config_path(project_root, scope) {
-			if let Some(serialize) = self.mcp_serialize_config {
-				return crate::descriptor::save_mcps_to_file(
-					&path, mcps, serialize,
-				);
-			}
-		}
-
-		(self.save_mcps)(project_root, scope, mcps)
+		let Some(serialize) = self.mcp_serialize_config else {
+			return Err(crate::errors::ConfigError::unsupported_operation(
+				"persist",
+				"MCP server",
+				self.id,
+			));
+		};
+		// `mcp_config_path` already applies the test override.
+		let path =
+			self.mcp_config_path(project_root, scope).ok_or_else(|| {
+				crate::errors::ConfigError::InvalidConfig(format!(
+					"MCP path unavailable for {:?} scope",
+					scope
+				))
+			})?;
+		crate::descriptor::save_mcps_to_file(&path, mcps, serialize)
 	}
 
 	fn load_sub_agents(

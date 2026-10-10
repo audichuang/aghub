@@ -44,8 +44,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "OpenAI Codex",
 	mcp_parse_config: Some(mcp_strategy::PARSE_TOML),
 	mcp_serialize_config: Some(mcp_strategy::SERIALIZE_TOML),
-	load_mcps: mcp::load,
-	save_mcps: mcp::save,
 	mcp_global_path: Some(mcp::global_path),
 	mcp_project_path: Some(mcp::project_path),
 	global_data_dir,

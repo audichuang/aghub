@@ -247,8 +247,9 @@ step-2 row naming a module with no `pub mod`, and a missing step-6 row, fail the
 BUILD. A missing step-7 asset fails no build, lint or typecheck — only
 `just preflight`'s desktop unit tests catch it.
 
-1. `crates/agents/src/agents/<name>.rs` — descriptor (naming gotchas:
-   `crates/agents/AGENTS.md`)
+1. `crates/agents/src/agents/<name>.rs` — descriptor — declares the MCP binding
+   (two paths + parse/serialize; all `None` when the agent has no MCP) and
+   writes no MCP load/save fns (naming gotchas: `crates/agents/AGENTS.md`)
 2. `crates/agents/src/agents/mod.rs` — `pub mod`, **and ONE `agent_roster!`
    row**: `Variant => "id", module, ["alias", …];`. That macro emits the
    `AgentType` enum, `ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and

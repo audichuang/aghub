@@ -46,33 +46,6 @@ fn global_data_dir() -> Option<PathBuf> {
 		.map(|path| expand_home(path, home_dir().as_deref()))
 		.or_else(|| home_dir().map(|home| home.join(".openclaw")))
 }
-fn load_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	load_scoped_mcps(
-		project_root,
-		scope,
-		Some(mcp_global_path),
-		None,
-		json_openclaw::parse,
-	)
-}
-fn save_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-	mcps: &[crate::McpServer],
-) -> crate::Result<()> {
-	save_scoped_mcps(
-		project_root,
-		scope,
-		mcps,
-		Some(mcp_global_path),
-		None,
-		json_openclaw::serialize,
-	)
-}
-
 /// Return the global skills directories for OpenClaw, checking fallback dirs.
 ///
 /// Priority: `.openclaw` → `.clawdbot` → `.moltbot`, defaulting to `.openclaw`.
@@ -127,8 +100,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "OpenClaw",
 	mcp_parse_config: Some(json_openclaw::parse),
 	mcp_serialize_config: Some(json_openclaw::serialize),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: None,
 	global_data_dir,

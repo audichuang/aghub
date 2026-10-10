@@ -1,7 +1,7 @@
 use crate::descriptor::*;
 use crate::format::{json_map, mcp_policy};
 use crate::json_map_dialect;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // Cline spells streamable HTTP in camelCase and toggles with `disabled`.
 json_map_dialect!(json_map::Dialect {
@@ -24,34 +24,6 @@ fn global_data_dir() -> Option<PathBuf> {
 
 const MCP_GLOBAL_PATH: Option<OptionalPathFn> = Some(mcp_global_path);
 const MCP_PROJECT_PATH: Option<OptionalProjectPathFn> = None;
-
-fn load_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	load_scoped_mcps(
-		project_root,
-		scope,
-		MCP_GLOBAL_PATH,
-		MCP_PROJECT_PATH,
-		parse_mcp_config,
-	)
-}
-
-fn save_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-	mcps: &[crate::McpServer],
-) -> crate::Result<()> {
-	save_scoped_mcps(
-		project_root,
-		scope,
-		mcps,
-		MCP_GLOBAL_PATH,
-		MCP_PROJECT_PATH,
-		serialize_mcp_config,
-	)
-}
 
 // Prefer the vendor-specific project entry; retain the shared read path for
 // discovery and migration of existing installs.
@@ -82,8 +54,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Cline",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: MCP_GLOBAL_PATH,
 	mcp_project_path: MCP_PROJECT_PATH,
 	global_data_dir,

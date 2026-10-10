@@ -13,7 +13,6 @@ json_map_dialect!(json_map::Dialect {
 
 define_mcp_paths! {
 	symmetric: ".cursor/mcp.json",
-	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 // npx-`skills` layout: Cursor owns ONLY its own per-agent dir (which holds
@@ -47,8 +46,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Cursor",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

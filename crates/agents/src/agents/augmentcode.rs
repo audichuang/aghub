@@ -1,6 +1,6 @@
 use crate::define_skill_paths;
 use crate::descriptor::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // The Auggie CLI persists MCP servers in ~/.augment/settings.json (a top-level
 // "mcpServers" map). There is no project-level MCP file — project servers are
@@ -12,33 +12,6 @@ fn mcp_global_path() -> Option<PathBuf> {
 fn global_data_dir() -> Option<PathBuf> {
 	home_dir().map(|home| home.join(".augment"))
 }
-fn load_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	load_scoped_mcps(
-		project_root,
-		scope,
-		Some(mcp_global_path),
-		None,
-		mcp_strategy::parse_json_map_mcp_servers,
-	)
-}
-fn save_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-	mcps: &[crate::McpServer],
-) -> crate::Result<()> {
-	save_scoped_mcps(
-		project_root,
-		scope,
-		mcps,
-		Some(mcp_global_path),
-		None,
-		mcp_strategy::serialize_json_map_mcp_servers,
-	)
-}
-
 define_skill_paths! {
 	symmetric: ".augment/skills",
 }
@@ -49,8 +22,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "AugmentCode",
 	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
 	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: None,
 	global_data_dir,

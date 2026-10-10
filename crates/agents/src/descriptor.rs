@@ -12,14 +12,6 @@ pub type McpParseFn = fn(&str) -> Result<AgentConfig>;
 /// Serialize function type for MCP-backed agent configuration content
 pub type McpSerializeFn = fn(&AgentConfig, Option<&str>) -> Result<String>;
 
-/// Load function type for agent MCP configuration
-pub type LoadMcpsFn =
-	fn(Option<&Path>, ResourceScope) -> Result<Vec<McpServer>>;
-
-/// Save function type for agent MCP configuration
-pub type SaveMcpsFn =
-	fn(Option<&Path>, ResourceScope, &[McpServer]) -> Result<()>;
-
 /// Load function type for agent sub-agent configuration.
 /// The implementation fully owns all I/O; no path is exposed.
 pub type LoadSubAgentsFn =
@@ -85,17 +77,15 @@ pub struct AgentDescriptor {
 	/// descriptor read it directly instead of parsing `id` back into an `AgentType`.
 	pub agent_type: crate::AgentType,
 	pub display_name: &'static str,
-	/// Parse raw MCP config content into AgentConfig.
+	/// Parse raw MCP config content into AgentConfig. `None` = no MCP I/O.
 	pub mcp_parse_config: Option<McpParseFn>,
-	/// Serialize MCP config content back to raw text.
+	/// Serialize MCP config content back to raw text. `None` = no MCP I/O.
 	pub mcp_serialize_config: Option<McpSerializeFn>,
-	/// Load MCPs for the requested scope. The descriptor owns all I/O.
-	pub load_mcps: LoadMcpsFn,
-	/// Persist MCPs for the requested scope. The descriptor owns all I/O.
-	pub save_mcps: SaveMcpsFn,
-	/// Global MCP config path for display, validation, and discovery.
+	/// Global MCP config path. The core adapter reads it with `mcp_parse_config`
+	/// and writes it with `mcp_serialize_config`; nothing else derives MCP I/O.
 	pub mcp_global_path: Option<OptionalPathFn>,
-	/// Project MCP config path for display, validation, and discovery.
+	/// Project MCP config path. The core adapter reads it with `mcp_parse_config`
+	/// and writes it with `mcp_serialize_config`; nothing else derives MCP I/O.
 	pub mcp_project_path: Option<OptionalProjectPathFn>,
 	/// Agent-specific global data directory used for availability checks.
 	pub global_data_dir: fn() -> Option<PathBuf>,

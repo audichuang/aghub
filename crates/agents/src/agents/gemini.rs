@@ -13,7 +13,6 @@ json_map_dialect!(json_map::Dialect {
 
 define_mcp_paths! {
 	symmetric: ".gemini/settings.json",
-	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 // Prefer the vendor-specific project entry; retain the shared read path for
@@ -41,8 +40,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Gemini CLI",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

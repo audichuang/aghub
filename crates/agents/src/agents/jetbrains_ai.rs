@@ -1,6 +1,5 @@
 use crate::descriptor::*;
-use crate::errors::ConfigError;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // JetBrains AI Assistant configures MCP only through the IDE GUI (Settings |
 // Tools | AI Assistant | Model Context Protocol), with a global/project "Level"
@@ -13,32 +12,12 @@ fn global_data_dir() -> Option<PathBuf> {
 	// ~/Library/Application Support/JetBrains (macOS), ~/.config/JetBrains (Linux).
 	dirs::config_dir().map(|dir| dir.join("JetBrains"))
 }
-fn load_mcps(
-	_: Option<&Path>,
-	_: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	Ok(Vec::new())
-}
-fn save_mcps(
-	_: Option<&Path>,
-	_: crate::ResourceScope,
-	_: &[crate::McpServer],
-) -> crate::Result<()> {
-	Err(ConfigError::unsupported_operation(
-		"persist",
-		"MCP server",
-		"jetbrains-ai",
-	))
-}
-
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "jetbrains-ai",
 	agent_type: crate::AgentType::JetBrainsAi,
 	display_name: "JetBrains AI",
 	mcp_parse_config: None,
 	mcp_serialize_config: None,
-	load_mcps,
-	save_mcps,
 	mcp_global_path: None,
 	mcp_project_path: None,
 	global_data_dir,

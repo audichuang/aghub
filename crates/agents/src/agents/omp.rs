@@ -22,7 +22,6 @@ define_mcp_paths! {
 	global: ".omp/agent/mcp.json",
 	project: ".omp/mcp.json",
 	data_dir: ".omp/agent",
-	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 // Skills: own dir plus the universal `.agents/skills` Master, at BOTH scopes —
@@ -58,8 +57,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Oh My Pi",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

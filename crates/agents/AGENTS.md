@@ -8,7 +8,7 @@
 Role map (not a full file tree — `ls` / codegraph for that):
 
 - `descriptor.rs` — `AgentDescriptor` + capabilities + path fn types
-- `macros.rs` — `define_mcp_paths!` / `define_skill_paths!` (prefer these over hand-written path fns) and `json_map_dialect!` (every `json_map` agent uses it)
+- `macros.rs` — `define_mcp_paths!` generates the MCP path fns + `global_data_dir` (no I/O); `define_skill_paths!` likewise for skills (prefer these over hand-written path fns); `json_map_dialect!` (every `json_map` agent uses it)
 - `models.rs` — `AgentConfig`, `McpServer`, `McpTransport`, `Skill`, `AgentSelection`, and `AgentType`'s re-export plus `parse_list` (the enum itself comes from `agents/mod.rs`)
 - `agents/` — one descriptor per agent, plus the `agent_roster!` macro in `mod.rs` that declares the roster ONCE and emits `AgentType`, `AgentType::ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and `ALL_DESCRIPTORS` from it (so `models.rs` re-exports `AgentType` rather than defining it); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
 - `sub_agents.rs` — markdown sub-agent I/O + `SubAgentLayout`: `Flat { suffix }` (`.md` for Claude/Grok/OpenCode, `.agent.md` for Copilot) vs `Nested { file_name }` (Antigravity's `<name>/agent.md`). The layout decides the read filter, the NAME and the written filename at once — get one wrong and aghub round-trips with itself while the vendor sees nothing. Frontmatter keys aghub does not model ride the model as `SubAgent::extra_frontmatter` (deserialized through a flattened `extra`), with the destination file read back only when the model carries none — a save rewrites EVERY sub-agent in the directory, not just the edited one, so without this creating one strips its siblings' `tools`/`model`/`color`. Codex is not here: its sub-agents are TOML (`agents/codex/sub_agent.rs`)
@@ -16,7 +16,7 @@ Role map (not a full file tree — `ls` / codegraph for that):
 
 ## KEY TYPES
 
-**`AgentDescriptor`** (static per agent): holds id, display_name, fn pointers for load_mcps/save_mcps/mcp_parse_config/mcp_serialize_config, path fns, capabilities.
+**`AgentDescriptor`** (static per agent): holds id, display_name, the MCP binding (`mcp_global_path`, `mcp_project_path`, `mcp_parse_config`, `mcp_serialize_config` — all four `None` = no MCP), skill/sub-agent path fns, capabilities. The core adapter (`crates/core/src/adapter.rs`) is the only MCP reader/writer: it checks the scope capability, resolves the declared path, parses it (missing file = empty) and writes the backing file with the declared serializer. A descriptor carries no MCP I/O of its own.
 
 **`Capabilities`**: `{ skills: SkillCapabilities, mcp: McpCapabilities, sub_agents: SubAgentCapabilities }` — scopes (global/project), transport support (stdio/remote), enable/disable toggle.
 

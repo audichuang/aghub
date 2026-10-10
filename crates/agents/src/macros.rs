@@ -1,7 +1,7 @@
 //! Macros for generating agent path helper functions.
 //!
 //! These macros reduce boilerplate in agent descriptor files by generating
-//! common path and I/O functions.
+//! common path functions.
 
 // ── MCP Dialect Macro ────────────────────────────────────────────────────────
 
@@ -46,15 +46,11 @@ macro_rules! json_map_dialect {
 /// - `mcp_global_path()` - returns global MCP config path
 /// - `mcp_project_path(root)` - returns project MCP config path
 /// - `global_data_dir()` - returns global data directory (parent of mcp_global)
-/// - `load_mcps(project_root, scope)` - loads MCPs for scope
-/// - `save_mcps(project_root, scope, mcps)` - saves MCPs for scope
 ///
 /// # Symmetric variant (same base path for global and project)
 /// ```rust,ignore
 /// define_mcp_paths! {
 ///     symmetric: ".claude/settings.json",
-///     strategy: mcp_strategy::parse_json_map_mcp_servers,
-///               mcp_strategy::serialize_json_map_mcp_servers,
 /// }
 /// ```
 ///
@@ -64,8 +60,6 @@ macro_rules! json_map_dialect {
 ///     global: ".codeium/windsurf/mcp_config.json",
 ///     project: ".windsurf/mcp_config.json",
 ///     data_dir: ".codeium/windsurf",
-///     strategy: mcp_strategy::parse_json_map_mcp_servers,
-///               mcp_strategy::serialize_json_map_mcp_servers,
 /// }
 /// ```
 #[macro_export]
@@ -73,7 +67,6 @@ macro_rules! define_mcp_paths {
 	// Symmetric variant - same path relative to home and project
 	(
 		symmetric: $path:literal,
-		strategy: $parse_fn:path, $serialize_fn:path,
 	) => {
 		fn mcp_global_path() -> Option<std::path::PathBuf> {
 			$crate::descriptor::home_dir().map(|home| home.join($path))
@@ -88,32 +81,6 @@ macro_rules! define_mcp_paths {
 				home.join($path).parent().map(|p| p.to_path_buf())
 			})
 		}
-		fn load_mcps(
-			project_root: Option<&std::path::Path>,
-			scope: $crate::ResourceScope,
-		) -> $crate::Result<Vec<$crate::McpServer>> {
-			$crate::descriptor::load_scoped_mcps(
-				project_root,
-				scope,
-				Some(mcp_global_path),
-				Some(mcp_project_path),
-				$parse_fn,
-			)
-		}
-		fn save_mcps(
-			project_root: Option<&std::path::Path>,
-			scope: $crate::ResourceScope,
-			mcps: &[$crate::McpServer],
-		) -> $crate::Result<()> {
-			$crate::descriptor::save_scoped_mcps(
-				project_root,
-				scope,
-				mcps,
-				Some(mcp_global_path),
-				Some(mcp_project_path),
-				$serialize_fn,
-			)
-		}
 	};
 
 	// Asymmetric variant - different paths for global and project
@@ -121,7 +88,6 @@ macro_rules! define_mcp_paths {
 		global: $global_path:literal,
 		project: $project_path:literal,
 		data_dir: $data_dir:literal,
-		strategy: $parse_fn:path, $serialize_fn:path,
 	) => {
 		fn mcp_global_path() -> Option<std::path::PathBuf> {
 			$crate::descriptor::home_dir().map(|home| home.join($global_path))
@@ -133,32 +99,6 @@ macro_rules! define_mcp_paths {
 		}
 		fn global_data_dir() -> Option<std::path::PathBuf> {
 			$crate::descriptor::home_dir().map(|home| home.join($data_dir))
-		}
-		fn load_mcps(
-			project_root: Option<&std::path::Path>,
-			scope: $crate::ResourceScope,
-		) -> $crate::Result<Vec<$crate::McpServer>> {
-			$crate::descriptor::load_scoped_mcps(
-				project_root,
-				scope,
-				Some(mcp_global_path),
-				Some(mcp_project_path),
-				$parse_fn,
-			)
-		}
-		fn save_mcps(
-			project_root: Option<&std::path::Path>,
-			scope: $crate::ResourceScope,
-			mcps: &[$crate::McpServer],
-		) -> $crate::Result<()> {
-			$crate::descriptor::save_scoped_mcps(
-				project_root,
-				scope,
-				mcps,
-				Some(mcp_global_path),
-				Some(mcp_project_path),
-				$serialize_fn,
-			)
 		}
 	};
 }

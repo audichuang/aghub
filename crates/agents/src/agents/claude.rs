@@ -11,32 +11,6 @@ fn mcp_project_path(root: &Path) -> Option<PathBuf> {
 fn global_data_dir() -> Option<PathBuf> {
 	home_dir().map(|home| home.join(".claude"))
 }
-fn load_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	load_scoped_mcps(
-		project_root,
-		scope,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		mcp_strategy::parse_json_map_mcp_servers,
-	)
-}
-fn save_mcps(
-	project_root: Option<&Path>,
-	scope: crate::ResourceScope,
-	mcps: &[crate::McpServer],
-) -> crate::Result<()> {
-	save_scoped_mcps(
-		project_root,
-		scope,
-		mcps,
-		Some(mcp_global_path),
-		Some(mcp_project_path),
-		mcp_strategy::serialize_json_map_mcp_servers,
-	)
-}
 fn global_skills_paths() -> Vec<PathBuf> {
 	home_dir()
 		.map(|home| vec![home.join(".claude/skills")])
@@ -95,8 +69,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Claude Code",
 	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
 	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
-	load_mcps,
-	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,

@@ -1,26 +1,8 @@
 use crate::descriptor::*;
-use crate::errors::ConfigError;
 use std::path::{Path, PathBuf};
 
 fn global_data_dir() -> Option<PathBuf> {
 	home_dir().map(|home| home.join(".pi/agent"))
-}
-fn load_mcps(
-	_: Option<&Path>,
-	_: crate::ResourceScope,
-) -> crate::Result<Vec<crate::McpServer>> {
-	Ok(Vec::new())
-}
-fn save_mcps(
-	_: Option<&Path>,
-	_: crate::ResourceScope,
-	_: &[crate::McpServer],
-) -> crate::Result<()> {
-	Err(ConfigError::unsupported_operation(
-		"persist",
-		"MCP server",
-		"pi",
-	))
 }
 // Pi's own skills doc lists the universal Master slot alongside its private dir
 // at BOTH scopes: global `~/.pi/agent/skills` + `~/.agents/skills`, project
@@ -53,8 +35,6 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	display_name: "Pi Coding Agent",
 	mcp_parse_config: None,
 	mcp_serialize_config: None,
-	load_mcps,
-	save_mcps,
 	mcp_global_path: None,
 	mcp_project_path: None,
 	global_data_dir,
