@@ -16,10 +16,12 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 	// path-free wording, and only this surface has a status to pick. The CODE
 	// comes from the shared mapping on `error.code()`.
 	match error {
-		ResyncError::Locked(_) => SafeResyncError {
-			message: "Another aghub process is mutating skills; retry shortly",
-			status: Status::Conflict,
-		},
+		ResyncError::Locked(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+			SafeResyncError {
+				message: "Another aghub process is mutating skills; retry shortly",
+				status: Status::Conflict,
+			}
+		}
 		ResyncError::StaleFetch(_) => SafeResyncError {
 			message:
 				"The skill's source changed while this sync was fetching; \
@@ -48,7 +50,9 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 			message: "Refusing to sync out-of-tree target",
 			status: Status::BadRequest,
 		},
-		ResyncError::Hash(_) | ResyncError::Swap(_) => SafeResyncError {
+		ResyncError::Hash(_)
+		| ResyncError::Swap(_)
+		| ResyncError::Locked(_) => SafeResyncError {
 			message: "Failed to sync skill",
 			status: Status::InternalServerError,
 		},
@@ -73,7 +77,10 @@ mod tests {
 			ResyncError::Hash(sentinel.to_string()),
 			ResyncError::Swap(sentinel.to_string()),
 			ResyncError::LockUpdate(sentinel.to_string()),
-			ResyncError::Locked(sentinel.to_string()),
+			ResyncError::Locked(std::io::Error::new(
+				std::io::ErrorKind::WouldBlock,
+				sentinel,
+			)),
 			ResyncError::StaleFetch(sentinel.to_string()),
 			ResyncError::Conflict(sentinel.to_string()),
 			// Carries a caller-supplied name, and used to be the one arm with a

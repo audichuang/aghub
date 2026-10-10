@@ -13563,12 +13563,7 @@ fn what_the_tool_reports_matches_what_is_on_disk() {
 		);
 	}
 
-	// --- (3) `add` must report the skill ON DISK, not the one it just parsed.
-	//
-	// The materializer preserves a pre-existing Master rather than overwriting
-	// it, so re-adding an edited source for a second agent wrote nothing — and
-	// the response echoed the SOURCE's description and version back, telling
-	// the user their edit had landed. `add` said B while `get` said A.
+	// --- (3) A different local owner is refused; the Master stays A.
 	{
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
@@ -13615,22 +13610,22 @@ fn what_the_tool_reports_matches_what_is_on_disk() {
 			])
 			.output()
 			.unwrap();
-		assert!(second.status.success());
-		let added: Value = serde_json::from_slice(&second.stdout).unwrap();
-		assert_eq!(
-			added["description"], "FROM-A",
-			"add must report the master that is on disk, not the source it \
-			 just parsed: {added}"
+		// A different local owner is refused, so the Master stays A.
+		assert!(!second.status.success());
+		let refusal = format!(
+			"{}{}",
+			String::from_utf8_lossy(&second.stdout),
+			String::from_utf8_lossy(&second.stderr)
 		);
-		assert_eq!(added["version"], "A.0.0", "{added}");
+		assert!(refusal.contains("already owned by source"), "{refusal}");
 
-		// …and `get`, seconds later, must give the same answer.
+		// …and `get` still reports the Master that is on disk: A.
 		let got = isolated_cli(home.path(), state.path())
-			.args(["-g", "-a", "claude", "--json", "get", "skills"])
+			.args(["-g", "-a", "cursor", "--json", "get", "skills"])
 			.output()
 			.unwrap();
 		let rows: Value = serde_json::from_slice(&got.stdout).unwrap();
-		assert_eq!(rows[0]["description"], added["description"], "{rows}");
+		assert_eq!(rows[0]["description"], "FROM-A", "{rows}");
 	}
 }
 

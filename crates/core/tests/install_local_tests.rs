@@ -7,7 +7,7 @@
 //! 4. Untracked master adoption: adopted and stamped into lock when content matches.
 //! 5. Untracked master refusal: rejected when content differs.
 //! 6. Custom install name: installed under requested name, frontmatter rewritten.
-//! 7. Idempotent re-import: does not restamp lock with different source if unchanged.
+//! 7. Re-import from a different local path: refused like any other owner, with the Master present or missing.
 
 #![cfg(unix)]
 
@@ -414,7 +414,7 @@ fn install_local_skill_with_custom_name_installs_and_rewrites_frontmatter() {
 }
 
 #[test]
-fn reimport_from_different_local_path_is_a_noop_and_does_not_restamp_lock() {
+fn reimport_from_different_local_path_is_refused_when_master_exists() {
 	with_isolated_env(|home, _data| {
 		let first = home.join("first-source/dup-skill");
 		std::fs::create_dir_all(&first).unwrap();
@@ -454,20 +454,36 @@ fn reimport_from_different_local_path_is_a_noop_and_does_not_restamp_lock() {
 		)
 		.unwrap();
 
+		let lock_before =
+			std::fs::read(project.join("skills-lock.json")).unwrap();
+		let link_before =
+			std::fs::read_link(project.join(".claude/skills/dup-skill"))
+				.unwrap();
+
 		let req2 = LocalSkillInstallRequest {
 			source_path: &second.join("SKILL.md"),
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
 		};
-		let rep2 = install_local_skill(req2)
-			.expect("reimporting existing skill must succeed as a no-op");
+		let err = install_local_skill(req2)
+			.expect_err("a different local owner must be refused");
 		assert!(
-			rep2.already_installed,
-			"second import must report already_installed"
+			matches!(err, aghub_core::ConfigError::ValidationFailed(_)),
+			"{err:?}"
 		);
-		assert!(!rep2.wrote_master, "master must not be rewritten");
-		assert!(!rep2.wrote_lock, "lock must not be restamped");
+		assert!(err.to_string().contains("already owned by source"), "{err}");
+		assert_eq!(
+			std::fs::read(project.join("skills-lock.json")).unwrap(),
+			lock_before,
+			"lock bytes must be unchanged"
+		);
+		assert_eq!(
+			std::fs::read_link(project.join(".claude/skills/dup-skill"))
+				.unwrap(),
+			link_before,
+			"referrer must be unchanged"
+		);
 
 		// Master is untouched
 		let master =
@@ -489,6 +505,69 @@ fn reimport_from_different_local_path_is_a_noop_and_does_not_restamp_lock() {
 		assert_eq!(
 			locked_after_second.computed_hash,
 			locked_after_first.computed_hash
+		);
+	});
+}
+
+#[test]
+fn reimport_from_different_local_path_is_refused_when_master_is_missing() {
+	with_isolated_env(|home, _data| {
+		let owner_a = home.join("owner-a/gone-skill"); // never created on disk
+		let project = home.join("gone-project");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+		skill::add_skill_to_local_lock(
+			"gone-skill",
+			skill::LocalSkillLockEntry {
+				source_url: None,
+				source: owner_a.join("SKILL.md").display().to_string(),
+				ref_name: None,
+				source_type: "local".to_string(),
+				computed_hash: "existinghash".to_string(),
+				skill_path: None,
+				ref_commit: None,
+			},
+			Some(&project),
+		)
+		.unwrap();
+
+		let source_b = home.join("source-b/gone-skill");
+		std::fs::create_dir_all(&source_b).unwrap();
+		std::fs::write(
+			source_b.join("SKILL.md"),
+			"---\nname: gone-skill\ndescription: test\n---\n\n# Body\n",
+		)
+		.unwrap();
+
+		let lock_before =
+			std::fs::read(project.join("skills-lock.json")).unwrap();
+		let req = LocalSkillInstallRequest {
+			source_path: &source_b.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+		let err = install_local_skill(req)
+			.expect_err("a different local owner must be refused");
+		assert!(
+			matches!(err, aghub_core::ConfigError::ValidationFailed(_)),
+			"{err:?}"
+		);
+		assert!(err.to_string().contains("already owned by source"), "{err}");
+		assert_eq!(
+			std::fs::read(project.join("skills-lock.json")).unwrap(),
+			lock_before,
+			"lock bytes must be unchanged"
+		);
+		assert!(
+			!project.join(".aghub/gone-skill").exists(),
+			"no Master may be written on refusal"
+		);
+		assert!(
+			std::fs::symlink_metadata(
+				project.join(".claude/skills/gone-skill")
+			)
+			.is_err(),
+			"no Referrer, not even a dangling one, may be written on refusal"
 		);
 	});
 }

@@ -44,7 +44,9 @@ pub struct ResyncReport {
 #[derive(Debug)]
 pub enum ResyncError {
 	/// The interprocess mutation lock could not be taken (nothing was mutated).
-	Locked(String),
+	/// Only `WouldBlock` is contention; any other kind is a permanent acquisition
+	/// failure.
+	Locked(std::io::Error),
 	/// The lock entry changed source/skillPath while this resync was fetching, so
 	/// it is no longer the entry that was fetched (nothing was mutated).
 	StaleFetch(String),
@@ -101,7 +103,7 @@ impl ResyncError {
 	/// Whether this failure is a transient lock contention that is retryable
 	/// by waiting without re-reading or re-fetching.
 	pub fn retryable(&self) -> bool {
-		matches!(self, Self::Locked(_))
+		matches!(self, Self::Locked(e) if e.kind() == std::io::ErrorKind::WouldBlock)
 	}
 }
 
@@ -112,7 +114,12 @@ impl ResyncError {
 /// skill), never the classification. See docs/history/core-removal.md#resync-failure-codes-diverged-per-surface
 pub fn resync_error_code(error: &ResyncError) -> &'static str {
 	match error {
-		ResyncError::Locked(_) => crate::skills::lock::MUTATION_LOCK_BUSY_CODE,
+		ResyncError::Locked(e)
+			if e.kind() == std::io::ErrorKind::WouldBlock =>
+		{
+			crate::skills::lock::MUTATION_LOCK_BUSY_CODE
+		}
+		ResyncError::Locked(_) => "IO_ERROR",
 		ResyncError::StaleFetch(_) => {
 			crate::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE
 		}
@@ -198,7 +205,7 @@ pub fn resync_installed_skill(
 		req.scope.resource_scope(),
 		req.scope.project_root(),
 	)
-	.map_err(|e| ResyncError::Locked(e.to_string()))?;
+	.map_err(ResyncError::Locked)?;
 	let store_root = req.scope.project_root();
 	crate::skills::linker::reject_linked_master_store(store_root)
 		.map_err(|e| ResyncError::OutOfTree(e.to_string()))?;
@@ -387,7 +394,13 @@ mod tests {
 	#[test]
 	fn every_resync_error_has_its_published_code() {
 		let cases = [
-			(ResyncError::Locked("x".into()), "SKILL_MUTATION_LOCK_BUSY"),
+			(
+				ResyncError::Locked(std::io::Error::new(
+					std::io::ErrorKind::WouldBlock,
+					"x",
+				)),
+				"SKILL_MUTATION_LOCK_BUSY",
+			),
 			(
 				ResyncError::StaleFetch("x".into()),
 				"SKILL_SOURCE_CHANGED_DURING_FETCH",
@@ -424,7 +437,10 @@ mod tests {
 	fn a_stale_fetch_is_not_confused_with_a_busy_lock() {
 		assert_ne!(
 			resync_error_code(&ResyncError::StaleFetch("x".into())),
-			resync_error_code(&ResyncError::Locked("x".into())),
+			resync_error_code(&ResyncError::Locked(std::io::Error::new(
+				std::io::ErrorKind::WouldBlock,
+				"x",
+			))),
 			"one is retryable by waiting, the other needs a re-fetch"
 		);
 	}

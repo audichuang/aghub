@@ -1228,9 +1228,17 @@ mod tests {
 		// Table asserting code and retryable for every variant of ResyncError
 		let resync_cases = [
 			(
-				ResyncError::Locked("lock busy".into()),
+				ResyncError::Locked(std::io::Error::new(
+					std::io::ErrorKind::WouldBlock,
+					"lock busy",
+				)),
 				"SKILL_MUTATION_LOCK_BUSY",
 				true,
+			),
+			(
+				ResyncError::Locked(std::io::Error::other("permission denied")),
+				"IO_ERROR",
+				false,
 			),
 			(
 				ResyncError::StaleFetch("stale".into()),
@@ -1342,7 +1350,9 @@ mod tests {
 				false,
 			),
 			(
-				LockedResyncError::Resync(ResyncError::Locked("busy".into())),
+				LockedResyncError::Resync(ResyncError::Locked(
+					std::io::Error::new(std::io::ErrorKind::WouldBlock, "busy"),
+				)),
 				"SKILL_MUTATION_LOCK_BUSY",
 				true,
 			),
@@ -1421,7 +1431,9 @@ mod tests {
 				false,
 			),
 			(
-				ResyncMutationError::Resync(ResyncError::Locked("busy".into())),
+				ResyncMutationError::Resync(ResyncError::Locked(
+					std::io::Error::new(std::io::ErrorKind::WouldBlock, "busy"),
+				)),
 				"SKILL_MUTATION_LOCK_BUSY",
 				true,
 			),

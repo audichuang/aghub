@@ -98,9 +98,6 @@ pub fn same_source_owner(
 	{
 		return false;
 	}
-	if existing.source_type.eq_ignore_ascii_case("local") {
-		return true;
-	}
 	match existing
 		.source_url
 		.as_deref()
@@ -113,10 +110,14 @@ pub fn same_source_owner(
 			(Some(existing), Some(requested)) => existing == requested,
 			_ => source_url.trim() == requested.source_url.trim(),
 		},
+		// Project GitHub and local locks intentionally omit a reconstructable
+		// sourceUrl, and their provider gives the missing identity. A legacy
+		// non-GitHub remote without sourceUrl has lost its host; fail closed rather
+		// than let an arbitrary host with the same owner/repo claim it.
 		None => {
 			matches!(
 				existing.source_type.to_ascii_lowercase().as_str(),
-				"github"
+				"github" | "local"
 			) && existing.source == requested.source
 		}
 	}
