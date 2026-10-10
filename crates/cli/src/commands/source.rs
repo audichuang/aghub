@@ -155,6 +155,23 @@ impl skill_update::Fetcher for CliFetcher {
 		}
 		self.inner.fetch(sr, token, selection)
 	}
+
+	fn fetch_pinned(
+		&self,
+		sr: &SourceRef,
+		token: Option<&str>,
+		selection: FetchSelection<'_>,
+		pinned: &skill_update::PinnedSnapshot,
+	) -> Result<skill_update::FetchedRepo, FetchError> {
+		// The debug-only fetch-root hook stays authoritative for e2e tests.
+		#[cfg(debug_assertions)]
+		if std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT").is_some() {
+			return self.fetch(sr, token, selection);
+		}
+		// Forward the claim so the fetch skips re-resolving the tip (one fewer
+		// request, and exactly the tip the preflight decided about).
+		self.inner.fetch_pinned(sr, token, selection, pinned)
+	}
 }
 
 /// What makes two fetches the same fetch: the repository's IDENTITY and the ref
@@ -1921,5 +1938,87 @@ mod tests {
 			narrow_by_name(items, &["zzz".to_string()], |s| s.as_str());
 		assert!(kept.is_empty());
 		assert_eq!(unknown, vec!["zzz".to_string()]);
+	}
+
+	#[test]
+	fn cli_fetcher_forwards_pinned_claim_without_resolving_again() {
+		use skill_update::{FetchSelection, Fetcher, RefResolver, SourceRef};
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		use std::sync::Arc;
+
+		struct CountingBackend {
+			resolves: AtomicUsize,
+		}
+		impl aghub_git::RepoFetchBackend for CountingBackend {
+			fn resolve(
+				&self,
+				_s: &aghub_git::SourceRef,
+				_a: Option<&aghub_git::Credentials>,
+			) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+				self.resolves.fetch_add(1, Ordering::SeqCst);
+				Ok(aghub_git::RepoSnapshot {
+					commit_oid: "1111111111111111111111111111111111111111"
+						.into(),
+					tree_oid: "tree".into(),
+					commit_time: None,
+				})
+			}
+			fn read_tree(
+				&self,
+				_s: &aghub_git::RepoSnapshot,
+			) -> aghub_git::Result<aghub_git::RepoTree> {
+				Ok(aghub_git::RepoTree {
+					entries: Vec::new(),
+				})
+			}
+			fn read_blobs(
+				&self,
+				_s: &aghub_git::RepoSnapshot,
+				_o: &[String],
+			) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+				Ok(Vec::new())
+			}
+			fn materialize(
+				&self,
+				_s: &aghub_git::RepoSnapshot,
+				_p: &[&str],
+				_d: &std::path::Path,
+			) -> aghub_git::Result<()> {
+				Ok(())
+			}
+		}
+
+		let rest = Arc::new(CountingBackend {
+			resolves: AtomicUsize::new(0),
+		});
+		let gix = Arc::new(CountingBackend {
+			resolves: AtomicUsize::new(0),
+		});
+		let fetcher = super::CliFetcher {
+			inner: skill_update::GitFetcher::with_repository(
+				skill_update::SkillRepository::with_backends(
+					Some(rest.clone() as Arc<dyn aghub_git::RepoFetchBackend>),
+					gix.clone() as Arc<dyn aghub_git::RepoFetchBackend>,
+				),
+			),
+		};
+		// github.com host => the REST slot answers the preflight and yields a claim.
+		let sr = SourceRef {
+			source: "https://github.com/owner/repo".into(),
+			ref_: None,
+		};
+		let tip = fetcher.ref_resolver().resolve(&sr, None).expect("tip");
+		let pinned = tip.pinned.expect("REST preflight returns a pinned claim");
+
+		fetcher
+			.fetch_pinned(&sr, None, FetchSelection::Skills(&[]), &pinned)
+			.expect("pinned fetch");
+
+		assert_eq!(
+			rest.resolves.load(Ordering::SeqCst),
+			1,
+			"pinned fetch must not resolve the tip a second time"
+		);
+		assert_eq!(gix.resolves.load(Ordering::SeqCst), 0);
 	}
 }
