@@ -11124,6 +11124,76 @@ fn accept_rename_preview_validates_lock_and_honours_json() {
 	}
 }
 
+/// The preview runs the commit's own fetch-free plan, so an already-present
+/// target is refused BEFORE the fetch: under --json the error carries the
+/// shared RENAME_TARGET_EXISTS code and the fetch never runs.
+#[cfg(unix)]
+#[test]
+fn accept_rename_preview_refuses_an_existing_target_without_fetching() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+
+	write_source_skill(src.path(), "renamable", "renamable");
+	write_source_skill(src.path(), "renamable-new", "renamable-new");
+	for name in ["renamable", "renamable-new"] {
+		let installed = run_sync_install(
+			home.path(),
+			state.path(),
+			src.path(),
+			"claude",
+			name,
+		);
+		assert!(
+			installed.status.success(),
+			"fixture install of {name} must succeed: {}",
+			String::from_utf8_lossy(&installed.stderr)
+		);
+	}
+
+	// The fetch root does not exist: reaching the fetch would fail with a
+	// "Failed to fetch" message instead of the plan's refusal.
+	let preview = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", home.path().join("nope"))
+		.args([
+			"--json",
+			"source",
+			"accept-rename",
+			"renamable",
+			"renamable-new",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!preview.status.success(),
+		"a preview onto a taken name must be refused: stdout={}",
+		String::from_utf8_lossy(&preview.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&preview.stderr);
+	assert!(
+		!stderr.contains("Failed to fetch"),
+		"the refusal must come before the fetch: {stderr}"
+	);
+	let pj: Value = serde_json::from_slice(&preview.stdout)
+		.expect("a refused preview under --json must still print a JSON error");
+	assert_eq!(pj["error"]["code"], "RENAME_TARGET_EXISTS", "{pj}");
+
+	// Nothing was written: both names are still installed.
+	let after = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "get", "skills"])
+		.output()
+		.unwrap();
+	let listed: Value = serde_json::from_slice(&after.stdout).unwrap();
+	let names: Vec<&str> = listed
+		.as_array()
+		.unwrap()
+		.iter()
+		.filter_map(|s| s["name"].as_str())
+		.collect();
+	assert!(names.contains(&"renamable"), "{listed}");
+	assert!(names.contains(&"renamable-new"), "{listed}");
+}
+
 /// An unreadable skill lock must fail the read-only commands that REPORT its
 /// contents, not read as an empty one.
 ///

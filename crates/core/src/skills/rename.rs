@@ -644,8 +644,10 @@ pub fn accept_rename(
 }
 
 /// Whether `new_name` already has a lock entry OR an on-disk skill dir in the
-/// target scope's agent dirs / universal master.
-fn new_name_exists_in_scope(
+/// target scope's agent dirs / universal master. Public so the fetch-free
+/// rename plan can refuse before the network; `accept_rename` re-checks under
+/// the mutation lock.
+pub fn new_name_exists_in_scope(
 	new_name: &str,
 	scope: ResourceScope,
 	project_root: Option<&Path>,

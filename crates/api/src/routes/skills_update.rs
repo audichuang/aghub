@@ -30,9 +30,9 @@ use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use crate::skills::rename::skill_renamed_message;
 use crate::skills::resync::safe_resync_error;
 use skill_update::mutation::{
-	accept_fetched_rename, fetch_for_rename, resync_locked_skill,
-	resync_locked_skills, FetchRenameError, FetchedRenameRequest,
-	LockedResyncError, LockedResyncRequest, LockedSkillsResyncRequest,
+	rename_locked_skill, resync_locked_skill, resync_locked_skills,
+	LockedRenameRequest, LockedResyncError, LockedResyncRequest,
+	LockedSkillsResyncRequest, RenameMutationError,
 };
 use skill_update::projection::{self, Identities};
 // Only the `#[cfg(unix)]` StubBackendUnavailableResolver test uses this —
@@ -602,8 +602,9 @@ fn accept_rename_error_with_code(
 }
 
 /// `POST /skills/accept-rename` — atomic rename: install the new name, delete
-/// the old name, transition both lock entries. The transaction is owned by
-/// `aghub_core::skills::rename`; this route just wires credentials + fetch.
+/// the old name, transition both lock entries. The plan, fetch and transaction
+/// are owned by `skill_update::mutation::rename_locked_skill`; this route just
+/// wires credentials.
 #[post("/skills/accept-rename", data = "<body>")]
 pub async fn accept_skill_rename(
 	body: Json<AcceptRenameRequest>,
@@ -614,17 +615,14 @@ pub async fn accept_skill_rename(
 	accept_rename_inner(body.into_inner(), &GitFetcher::new(), &resolver).await
 }
 
-/// Thin adapter over the core rename transaction: validate the request, fetch
-/// the source (the fetch cannot live in core — `skill-update` depends on core),
-/// then hand the fetched tree to `rename::accept_rename` and map the outcome to
-/// the response DTO.
+/// Thin adapter over `skill_update::mutation::rename_locked_skill`: validate
+/// the request, run the shared entry on the mutation pool, and map its outcome
+/// to the response DTO. The plan, fetch and transaction live in that entry.
 pub(crate) async fn accept_rename_inner(
 	req: AcceptRenameRequest,
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> ApiResult<AcceptRenameResponse> {
-	use aghub_core::skills::rename::{self, RenameRequest};
-
 	// Adapter concern: confirmation gate.
 	if !req.confirm.unwrap_or(false) {
 		return Ok(Json(accept_rename_error(
@@ -651,86 +649,18 @@ pub(crate) async fn accept_rename_inner(
 		}
 	};
 
-	// Refuse a degenerate rename before any lock read / fetch.
-	if let Err(e) = rename::ensure_distinct_names(&req.old_name, &req.new_name)
-	{
-		return Ok(Json(accept_rename_error_with_code(
-			&req.old_name,
-			&req.new_name,
-			&req.scope,
-			&e.message(),
-			e.code(),
-		)));
-	}
-
-	// Step 1: read the OLD-name lock entry for the fetch coordinates.
-	let source = match rename::rename_source_from_lock(&req.old_name, &scope) {
-		Ok(s) => s,
-		Err(e) => {
-			return Ok(Json(accept_rename_error_with_code(
-				&req.old_name,
-				&req.new_name,
-				&req.scope,
-				&e.message(),
-				e.code(),
-			)));
-		}
-	};
-
-	// Step 3: the shared mutation seam owns auth, catalog scanning, new-path
-	// validation, and the commit-pinned Fetched Source lifetime.
-	let prepared = match fetch_for_rename(
-		FetchedRenameRequest {
-			source: &source,
-			new_name: &req.new_name,
-		},
-		fetcher,
-		resolver,
-	) {
-		Ok(prepared) => prepared,
-		Err(FetchRenameError::Fetch(FetchError::BackendUnavailable)) => {
-			return Err(crate::credentials::CredentialStoreError::Unavailable(
-				"credential backend unreachable".to_string(),
-			)
-			.into());
-		}
-		Err(FetchRenameError::CatalogScan) => {
-			return Ok(Json(accept_rename_error(
-				&req.old_name,
-				&req.new_name,
-				&req.scope,
-				"Fetched source catalog could not be scanned safely",
-			)));
-		}
-		Err(FetchRenameError::SkillNotFound) => {
-			return Ok(Json(accept_rename_error(
-				&req.old_name,
-				&req.new_name,
-				&req.scope,
-				"New skill name was not found in the fetched source",
-			)));
-		}
-		Err(FetchRenameError::Fetch(error)) => {
-			return Ok(Json(accept_rename_error(
-				&req.old_name,
-				&req.new_name,
-				&req.scope,
-				fetch_error_text(&error),
-			)));
-		}
-	};
-
-	// The remaining steps, guards and rollback live in core. The transaction
-	// holds the mutation lock and is synchronous — off the async worker.
+	// The entry fetches (blocking network) AND runs the lock-holding transaction,
+	// so the WHOLE call belongs on the mutation pool, never on the async worker (#19).
 	crate::blocking::in_mutation_pool(|| {
-		match accept_fetched_rename(
-			&prepared.fetched,
-			RenameRequest {
+		match rename_locked_skill(
+			LockedRenameRequest {
 				old_name: &req.old_name,
 				new_name: &req.new_name,
 				scope,
+				git_ref: None,
 			},
-			&prepared.source,
+			fetcher,
+			resolver,
 		) {
 			Ok(ok) => Ok(Json(AcceptRenameResponse {
 				success: true,
@@ -742,13 +672,35 @@ pub(crate) async fn accept_rename_inner(
 				error: None,
 				code: None,
 			})),
-			Err(e) => Ok(Json(accept_rename_error_with_code(
-				&req.old_name,
-				&req.new_name,
-				&req.scope,
-				&e.message(),
-				e.code(),
-			))),
+			Err(RenameMutationError::Fetch(FetchError::BackendUnavailable)) => {
+				Err(crate::credentials::CredentialStoreError::Unavailable(
+					"credential backend unreachable".to_string(),
+				)
+				.into())
+			}
+			Err(error) => {
+				let message = match &error {
+					RenameMutationError::Rename(e) => e.message(),
+					RenameMutationError::Fetch(e) => {
+						fetch_error_text(e).to_string()
+					}
+					RenameMutationError::CatalogScan => {
+						"Fetched source catalog could not be scanned safely"
+							.to_string()
+					}
+					RenameMutationError::SkillNotFound => {
+						"New skill name was not found in the fetched source"
+							.to_string()
+					}
+				};
+				Ok(Json(accept_rename_error_with_code(
+					&req.old_name,
+					&req.new_name,
+					&req.scope,
+					&message,
+					error.code(),
+				)))
+			}
 		}
 	})
 	.await
@@ -2719,10 +2671,128 @@ mod tests {
 		});
 	}
 
+	/// #19: the rename fetch is blocking network I/O, so it must run on the
+	/// mutation pool. Proof: the fetch parks until the test's release task runs
+	/// on the SAME single-worker runtime. Inline on the worker the release can
+	/// never run, the bounded wait times out, and `released` stays false.
+	#[cfg(unix)]
+	#[test]
+	fn accept_rename_fetch_runs_in_the_mutation_pool_not_on_the_async_worker() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+		use std::sync::{mpsc, Arc, Mutex};
+		use std::time::Duration;
+
+		struct GatedFetcher {
+			started: Mutex<Option<rocket::tokio::sync::oneshot::Sender<()>>>,
+			go: Mutex<mpsc::Receiver<()>>,
+			released: Arc<AtomicBool>,
+			root: std::path::PathBuf,
+		}
+		impl Fetcher for GatedFetcher {
+			fn fetch(
+				&self,
+				_source_ref: &SourceRef,
+				_token: Option<&str>,
+				_selection: skill_update::FetchSelection<'_>,
+			) -> Result<skill_update::FetchedRepo, FetchError> {
+				if let Some(tx) = self.started.lock().unwrap().take() {
+					let _ = tx.send(());
+				}
+				// Bounded: a regression must fail, not hang the test.
+				let ok = self
+					.go
+					.lock()
+					.unwrap()
+					.recv_timeout(Duration::from_secs(5))
+					.is_ok();
+				self.released.store(ok, Ordering::SeqCst);
+				Ok(skill_update::FetchedRepo {
+					root: self.root.clone(),
+					snapshot: aghub_git::RepoSnapshot {
+						commit_oid: "c".to_string(),
+						tree_oid: "t".to_string(),
+						commit_time: None,
+					},
+					_guard: None,
+				})
+			}
+		}
+
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("old-skill".into(), global_entry());
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			// Empty fetched tree: the fetch succeeds, the catalog has no
+			// `new-skill`, so the route answers SkillNotFound after the fetch.
+			let root = tempfile::tempdir().unwrap();
+			let (started_tx, started_rx) =
+				rocket::tokio::sync::oneshot::channel();
+			let (go_tx, go_rx) = mpsc::channel();
+			let released = Arc::new(AtomicBool::new(false));
+			let fetcher = GatedFetcher {
+				started: Mutex::new(Some(started_tx)),
+				go: Mutex::new(go_rx),
+				released: Arc::clone(&released),
+				root: root.path().to_path_buf(),
+			};
+			let req = crate::dto::skill::AcceptRenameRequest {
+				old_name: "old-skill".to_string(),
+				new_name: "new-skill".to_string(),
+				scope: "global".to_string(),
+				project_root: None,
+				confirm: Some(true),
+			};
+
+			let runtime = rocket::tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.enable_all()
+				.build()
+				.unwrap();
+			let resp = runtime.block_on(async move {
+				let resolver = empty_keyring_resolver();
+				let route = rocket::tokio::spawn(async move {
+					match accept_rename_inner(req, &fetcher, &resolver).await {
+						Ok(json) => json.into_inner(),
+						Err(error) => panic!(
+							"accept_rename should return Ok: {}",
+							error.body.error
+						),
+					}
+				});
+				let release = rocket::tokio::spawn(async move {
+					let _ = started_rx.await;
+					let _ = go_tx.send(());
+				});
+				release.await.unwrap();
+				route.await.unwrap()
+			});
+
+			match old_home {
+				Some(v) => std::env::set_var("HOME", v),
+				None => std::env::remove_var("HOME"),
+			}
+
+			assert!(
+				released.load(Ordering::SeqCst),
+				"the fetch parked the only async worker: it must run on the mutation pool"
+			);
+			assert!(!resp.success);
+			assert_eq!(
+				resp.code.as_deref(),
+				Some(skill_update::mutation::SKILL_PATH_NOT_FOUND_CODE),
+			);
+		});
+	}
+
 	/// P0-2 guard (a): a degenerate rename whose old/new names sanitize to the
 	/// same on-disk dir must be rejected up front (before any fetch/mutation)
-	/// with the machine code. Adapter-level: the route calls
-	/// `rename::ensure_distinct_names` before it reads the lock or fetches.
+	/// with the machine code. Adapter-level: the shared plan
+	/// (`plan_locked_rename`) refuses before any lock read / fetch.
 	#[cfg(unix)]
 	#[test]
 	fn accept_rename_rejects_degenerate_sanitized_collision() {

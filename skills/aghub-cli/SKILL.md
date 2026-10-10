@@ -503,9 +503,12 @@ readers get their own Referrer, a disabled agent gets nothing — and the commit
 Master included. The one exception is an agent you disabled (`agents list`) that
 still holds a Referrer to it: the old Master is kept for that agent and shows up
 untracked in `doctor` (enable the agent or unlink that entry, then `delete skills
-<OLD> --all-agents`). The preview does not fetch or check the disk, so a wrong
-name, a new name that already exists in the scope (`TargetExists`) and a locked
-old name with no installed copy (`NoInstalledCopy`) all preview as success (exit 0) and fail only on `--yes` (exit 1). Run `doctor --verify-links` afterwards as the completion check.
+<OLD> --all-agents`). The preview refuses, without fetching, a degenerate rename,
+an old name that is not in the lock, and a new name that already exists in the
+scope (a lock entry or an on-disk dir; code `RENAME_TARGET_EXISTS`), so those exit 1
+before `--yes`. Under `--json` a rename failure carries the same `error.code` as the
+desktop/API route. A locked old name with no installed copy (`NoInstalledCopy`)
+still previews as success (exit 0) and fails only on `--yes` (exit 1). Run `doctor --verify-links` afterwards as the completion check.
 
 ### Clean up leftovers
 

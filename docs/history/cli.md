@@ -233,7 +233,10 @@ the dry-run return, so the preview green-lit renaming a name not in the lock
 (or `a -> a`) and the caller hit the wall only on `--yes`. The preview also
 `println!`ed prose even under `--json` on exit 0 — a strict parser read a crash
 on the success path, a lenient one read "the rename was committed". Pinned
-by: `accept_rename_preview_validates_lock_and_honours_json`.
+by: `accept_rename_preview_validates_lock_and_honours_json`. The preview now runs
+the commit's own plan (`plan_locked_rename`), so an already-present target is
+refused before the fetch too; pinned by
+`accept_rename_preview_refuses_an_existing_target_without_fetching`.
 
 ## reconcile without targets
 

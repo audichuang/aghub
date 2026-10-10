@@ -1469,15 +1469,13 @@ struct AcceptRenameArgs<'a> {
 	scope: &'a Scope,
 }
 
-/// `source accept-rename <old> <new>` — thin adapter over the core rename
-/// transaction. Resolves scope + dry-run (CLI concerns), reads the lock source
-/// and fetches (the fetch cannot live in core — `skill-update` depends on
-/// core), then hands the fetched tree to `rename::accept_rename`.
+/// `source accept-rename <old> <new>` — thin adapter over
+/// `skill_update::mutation::rename_locked_skill`. Resolves scope and dry-run
+/// (CLI concerns); the preview runs the commit's own fetch-free plan
+/// (`plan_locked_rename`), so it refuses exactly what `--yes` refuses.
 fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
-	use aghub_core::skills::rename::{self, RenameRequest};
 	use skill_update::mutation::{
-		accept_fetched_rename, fetch_for_rename, FetchRenameError,
-		FetchedRenameRequest,
+		plan_locked_rename, rename_locked_skill, LockedRenameRequest,
 	};
 
 	// Scope was resolved and validated ONCE, in `main`; `write_scope` refuses
@@ -1486,15 +1484,16 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	let scope = args.scope.write_scope()?;
 	let scope_label = args.scope.label();
 
-	// Refuse a degenerate rename (and, below, a name not in the lock) BEFORE
-	// the preview, so the preview never green-lights what `--yes` refuses.
-	// See docs/history/cli.md#accept-rename-preview
-	rename::ensure_distinct_names(args.old_name, args.new_name)
-		.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
-
-	// Step 1: read the OLD-name lock entry for the fetch coordinates.
-	let mut source = rename::rename_source_from_lock(args.old_name, &scope)
-		.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+	let request = LockedRenameRequest {
+		old_name: args.old_name,
+		new_name: args.new_name,
+		scope,
+		git_ref: args.git_ref,
+	};
+	// The fetch-free refusals (degenerate names, not in the lock, target already
+	// present) BEFORE the preview, so the preview never green-lights what `--yes`
+	// refuses. See docs/history/cli.md#accept-rename-preview
+	plan_locked_rename(&request).map_err(|e| rename_error(args.new_name, e))?;
 
 	if !args.yes {
 		// The preview MUST honour --json like every sibling preview. Keys
@@ -1521,60 +1520,10 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		return Ok(());
 	}
 
-	// Apply any --ref override: the effective ref is fetched AND written to the
-	// new lock entry.
-	let effective_ref =
-		args.git_ref.map(str::to_string).or(source.ref_name.clone());
-	source.ref_name = effective_ref.clone();
-
-	// Step 3: fetch a catalog snapshot and resolve the new frontmatter name to
-	// its current path. The directory may have moved as part of the rename.
-	let prepared = fetch_for_rename(
-		FetchedRenameRequest {
-			source: &source,
-			new_name: args.new_name,
-		},
-		&CliFetcher::new(),
-		&EnvTokenResolver,
-	)
-	.map_err(|error| match error {
-		FetchRenameError::Fetch(FetchError::Auth) => anyhow::anyhow!(
-			"This source needs a credential. Log in with git (e.g. `gh auth \
-			 login`), or set GIT_PASSWORD (any host) or GITHUB_TOKEN \
-			 (github.com) in the environment, and retry."
-		),
-		FetchRenameError::Fetch(FetchError::Network(detail)) => {
-			anyhow::anyhow!(
-				"Failed to fetch source repository '{}': {}",
-				safe_source(&source.source_url),
-				safe_source(&detail)
-			)
-		}
-		FetchRenameError::Fetch(FetchError::BackendUnavailable) => {
-			anyhow::anyhow!("Credential backend is unavailable; retry later.")
-		}
-		FetchRenameError::CatalogScan => {
-			anyhow::anyhow!(
-				"Fetched source catalog could not be scanned safely"
-			)
-		}
-		FetchRenameError::SkillNotFound => anyhow::anyhow!(
-			"new skill '{}' was not found in the fetched source",
-			args.new_name
-		),
-	})?;
-
-	// The remaining steps, guards and rollback live in core.
-	let outcome = accept_fetched_rename(
-		&prepared.fetched,
-		RenameRequest {
-			old_name: args.old_name,
-			new_name: args.new_name,
-			scope,
-		},
-		&prepared.source,
-	)
-	.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+	// Fetch, then the lock-holding transaction — both inside the shared entry.
+	let outcome =
+		rename_locked_skill(request, &CliFetcher::new(), &EnvTokenResolver)
+			.map_err(|e| rename_error(args.new_name, e))?;
 
 	if args.json {
 		println!(
@@ -1601,6 +1550,50 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		);
 	}
 	Ok(())
+}
+
+/// CLI wording for a rename failure. The code and retryability are the shared
+/// ones from skill-update, so `--json` reports the same code as the API.
+fn rename_error(
+	new_name: &str,
+	error: skill_update::mutation::RenameMutationError,
+) -> anyhow::Error {
+	use skill_update::mutation::RenameMutationError;
+
+	let message = match &error {
+		RenameMutationError::Fetch(FetchError::Auth) => {
+			"This source needs a credential. Log in with git (e.g. `gh auth \
+			 login`), or set GIT_PASSWORD (any host) or GITHUB_TOKEN \
+			 (github.com) in the environment, and retry."
+				.to_string()
+		}
+		RenameMutationError::Fetch(FetchError::Network(detail)) => {
+			format!(
+				"Failed to fetch source repository: {}",
+				safe_source(detail)
+			)
+		}
+		RenameMutationError::Fetch(FetchError::BackendUnavailable) => {
+			"Credential backend is unavailable; retry later.".to_string()
+		}
+		RenameMutationError::CatalogScan => {
+			"Fetched source catalog could not be scanned safely".to_string()
+		}
+		RenameMutationError::SkillNotFound => {
+			format!(
+				"new skill '{new_name}' was not found in the fetched source"
+			)
+		}
+		RenameMutationError::Rename(e) => e.message(),
+	};
+	match error.code() {
+		Some(code) => anyhow::Error::new(crate::CodedError {
+			message,
+			code,
+			retryable: error.retryable(),
+		}),
+		None => anyhow::anyhow!("{message}"),
+	}
 }
 
 /// Split `items` into those whose name is in `requested` (source order kept)

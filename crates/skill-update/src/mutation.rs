@@ -8,19 +8,46 @@ use crate::{
 	Fetcher, SourceRef, TokenResolver,
 };
 
-pub struct FetchedRenameRequest<'a> {
+pub(crate) struct FetchedRenameRequest<'a> {
 	pub source: &'a aghub_core::skills::rename::RenameLockSource,
 	pub new_name: &'a str,
 }
 
 #[derive(Debug)]
-pub enum FetchRenameError {
+pub enum RenameMutationError {
+	/// A refusal or failure from the core rename (plan or transaction).
+	Rename(aghub_core::skills::rename::RenameError),
 	Fetch(FetchError),
 	CatalogScan,
 	SkillNotFound,
 }
 
-pub struct PreparedRename {
+impl RenameMutationError {
+	/// Stable machine code shared by every surface; `None` where the core
+	/// error has none (surfaces then report their own "no code" spelling).
+	pub fn code(&self) -> Option<&'static str> {
+		match self {
+			Self::Rename(error) => error.code(),
+			Self::Fetch(FetchError::BackendUnavailable) => {
+				Some(KEYCHAIN_UNAVAILABLE_CODE)
+			}
+			Self::Fetch(_) => Some(SOURCE_FETCH_FAILED_CODE),
+			Self::CatalogScan | Self::SkillNotFound => {
+				Some(SKILL_PATH_NOT_FOUND_CODE)
+			}
+		}
+	}
+
+	/// Whether this failure is transient lock contention.
+	pub fn retryable(&self) -> bool {
+		matches!(
+			self,
+			Self::Rename(aghub_core::skills::rename::RenameError::Locked(_))
+		)
+	}
+}
+
+pub(crate) struct PreparedRename {
 	pub fetched: FetchedSource,
 	pub source: aghub_core::skills::rename::RenameLockSource,
 }
@@ -68,7 +95,7 @@ fn fetched_skill_file(fetched: &FetchedSource, path: &str) -> Option<PathBuf> {
 
 /// Run the existing core rename transaction against one commit-pinned fetched
 /// source without exposing its root or commit identity to the adapter.
-pub fn accept_fetched_rename(
+pub(crate) fn accept_fetched_rename(
 	fetched: &FetchedSource,
 	request: aghub_core::skills::rename::RenameRequest<'_>,
 	source: &aghub_core::skills::rename::RenameLockSource,
@@ -161,11 +188,11 @@ fn core_install_request<'a>(
 /// Fetch a complete catalog for rename acceptance and resolve the new name to
 /// its current repo-relative path. This supports both a frontmatter-only rename
 /// at the old path and a rename that moved the skill directory.
-pub fn fetch_for_rename(
+pub(crate) fn fetch_for_rename(
 	request: FetchedRenameRequest<'_>,
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
-) -> Result<PreparedRename, FetchRenameError> {
+) -> Result<PreparedRename, RenameMutationError> {
 	let source_ref = SourceRef {
 		source: request.source.source_url.clone(),
 		ref_: request.source.ref_name.clone(),
@@ -176,7 +203,7 @@ pub fn fetch_for_rename(
 		resolver,
 		FetchSelection::CatalogSnapshot,
 	)
-	.map_err(FetchRenameError::Fetch)?;
+	.map_err(RenameMutationError::Fetch)?;
 	let fetched = FetchedSource { repo };
 	let options = skill::scan::ScanOptions {
 		max_depth: crate::repository::CATALOG_MAX_DEPTH,
@@ -185,18 +212,18 @@ pub fn fetch_for_rename(
 	};
 	let skill_dirs =
 		skill::scan::scan_skills(fetched.root(), options, Vec::new())
-			.map_err(|_| FetchRenameError::CatalogScan)?;
+			.map_err(|_| RenameMutationError::CatalogScan)?;
 	let matched = skill_dirs.into_iter().find(|directory| {
 		skill::parser::parse(&directory.join("SKILL.md"))
 			.is_ok_and(|parsed| parsed.name == request.new_name)
 	});
-	let directory = matched.ok_or(FetchRenameError::SkillNotFound)?;
+	let directory = matched.ok_or(RenameMutationError::SkillNotFound)?;
 	let relative = directory
 		.strip_prefix(fetched.root())
-		.map_err(|_| FetchRenameError::CatalogScan)?;
+		.map_err(|_| RenameMutationError::CatalogScan)?;
 	let folder = relative.to_string_lossy().replace('\\', "/");
 	let validated = skill::SkillPath::parse(&folder)
-		.map_err(|_| FetchRenameError::CatalogScan)?;
+		.map_err(|_| RenameMutationError::CatalogScan)?;
 	let lock_skill_path = if validated.is_root() {
 		"SKILL.md".to_string()
 	} else {
@@ -205,6 +232,76 @@ pub fn fetch_for_rename(
 	let mut source = request.source.clone();
 	source.skill_path = lock_skill_path;
 	Ok(PreparedRename { fetched, source })
+}
+
+pub struct LockedRenameRequest<'a> {
+	pub old_name: &'a str,
+	pub new_name: &'a str,
+	pub scope: WriteScope,
+	/// `--ref` override: fetched AND written to the new lock entry. `None`
+	/// keeps the locked ref (the API always passes `None`).
+	pub git_ref: Option<&'a str>,
+}
+
+/// Every rename refusal answerable WITHOUT the network, in the order both
+/// surfaces report them: degenerate names, old name not in the lock, new name
+/// already present. The CLI preview and [`rename_locked_skill`] both call it,
+/// so a preview never green-lights what the commit refuses.
+/// See docs/history/cli.md#accept-rename-preview
+pub fn plan_locked_rename(
+	request: &LockedRenameRequest<'_>,
+) -> Result<aghub_core::skills::rename::RenameLockSource, RenameMutationError> {
+	use aghub_core::skills::rename;
+	rename::ensure_distinct_names(request.old_name, request.new_name)
+		.map_err(RenameMutationError::Rename)?;
+	let source =
+		rename::rename_source_from_lock(request.old_name, &request.scope)
+			.map_err(RenameMutationError::Rename)?;
+	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
+		request.scope.resource_scope(),
+		request.scope.project_root(),
+	);
+	if rename::new_name_exists_in_scope(
+		request.new_name,
+		request.scope.resource_scope(),
+		request.scope.project_root(),
+		&agent_dirs,
+	) {
+		return Err(RenameMutationError::Rename(
+			rename::RenameError::TargetExists(request.new_name.to_string()),
+		));
+	}
+	Ok(source)
+}
+
+/// Accept an upstream rename end to end: plan, fetch a commit-pinned catalog,
+/// then the core transaction (ADR-0001). Synchronous and blocking (network +
+/// mutation lock): an async caller must run it on its blocking pool.
+pub fn rename_locked_skill(
+	request: LockedRenameRequest<'_>,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> Result<aghub_core::skills::rename::RenameSuccess, RenameMutationError> {
+	let mut source = plan_locked_rename(&request)?;
+	source.ref_name = request.git_ref.map(str::to_string).or(source.ref_name);
+	let prepared = fetch_for_rename(
+		FetchedRenameRequest {
+			source: &source,
+			new_name: request.new_name,
+		},
+		fetcher,
+		resolver,
+	)?;
+	accept_fetched_rename(
+		&prepared.fetched,
+		aghub_core::skills::rename::RenameRequest {
+			old_name: request.old_name,
+			new_name: request.new_name,
+			scope: request.scope,
+		},
+		&prepared.source,
+	)
+	.map_err(RenameMutationError::Rename)
 }
 
 pub struct FetchedResyncRequest<'a> {
