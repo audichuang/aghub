@@ -635,38 +635,6 @@ pub fn find_skill_holders_crediting(
 	(holders, unreadable)
 }
 
-/// Query holders of a skill in the given scope, partitioned into managed and unmanaged.
-pub fn get_skill_holders(
-	name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> SkillHoldersView {
-	let (holders, _) = find_skill_holders(name, scope, project_root);
-	SkillHoldersView::from_agents(holders)
-}
-
-/// Find in-scope agents outside `excluding` reading the kept path `path`, partitioned by managed status.
-pub fn find_readers_of_kept_path(
-	path: &Path,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-	excluding: &[AgentType],
-) -> Vec<crate::errors::RejectedTargetReader> {
-	crate::skills::removal::readers_outside(
-		path,
-		scope,
-		project_root,
-		excluding,
-		true,
-	)
-	.into_iter()
-	.map(|id| crate::errors::RejectedTargetReader {
-		agent: id.to_string(),
-		managed: crate::agent_settings::is_managed(id),
-	})
-	.collect()
-}
-
 /// Build [`RejectedTarget`]s for a set of rejected agents, sharing the populated `readers`.
 /// Readers come from the first kept path only.
 pub fn build_rejected_targets(
@@ -680,7 +648,19 @@ pub fn build_rejected_targets(
 ) -> Vec<crate::errors::RejectedTarget> {
 	let readers = if kind == Some("shared") {
 		path.map(|p| {
-			find_readers_of_kept_path(p, scope, project_root, excluding)
+			crate::skills::removal::readers_outside(
+				p,
+				scope,
+				project_root,
+				excluding,
+				true,
+			)
+			.into_iter()
+			.map(|id| crate::errors::RejectedTargetReader {
+				agent: id.to_string(),
+				managed: crate::agent_settings::is_managed(id),
+			})
+			.collect::<Vec<_>>()
 		})
 	} else {
 		None
@@ -743,6 +723,37 @@ pub(crate) static COMMIT_PREFLIGHT_HOOK: std::sync::Mutex<
 	Option<std::sync::mpsc::Sender<()>>,
 > = std::sync::Mutex::new(None);
 
+/// Holders, unreadable agents, effective targets and exhaustiveness for a
+/// by-name removal. Called before the preflight and again inside the
+/// mutation guard.
+fn resolve_name_targets(
+	request: &SkillRemovalRequest,
+	name: &str,
+) -> (Vec<AgentType>, Vec<&'static str>, Vec<AgentType>, bool) {
+	let scope = request.scope.resource_scope();
+	let project_root = request.scope.project_root();
+	let (holders, unreadable) = if request.keeps_master {
+		(Vec::new(), Vec::new())
+	} else {
+		find_skill_holders(name, scope, project_root)
+	};
+	let targets: Vec<AgentType> =
+		if request.agents.is_empty() && request.all_agents {
+			holders
+				.iter()
+				.filter(|a| crate::agent_settings::is_managed(a.as_str()))
+				.copied()
+				.collect()
+		} else {
+			request.agents.clone()
+		};
+	let is_exhaustive = !request.keeps_master
+		&& (request.all_agents
+			|| (!holders.is_empty()
+				&& holders.iter().all(|h| targets.contains(h))));
+	(holders, unreadable, targets, is_exhaustive)
+}
+
 fn check_unreadable_exhaustive(
 	name: &str,
 	is_exhaustive: bool,
@@ -795,35 +806,6 @@ fn check_unreadable_exhaustive(
 		)));
 	}
 	Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct PreflightVerdict {
-	agent: AgentType,
-	verdict: Verdict,
-	still_read_from: Vec<PathBuf>,
-	paths: Vec<PathBuf>,
-	skipped: Vec<PathBuf>,
-	outcome: crate::dto::RemovalKind,
-	needs_confirm: bool,
-}
-
-impl PreflightVerdict {
-	fn to_row(&self) -> SkillRemovalRow {
-		SkillRemovalRow {
-			agent: self.agent,
-			verdict: self.verdict.clone(),
-			outcome: self.outcome,
-			error: None,
-			typed_error: None,
-			is_load_error: false,
-			still_read_from: self.still_read_from.clone(),
-			paths: self.paths.clone(),
-			skipped: self.skipped.clone(),
-			executed: false,
-			needs_confirm: self.needs_confirm,
-		}
-	}
 }
 
 /// Single core entry point for skill deletion across multiple agents.
@@ -1133,25 +1115,8 @@ fn remove_skill_by_name(
 	let scope = request.scope.resource_scope();
 	let project_root = request.scope.project_root();
 
-	let target_agents = request.agents.clone();
-
-	let (holders, unreadable) = if request.keeps_master {
-		(Vec::new(), Vec::new())
-	} else {
-		find_skill_holders(name, scope, project_root)
-	};
-
-	let target_agents: Vec<AgentType> = if request.agents.is_empty()
-		&& request.all_agents
-	{
-		holders
-			.iter()
-			.filter(|agent| crate::agent_settings::is_managed(agent.as_str()))
-			.copied()
-			.collect()
-	} else {
-		target_agents
-	};
+	let (holders, unreadable, target_agents, is_exhaustive) =
+		resolve_name_targets(request, name);
 
 	// Refused before any plan, preview included (the API always did this).
 	// Skipped when no plugin is known, so plugin-free runs load nothing extra.
@@ -1177,11 +1142,6 @@ fn remove_skill_by_name(
 			}
 		}
 	}
-
-	let is_exhaustive = !request.keeps_master
-		&& (request.all_agents
-			|| (!holders.is_empty()
-				&& holders.iter().all(|held| target_agents.contains(held))));
 
 	check_unreadable_exhaustive(
 		name,
@@ -1214,7 +1174,7 @@ fn remove_skill_by_name(
 	} else {
 		Vec::new()
 	};
-	let mut preflight_verdicts: Vec<PreflightVerdict> = Vec::new();
+	let mut preflight_verdicts: Vec<SkillRemovalRow> = Vec::new();
 	let mut preflight_failures: Vec<(AgentType, Arc<ConfigError>)> = Vec::new();
 	let mut preflight_load_failures: Vec<(AgentType, Arc<ConfigError>)> =
 		Vec::new();
@@ -1242,7 +1202,7 @@ fn remove_skill_by_name(
 		}
 
 		let is_agent_exhaustive = is_exhaustive && holders.contains(&agent);
-		let plan_result = manager.remove_skill_planned_for_agents_with_prior(
+		let plan_result = manager.remove_skill_planned_for_agents(
 			name,
 			is_agent_exhaustive || request.all_agents,
 			true, // dry_run
@@ -1253,15 +1213,10 @@ fn remove_skill_by_name(
 
 		match plan_result {
 			Ok(outcome) => {
-				let kind = crate::dto::removal_kind_from_outcome(
-					&outcome,
-					request.dry_run,
-				);
-				let still_read_from = still_read_paths(&outcome);
 				let needs_confirm =
 					if is_agent_exhaustive && !request.all_agents {
 						manager
-							.remove_skill_planned_for_agents_with_prior(
+							.remove_skill_planned_for_agents(
 								name,
 								request.all_agents,
 								true, // dry_run
@@ -1274,15 +1229,13 @@ fn remove_skill_by_name(
 					} else {
 						outcome.plan.needs_confirm
 					};
-				preflight_verdicts.push(PreflightVerdict {
+				let mut row = SkillRemovalRow::from_outcome(
 					agent,
-					verdict: outcome.verdict.clone(),
-					still_read_from,
-					paths: outcome.plan.paths.clone(),
-					skipped: outcome.plan.skipped.clone(),
-					outcome: kind,
-					needs_confirm,
-				});
+					&outcome,
+					request.dry_run,
+				);
+				row.needs_confirm = needs_confirm;
+				preflight_verdicts.push(row);
 				if let Verdict::Refused {
 					ref reason,
 					ref kind,
@@ -1322,20 +1275,11 @@ fn remove_skill_by_name(
 			}
 			Err(ConfigError::ResourceNotFound { .. }) => {
 				let outcome = manager.skill_noop_outcome(name);
-				let kind = crate::dto::removal_kind_from_outcome(
+				preflight_verdicts.push(SkillRemovalRow::from_outcome(
+					agent,
 					&outcome,
 					request.dry_run,
-				);
-				let still_read_from = still_read_paths(&outcome);
-				preflight_verdicts.push(PreflightVerdict {
-					agent,
-					verdict: outcome.verdict,
-					still_read_from,
-					paths: outcome.plan.paths,
-					skipped: outcome.plan.skipped,
-					outcome: kind,
-					needs_confirm: outcome.plan.needs_confirm,
-				});
+				));
 			}
 			Err(err) => {
 				preflight_failures.push((agent, Arc::new(err)));
@@ -1355,7 +1299,7 @@ fn remove_skill_by_name(
 				let verdict_entry =
 					preflight_verdicts.iter().find(|e| e.agent == *agent);
 				let mut row = verdict_entry
-					.map(|e| e.to_row())
+					.cloned()
 					.unwrap_or_else(|| SkillRemovalRow::absent(*agent));
 				let load_err =
 					preflight_load_failures.iter().find(|(a, _)| *a == *agent);
@@ -1372,36 +1316,28 @@ fn remove_skill_by_name(
 			.collect();
 		let shared_master_kept = request.keeps_master
 			|| rows.iter().any(|r| r.verdict.shared_master_kept());
+		let mut union_paths: Vec<PathBuf> = Vec::new();
+		for row in &rows {
+			for p in &row.paths {
+				if !union_paths.contains(p) {
+					union_paths.push(p.clone());
+				}
+			}
+		}
 		let prune = if shared_master_kept {
 			PruneStatus::NotRun
 		} else {
-			let mut union_paths: Vec<PathBuf> = Vec::new();
-			for row in &rows {
-				for p in &row.paths {
-					if !union_paths.contains(p) {
-						union_paths.push(p.clone());
-					}
-				}
-			}
 			crate::skills::prune::preview_prune_for_removal(
 				scope,
 				project_root,
 				&union_paths,
 			)
 		};
-		let mut planned_deletions: Vec<PathBuf> = Vec::new();
-		for row in &rows {
-			for p in &row.paths {
-				if !planned_deletions.contains(p) {
-					planned_deletions.push(p.clone());
-				}
-			}
-		}
 		let (keepers, _) = find_skill_holders_crediting(
 			name,
 			scope,
 			project_root,
-			&planned_deletions,
+			&union_paths,
 		);
 		return Ok(SkillRemovalResponse {
 			rows,
@@ -1482,33 +1418,11 @@ fn remove_skill_by_name(
 	let master_p = crate::skills::shape::master_path(scope, project_root, name);
 	let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
 
-	let (holders, unreadable) = if request.keeps_master {
-		(Vec::new(), Vec::new())
-	} else {
-		find_skill_holders(name, scope, project_root)
-	};
-
-	let in_lock_target_agents: Vec<AgentType> = if request.agents.is_empty()
-		&& request.all_agents
-	{
-		holders
-			.iter()
-			.filter(|agent| crate::agent_settings::is_managed(agent.as_str()))
-			.copied()
-			.collect()
-	} else {
-		target_agents
-	};
+	let (holders, unreadable, in_lock_target_agents, is_exhaustive) =
+		resolve_name_targets(request, name);
 
 	let execution_order =
 		shared_first_order(&in_lock_target_agents, scope, project_root);
-
-	let is_exhaustive = !request.keeps_master
-		&& (request.all_agents
-			|| (!holders.is_empty()
-				&& holders
-					.iter()
-					.all(|held| in_lock_target_agents.contains(held))));
 
 	check_unreadable_exhaustive(
 		name,
@@ -1544,7 +1458,7 @@ fn remove_skill_by_name(
 		let caller_needs_confirm = if is_agent_exhaustive && !request.all_agents
 		{
 			manager
-				.remove_skill_planned_for_agents_with_prior(
+				.remove_skill_planned_for_agents(
 					name,
 					request.all_agents,
 					true, // dry_run
@@ -1557,7 +1471,7 @@ fn remove_skill_by_name(
 		} else {
 			None
 		};
-		let res = manager.remove_skill_planned_for_agents_with_prior(
+		let res = manager.remove_skill_planned_for_agents(
 			name,
 			is_agent_exhaustive || request.all_agents,
 			false, // dry_run
@@ -1584,23 +1498,17 @@ fn remove_skill_by_name(
 									all_pruned_keys.push(key.clone());
 								}
 							}
-							if !matches!(
-								batch_prune,
-								PruneStatus::Failed { .. }
-							) {
-								batch_prune = PruneStatus::Pruned(
-									all_pruned_keys.clone(),
-								);
-							} else if let PruneStatus::Failed {
-								ref reason,
-								..
-							} = batch_prune
-							{
-								batch_prune = PruneStatus::Failed {
-									reason: reason.clone(),
-									pruned: all_pruned_keys.clone(),
-								};
-							}
+							batch_prune = match &batch_prune {
+								PruneStatus::Failed { reason, .. } => {
+									PruneStatus::Failed {
+										reason: reason.clone(),
+										pruned: all_pruned_keys.clone(),
+									}
+								}
+								_ => {
+									PruneStatus::Pruned(all_pruned_keys.clone())
+								}
+							};
 						}
 						_ => {}
 					}

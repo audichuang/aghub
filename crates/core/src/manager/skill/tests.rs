@@ -1423,6 +1423,7 @@ fn real_dir_shared_slot_removed_when_request_names_every_enabled_reader() {
 			false,
 			true,
 			&[AgentType::Cursor, AgentType::OpenCode],
+			&[],
 		)
 		.expect("removal must succeed when request names every enabled reader");
 
@@ -1499,6 +1500,7 @@ fn dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set() {
 					true,
 					false,
 					&[agent],
+					&[],
 				)
 				.expect("preview must report a keep");
 			assert!(!preview.executed);
@@ -1512,6 +1514,7 @@ fn dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set() {
 					false,
 					true,
 					&[agent],
+					&[],
 				)
 				.expect_err("confirmed delete must refuse the same keep");
 			assert!(
@@ -1542,6 +1545,7 @@ fn dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set() {
 				true,
 				false,
 				&[AgentType::Claude, AgentType::Cursor],
+				&[],
 			)
 			.unwrap();
 		assert!(preview.plan.paths.iter().any(|path| {
@@ -1555,6 +1559,7 @@ fn dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set() {
 				false,
 				true,
 				&[AgentType::Claude, AgentType::Cursor],
+				&[],
 			)
 			.expect("naming both enabled readers must release the directory");
 		assert!(outcome.executed);
@@ -1583,6 +1588,7 @@ fn dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set() {
 				false,
 				true,
 				&[AgentType::Claude],
+				&[],
 			)
 			.expect("a disabled co-reader must not block deletion");
 		assert!(outcome.executed);
@@ -1613,6 +1619,7 @@ fn dotfiles_shared_private_dir_obeys_the_complete_requested_reader_set() {
 				false,
 				true,
 				&[AgentType::Claude],
+				&[],
 			)
 			.expect("a private copy with no co-reader stays deletable");
 		assert!(outcome.executed);
@@ -4084,7 +4091,12 @@ fn real_dir_batch_verdict_is_independent_of_order() {
 			mgr.load().unwrap();
 			let outcome = mgr
 				.remove_skill_planned_for_agents(
-					name, false, true, false, &requested,
+					name,
+					false,
+					true,
+					false,
+					&requested,
+					&[],
 				)
 				.expect("preview must succeed");
 			previews.push((
@@ -4101,7 +4113,12 @@ fn real_dir_batch_verdict_is_independent_of_order() {
 			let load_res = mgr.load();
 			let res = if load_res.is_ok() {
 				mgr.remove_skill_planned_for_agents(
-					name, false, false, true, &requested,
+					name,
+					false,
+					false,
+					true,
+					&requested,
+					&[],
 				)
 			} else {
 				Err(ConfigError::resource_not_found("skill", name))
@@ -4244,7 +4261,14 @@ fn real_dir_keeps_and_refuses_when_link_belongs_to_unrequested_agent() {
 	cursor.load().unwrap();
 
 	let preview = cursor
-		.remove_skill_planned_for_agents(name, false, true, false, &requested)
+		.remove_skill_planned_for_agents(
+			name,
+			false,
+			true,
+			false,
+			&requested,
+			&[],
+		)
 		.expect("preview must succeed");
 	assert!(
 		preview.plan.shared_master_kept,
@@ -4257,7 +4281,14 @@ fn real_dir_keeps_and_refuses_when_link_belongs_to_unrequested_agent() {
 	);
 
 	let err = cursor
-		.remove_skill_planned_for_agents(name, false, false, true, &requested)
+		.remove_skill_planned_for_agents(
+			name,
+			false,
+			false,
+			true,
+			&requested,
+			&[],
+		)
 		.expect_err("execution must be refused");
 	assert!(
 		matches!(err, ConfigError::UnsupportedOperation { .. }),
@@ -4313,7 +4344,7 @@ fn planned_removal_rejects_request_omitting_target_agent() {
 	// (~L2866, L2951). At the ConfigManager layer, a request that omits the target
 	// agent is rejected immediately by the guard in remove_skill_planned_inner.
 	let err = cursor
-		.remove_skill_planned_for_agents(name, false, false, true, &[])
+		.remove_skill_planned_for_agents(name, false, false, true, &[], &[])
 		.expect_err(
 			"planned removal must reject a request that omits the target agent",
 		);
@@ -4384,6 +4415,7 @@ fn real_dir_git_tracked_single_agent_delete_is_refused() {
 			false,
 			true,
 			&[AgentType::Cursor, AgentType::OpenCode],
+			&[],
 		)
 		.expect_err("tracked real directory deletion must be refused");
 
@@ -4459,6 +4491,7 @@ fn real_dir_untracked_in_git_repo_single_agent_delete_is_allowed() {
 			false,
 			true,
 			&[AgentType::Cursor, AgentType::OpenCode],
+			&[],
 		)
 		.expect("untracked real directory removal must succeed");
 
@@ -4512,6 +4545,7 @@ fn real_dir_outside_git_repo_single_agent_delete_is_allowed() {
 			false,
 			true,
 			&[AgentType::Cursor, AgentType::OpenCode],
+			&[],
 		)
 		.expect("real directory outside git repo removal must succeed");
 
@@ -4623,6 +4657,7 @@ fn real_dir_delete_failure_keeps_the_requested_agents_links() {
 		false,
 		true,
 		&enabled_three,
+		&[],
 	);
 	std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o755))
 		.unwrap();
@@ -4781,7 +4816,12 @@ fn real_dir_batch_with_own_links_is_order_independent() {
 			mgr.load().unwrap();
 			let outcome = mgr
 				.remove_skill_planned_for_agents(
-					name, false, true, false, &requested,
+					name,
+					false,
+					true,
+					false,
+					&requested,
+					&[],
 				)
 				.unwrap_or_else(|e| {
 					panic!("{order_name}: preview must succeed for {agent:?}: {e:?}")
@@ -4799,7 +4839,12 @@ fn real_dir_batch_with_own_links_is_order_independent() {
 			// Mirror the CLI's `plan_or_noop`: a later row finding nothing left
 			// is `ResourceNotFound`, which the surfaces map to a noop outcome.
 			let outcome = match mgr.remove_skill_planned_for_agents(
-				name, false, false, true, &requested,
+				name,
+				false,
+				false,
+				true,
+				&requested,
+				&[],
 			) {
 				Ok(outcome) => outcome,
 				Err(ConfigError::ResourceNotFound { .. }) if idx > 0 => {
@@ -4916,7 +4961,12 @@ fn real_dir_with_unrequested_enabled_linker_refuses_the_direct_reader_row() {
 			mgr.load().unwrap();
 			let preview = mgr
 				.remove_skill_planned_for_agents(
-					name, false, true, false, requested,
+					name,
+					false,
+					true,
+					false,
+					requested,
+					&[],
 				)
 				.unwrap_or_else(|e| {
 					panic!("{order_name}: preview must succeed for {agent:?}: {e:?}")
@@ -4941,7 +4991,12 @@ fn real_dir_with_unrequested_enabled_linker_refuses_the_direct_reader_row() {
 			mgr.load().unwrap();
 			let err = mgr
 				.remove_skill_planned_for_agents(
-					name, false, false, true, requested,
+					name,
+					false,
+					false,
+					true,
+					requested,
+					&[],
 				)
 				.expect_err(&format!(
 					"{order_name}: execution must be refused for {agent:?}"
@@ -5032,7 +5087,14 @@ fn real_dir_git_tracked_all_agents_delete_is_refused() {
 	let everyone = [AgentType::Cursor, AgentType::OpenCode];
 
 	let preview = cursor
-		.remove_skill_planned_for_agents(name, true, true, false, &everyone)
+		.remove_skill_planned_for_agents(
+			name,
+			true,
+			true,
+			false,
+			&everyone,
+			&[],
+		)
 		.expect("a preview previews");
 	assert!(
 		preview.plan.paths.is_empty() && preview.plan.shared_master_kept,
@@ -5041,7 +5103,14 @@ fn real_dir_git_tracked_all_agents_delete_is_refused() {
 	);
 
 	let err = cursor
-		.remove_skill_planned_for_agents(name, true, false, true, &everyone)
+		.remove_skill_planned_for_agents(
+			name,
+			true,
+			false,
+			true,
+			&everyone,
+			&[],
+		)
 		.expect_err("--all-agents must not delete a git-tracked directory");
 	let message = err.to_string();
 	assert!(
@@ -5088,6 +5157,7 @@ fn real_dir_untracked_in_git_repo_all_agents_delete_is_allowed() {
 			false,
 			true,
 			&[AgentType::Cursor, AgentType::OpenCode],
+			&[],
 		)
 		.expect("an untracked directory is still removable");
 	assert!(outcome.executed && !skill_dir.exists());
@@ -5126,6 +5196,7 @@ fn real_dir_git_undecided_refuses_single_agent_and_all_agents_delete() {
 				false,
 				true,
 				&[AgentType::Cursor, AgentType::OpenCode],
+				&[],
 			)
 			.expect_err("an undecidable probe must refuse the delete");
 		let message = err.to_string();

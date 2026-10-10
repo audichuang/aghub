@@ -547,38 +547,22 @@ impl ConfigManager {
 	) -> Result<crate::skills::removal::RemovalOutcome> {
 		let requested = [self.agent_type()];
 		self.remove_skill_planned_for_agents(
-			name, all_agents, dry_run, confirm, &requested,
+			name,
+			all_agents,
+			dry_run,
+			confirm,
+			&requested,
+			&[],
 		)
 	}
 
 	/// Batch-aware removal: `requested_agents` is the complete set authorized by
 	/// this request to lose a shared Referrer. It must include this manager's
 	/// agent; readers outside the set keep the Referrer if they need it.
+	/// `prior_deletions` are earlier rows' planned deletions in the same batch,
+	/// treated as doomed so this agent's `read_effect_after` does not count them
+	/// as survivors.
 	pub fn remove_skill_planned_for_agents(
-		&mut self,
-		name: &str,
-		all_agents: bool,
-		dry_run: bool,
-		confirm: bool,
-		requested_agents: &[crate::models::AgentType],
-	) -> Result<crate::skills::removal::RemovalOutcome> {
-		self.remove_skill_planned_inner(
-			name,
-			all_agents,
-			dry_run,
-			confirm,
-			PlannedRemovalOptions {
-				target_entry: None,
-				requested_agents,
-				prior_deletions: &[],
-			},
-		)
-	}
-
-	/// Batch-aware removal with prior-row deletion credits: earlier rows in the same
-	/// batch that will have already unlinked/deleted their entries are treated as doomed,
-	/// so this agent's `read_effect_after` does not treat them as survivors.
-	pub(crate) fn remove_skill_planned_for_agents_with_prior(
 		&mut self,
 		name: &str,
 		all_agents: bool,

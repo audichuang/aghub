@@ -2,7 +2,8 @@ use crate::{eprintln_verbose, ResourceType};
 use aghub_core::errors::ConfigError;
 use aghub_core::manager::ConfigManager;
 use aghub_core::skills::removal::{
-	self, PruneStatus, RemovalOutcome, SkillRemovalRequest, SkillRemovalTarget,
+	self, apply_prune_fields, RemovalOutcome, SkillRemovalRequest,
+	SkillRemovalTarget,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -154,24 +155,10 @@ fn plan_or_noop(
 	}
 }
 
-/// Render a skill removal's [`PruneStatus`] onto the JSON `payload`, matching
-/// the API's `DeleteSkillByPathResponse` fields. Keys are **snake_case**
-/// (`pruned_lock_entries`/`prune_error`) so the CLI and the API/desktop DTO are
-/// one wire shape — the same convention the shared `RemovalView` uses:
-///
-/// - `NotRun` → no keys (no prune was attempted).
-/// - `Pruned(keys)` → `pruned_lock_entries` (empty = ran, nothing orphaned).
-/// - `Failed { reason, pruned }` → `prune_error` plus `pruned_lock_entries` for
-///   the keys dropped BEFORE the failure. The list is ALWAYS emitted (even
-///   when empty) so the CLI and API agree on the `Failed` shape; a `Both`-scope
-///   prune can leave a non-empty partial here.
-fn apply_prune_fields(payload: &mut serde_json::Value, prune: &PruneStatus) {
-	aghub_core::skills::removal::apply_prune_fields(payload, prune);
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use aghub_core::skills::removal::PruneStatus;
 
 	#[test]
 	fn prune_not_run_adds_no_keys() {

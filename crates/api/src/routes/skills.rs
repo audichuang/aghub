@@ -183,6 +183,37 @@ pub async fn reconcile_skill_route(
 	.await
 }
 
+/// Projects a single-skill removal into the wire response shared by both
+/// delete routes.
+fn single_view_response(
+	single: aghub_core::skills::removal::SingleSkillRemovalView,
+	error: Option<String>,
+) -> DeleteSkillByPathResponse {
+	let (pruned_lock_entries, would_prune_lock_entries, prune_error) =
+		super::project_prune_status(single.prune);
+	let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
+		single.holders.to_options();
+	DeleteSkillByPathResponse {
+		success: single.removal_view.success,
+		dry_run: single.removal_view.dry_run,
+		executed: single.removal_view.executed,
+		needs_confirm: single.removal_view.needs_confirm,
+		paths: single.removal_view.paths,
+		skipped: single.removal_view.skipped,
+		deleted_path: single.removal_view.deleted_path,
+		pruned_lock_entries,
+		would_prune_lock_entries,
+		prune_error,
+		outcome: single.removal_view.outcome.into(),
+		error,
+		validation_errors: None,
+		still_read_by,
+		still_read_by_managed,
+		still_read_by_unmanaged,
+		code: single.code.map(|s| s.to_string()),
+	}
+}
+
 #[delete("/skills/by-path", data = "<body>")]
 pub async fn delete_skill_by_path(
 	_origin: TrustedLocalOrigin,
@@ -222,12 +253,6 @@ pub async fn delete_skill_by_path(
 
 		let single = resp.to_single_view(dry_run).map_err(ApiError::from)?;
 
-		let (pruned_lock_entries, would_prune_lock_entries, prune_error) =
-			super::project_prune_status(single.prune);
-
-		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
-			single.holders.to_options();
-
 		let error = resp
 			.rows
 			.iter()
@@ -239,25 +264,7 @@ pub async fn delete_skill_by_path(
 			})
 			.and_then(|r| r.error.clone());
 
-		Ok(Json(DeleteSkillByPathResponse {
-			success: single.removal_view.success,
-			dry_run: single.removal_view.dry_run,
-			executed: single.removal_view.executed,
-			needs_confirm: single.removal_view.needs_confirm,
-			paths: single.removal_view.paths,
-			skipped: single.removal_view.skipped,
-			deleted_path: single.removal_view.deleted_path,
-			pruned_lock_entries,
-			would_prune_lock_entries,
-			prune_error,
-			outcome: single.removal_view.outcome.into(),
-			error,
-			validation_errors: None,
-			still_read_by,
-			still_read_by_managed,
-			still_read_by_unmanaged,
-			code: single.code.map(|s| s.to_string()),
-		}))
+		Ok(Json(single_view_response(single, error)))
 	})
 	.await
 }
@@ -656,11 +663,13 @@ pub fn get_skill_holders(
 	let resolved = scope.resolve()?;
 	require_writable_scope(&resolved)?;
 	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
-	let view = aghub_core::skills::removal::batch::get_skill_holders(
+	let (holders, _) = aghub_core::skills::removal::find_skill_holders(
 		name,
 		resource_scope,
 		project_root.as_deref(),
 	);
+	let view =
+		aghub_core::skills::removal::SkillHoldersView::from_agents(holders);
 	Ok(Json(SkillHoldersResponse::from(view)))
 }
 
@@ -853,31 +862,7 @@ pub async fn delete_skill(
 
 		let single = resp.to_single_view(dry_run).map_err(ApiError::from)?;
 
-		let (pruned_lock_entries, would_prune_lock_entries, prune_error) =
-			super::project_prune_status(single.prune);
-
-		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
-			single.holders.to_options();
-
-		Ok(Json(DeleteSkillByPathResponse {
-			success: single.removal_view.success,
-			dry_run: single.removal_view.dry_run,
-			executed: single.removal_view.executed,
-			needs_confirm: single.removal_view.needs_confirm,
-			paths: single.removal_view.paths,
-			skipped: single.removal_view.skipped,
-			deleted_path: single.removal_view.deleted_path,
-			pruned_lock_entries,
-			would_prune_lock_entries,
-			prune_error,
-			outcome: single.removal_view.outcome.into(),
-			error: None,
-			validation_errors: None,
-			still_read_by,
-			still_read_by_managed,
-			still_read_by_unmanaged,
-			code: single.code.map(|s| s.to_string()),
-		}))
+		Ok(Json(single_view_response(single, None)))
 	})
 	.await
 }

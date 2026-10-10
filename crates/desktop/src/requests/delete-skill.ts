@@ -355,15 +355,9 @@ export function interpretRemovalVerdict(
 	outcome: RemovalOutcomeKind | undefined | null,
 	intentKind: DeleteSkillIntent["kind"],
 ): DeleteSkillVerdict {
-	if (intentKind === "clean-lock") {
-		if (outcome === "removed") return "removed";
-		if (outcome === "absent") return "lock-only";
-		if (outcome === "partial") return "partial";
-		if (outcome === "kept") return "kept";
-		return "refused";
-	}
+	if (outcome === "absent")
+		return intentKind === "clean-lock" ? "lock-only" : "absent";
 	if (outcome === "removed") return "removed";
-	if (outcome === "absent") return "absent";
 	if (outcome === "kept") return "kept";
 	if (outcome === "partial") return "partial";
 	return "refused";
