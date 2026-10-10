@@ -5842,7 +5842,6 @@ mod tests {
 		);
 	}
 
-	#[cfg(unix)]
 	fn private_slot_for(agent: AgentType, root: &Path) -> PathBuf {
 		let dir = create_adapter(agent)
 			.target_skills_dir(
