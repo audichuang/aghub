@@ -929,13 +929,20 @@ fn sync(args: SyncArgs) -> Result<()> {
 	//   target agent even when the scope lock already says "installed" — the
 	//   repair path a bare, lock-gated `--install-missing` cannot reach (e.g.
 	//   adding a new agent's link, or `-a all` after a single-agent install).
+	//   It also takes `Uncheckable { local }` rows: a lock entry with nothing on
+	//   disk (or disagreeing copies) has no local evidence; the install's
+	//   adoption guard refuses a Master whose bytes differ from the fetched ones,
+	//   and an occupied agent slot is reported as a conflict, not overwritten.
 	use skill_update::sources::SourceSkillState as St;
 	let ensure_named = !args.skills.is_empty();
 	let mut plan: Vec<(&'static str, &SourceSkillDiff)> = Vec::new();
 	if args.install_missing {
 		for d in diffs.iter().filter(|d| {
 			d.state == St::NotInstalled
-				|| (ensure_named && d.state == St::InstalledCurrent)
+				|| (ensure_named
+					&& (d.state == St::InstalledCurrent
+						|| (d.state == St::Uncheckable
+							&& d.reason.as_deref() == Some("local"))))
 		}) {
 			plan.push(("install", d));
 		}

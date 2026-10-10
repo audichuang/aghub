@@ -4083,6 +4083,72 @@ fn check_and_source_diff_agree_on_withheld_edit_and_missing_copy() {
 	);
 }
 
+/// A lock entry whose folder is gone is `uncheckable(local)` in `source diff`
+/// (#46), but naming it still restores it: this is the command `doctor` prints
+/// for a missing/dangling referrer.
+#[cfg(unix)]
+#[test]
+fn source_sync_named_install_missing_restores_a_locked_skill_with_nothing_on_disk(
+) {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "gone", "gone");
+	let hash =
+		skill::compute_skill_folder_hash(&src.path().join("gone")).unwrap();
+
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+	// Only the "gone" lock entry: no `.aghub/gone`, no `.claude/skills/gone`.
+	std::fs::write(
+		project.path().join("skills-lock.json"),
+		format!(
+			r#"{{"version":1,"skills":{{
+		  "gone":{{"source":"owner/repo","sourceType":"github","ref":"main",
+		    "skillPath":"gone/SKILL.md","computedHash":"{}"}}}}}}"#,
+			hash,
+		),
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-p",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"gone",
+			"--install-missing",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["actions"][0]["action"], "install", "sync json: {json}");
+	assert_eq!(json["actions"][0]["applied"], true, "sync json: {json}");
+	assert!(
+		project.path().join(".aghub/gone/SKILL.md").exists(),
+		"Master was not recreated"
+	);
+	let link =
+		std::fs::symlink_metadata(project.path().join(".claude/skills/gone"));
+	assert!(
+		link.is_ok_and(|m| m.file_type().is_symlink()),
+		"agent referrer was not relinked"
+	);
+}
+
 /// A host-blind source that resolves to a DIFFERENT forge in each scope.
 ///
 /// `source list` prints the lock's host-blind `SOURCE`, so pasting it back can

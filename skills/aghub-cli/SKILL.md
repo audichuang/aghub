@@ -216,12 +216,13 @@ private directory does not count — repair leaves that alone.
 
 **Dead ends. These are disclosed, not routed — do not pick a verb for them:**
 
-- An `orphan-lock` with NOTHING on disk shows as `uncheckable` (`local`) in
-  `source diff` (or `installedOutdated` when upstream moved). `--install-missing`
-  skips both and `--update` refuses because there is no installed copy to
-  resync; a `renamed` row refuses for the same reason. Drop the stale entry with
-  `prune-lock` and install it fresh, or accept that the entry is stale and just
-  prune it.
+- An `orphan-lock` with NOTHING on disk restores with `source sync <source>
+--skill <NAME> --install-missing --yes` while `source diff` calls it
+  `uncheckable` (`local`) — the lock hash still matches upstream. If upstream
+  moved, the row is `installedOutdated`: `--install-missing` skips it and
+  `--update` refuses because there is no installed copy to resync; a `renamed`
+  row refuses for the same reason. Drop the stale entry with `prune-lock` and
+  install it fresh, or accept that the entry is stale and just prune it.
 - `orphanMaster` — a Master with no lock entry and no slot for this agent — has
   no source to relink from. Wanting it tracked again is the adopt branch, and
   adoption only succeeds on an exact byte match. Not wanting it is
@@ -313,7 +314,7 @@ idempotent, which makes this the branch for a Referrer that should exist and
 does not.
 
 **The trap: `--install-missing` plans only `notInstalled` rows, plus explicitly
-named `installedCurrent` ones.** An `installedOutdated` skill is filtered out,
+named `installedCurrent` and `uncheckable` (`local`) ones.** An `installedOutdated` skill is filtered out,
 so granting an agent a skill that has an upstream update produces an EMPTY plan
 — exit 0, nothing written, the agent still `withheld`.
 
