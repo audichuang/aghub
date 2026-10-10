@@ -319,10 +319,11 @@ pub(crate) fn read_scopes(scope: &Scope) -> Vec<WriteScope> {
 /// their answer, so an unreadable lock must fail here instead of surfacing as
 /// "no sources installed" / "untracked".
 ///
-/// `doctor` CONSUMES the returned snapshot. The two `source` commands read
-/// through `skill_update::sources`, which owns its lock access and has no
-/// snapshot injection point, so they keep only the fail-closed CHECK and the
-/// narrow re-read window. Honest partial, not an oversight.
+/// `doctor` no longer uses this: it reads its own scope's lock inside
+/// `aghub_core::skills::health::report`. The `source` commands read through
+/// `skill_update::sources`, which owns its lock access and has no snapshot
+/// injection point, so they keep only the fail-closed CHECK and the narrow
+/// re-read window. Honest partial, not an oversight.
 pub(crate) fn read_scope_locks_checked(
 	scopes: &[WriteScope],
 ) -> Result<crate::commands::LockSnapshot> {

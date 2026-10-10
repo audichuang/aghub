@@ -2,6 +2,7 @@ pub mod adoption;
 pub mod agent_dirs;
 pub mod discovery;
 pub(crate) mod enumerate;
+pub mod health;
 pub mod install_fetched;
 pub mod install_local;
 pub mod linker;

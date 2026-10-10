@@ -49,47 +49,12 @@ impl AgentSkillDirs {
 	}
 }
 
-/// The agent's own read dirs, minus the one it writes and minus every dir any
-/// OTHER descriptor also reads.
-///
-/// An agent can read more dirs than it writes (e.g. Antigravity's pre-move
-/// `.gemini/antigravity/skills`, `.gemini/antigravity-cli/skills` and its
-/// `.agent/skills` alias); auditing the write slot alone would call those
-/// loaded installs `withheld`.
-///
-/// SHARED dirs are excluded: "present in `.agents/skills` with no Referrer of
-/// my own" IS the withheld state this audit exists to surface.
-pub fn private_fallback_dirs(
-	descriptor: &AgentDescriptor,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Vec<PathBuf> {
-	use crate::skills::path_identity::resolved_location;
-	let own = AgentSkillDirs::of(descriptor, scope, project_root);
-	let write = own.write.as_deref().map(resolved_location);
-	own.read
-		.into_iter()
-		.filter(|dir| Some(resolved_location(dir)) != write)
-		.filter(|dir| {
-			let id = resolved_location(dir);
-			!crate::registry::ALL_AGENTS
-				.iter()
-				.filter(|other| other.id != descriptor.id)
-				.any(|other| {
-					AgentSkillDirs::of(other, scope, project_root)
-						.read
-						.iter()
-						.any(|other_dir| resolved_location(other_dir) == id)
-				})
-		})
-		.collect()
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::models::AgentType;
 	use crate::skills::prune::test_lock::env_lock;
+	use crate::skills::shape::compat_roster;
 
 	struct EnvVarGuard(&'static str, Option<std::ffi::OsString>);
 
@@ -126,12 +91,14 @@ mod tests {
 		let scope = ResourceScope::ProjectOnly;
 		let name = "d2-override-probe";
 
-		// Baseline without override: the private compat dir IS a fallback, so
+		// Baseline without override: the private compat dir IS a compat dir, so
 		// the empty answer below is not vacuous.
-		assert_eq!(
-			private_fallback_dirs(cline, scope, Some(&root)),
-			vec![root.join(".clinerules/skills")]
-		);
+		assert!(compat_roster(scope, Some(&root))
+			.iter()
+			.find(|a| a.id == "cline")
+			.unwrap()
+			.compat_dirs()
+			.any(|d| *d == root.join(".clinerules/skills")));
 
 		let over = root.join("override-skills");
 		std::fs::create_dir_all(over.join(name)).unwrap();
@@ -169,27 +136,9 @@ mod tests {
 		let row = roster.iter().find(|a| a.id == "cline").unwrap();
 		assert_eq!(row.write, Some(over.clone()));
 		assert_eq!(row.read, vec![over.clone()]);
-		// doctor fallback: write == only read dir, so nothing private is left
-		assert_eq!(
-			private_fallback_dirs(cline, scope, Some(&root)),
-			Vec::<PathBuf>::new()
-		);
+		// compat dirs: write == only read dir, so nothing else is left
+		assert_eq!(row.compat_dirs().count(), 0);
 
 		set_skills_path_override("cline", None);
-	}
-
-	#[test]
-	fn the_shared_slot_does_not_count_as_a_private_fallback() {
-		let tmp = tempfile::tempdir().unwrap();
-		let root = tmp.path();
-		let dirs = private_fallback_dirs(
-			crate::registry::get(AgentType::Grok),
-			ResourceScope::ProjectOnly,
-			Some(root),
-		);
-		assert!(
-			dirs.is_empty(),
-			"grok's only extra read dir is the shared slot, got {dirs:?}"
-		);
 	}
 }

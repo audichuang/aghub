@@ -2125,6 +2125,18 @@ pub(crate) struct AgentDirs {
 	pub(crate) read: Vec<PathBuf>,
 }
 
+impl AgentDirs {
+	/// Read dirs that are not this agent's write slot, compared by entry
+	/// identity: the dirs repair's compat sweep visits AND doctor's link
+	/// audit falls back to. Empty when the agent has no write slot.
+	pub(crate) fn compat_dirs(&self) -> impl Iterator<Item = &PathBuf> + '_ {
+		let write = self.write.as_deref().map(entry_identity);
+		self.read.iter().filter(move |dir| {
+			write.as_ref().is_some_and(|w| entry_identity(dir) != *w)
+		})
+	}
+}
+
 /// Every agent's dirs at a scope, snapshotted once before the compat sweep
 /// runs so guard 4 sees each entry's whole reader set.
 pub(crate) fn compat_roster(
@@ -2403,17 +2415,10 @@ pub fn plan_repair(
 
 	let mut unlink: Vec<PlannedReferrer> = Vec::new();
 	for agent in &roster {
-		let Some(write_dir) = agent.write.as_ref() else {
-			continue;
-		};
 		// NOT an early `continue` on coverage: the fallible probe must run even
 		// for an uncovered agent, as it is the only thing that notices an
 		// unreadable compat dir. See docs/history/core-skills-shape.md#compat-sweep-skipped-the-unreadable-probe
-		for read_dir in &agent.read {
-			// Identity, not spelling — see the guards note above.
-			if entry_identity(read_dir) == entry_identity(write_dir) {
-				continue;
-			}
+		for read_dir in agent.compat_dirs() {
 			let entry = read_dir.join(&safe);
 			match compat_unlink_permitted(
 				&entry,

@@ -38,8 +38,8 @@ agent alone. Ask the matrix, do not remember it — but read it correctly:
 it. At project scope only amp writes `<root>/.agents/skills` (`SHARES WITH` is
 `-`), yet well over a dozen agents read it; globally cline and warp write
 `~/.agents/skills` and roughly eleven agents read it. So one grant there reaches
-all of those readers, and `doctor` still calls the ones without their own
-Referrer `withheld` — `withheld` therefore does not mean "cannot see it". The
+all of those readers, and `doctor` reports each of them `linked` at that shared
+dir. `withheld` means the agent reads the skill nowhere. The
 JSON form carries no directory (use the table for paths). `coverage` is static:
 it names no skills; per-skill state comes from `doctor --verify-links`.
 
@@ -51,8 +51,8 @@ with that directory.
 ### `withheld` is not coverage
 
 `doctor --verify-links` gives one state per agent. The one that misleads is
-**`withheld`**: the Master is healthy and this agent holds no Referrer anywhere
-it privately reads. That is a legitimate resting state ("installed, deliberately
+**`withheld`**: the Master is healthy and this agent holds no Referrer in any
+dir it reads. That is a legitimate resting state ("installed, deliberately
 not granted"), and `--fail-on-issues` correctly ignores it — but it is a PASS
 only for an agent nobody asked for. **For a requested agent, `linked` is the
 only pass.** Reading `withheld` as "fine" reports success for an agent that

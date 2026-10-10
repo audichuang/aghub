@@ -29,7 +29,7 @@ codegraph — enumerated trees drift):
 - `skills/` — the skill subsystem (`ls` for the full list). Load-bearing, and
   the three biggest files are the ones the root AGENTS.md keeps pointing at:
   `shape.rs` (`classify_shape` / `candidate_referrers` / `plan_repair`),
-  `removal.rs` (`read_effect_after` / `plan_removal`), `repair.rs`. Then
+  `removal.rs` (`read_effect_after` / `plan_removal`), `repair.rs`, `health.rs` (`report`: one scope's lock↔Master rows + link audit; compat dirs = `AgentDirs::compat_dirs`, shared with repair). Then
   `enumerate.rs` (the ONE skill-directory walker and marker rule — root `SKILL.md` or
   `skill.md`, `SkillMarker` three-state; discovery, prune, shape and removal all call it and each
   keeps its own `Unknown` bias), `discovery.rs` (frontmatter names on top of it),

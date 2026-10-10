@@ -66,7 +66,7 @@ list, or `all`), `-g`/`-p`, `--all`.
   `would_prune_lock_entries`, deliberately separate from the committed
   `pruned_lock_entries`.
   Why: knowledge page `技能移除與 Master 回收`
-- **`doctor`'s `health` covers lock ↔ Master only** — per-agent referrer state
+- **`doctor`'s `health` covers lock ↔ Master only** (computed by `aghub_core::skills::health::report`; the CLI only renders and gates) — per-agent referrer state
   needs `--verify-links`, and `linkAudit.state` is `verified` ONLY when every
   agent row is healthy. The per-agent verdict is `skills::shape::classify_shape`'s,
   renamed; doctor derives none of its own, so `chain` and `masterUnusable` must
