@@ -263,6 +263,10 @@ fn collect_skills(
 mod tests {
 	use super::*;
 	use crate::skills::prune::test_lock::env_lock;
+	use crate::skills::shape::{
+		classify_shape, readers_of, SkillShape, ViolationKind,
+	};
+	use aghub_agents::ResourceScope;
 	use std::collections::BTreeSet;
 	use std::os::unix::fs::{symlink, PermissionsExt};
 
@@ -331,6 +335,8 @@ mod tests {
 			.map(|v| v.into_iter().map(|s| s.name).collect())
 	}
 
+	/// Every consumer: enumerate, discovery, prune, shape, removal.
+	///
 	/// Each row is a fresh project root, so one row's lock cannot leak into
 	/// another. Every row seeds `control-orphan` (no folder anywhere): it must
 	/// be gone after the prune, which proves the prune ran and did not bail on
@@ -435,6 +441,31 @@ mod tests {
 				BTreeSet::from(["lower".to_string()]),
 				"lowercase: the key is KEPT (D3: was pruned before)"
 			);
+			// Shape (repair) and removal see the same skill: a real `.claude/skills/lower`
+			// holding only `skill.md`, beside the Master, is a forked copy, not ForeignDir.
+			let claude = root.join(".claude/skills");
+			write_skill(&claude.join("lower"), "skill.md", "lower");
+			write_skill(&claude.join("lower-folder"), "skill.md", "lower");
+			assert_eq!(
+				classify_shape(&claude.join("lower"), &store.join("lower")),
+				SkillShape::Violation(ViolationKind::ForkedCopy),
+				"lowercase: shape reads skill.md as a marker (D4: was ForeignDir)"
+			);
+			assert!(
+				readers_of(ResourceScope::ProjectOnly, Some(&root), "lower")
+					.contains(&"claude"),
+				"lowercase: repair's readers_of counts the skill.md dir as a read"
+			);
+			assert!(
+				crate::skills::removal::candidate_entries(
+					&claude,
+					"lower",
+					"lower",
+				)
+					.0
+					.contains(&claude.join("lower-folder")),
+				"lowercase: removal candidates include the renamed skill.md folder"
+			);
 		}
 
 		// unreadable: a skill folder whose marker cannot be probed (mode 0000).
@@ -534,6 +565,16 @@ mod tests {
 				prune_and_read(&root),
 				BTreeSet::from(["folder-x".to_string()]),
 				"renamed_folder: keyed by folder name (pinned, unchanged by D3)"
+			);
+			assert!(
+				crate::skills::removal::candidate_entries(
+					&store,
+					"other-name",
+					"other-name",
+				)
+					.0
+					.contains(&store.join("folder-x")),
+				"renamed_folder: removal candidates find the folder by frontmatter name"
 			);
 		}
 	}

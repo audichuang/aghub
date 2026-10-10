@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use aghub_agents::ResourceScope;
 
 use crate::skills::agent_dirs::AgentSkillDirs;
-use crate::skills::enumerate::SkillMarker;
+use crate::skills::enumerate::{skill_marker, SkillMarker};
 use crate::skills::linker::{master_store_dir, shared_referrer_dir, Linker};
 use crate::skills::path_identity::entry_identity;
 
@@ -107,7 +107,7 @@ pub fn master_path(
 /// is moved. Read paths, not write dirs: an agent reading the shared slot while
 /// writing its own dir would otherwise lose the skill.
 ///
-/// A path counts only when it holds a root `SKILL.md`
+/// A path counts only when it holds a root `SKILL.md` or `skill.md`
 /// ([`SkillMarker::Present`]); a same-named category dir or an unreadable dir
 /// ([`SkillMarker::Unknown`]) is no evidence of a read and must not seed an
 /// implicit `Create`. A definitively DANGLING link also counts: it is a
@@ -133,7 +133,7 @@ pub fn readers_of(
 				.iter()
 				.any(|dir| {
 					let entry = dir.join(&safe);
-					has_skill_marker(&entry) == SkillMarker::Present
+					skill_marker(&entry) == SkillMarker::Present
 						|| is_dangling_link(&entry)
 				})
 		})
@@ -329,13 +329,13 @@ pub fn classify_shape(referrer: &Path, master: &Path) -> SkillShape {
 	if !referrer.is_dir() {
 		return SkillShape::Violation(ViolationKind::ReferrerIsNotADir);
 	}
-	// A directory with no root `SKILL.md` is not a skill, only a name
+	// A directory with no root `SKILL.md`/`skill.md` is not a skill, only a name
 	// collision. Asked BEFORE the fork/unmigrated split, because both of those
 	// lead somewhere destructive (quarantine, adoption as the Master).
 	// `Unknown` counts as `Present` here — the OPPOSITE of `readers_of` — so an
 	// unreadable dir routes to a visible refusal instead of `LeaveForeign`
 	// (see [`SkillMarker`]).
-	if has_skill_marker(referrer) == SkillMarker::Absent {
+	if skill_marker(referrer) == SkillMarker::Absent {
 		return SkillShape::ForeignDir;
 	}
 	if master_exists {
@@ -349,30 +349,6 @@ pub fn classify_shape(referrer: &Path, master: &Path) -> SkillShape {
 /// here need "is there an entry at this path at all", link-ness included.
 fn referrer_or_master_exists(path: &Path) -> bool {
 	path.symlink_metadata().is_ok()
-}
-
-/// Whether `entry` is actually serving A SKILL, by ONE rule shared by every
-/// caller in THIS module that asks this question ([`classify_shape`]'s
-/// `ForeignDir` split and [`readers_of`]'s `Present` check) — each picks its
-/// own safe direction for [`SkillMarker::Unknown`]; see that type's doc.
-///
-/// Uppercase only, unlike `enumerate::skill_marker` (which also accepts
-/// `skill.md`); moving onto it is D4 — it changes which dirs read as `ForeignDir`.
-fn has_skill_marker(entry: &Path) -> SkillMarker {
-	match std::fs::metadata(entry.join("SKILL.md")) {
-		Ok(meta) if meta.is_file() => SkillMarker::Present,
-		Ok(_) => SkillMarker::Absent,
-		Err(e)
-			if matches!(
-				e.kind(),
-				std::io::ErrorKind::NotFound
-					| std::io::ErrorKind::NotADirectory
-			) =>
-		{
-			SkillMarker::Absent
-		}
-		Err(_) => SkillMarker::Unknown,
-	}
 }
 
 #[cfg(all(test, unix))]
@@ -1589,7 +1565,7 @@ mod tests {
 		fs::write(&entry, "not a skill directory at all").unwrap();
 
 		assert_eq!(
-			has_skill_marker(&entry),
+			skill_marker(&entry),
 			SkillMarker::Absent,
 			"NotADirectory is just as definite as NotFound; it must not be \
 			 folded into Unknown"

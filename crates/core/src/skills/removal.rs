@@ -1233,18 +1233,20 @@ pub fn dir_has_external_referrer_excluding(
 					// `read_dir` works, child stats fail). A complete listing
 					// without the leaf proves no referrer. Asked of the entry's own
 					// parent, since discovered entries may nest below `dir`.
-					let listed = entry
-						.file_name()
-						.and_then(|leaf| leaf.to_str())
-						.and_then(|leaf| {
-							dir_lists_name(entry.parent().unwrap_or(dir), leaf)
-						});
-					match listed {
-						Some(false) => continue,
-						// Present but opaque, or unlistable: unknown keeps the dir
-						// (costs a refused deletion, never data).
-						Some(true) | None => return Some(entry),
+					let (listed, unlisted) = crate::skills::enumerate::entries(
+						entry.parent().unwrap_or(dir),
+						false,
+					);
+					let leaf = entry.file_name();
+					// A complete listing without the leaf proves no referrer; present
+					// but opaque, or an incomplete listing, keeps the dir (costs a
+					// refused deletion, never data).
+					if !unlisted
+						&& !listed.iter().any(|p| p.file_name() == leaf)
+					{
+						continue;
 					}
+					return Some(entry);
 				}
 			}
 			if !Linker::is_link(&entry) {
@@ -1271,25 +1273,6 @@ pub fn dir_has_external_referrer_excluding(
 		}
 	}
 	None
-}
-
-/// `Some(true)` / `Some(false)` when `dir`'s listing was read IN FULL and
-/// `safe` was / was not among the names; `None` when the listing could not be
-/// completed and the question stays open.
-///
-/// Deliberately name-only: `read_dir` yields names without stat'ing anything,
-/// which is what makes it usable on a directory whose children cannot be
-/// stat'd.
-fn dir_lists_name(dir: &Path, safe: &str) -> Option<bool> {
-	let mut found = false;
-	for entry in std::fs::read_dir(dir).ok()? {
-		// A per-entry error means the listing is INCOMPLETE — the name could
-		// have been in the part we did not get.
-		if entry.ok()?.file_name() == std::ffi::OsStr::new(safe) {
-			found = true;
-		}
-	}
-	Some(found)
 }
 
 /// Builds the refusal text when a delete is refused because git tracks the
