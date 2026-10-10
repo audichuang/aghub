@@ -42,17 +42,14 @@ fn global_data_dir() -> Option<PathBuf> {
 // `docs/specs/2026-08-30-skills-hub-borrow-path.md` — an agent never reads
 // another agent's private dir. Own dir stays FIRST (first-dir-wins decides
 // `source_path`, i.e. what `remove_skill_planned` deletes).
-fn global_skills_paths() -> Vec<PathBuf> {
-	let (Some(grok), Some(home)) = (grok_home(), home_dir()) else {
-		return grok_home()
-			.map(|grok| vec![grok.join("skills")])
-			.unwrap_or_default();
-	};
-	vec![grok.join("skills"), home.join(".agents/skills")]
+fn global_also_reads() -> Vec<PathBuf> {
+	home_dir()
+		.map(|home| vec![home.join(".agents/skills")])
+		.unwrap_or_default()
 }
 
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".grok/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -131,12 +128,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents,
 	save_sub_agents,

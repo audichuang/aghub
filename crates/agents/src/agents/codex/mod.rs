@@ -9,14 +9,11 @@ fn global_data_dir() -> Option<PathBuf> {
 	mcp::global_dir()
 }
 
-fn global_skills_paths() -> Vec<PathBuf> {
-	let Some(root) = mcp::global_dir() else {
+fn global_also_reads() -> Vec<PathBuf> {
+	let Some(home) = home_dir() else {
 		return Vec::new();
 	};
-	let Some(home) = home_dir() else {
-		return vec![root.join("skills")];
-	};
-	let paths = vec![root.join("skills"), home.join(".agents/skills")];
+	let paths = vec![home.join(".agents/skills")];
 	#[cfg(not(target_os = "windows"))]
 	let paths = {
 		let mut p = paths;
@@ -26,8 +23,8 @@ fn global_skills_paths() -> Vec<PathBuf> {
 	paths
 }
 
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".codex/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -72,12 +69,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents: sub_agent::load,
 	save_sub_agents: sub_agent::save,

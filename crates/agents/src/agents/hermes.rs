@@ -36,13 +36,6 @@ fn global_data_dir() -> Option<PathBuf> {
 	hermes_home()
 }
 
-fn global_skills_read() -> Vec<PathBuf> {
-	match hermes_home() {
-		Some(h) => vec![h.join("skills")],
-		None => Vec::new(),
-	}
-}
-
 fn global_skills_write() -> Option<PathBuf> {
 	hermes_home().map(|h| h.join("skills"))
 }
@@ -81,8 +74,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_read,
 		write: global_skills_write,
+		also_reads: None,
 	}),
 	project_skill_paths: None,
 	load_sub_agents: load_sub_agents_noop,

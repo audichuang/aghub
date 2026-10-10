@@ -11,15 +11,6 @@ fn mcp_project_path(root: &Path) -> Option<PathBuf> {
 fn global_data_dir() -> Option<PathBuf> {
 	home_dir().map(|home| home.join(".claude"))
 }
-fn global_skills_paths() -> Vec<PathBuf> {
-	home_dir()
-		.map(|home| vec![home.join(".claude/skills")])
-		.unwrap_or_default()
-}
-
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".claude/skills")]
-}
 
 fn global_skill_write_path() -> Option<PathBuf> {
 	home_dir().map(|home| home.join(".claude/skills"))
@@ -97,12 +88,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: None,
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: None,
 	}),
 	load_sub_agents,
 	save_sub_agents,

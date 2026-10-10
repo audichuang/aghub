@@ -40,16 +40,11 @@ json_map_dialect!(json_map::Dialect {
 
 // Prefer the vendor-specific project entry; retain the shared read path for
 // discovery and migration of existing installs.
-fn global_skills_paths() -> Vec<std::path::PathBuf> {
-	home_dir()
-		.map(|home| vec![home.join(".config/agents/skills")])
-		.unwrap_or_default()
-}
 fn global_skill_write_path() -> Option<std::path::PathBuf> {
 	home_dir().map(|home| home.join(".config/agents/skills"))
 }
-fn project_skills_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-	vec![root.join(".kimi/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &std::path::Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 fn project_skill_write_path(
 	root: &std::path::Path,
@@ -91,12 +86,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: None,
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,

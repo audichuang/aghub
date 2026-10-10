@@ -30,17 +30,14 @@ define_mcp_paths! {
 // `remove_skill_planned` deletes). The singular `.agent/skills` slot and omp's
 // first-run import of `.claude` / `.cursor` / `.codex` / … are deliberately not
 // modelled — decision #11: never read another agent's private dir.
-fn global_skills_paths() -> Vec<PathBuf> {
-	match home_dir() {
-		Some(home) => {
-			vec![home.join(".omp/agent/skills"), home.join(".agents/skills")]
-		}
-		None => Vec::new(),
-	}
+fn global_also_reads() -> Vec<PathBuf> {
+	home_dir()
+		.map(|home| vec![home.join(".agents/skills")])
+		.unwrap_or_default()
 }
 
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".omp/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -92,12 +89,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,
@@ -127,11 +124,11 @@ mod tests {
 			Some(Path::new("/workspace/.omp/mcp.json").to_path_buf())
 		);
 		assert_eq!(
-			global_skills_paths(),
+			DESCRIPTOR.global_skill_read_paths(),
 			vec![home.join(".omp/agent/skills"), home.join(".agents/skills")]
 		);
 		assert_eq!(
-			project_skills_paths(Path::new("/workspace")),
+			DESCRIPTOR.project_skill_read_paths(Path::new("/workspace")),
 			vec![
 				PathBuf::from("/workspace/.omp/skills"),
 				PathBuf::from("/workspace/.agents/skills"),

@@ -30,12 +30,11 @@ define_mcp_paths! {
 // older Antigravity dirs stay READ-ONLY so skills an older aghub installed are
 // not stranded. Known costs (doctor audits them `withheld`; `aghub repair`, not
 // `add`, migrates them): see docs/descriptors/antigravity.md.
-fn global_skills_paths() -> Vec<PathBuf> {
+fn global_also_reads() -> Vec<PathBuf> {
 	let Some(home) = home_dir() else {
 		return Vec::new();
 	};
 	vec![
-		home.join(".gemini/config/skills"),
 		home.join(".gemini/antigravity/skills"),
 		home.join(".gemini/antigravity-cli/skills"),
 	]
@@ -43,8 +42,8 @@ fn global_skills_paths() -> Vec<PathBuf> {
 
 // The vendor supports `.agent/skills`. Prefer that private entry for grants;
 // the default `.agents/skills` remains readable for legacy installs.
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".agent/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -139,12 +138,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents,
 	save_sub_agents,
@@ -190,7 +189,7 @@ mod tests {
 	fn antigravity_reads_the_legacy_dirs_but_prefers_the_vendor_one() {
 		let home = home_dir().expect("home directory should resolve");
 		assert_eq!(
-			global_skills_paths(),
+			DESCRIPTOR.global_skill_read_paths(),
 			vec![
 				home.join(".gemini/config/skills"),
 				home.join(".gemini/antigravity/skills"),
@@ -204,7 +203,7 @@ mod tests {
 			"writes go to the vendor dir only"
 		);
 		assert_eq!(
-			project_skills_paths(Path::new("/workspace")),
+			DESCRIPTOR.project_skill_read_paths(Path::new("/workspace")),
 			vec![
 				PathBuf::from("/workspace/.agent/skills"),
 				PathBuf::from("/workspace/.agents/skills"),

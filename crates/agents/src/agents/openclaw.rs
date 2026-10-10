@@ -62,11 +62,8 @@ pub fn get_openclaw_skills_dirs(
 	vec![home.join(".openclaw/skills")]
 }
 
-fn global_skills_paths() -> Vec<PathBuf> {
-	let Some(home) = home_dir() else {
-		return Vec::new();
-	};
-	let mut paths = get_openclaw_skills_dirs(&home, |p| p.exists());
+fn global_also_reads() -> Vec<PathBuf> {
+	let mut paths = Vec::new();
 
 	// Dynamic discovery: which openclaw → canonicalize → parent/skills
 	// This allows finding skills from npm global installation or other symlinked locations
@@ -128,8 +125,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: None,
 	load_sub_agents: load_sub_agents_noop,

@@ -24,9 +24,6 @@ fn global_data_dir() -> Option<PathBuf> {
 	// %APPDATA%\Trae (Windows). Used for availability/reveal, not for writing.
 	dirs::config_dir().map(|dir| dir.join("Trae"))
 }
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".trae/skills")]
-}
 fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
 	Some(root.join(".trae/skills"))
 }
@@ -66,8 +63,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	},
 	global_skill_paths: None,
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: None,
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,

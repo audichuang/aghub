@@ -65,15 +65,14 @@ json_map_dialect!(json_map::Dialect {
 // not own and plan destructive removals against them.
 // Write dir FIRST in each list (`load_skills_from_dirs` is first-dir-wins and the
 // winner becomes `source_path`, the path `remove_skill_planned` deletes).
-fn global_skills_paths() -> Vec<PathBuf> {
-	let Some(home) = home_dir() else {
-		return Vec::new();
-	};
-	vec![home.join(".copilot/skills"), home.join(".agents/skills")]
+fn global_also_reads() -> Vec<PathBuf> {
+	home_dir()
+		.map(|home| vec![home.join(".agents/skills")])
+		.unwrap_or_default()
 }
 
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".github/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -164,12 +163,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents,
 	save_sub_agents,
@@ -227,11 +226,11 @@ mod tests {
 	fn copilot_reads_the_universal_master_and_the_github_slot() {
 		let home = home_dir().expect("home directory should resolve");
 		assert_eq!(
-			global_skills_paths(),
+			DESCRIPTOR.global_skill_read_paths(),
 			vec![home.join(".copilot/skills"), home.join(".agents/skills")]
 		);
 		assert_eq!(
-			project_skills_paths(Path::new("/workspace")),
+			DESCRIPTOR.project_skill_read_paths(Path::new("/workspace")),
 			vec![
 				PathBuf::from("/workspace/.github/skills"),
 				PathBuf::from("/workspace/.agents/skills"),

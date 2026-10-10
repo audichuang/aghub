@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 // DeepSeek Harness (`@deepseek-ai/dsh`) — not Deep Code, not DeepSeek-TUI.
 // Private `.dsh/skills` outranks the shared `.agents/skills` at both scopes, so
-// the write dir goes first. `universal: false`: dsh's shared root is `~/.agents`
-// (`$DSH_AGENTS_HOME`), not XDG. MCP is deliberately unsupported (per-profile
+// `.dsh/skills` is the write slot and `.agents/skills` an also-read.
+// `universal: false`: dsh's shared root is `~/.agents` (`$DSH_AGENTS_HOME`),
+// not XDG. MCP is deliberately unsupported (per-profile
 // Cordis YAML with `!!js` tags cannot round-trip); sub-agents not researched.
 // See docs/descriptors/dsh.md.
 
@@ -39,16 +40,15 @@ fn global_data_dir() -> Option<PathBuf> {
 	dsh_home()
 }
 
-fn global_skills_paths() -> Vec<PathBuf> {
-	[dsh_home(), dsh_agents_home()]
-		.into_iter()
-		.flatten()
+fn global_also_reads() -> Vec<PathBuf> {
+	dsh_agents_home()
 		.map(|root| root.join("skills"))
+		.into_iter()
 		.collect()
 }
 
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".dsh/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -94,12 +94,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,

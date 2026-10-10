@@ -21,21 +21,19 @@ define_mcp_paths! {
 	data_dir: ".zcode",
 }
 
-// Write the private `.zcode/skills` first; `.agents/skills` must stay a READ
-// path so `compat_unlink_authorized` counts ZCode as a reader of the shared slot.
+// Write slot is the private `.zcode/skills`; `.agents/skills` must stay an
+// also-read so `compat_unlink_authorized` counts ZCode as a reader of the
+// shared slot.
 // Not `universal: true` — ZCode names `~/.agents/skills`, never XDG.
 // See docs/descriptors/zcode.md#skill-roots.
-fn global_skills_paths() -> Vec<std::path::PathBuf> {
-	match home_dir() {
-		Some(home) => {
-			vec![home.join(".zcode/skills"), home.join(".agents/skills")]
-		}
-		None => Vec::new(),
-	}
+fn global_also_reads() -> Vec<std::path::PathBuf> {
+	home_dir()
+		.map(|home| vec![home.join(".agents/skills")])
+		.unwrap_or_default()
 }
 
-fn project_skills_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-	vec![root.join(".zcode/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<std::path::PathBuf> {
@@ -84,12 +82,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,
@@ -127,11 +125,11 @@ mod tests {
 		// makes `compat_unlink_authorized` miscount ZCode as a non-reader and
 		// lets another agent's `repair` detach a Referrer ZCode still uses.
 		assert_eq!(
-			global_skills_paths(),
+			DESCRIPTOR.global_skill_read_paths(),
 			vec![home.join(".zcode/skills"), home.join(".agents/skills")]
 		);
 		assert_eq!(
-			project_skills_paths(Path::new("/workspace")),
+			DESCRIPTOR.project_skill_read_paths(Path::new("/workspace")),
 			vec![
 				PathBuf::from("/workspace/.zcode/skills"),
 				PathBuf::from("/workspace/.agents/skills"),

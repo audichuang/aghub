@@ -57,16 +57,21 @@ pub struct Capabilities {
 	pub sub_agents: SubAgentCapabilities,
 }
 
+/// A scope's skill dirs: the ONE slot aghub writes, plus the dirs the agent
+/// also reads (the shared `.agents/skills`, vendor aliases, legacy dirs). The
+/// read list is derived — `write` first, then `also_reads` in order — so the
+/// write slot is read[0] by construction (first-dir-wins makes read[0] the
+/// skill's `source_path`).
 #[derive(Clone, Copy)]
 pub struct GlobalSkillPaths {
-	pub read: fn() -> Vec<PathBuf>,
 	pub write: fn() -> Option<PathBuf>,
+	pub also_reads: Option<fn() -> Vec<PathBuf>>,
 }
 
 #[derive(Clone, Copy)]
 pub struct ProjectSkillPaths {
-	pub read: fn(&Path) -> Vec<PathBuf>,
 	pub write: fn(&Path) -> Option<PathBuf>,
+	pub also_reads: Option<fn(&Path) -> Vec<PathBuf>>,
 }
 
 /// Static descriptor for an agent — one per agent, declared in agents/*.rs
@@ -197,7 +202,10 @@ impl AgentDescriptor {
 		let mut dirs = Vec::new();
 
 		if let Some(paths) = self.global_skill_paths {
-			dirs.extend((paths.read)());
+			dirs.extend((paths.write)());
+			if let Some(also_reads) = paths.also_reads {
+				dirs.extend(also_reads());
+			}
 		}
 
 		if self.capabilities.skills.universal {
@@ -216,7 +224,10 @@ impl AgentDescriptor {
 		let mut dirs = Vec::new();
 
 		if let Some(paths) = self.project_skill_paths {
-			dirs.extend((paths.read)(project_root));
+			dirs.extend((paths.write)(project_root));
+			if let Some(also_reads) = paths.also_reads {
+				dirs.extend(also_reads(project_root));
+			}
 		}
 
 		if self.capabilities.skills.universal {

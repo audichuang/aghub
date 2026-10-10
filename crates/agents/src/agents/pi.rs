@@ -9,16 +9,13 @@ fn global_data_dir() -> Option<PathBuf> {
 // `.pi/skills` + `.agents/skills`. Own dir FIRST (first-dir-wins decides
 // `source_path`). Pi's configurable compat scanning of `~/.claude/skills` /
 // `~/.codex/skills` is deliberately not modelled — decision #11.
-fn global_skills_paths() -> Vec<PathBuf> {
-	match home_dir() {
-		Some(home) => {
-			vec![home.join(".pi/agent/skills"), home.join(".agents/skills")]
-		}
-		None => Vec::new(),
-	}
+fn global_also_reads() -> Vec<PathBuf> {
+	home_dir()
+		.map(|home| vec![home.join(".agents/skills")])
+		.unwrap_or_default()
 }
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".pi/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -63,12 +60,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,

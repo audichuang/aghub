@@ -22,14 +22,13 @@ define_mcp_paths! {
 // against another agent's content. Mapping mirrors upstream `agents.ts`
 // (cursor → project `.agents/skills`, global `~/.cursor/skills`); the global
 // Master is `~/.agents/skills` per the npx interop contract.
-fn global_skills_paths() -> Vec<PathBuf> {
-	let Some(home) = home_dir() else {
-		return Vec::new();
-	};
-	vec![home.join(".cursor/skills"), home.join(".agents/skills")]
+fn global_also_reads() -> Vec<PathBuf> {
+	home_dir()
+		.map(|home| vec![home.join(".agents/skills")])
+		.unwrap_or_default()
 }
-fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".cursor/skills"), root.join(".agents/skills")]
+fn project_also_reads(root: &Path) -> Vec<PathBuf> {
+	vec![root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -74,12 +73,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
-		read: global_skills_paths,
 		write: global_skill_write_path,
+		also_reads: Some(global_also_reads),
 	}),
 	project_skill_paths: Some(ProjectSkillPaths {
-		read: project_skills_paths,
 		write: project_skill_write_path,
+		also_reads: Some(project_also_reads),
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,

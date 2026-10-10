@@ -8,7 +8,7 @@
 Role map (not a full file tree — `ls` / codegraph for that):
 
 - `descriptor.rs` — `AgentDescriptor` + capabilities + path fn types
-- `macros.rs` — `define_mcp_paths!` generates the MCP path fns + `global_data_dir` (no I/O); `define_skill_paths!` likewise for skills (prefer these over hand-written path fns); `json_map_dialect!` (every `json_map` agent uses it)
+- `macros.rs` — `define_mcp_paths!` generates the MCP path fns + `global_data_dir` (no I/O); `define_skill_paths!` generates the per-scope WRITE fns only (`global_skill_write_path` / `project_skill_write_path`); `json_map_dialect!` (every `json_map` agent uses it)
 - `models.rs` — `AgentConfig`, `McpServer`, `McpTransport`, `Skill`, `AgentSelection`, and `AgentType`'s re-export plus `parse_list` (the enum itself comes from `agents/mod.rs`)
 - `agents/` — one descriptor per agent, plus the `agent_roster!` macro in `mod.rs` that declares the roster ONCE and emits `AgentType`, `AgentType::ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and `ALL_DESCRIPTORS` from it (so `models.rs` re-exports `AgentType` rather than defining it); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
 - `sub_agents.rs` — markdown sub-agent I/O + `SubAgentLayout`: `Flat { suffix }` (`.md` for Claude/Grok/OpenCode, `.agent.md` for Copilot) vs `Nested { file_name }` (Antigravity's `<name>/agent.md`). The layout decides the read filter, the NAME and the written filename at once — get one wrong and aghub round-trips with itself while the vendor sees nothing. Frontmatter keys aghub does not model ride the model as `SubAgent::extra_frontmatter` (deserialized through a flattened `extra`), with the destination file read back only when the model carries none — a save rewrites EVERY sub-agent in the directory, not just the edited one, so without this creating one strips its siblings' `tools`/`model`/`color`. Codex is not here: its sub-agents are TOML (`agents/codex/sub_agent.rs`)
@@ -50,8 +50,9 @@ chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
   `~/.grok/config.toml` (project: `.grok/config.toml`); streamable HTTP carries
   **no** `type` key — only SSE has `type = "sse"`; native `enabled` flag; other
   top-level keys preserved on rewrite
-- **Copilot**: skills — global `~/.copilot/skills` + `~/.agents/skills`;
-  project `.github/skills` (the WRITE dir, first) + `.agents/skills`.
+- **Copilot**: skills — global write slot `~/.copilot/skills` + also-read
+  `~/.agents/skills`; project write slot `.github/skills` + also-read
+  `.agents/skills`.
   `.claude/skills` is documented by the vendor but deliberately NOT read
   (decision #11). Sub-agents at both scopes: `~/.copilot/agents/<name>.agent.md`
   and `.github/agents/<name>.agent.md` — the `.agent.md` suffix is load-bearing
@@ -67,9 +68,9 @@ chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
   hand-written `transport: "sse"` is the one thing aghub cannot see. MCP at
   `~/.omp/agent/mcp.json` / `.omp/mcp.json`, deliberately NOT the root
   `.mcp.json` Claude and Copilot share
-- **Antigravity**: global skills WRITE `~/.gemini/config/skills`; READ that plus
+- **Antigravity**: global skills write slot `~/.gemini/config/skills` + also-reads
   the legacy `.gemini/antigravity/skills` and `.gemini/antigravity-cli/skills`.
-  Project READ `.agent/skills` (the write dir) + `.agents/skills`. A skill an
+  Project write slot `.agent/skills` + also-read `.agents/skills`. A skill an
   older release left in a compat dir is migrated with `aghub repair`, never
   `aghub add` (which refuses `resource_exists` — the skill already loads);
   `repair` plans WRITE dirs but `readers_of` asks the READ paths, which is the
@@ -89,8 +90,8 @@ chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
   `enabled`, which is why `ToggleKey` carries its spelling as data. The two
   config files are both `config.json` at DIFFERENT depths: user
   `~/.zcode/cli/config.json`, workspace `<root>/.zcode/config.json`. Skills: the WRITE
-  slot is its own `.zcode/skills` at both scopes, and `.agents/skills` is a
-  READ path at both — ZCode's own discovery order is user `.zcode` → user
+  slot is its own `.zcode/skills` at both scopes, and `.agents/skills` is an
+  also-read at both — ZCode's own discovery order is user `.zcode` → user
   `.agents` → workspace `.zcode` → workspace `.agents`. Do not read
   `universal: false` as "does not read the shared slot": that flag only decides
   whether XDG `$XDG_CONFIG_HOME/agents/skills` is appended, and ZCode names
@@ -108,7 +109,7 @@ chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
   LIVE variant (no `#[deprecated]`) — whether a given agent can write one is
   decided by its `vocab.sse`, and the roundtrip test exercises SSE for every
   agent
-- **Descriptors are macro-built — until they can't be**: path mappings come from `define_mcp_paths!`/`define_skill_paths!` in `macros.rs` — read those before hand-writing a path fn. `define_skill_paths!` expresses exactly ONE dir per scope, so every agent that also reads the shared `.agents/skills` slot, a vendor alias or a legacy dir hand-writes the fns instead. **When you hand-write them the WRITE dir goes FIRST**: `load_skills_from_dirs` is first-dir-wins and the winner becomes `source_path` — the path `remove_skill_planned` deletes and `check` hashes — pinned for every agent and scope by `descriptor_regression::skill_write_slot_is_first_read_dir`.
+- **Descriptors are macro-built — until they can't be**: MCP path mappings come from `define_mcp_paths!` in `macros.rs` — read it before hand-writing a path fn. Each skill scope declares `write` (the ONE slot aghub writes; from `define_skill_paths!` when it is a plain home/root-relative dir) and `also_reads` (the shared `.agents/skills`, a vendor alias, legacy dirs, in the agent's discovery order; `None` if none). The read list is derived write-first, so write == read[0] is a construction guarantee — `load_skills_from_dirs` is first-dir-wins and the winner becomes `source_path`, the path `remove_skill_planned` deletes and `check` hashes — still pinned by `descriptor_regression::skill_write_slot_is_first_read_dir`. Never list the write dir again inside `also_reads`.
 
 ## ADDING AN AGENT
 
@@ -117,6 +118,7 @@ Crate-level detail only: the descriptor is
 `pub const DESCRIPTOR: AgentDescriptor = …`, and the roster it joins is
 `agents::ALL_DESCRIPTORS` in this crate (`core`'s `ALL_AGENTS` is that same
 const).
+Skill dirs are declared per scope as `GlobalSkillPaths` / `ProjectSkillPaths { write, also_reads }` — see the Descriptors bullet above.
 
 ## ANTI-PATTERNS
 

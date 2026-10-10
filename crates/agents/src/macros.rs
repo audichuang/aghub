@@ -107,11 +107,9 @@ macro_rules! define_mcp_paths {
 
 /// Macro to generate skill path helper functions for an agent descriptor.
 ///
-/// Generates the following functions:
-/// - `global_skills_paths()` - returns global skills read paths
-/// - `project_skills_paths(root)` - returns project skills read paths
-/// - `global_skill_write_path()` - returns global skills write path
-/// - `project_skill_write_path(root)` - returns project skills write path
+/// Generates `global_skill_write_path()` and `project_skill_write_path(root)` —
+/// the write slot per scope; an agent with no extra read dirs declares
+/// `also_reads: None`.
 ///
 /// # Symmetric variant (same path relative to home and project)
 /// ```rust,ignore
@@ -133,17 +131,6 @@ macro_rules! define_skill_paths {
 	(
 		symmetric: $path:literal,
 	) => {
-		fn global_skills_paths() -> Vec<std::path::PathBuf> {
-			match $crate::descriptor::home_dir() {
-				Some(home) => vec![home.join($path)],
-				None => Vec::new(),
-			}
-		}
-		fn project_skills_paths(
-			root: &std::path::Path,
-		) -> Vec<std::path::PathBuf> {
-			vec![root.join($path)]
-		}
 		fn global_skill_write_path() -> Option<std::path::PathBuf> {
 			$crate::descriptor::home_dir().map(|home| home.join($path))
 		}
@@ -159,17 +146,6 @@ macro_rules! define_skill_paths {
 		global: $global_path:literal,
 		project: $project_path:literal,
 	) => {
-		fn global_skills_paths() -> Vec<std::path::PathBuf> {
-			match $crate::descriptor::home_dir() {
-				Some(home) => vec![home.join($global_path)],
-				None => Vec::new(),
-			}
-		}
-		fn project_skills_paths(
-			root: &std::path::Path,
-		) -> Vec<std::path::PathBuf> {
-			vec![root.join($project_path)]
-		}
 		fn global_skill_write_path() -> Option<std::path::PathBuf> {
 			$crate::descriptor::home_dir().map(|home| home.join($global_path))
 		}
