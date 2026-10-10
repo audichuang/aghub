@@ -5,7 +5,7 @@ use aghub_core::WriteScope;
 
 use crate::{
 	skill_folder_from_lock_path, FetchError, FetchSelection, FetchedRepo,
-	Fetcher, SourceRef, TokenResolution, TokenResolver,
+	Fetcher, SourceRef, TokenResolver,
 };
 
 pub struct FetchedRenameRequest<'a> {
@@ -15,7 +15,6 @@ pub struct FetchedRenameRequest<'a> {
 
 #[derive(Debug)]
 pub enum FetchRenameError {
-	CredentialBackendUnavailable,
 	Fetch(FetchError),
 	CatalogScan,
 	SkillNotFound,
@@ -167,24 +166,17 @@ pub fn fetch_for_rename(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<PreparedRename, FetchRenameError> {
-	let token = match resolver.resolve(&request.source.source_url) {
-		TokenResolution::Token(token) => Some(token),
-		TokenResolution::NoToken => None,
-		TokenResolution::BackendUnavailable => {
-			return Err(FetchRenameError::CredentialBackendUnavailable);
-		}
-	};
 	let source_ref = SourceRef {
 		source: request.source.source_url.clone(),
 		ref_: request.source.ref_name.clone(),
 	};
-	let repo = fetcher
-		.fetch(
-			&source_ref,
-			token.as_deref(),
-			FetchSelection::CatalogSnapshot,
-		)
-		.map_err(FetchRenameError::Fetch)?;
+	let repo = crate::sources::fetch_source_with_resolver(
+		&source_ref,
+		fetcher,
+		resolver,
+		FetchSelection::CatalogSnapshot,
+	)
+	.map_err(FetchRenameError::Fetch)?;
 	let fetched = FetchedSource { repo };
 	let options = skill::scan::ScanOptions {
 		max_depth: crate::repository::CATALOG_MAX_DEPTH,
@@ -219,12 +211,14 @@ pub struct FetchedResyncRequest<'a> {
 	pub skill_path: &'a str,
 	pub name: &'a str,
 	pub scope: WriteScope,
-	/// The entry's identity CAPTURED before this fetch
-	/// (`aghub_core::skills::lock::EntryIdentity::capture`), re-verified under the
-	/// mutation guard so a repointed entry cannot be overwritten with a stale
-	/// fetch. Required: a caller whose capture found no entry has no mandate to
-	/// overwrite that skill and must refuse instead of syncing.
-	pub expected: aghub_core::skills::lock::EntryIdentity,
+	/// The coordinate the Fetched Source was fetched from. Refused unless the
+	/// pre-fetch identity describes it (`EntryIdentity::describes`).
+	pub source: &'a str,
+	/// The entry's identity captured BEFORE the fetch
+	/// (`EntryIdentity::capture` / `of_*_entry`). `None` = there was no entry
+	/// then: this caller never saw the skill and has no mandate to overwrite
+	/// it, so the seam refuses with SOURCE_CHANGED_DURING_FETCH.
+	pub expected: Option<aghub_core::skills::lock::EntryIdentity>,
 }
 
 pub const SKILL_PATH_NOT_FOUND_CODE: &str = "SKILL_PATH_NOT_FOUND";
@@ -232,12 +226,17 @@ pub const SKILL_LOCK_ENTRY_NOT_FOUND_CODE: &str = "SKILL_LOCK_ENTRY_NOT_FOUND";
 pub const SOURCE_FETCH_FAILED_CODE: &str = "SOURCE_FETCH_FAILED";
 pub const KEYCHAIN_UNAVAILABLE_CODE: &str = "KEYCHAIN_UNAVAILABLE";
 pub const SKILL_SOURCE_VIEW_STALE_CODE: &str = "SKILL_SOURCE_VIEW_STALE";
+pub const SKILL_SOURCE_MISMATCH_CODE: &str = "SKILL_SOURCE_MISMATCH";
 pub const INVALID_SCOPE_CODE: &str = "INVALID_SCOPE";
 pub const MISSING_PARAM_CODE: &str = "MISSING_PARAM";
 
 #[derive(Debug)]
 pub enum ResyncMutationError {
 	InvalidSkillPath,
+	/// No Lock entry when the fetch started; one exists now. Nothing was written.
+	SourceChangedDuringFetch,
+	/// The fetched coordinates are not the ones the Lock entry names. Nothing was written.
+	SourceMismatch,
 	Resync(aghub_core::skills::resync::ResyncError),
 }
 
@@ -246,6 +245,10 @@ impl ResyncMutationError {
 	pub fn code(&self) -> &'static str {
 		match self {
 			Self::InvalidSkillPath => SKILL_PATH_NOT_FOUND_CODE,
+			Self::SourceChangedDuringFetch => {
+				aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE
+			}
+			Self::SourceMismatch => SKILL_SOURCE_MISMATCH_CODE,
 			Self::Resync(err) => err.code(),
 		}
 	}
@@ -253,7 +256,9 @@ impl ResyncMutationError {
 	/// Whether this failure is a transient lock contention that is retryable.
 	pub fn retryable(&self) -> bool {
 		match self {
-			Self::InvalidSkillPath => false,
+			Self::InvalidSkillPath
+			| Self::SourceChangedDuringFetch
+			| Self::SourceMismatch => false,
 			Self::Resync(err) => err.retryable(),
 		}
 	}
@@ -266,6 +271,13 @@ pub fn resync_fetched_source(
 	fetched: &FetchedSource,
 	request: FetchedResyncRequest<'_>,
 ) -> Result<aghub_core::skills::resync::ResyncReport, ResyncMutationError> {
+	// Order matters: the appeared check runs before anything reads disk.
+	let Some(expected) = request.expected else {
+		return Err(ResyncMutationError::SourceChangedDuringFetch);
+	};
+	if !expected.describes(request.source, request.skill_path) {
+		return Err(ResyncMutationError::SourceMismatch);
+	}
 	let skill_file = fetched_skill_file(fetched, request.skill_path)
 		.ok_or(ResyncMutationError::InvalidSkillPath)?;
 	let source_dir = skill_file.parent().unwrap_or_else(|| fetched.root());
@@ -275,7 +287,7 @@ pub fn resync_fetched_source(
 			name: request.name,
 			scope: request.scope,
 			ref_commit: Some(fetched.oid()),
-			expected: request.expected,
+			expected,
 		},
 	)
 	.map_err(ResyncMutationError::Resync)
@@ -315,7 +327,6 @@ pub enum LockedResyncError {
 	LockEntryNotFound { scope: ResourceScope },
 	MissingSkillPath,
 	NotInstalled,
-	CredentialBackendUnavailable,
 	InvalidSkillPath,
 	SourceSkillNotFound,
 	SourceGroupMismatch,
@@ -334,8 +345,10 @@ impl LockedResyncError {
 			Self::NotInstalled => {
 				aghub_core::skills::resync::ResyncError::NotInstalled.code()
 			}
-			Self::CredentialBackendUnavailable => KEYCHAIN_UNAVAILABLE_CODE,
 			Self::SourceGroupMismatch => SKILL_SOURCE_VIEW_STALE_CODE,
+			Self::Fetch(FetchError::BackendUnavailable) => {
+				KEYCHAIN_UNAVAILABLE_CODE
+			}
 			Self::Fetch(_) => SOURCE_FETCH_FAILED_CODE,
 			Self::Resync(err) => err.code(),
 		}
@@ -355,6 +368,19 @@ impl From<ResyncMutationError> for LockedResyncError {
 		match error {
 			ResyncMutationError::InvalidSkillPath => {
 				LockedResyncError::SourceSkillNotFound
+			}
+			ResyncMutationError::SourceChangedDuringFetch => {
+				LockedResyncError::Resync(
+					aghub_core::skills::resync::ResyncError::StaleFetch(
+						"lock entry appeared during the fetch".to_string(),
+					),
+				)
+			}
+			// The batch fetches from the entry's own coordinates read in the same
+			// observation, so this is unreachable there; if it ever fires,
+			// "refresh and retry" is the right answer.
+			ResyncMutationError::SourceMismatch => {
+				LockedResyncError::SourceGroupMismatch
 			}
 			ResyncMutationError::Resync(error) => {
 				LockedResyncError::Resync(error)
@@ -397,25 +423,6 @@ struct ResyncRow {
 struct PreparedFetchGroup {
 	source_ref: SourceRef,
 	folders: Vec<skill::SkillPath>,
-}
-
-/// One fetch group's failure, replayed onto every row that group owns.
-// Clone, not Copy: `FetchError::Network` carries the underlying reason.
-#[derive(Clone, Debug)]
-enum GroupFailure {
-	CredentialBackendUnavailable,
-	Fetch(FetchError),
-}
-
-impl From<GroupFailure> for LockedResyncError {
-	fn from(failure: GroupFailure) -> Self {
-		match failure {
-			GroupFailure::CredentialBackendUnavailable => {
-				LockedResyncError::CredentialBackendUnavailable
-			}
-			GroupFailure::Fetch(error) => LockedResyncError::Fetch(error),
-		}
-	}
 }
 
 /// One Lock entry's two Source identities: the coordinate its content is
@@ -668,24 +675,16 @@ pub fn resync_locked_skills(
 
 	// Every group is fetched BEFORE the first write, so no row can be swapped
 	// while a later group is still on the network.
-	let fetched_groups: Vec<Result<FetchedSource, GroupFailure>> = groups
+	let fetched_groups: Vec<Result<FetchedSource, FetchError>> = groups
 		.iter()
 		.map(|group| {
-			let token = match resolver.resolve(&group.source_ref.source) {
-				TokenResolution::Token(token) => Some(token),
-				TokenResolution::NoToken => None,
-				TokenResolution::BackendUnavailable => {
-					return Err(GroupFailure::CredentialBackendUnavailable);
-				}
-			};
-			fetcher
-				.fetch(
-					&group.source_ref,
-					token.as_deref(),
-					FetchSelection::Skills(&group.folders),
-				)
-				.map(FetchedSource::from_repo)
-				.map_err(GroupFailure::Fetch)
+			crate::sources::fetch_source_with_resolver(
+				&group.source_ref,
+				fetcher,
+				resolver,
+				FetchSelection::Skills(&group.folders),
+			)
+			.map(FetchedSource::from_repo)
 		})
 		.collect();
 
@@ -701,10 +700,9 @@ pub fn resync_locked_skills(
 		.into_iter()
 		.map(|ResyncRow { name, prepared }| {
 			let outcome = prepared.and_then(|item| {
-				let fetched =
-					fetched_groups[item.group_index].as_ref().map_err(
-						|failure| LockedResyncError::from(failure.clone()),
-					)?;
+				let fetched = fetched_groups[item.group_index]
+					.as_ref()
+					.map_err(|error| LockedResyncError::Fetch(error.clone()))?;
 				if !fetched_skill_path_exists(fetched, &item.skill_path) {
 					return Err(LockedResyncError::SourceSkillNotFound);
 				}
@@ -714,7 +712,8 @@ pub fn resync_locked_skills(
 						skill_path: &item.skill_path,
 						name: &name,
 						scope: request.scope.clone(),
-						expected: item.expected,
+						source: &groups[item.group_index].source_ref.source,
+						expected: Some(item.expected),
 					},
 				)
 				.map_err(LockedResyncError::from)
@@ -906,12 +905,15 @@ mod tests {
 					// The lock entry has no `source_url`, so its effective source is
 					// `source` — the verbatim value a real caller's pre-fetch read
 					// would have returned.
-					expected: aghub_core::skills::lock::EntryIdentity::capture(
-						"sync-me",
-						ResourceScope::ProjectOnly,
-						Some(&project),
-					)
-					.expect("fixture entry exists"),
+					source: "owner/repo",
+					expected: Some(
+						aghub_core::skills::lock::EntryIdentity::capture(
+							"sync-me",
+							ResourceScope::ProjectOnly,
+							Some(&project),
+						)
+						.expect("fixture entry exists"),
+					),
 				},
 			)
 			.expect("Fetched Source should Resync the installed skill");
@@ -1225,11 +1227,6 @@ mod tests {
 				false,
 			),
 			(
-				LockedResyncError::CredentialBackendUnavailable,
-				KEYCHAIN_UNAVAILABLE_CODE,
-				false,
-			),
-			(
 				LockedResyncError::InvalidSkillPath,
 				SKILL_PATH_NOT_FOUND_CODE,
 				false,
@@ -1246,7 +1243,7 @@ mod tests {
 			),
 			(
 				LockedResyncError::Fetch(FetchError::BackendUnavailable),
-				SOURCE_FETCH_FAILED_CODE,
+				KEYCHAIN_UNAVAILABLE_CODE,
 				false,
 			),
 			(
@@ -1352,6 +1349,16 @@ mod tests {
 			(
 				ResyncMutationError::Resync(ResyncError::NotInstalled),
 				"SKILL_NOT_INSTALLED",
+				false,
+			),
+			(
+				ResyncMutationError::SourceChangedDuringFetch,
+				"SKILL_SOURCE_CHANGED_DURING_FETCH",
+				false,
+			),
+			(
+				ResyncMutationError::SourceMismatch,
+				"SKILL_SOURCE_MISMATCH",
 				false,
 			),
 		];

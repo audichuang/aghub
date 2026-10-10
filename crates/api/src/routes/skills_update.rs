@@ -301,7 +301,7 @@ fn apply_locked_resync_error(
 	error: &LockedResyncError,
 ) -> Result<ApplySkillUpdateResponse, ApiError> {
 	let message = match error {
-		LockedResyncError::CredentialBackendUnavailable => {
+		LockedResyncError::Fetch(FetchError::BackendUnavailable) => {
 			return Err(crate::credentials::CredentialStoreError::Unavailable(
 				"credential backend unreachable".to_string(),
 			)
@@ -402,7 +402,10 @@ fn apply_locked_resync_batch_error(
 	scope: &str,
 	error: &LockedResyncError,
 ) -> ApplySkillUpdateResponse {
-	if matches!(error, LockedResyncError::CredentialBackendUnavailable) {
+	if matches!(
+		error,
+		LockedResyncError::Fetch(FetchError::BackendUnavailable)
+	) {
 		return apply_error_with_code(
 			name,
 			scope,
@@ -781,7 +784,7 @@ pub(crate) async fn accept_rename_inner(
 		resolver,
 	) {
 		Ok(prepared) => prepared,
-		Err(FetchRenameError::CredentialBackendUnavailable) => {
+		Err(FetchRenameError::Fetch(FetchError::BackendUnavailable)) => {
 			return Err(crate::credentials::CredentialStoreError::Unavailable(
 				"credential backend unreachable".to_string(),
 			)

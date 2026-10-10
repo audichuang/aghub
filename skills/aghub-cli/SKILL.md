@@ -577,6 +577,9 @@ Two results to read rather than retry:
       not outdated. `source sync --update --yes` still refuses that conflict
       (`errorCode: "SKILL_UPDATE_CONFLICT"`); move the fork aside. A lone private
       copy with no other managed copy IS the baseline and compares normally.
+    - A `source sync --update --yes` row with `errorCode: "SKILL_SOURCE_CHANGED_DURING_FETCH"`
+      (the lock entry appeared or moved while fetching) or `"SKILL_SOURCE_MISMATCH"` (the fetched
+      source/path is not what the entry is locked to) wrote nothing; re-run `source diff`, then retry.
 
 If the user needs proof of runtime invocation rather than file discovery, run a
 smoke prompt inside each requested agent — no aghub command can show that.

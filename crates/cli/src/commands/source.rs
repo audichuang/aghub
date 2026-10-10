@@ -1022,6 +1022,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 					&fetched,
 					d,
 					&write_scope,
+					&fetch_source,
 					&pre_fetch_identities,
 				),
 				_ => unreachable!(),
@@ -1393,33 +1394,10 @@ fn apply_update_row(
 	fetched: &skill_update::mutation::FetchedSource,
 	d: &SourceSkillDiff,
 	scope: &WriteScope,
+	fetch_source: &str,
 	pre_fetch: &std::collections::BTreeMap<String, EntryIdentity>,
 ) -> SyncActionView {
 	use skill_update::mutation::{resync_fetched_source, FetchedResyncRequest};
-
-	// No pre-fetch identity means this name was NOT in the lock when the fetch
-	// started: another process installed it in between, and this sync has no
-	// mandate to overwrite it.
-	let Some(expected) = pre_fetch.get(&d.name).cloned() else {
-		return SyncActionView {
-			action: "update",
-			name: d.name.clone(),
-			skill_path: d.skill_path.clone(),
-			applied: false,
-			error: Some(
-				"skill appeared in the lock while this sync was fetching; \
-				 nothing was written"
-					.to_string(),
-			),
-			// The API answers this exact condition with 409 +
-			// SOURCE_CHANGED_DURING_FETCH. It is the same refusal for the same
-			// reason, so it carries the same code.
-			error_code: Some(
-				aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE,
-			),
-			agents: Vec::new(),
-		};
-	};
 
 	match resync_fetched_source(
 		fetched,
@@ -1427,7 +1405,8 @@ fn apply_update_row(
 			skill_path: &d.skill_path,
 			name: &d.name,
 			scope: scope.clone(),
-			expected,
+			source: fetch_source,
+			expected: pre_fetch.get(&d.name).cloned(),
 		},
 	) {
 		Ok(report) => SyncActionView {
@@ -1461,6 +1440,13 @@ fn resync_row_error(
 		ResyncMutationError::InvalidSkillPath => {
 			"locked skillPath was not found in source".to_string()
 		}
+		ResyncMutationError::SourceChangedDuringFetch => {
+			"skill appeared in the lock while this sync was fetching; nothing was written"
+				.to_string()
+		}
+		ResyncMutationError::SourceMismatch => format!(
+			"the fetched source or skill path does not match what '{name}' is locked to; nothing was written"
+		),
 		ResyncMutationError::Resync(ResyncError::NotInstalled) => {
 			format!("skill '{name}' is locked but no installed copy was found")
 		}
@@ -1552,9 +1538,6 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		&EnvTokenResolver,
 	)
 	.map_err(|error| match error {
-		FetchRenameError::CredentialBackendUnavailable => {
-			anyhow::anyhow!("Credential backend is unavailable; retry later.")
-		}
 		FetchRenameError::Fetch(FetchError::Auth) => anyhow::anyhow!(
 			"This source needs a credential. Log in with git (e.g. `gh auth \
 			 login`), or set GIT_PASSWORD (any host) or GITHUB_TOKEN \
@@ -1646,8 +1629,8 @@ fn narrow_by_name<T>(
 #[cfg(test)]
 mod tests {
 	use super::{
-		diff_with, narrow_by_name, plan_target_agents, resync_row_error,
-		select_env_token, FetchError, SyncActionView,
+		apply_update_row, diff_with, narrow_by_name, plan_target_agents,
+		resync_row_error, select_env_token, FetchError, SyncActionView,
 	};
 	use aghub_core::models::AgentType;
 	use aghub_core::WriteScope;
@@ -1805,6 +1788,32 @@ mod tests {
 	/// This is what the API's own comment already claimed ("the same answer the
 	/// CLI's sync gives") while the CLI in fact emitted untyped prose: a script
 	/// could not tell a re-fetchable race from a genuine sync failure.
+	#[test]
+	fn an_entry_that_appeared_mid_fetch_carries_the_shared_code() {
+		let temp = tempfile::tempdir().unwrap();
+		let fetched = skill_update::mutation::FetchedSource::from_repo(
+			skill_update::FetchedRepo {
+				root: temp.path().to_path_buf(),
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: "c".into(),
+					tree_oid: "t".into(),
+					commit_time: None,
+				},
+				_guard: None,
+			},
+		);
+		let row = apply_update_row(
+			&fetched,
+			&diff("keep", SourceSkillState::InstalledOutdated),
+			&WriteScope::project(temp.path()),
+			"owner/repo",
+			&std::collections::BTreeMap::new(),
+		);
+		let json = serde_json::to_value(&row).unwrap();
+		assert_eq!(json["errorCode"], "SKILL_SOURCE_CHANGED_DURING_FETCH");
+		assert_eq!(json["applied"], false);
+	}
+
 	#[test]
 	fn a_source_that_moved_mid_fetch_carries_the_shared_code() {
 		use aghub_core::skills::resync::ResyncError;

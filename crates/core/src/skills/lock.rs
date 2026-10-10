@@ -13,16 +13,22 @@ use std::path::Path;
 /// `owner/repo` shorthand, which that function deliberately rejects (it guards
 /// Master adoption, where a hostless string would widen ownership). Here it MUST
 /// resolve: it is what an npx-written project entry records, and an unresolvable
-/// entry is unguarded. `owner/repo` means GitHub (`precheck_source` accepts no
-/// other hostless form).
-fn comparable_remote(source: &str) -> Option<String> {
+/// entry is unguarded.
+fn comparable_remote(
+	source: &str,
+	shorthand_host: Option<&str>,
+) -> Option<String> {
 	use crate::skills::install_fetched::remote_owner_from_url;
 	let source = source.trim();
 	let hostless_shorthand = !source.contains("://")
 		&& !source.contains(':')
 		&& source.matches('/').count() == 1;
 	if hostless_shorthand {
-		return remote_owner_from_url(&format!("https://github.com/{source}"));
+		// Shorthand names no host; the caller says which one it means, or
+		// nothing is provable.
+		return shorthand_host.and_then(|host| {
+			remote_owner_from_url(&format!("https://{host}/{source}"))
+		});
 	}
 	remote_owner_from_url(source)
 }
@@ -113,6 +119,8 @@ pub struct EntryIdentity {
 	source: String,
 	skill_path: Option<String>,
 	ref_name: Option<String>,
+	/// Recorded provider; names the host of a hostless `owner/repo` source.
+	source_type: String,
 }
 
 impl EntryIdentity {
@@ -125,6 +133,7 @@ impl EntryIdentity {
 			source: entry.source_url.clone(),
 			skill_path: entry.skill_path.clone(),
 			ref_name: entry.ref_name.clone(),
+			source_type: entry.source_type.clone(),
 		}
 	}
 
@@ -139,6 +148,7 @@ impl EntryIdentity {
 				.unwrap_or_else(|| entry.source.clone()),
 			skill_path: entry.skill_path.clone(),
 			ref_name: entry.ref_name.clone(),
+			source_type: entry.source_type.clone(),
 		}
 	}
 
@@ -180,6 +190,7 @@ impl EntryIdentity {
 			source: source.into(),
 			skill_path,
 			ref_name,
+			source_type: "github".to_string(),
 		}
 	}
 
@@ -210,7 +221,18 @@ impl EntryIdentity {
 				return false;
 			}
 		}
-		match (comparable_remote(&self.source), comparable_remote(source)) {
+		// The recorded provider names a recorded shorthand's host (npx writes
+		// `owner/repo` for GitLab too); an unknown provider proves nothing.
+		let recorded_host = match self.source_type.to_ascii_lowercase().as_str()
+		{
+			"github" => Some("github.com"),
+			"gitlab" => Some("gitlab.com"),
+			_ => None,
+		};
+		match (
+			comparable_remote(&self.source, recorded_host),
+			comparable_remote(source, Some("github.com")),
+		) {
 			(Some(recorded), Some(claimed)) => recorded == claimed,
 			_ => true,
 		}
@@ -384,5 +406,27 @@ mod tests {
 			EntryIdentity::unchecked_for_tests("owner/repo", None, None);
 		assert!(entry.describes("owner/repo", "anything/SKILL.md"));
 		assert!(!entry.describes("other/repo", "anything/SKILL.md"));
+	}
+
+	/// npx writes `owner/repo` for GitLab too, with no `sourceUrl`. The
+	/// recorded provider must name the host, or a GitLab sync is refused.
+	#[test]
+	fn a_gitlab_shorthand_entry_resolves_to_gitlab() {
+		let entry =
+			EntryIdentity::of_project_entry(&skill::LocalSkillLockEntry {
+				source_url: None,
+				source: "group/repo".to_string(),
+				ref_name: Some("main".to_string()),
+				source_type: "gitlab".to_string(),
+				computed_hash: "h".to_string(),
+				skill_path: Some("s/SKILL.md".to_string()),
+				ref_commit: None,
+			});
+		assert!(
+			entry.describes("https://gitlab.com/group/repo.git", "s/SKILL.md")
+		);
+		assert!(
+			!entry.describes("https://github.com/group/repo.git", "s/SKILL.md")
+		);
 	}
 }

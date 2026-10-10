@@ -303,8 +303,7 @@ fn locked_resync_error_message(
 		| LockedResyncError::Resync(ResyncError::NotInstalled) => {
 			format!("skill '{name}' is locked but no installed copy was found")
 		}
-		LockedResyncError::CredentialBackendUnavailable
-		| LockedResyncError::Fetch(
+		LockedResyncError::Fetch(
 			skill_update::FetchError::BackendUnavailable,
 		) => "Credential backend is unavailable; retry later.".to_string(),
 		LockedResyncError::InvalidSkillPath => {
@@ -556,7 +555,9 @@ mod tests {
 				"locked skillPath is not a valid skill folder",
 			),
 			(
-				LockedResyncError::CredentialBackendUnavailable,
+				LockedResyncError::Fetch(
+					skill_update::FetchError::BackendUnavailable,
+				),
 				"Credential backend is unavailable; retry later.",
 			),
 			(

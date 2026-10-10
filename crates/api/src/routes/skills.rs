@@ -2121,13 +2121,8 @@ pub async fn git_sync_skill(
 			)
 		})?;
 
-	// Snapshot the entry's identity BEFORE the fetch, so the resync can prove
-	// under the mutation lock that it is still writing to the coordinates this
-	// request started from. Scope is validated before this capture; only lock
-	// validation follows. Absent = there was no such entry AT THAT POINT; the
-	// lock validation below reports the still-absent case with the route's
-	// historical precedence, and the appeared-during-the-fetch case is answered
-	// after it.
+	// Snapshot the entry's identity BEFORE the fetch. The Resync seam refuses an
+	// entry that appeared meanwhile or coordinates it does not name.
 	let write_scope = crate::extractors::resolve_write_scope(
 		&req.scope,
 		req.project_root.as_deref(),
@@ -2183,42 +2178,6 @@ pub async fn git_sync_skill(
 		));
 	}
 
-	// Locked NOW but absent when this request started: another aghub process (or
-	// `npx skills`, which takes no lock of ours) inserted it while we were
-	// fetching. There is no snapshot to compare against and no mandate to
-	// overwrite a skill this request never saw, so refuse — the same answer the
-	// CLI's sync gives, and the same 409 a repointed entry gets. Checked AFTER
-	// the not-found reply above so that precedence is unchanged.
-	let Some(pre_fetch_identity) = pre_fetch_identity else {
-		return Err(ApiError::new(
-			Status::Conflict,
-			format!(
-				"Skill '{}' appeared in the lock while this sync was fetching; \
-				 nothing was written. Re-run to sync the current entry",
-				req.name
-			),
-			aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE,
-		));
-	};
-
-	// The session (a repo) and the skill name arrive as SEPARATE request fields, so
-	// nothing so far ties them together: `ensure_unchanged` proves the entry did not
-	// move under us, not that we fetched from the entry's own coordinates. Without
-	// this a caller can pair one repo's session with a skill locked to another and
-	// have those bytes installed under the original entry's source/path/ref, with
-	// only the hash re-stamped. No race required — just a mismatched pair.
-	if !pre_fetch_identity.describes(session.url(), &req.skill_path) {
-		return Err(ApiError::new(
-			Status::BadRequest,
-			format!(
-				"The scanned source or skill path does not match what '{}' is \
-				 locked to; nothing was written. Re-scan the skill's own source",
-				req.name
-			),
-			"SKILL_SOURCE_MISMATCH",
-		));
-	}
-
 	// The post-session transaction (rename guard → containment → swap → lock) is
 	// the shared core resync; the route owns only the session lifecycle.
 	use crate::skills::resync::safe_resync_error;
@@ -2231,6 +2190,7 @@ pub async fn git_sync_skill(
 	// above stays on the async worker — it must never hold the lock anyway.
 	let name = req.name.clone();
 	let skill_path = req.skill_path.clone();
+	let source_url = session.url().to_string();
 	let report = in_mutation_pool(move || {
 		resync_fetched_source(
 			&fetched,
@@ -2238,8 +2198,7 @@ pub async fn git_sync_skill(
 				skill_path: &skill_path,
 				name: &name,
 				scope: write_scope,
-				// Captured before the fetch above, and proven present as of then
-				// by the check directly above.
+				source: &source_url,
 				expected: pre_fetch_identity,
 			},
 		)
@@ -2250,6 +2209,20 @@ pub async fn git_sync_skill(
 					Status::NotFound,
 					format!(
 						"Skill path '{skill_path}' not found in cloned repository"
+					),
+					code,
+				),
+				ResyncMutationError::SourceChangedDuringFetch => ApiError::new(
+					Status::Conflict,
+					format!(
+						"Skill '{name}' appeared in the lock while this sync was fetching; nothing was written. Re-run to sync the current entry"
+					),
+					code,
+				),
+				ResyncMutationError::SourceMismatch => ApiError::new(
+					Status::BadRequest,
+					format!(
+						"The scanned source or skill path does not match what '{name}' is locked to; nothing was written. Re-scan the skill's own source"
 					),
 					code,
 				),
@@ -2425,14 +2398,24 @@ mod tests {
 	}
 
 	/// Build a session whose later `fetch` materializes from `fixture_root`.
-	/// Calls `resolve` so the repository's commit→backend memo is populated.
 	fn session_from_fixture(
 		fixture_root: &std::path::Path,
 		url: &str,
 		current_branch: &str,
 	) -> PinnedSourceSession {
-		let backend =
-			std::sync::Arc::new(SessionLocalBackend::new(fixture_root));
+		session_with_backend(
+			std::sync::Arc::new(SessionLocalBackend::new(fixture_root)),
+			url,
+			current_branch,
+		)
+	}
+
+	/// Calls `resolve` so the repository's commit→backend memo is populated.
+	fn session_with_backend(
+		backend: std::sync::Arc<dyn aghub_git::RepoFetchBackend>,
+		url: &str,
+		current_branch: &str,
+	) -> PinnedSourceSession {
 		let repo = std::sync::Arc::new(
 			skill_update::SkillRepository::with_backends(None, backend),
 		);
@@ -5784,6 +5767,145 @@ mod tests {
 			assert_eq!(
 				skill::lock::local::read_local_lock(Some(&project)).skills,
 				lock_before.skills,
+				"a refused sync must not stamp a hash"
+			);
+		});
+	}
+
+	/// Another process installs the skill while this request is fetching: the
+	/// lock entry is written from inside the fetch.
+	struct AppearingEntryBackend {
+		inner: SessionLocalBackend,
+		project: std::path::PathBuf,
+	}
+
+	impl aghub_git::RepoFetchBackend for AppearingEntryBackend {
+		fn resolve(
+			&self,
+			source: &aghub_git::SourceRef,
+			auth: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+			aghub_git::RepoFetchBackend::resolve(&self.inner, source, auth)
+		}
+		fn read_tree(
+			&self,
+			s: &aghub_git::RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			aghub_git::RepoFetchBackend::read_tree(&self.inner, s)
+		}
+		fn read_blobs(
+			&self,
+			s: &aghub_git::RepoSnapshot,
+			o: &[String],
+		) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+			aghub_git::RepoFetchBackend::read_blobs(&self.inner, s, o)
+		}
+		fn materialize(
+			&self,
+			s: &aghub_git::RepoSnapshot,
+			paths: &[&str],
+			dest: &std::path::Path,
+		) -> aghub_git::Result<()> {
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					source_url: None,
+					ref_commit: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+				},
+				Some(&self.project),
+			)
+			.unwrap();
+			aghub_git::RepoFetchBackend::materialize(
+				&self.inner,
+				s,
+				paths,
+				dest,
+			)
+		}
+	}
+
+	#[test]
+	fn git_sync_refuses_an_entry_that_appeared_during_the_fetch() {
+		with_isolated_env(|_, _| {
+			let temp = tempdir().unwrap();
+			let project = temp.path().join("project");
+			let installed = project.join(".claude/skills/sync-me");
+			std::fs::create_dir_all(&installed).unwrap();
+			std::fs::write(
+				installed.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: mine\n---\n\nmine\n",
+			)
+			.unwrap();
+
+			// Same fixture as the different-repo test: a scan of a repo holding the
+			// same path. No lock entry exists before the request.
+			let fixture = tempdir().unwrap();
+			let elsewhere = fixture.path().join("sync-me");
+			std::fs::create_dir_all(&elsewhere).unwrap();
+			std::fs::write(
+				elsewhere.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: theirs\n---\n\ntheirs\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("git clone sessions");
+			sessions.insert(
+				"appearing-entry".to_string(),
+				session_with_backend(
+					std::sync::Arc::new(AppearingEntryBackend {
+						inner: SessionLocalBackend::new(fixture.path()),
+						project: project.clone(),
+					}),
+					"https://github.com/owner/repo.git",
+					"main",
+				),
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "appearing-entry",
+					"name": "sync-me",
+					"scope": "project",
+					"project_root": project.display().to_string(),
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [project
+						.join(".claude/skills")
+						.display()
+						.to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::Conflict);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+			assert_eq!(body["code"], "SKILL_SOURCE_CHANGED_DURING_FETCH");
+			assert!(
+				std::fs::read_to_string(installed.join("SKILL.md"))
+					.unwrap()
+					.contains("mine"),
+				"the installed skill must survive an appeared entry"
+			);
+			assert_eq!(
+				skill::lock::local::read_local_lock(Some(&project)).skills
+					["sync-me"]
+					.computed_hash,
+				"old",
 				"a refused sync must not stamp a hash"
 			);
 		});
