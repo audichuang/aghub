@@ -4,18 +4,21 @@
 //!
 //! Both surfaces consume it: the `wanted` filter, the per-root hash memo, the
 //! offline skip, and the lock-before-disk read order live only here. The API
-//! route (`GET /skills/check-updates`) also consumes the [`Identities`] half —
-//! it is the only surface that heals the lock afterwards — while the CLI
-//! (`aghub-cli check`) ignores it.
+//! route (`GET /skills/check-updates`) also consumes the [`Identities`] half
+//! and the heal writer [`write_auto_healed_hashes`] — it is the only surface
+//! that heals the lock afterwards — while the CLI (`aghub-cli check`) ignores
+//! both.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use aghub_core::errors::ConfigError;
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::lock::EntryIdentity;
+use chrono::Utc;
 
 use crate::verdict::local_hashes_for_scope;
-use crate::{EntryInput, SourceRef};
+use crate::{CheckOutput, EntryInput, SourceRef};
 
 pub use crate::verdict::LocalHashes;
 
@@ -65,6 +68,145 @@ impl HealPrecondition {
 
 /// Pre-fetch preconditions keyed by skill name within a scope.
 pub type Identities = HashMap<String, HealPrecondition>;
+
+/// Heal `name` only if the live entry is still EXACTLY the one the check read.
+///
+/// A check reads the lock unlocked, spends seconds on the network, and only then
+/// takes the mutation lock. By write time another process may have
+///
+/// - repointed this name at a different source/ref/skillPath and written ITS
+///   correct hash, or
+/// - run `apply-update` on this very entry — same coordinates, but the content
+///   hash and refCommit have moved on.
+///
+/// Both make the stale heal wrong, and both look fine to a name lookup. Writing
+/// it anyway leaves a baseline the entry never came from, so every later check
+/// reports a phantom "update available" until something rewrites the entry.
+fn heal_precondition_holds(
+	identities: &Identities,
+	name: &str,
+	live: HealPrecondition,
+) -> bool {
+	identities.get(name) == Some(&live)
+}
+
+/// The post-check compare-and-set heal. The API calls it after a check; the CLI
+/// `check` never does (see `crates/skill-update/AGENTS.md`, "Deliberate surface
+/// differences").
+///
+/// A busy mutation lock returns `ConfigError::Io(WouldBlock)` with NOTHING
+/// written, so the caller can report it as retryable beside the check results.
+pub fn write_auto_healed_hashes(
+	outputs: &[CheckOutput],
+	project_root: Option<&Path>,
+	global_identities: &Identities,
+	project_identities: &Identities,
+) -> Result<(), ConfigError> {
+	// One record per global name: hash and OID apply under a SINGLE
+	// precondition check (writing the hash first would invalidate the
+	// precondition a second OID pass re-checks, so the OID never lands).
+	let mut global_heals: HashMap<String, (Option<&String>, Option<&String>)> =
+		HashMap::new();
+	let mut project_heals = HashMap::new();
+	for output in outputs {
+		match output.key.scope.as_str() {
+			"global" => {
+				// refCommit heal is GLOBAL-only (the project lock is
+				// VCS-tracked) and independent of heal_hash (a known-stored
+				// entry has no heal_hash).
+				if output.heal_hash.is_some() || output.heal_oid.is_some() {
+					let slot = global_heals
+						.entry(output.key.name.clone())
+						.or_insert((None, None));
+					slot.0 = slot.0.or(output.heal_hash.as_ref());
+					slot.1 = slot.1.or(output.heal_oid.as_ref());
+				}
+			}
+			"project" => {
+				if let Some(hash) = &output.heal_hash {
+					project_heals.insert(output.key.name.clone(), hash.clone());
+				}
+			}
+			_ => {}
+		}
+	}
+
+	if global_heals.is_empty() && project_heals.is_empty() {
+		return Ok(());
+	}
+
+	// One guard over every scope this heal writes, taken before the first write,
+	// so a busy lock on either file makes the whole heal all-or-nothing. The
+	// inner `modify_*_lock_changed` calls re-enter it for free.
+	let scope = match (global_heals.is_empty(), project_heals.is_empty()) {
+		(false, false) => ResourceScope::Both,
+		(false, true) => ResourceScope::GlobalOnly,
+		_ => ResourceScope::ProjectOnly,
+	};
+	let _guard = aghub_core::skills::lock::mutation_guard(
+		"auto-heal skill lock",
+		scope,
+		project_root,
+	)?;
+
+	if !global_heals.is_empty() {
+		skill::lock::global::modify_skill_lock_changed(|lock| {
+			let now = Utc::now().to_rfc3339();
+			let mut changed = false;
+			for (name, (hash, oid)) in &global_heals {
+				let Some(entry) = lock.skills.get_mut(name) else {
+					continue;
+				};
+				if !heal_precondition_holds(
+					global_identities,
+					name,
+					HealPrecondition::of_global_entry(entry),
+				) {
+					continue;
+				}
+				if let Some(hash) = hash {
+					changed |= entry.apply_content_hash(hash, &now);
+				}
+				if let Some(oid) = oid {
+					if entry.ref_commit.as_deref() != Some(oid.as_str()) {
+						entry.ref_commit = Some((*oid).clone());
+						entry.updated_at = now.clone();
+						changed = true;
+					}
+				}
+			}
+			((), changed)
+		})?;
+	}
+
+	// Project outputs only exist when a root was given, so `None` here means
+	// there is nothing project-side to heal.
+	if let Some(root) = project_root {
+		if !project_heals.is_empty() {
+			skill::lock::local::modify_local_lock_changed(
+				Some(root),
+				|lock| {
+					let mut changed = false;
+					for (name, hash) in &project_heals {
+						if let Some(entry) = lock.skills.get_mut(name) {
+							if !heal_precondition_holds(
+								project_identities,
+								name,
+								HealPrecondition::of_project_entry(entry),
+							) {
+								continue;
+							}
+							changed |= entry.apply_computed_hash(hash);
+						}
+					}
+					((), changed)
+				},
+			)?;
+		}
+	}
+
+	Ok(())
+}
 
 /// Project the global skill lock into the orchestrator's per-entry inputs, plus
 /// the identity of each entry AS READ HERE (the read that decides what to fetch).
@@ -271,8 +413,9 @@ mod tests {
 	}
 
 	/// The project half of the read order, which the global test above pins for
-	/// its own half. Both matter and for the SAME reason: the API heals the
-	/// project lock too (`write_auto_healed_hashes`), and a heal computed from
+	/// its own half. Both matter and for the SAME reason: the heal writer
+	/// (`write_auto_healed_hashes`, called only by the API) also heals the
+	/// project lock, and a heal computed from
 	/// disk hashes older than the lock snapshot passes its own precondition and
 	/// then clears `skillFolderHash` — destroying an `npx skills update` that
 	/// landed in between.

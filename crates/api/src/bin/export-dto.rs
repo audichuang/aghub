@@ -61,20 +61,20 @@ use aghub_api::dto::{
 	skill::{
 		AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
 		ApplySkillUpdateResponse, ApplySkillUpdatesRequest,
-		ApplySkillUpdatesResponse, CreateSkillRequest,
-		DeleteSkillByPathRequest, DeleteSkillByPathResponse,
-		GitCredentialStatus, GitCredentialStatusQuery,
-		GitCredentialStatusResponse, GitInstallRequest, GitInstallResponse,
-		GitInstallResultEntry, GitScanRequest, GitScanResponse,
-		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
-		GlobalSkillLockResponse, ImportSkillRequest, InstallSkillRequest,
-		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
-		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
-		RemovalOutcomeKind, SkillContentQuery, SkillHoldersResponse,
-		SkillLockEntryResponse, SkillResponse, SkillTreeNodeKind,
-		SkillTreeNodeResponse, SkillTreeQuery, SkillUpdateResponse,
-		SkillUpdateStatusResponse, SkillUsageResponse, UpdateSkillRequest,
-		ValidationError,
+		ApplySkillUpdatesResponse, CheckSkillUpdatesResponse,
+		CreateSkillRequest, DeleteSkillByPathRequest,
+		DeleteSkillByPathResponse, GitCredentialStatus,
+		GitCredentialStatusQuery, GitCredentialStatusResponse,
+		GitInstallRequest, GitInstallResponse, GitInstallResultEntry,
+		GitScanRequest, GitScanResponse, GitScanSkillEntry, GitSyncRequest,
+		GitSyncResponse, GlobalSkillLockResponse, ImportSkillRequest,
+		InstallSkillRequest, InstallSkillResponse, LocalSkillLockEntryResponse,
+		ProjectLockQuery, ProjectSkillLockResponse, PruneLockRequest,
+		PruneLockResponse, RemovalOutcomeKind, SkillContentQuery,
+		SkillHealErrorResponse, SkillHoldersResponse, SkillLockEntryResponse,
+		SkillResponse, SkillTreeNodeKind, SkillTreeNodeResponse,
+		SkillTreeQuery, SkillUpdateResponse, SkillUpdateStatusResponse,
+		SkillUsageResponse, UpdateSkillRequest, ValidationError,
 	},
 	sources::{
 		CredentialStatus, SourceDiffResponse, SourceSkillDiff,
@@ -244,6 +244,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<DeleteSkillByPathRequest>(&cfg)?;
 	export_type::<SkillUpdateStatusResponse>(&cfg)?;
 	export_type::<SkillUpdateResponse>(&cfg)?;
+	export_type::<CheckSkillUpdatesResponse>(&cfg)?;
+	export_type::<SkillHealErrorResponse>(&cfg)?;
 	export_type::<ApplySkillUpdateRequest>(&cfg)?;
 	export_type::<ApplySkillUpdateResponse>(&cfg)?;
 	export_type::<ApplySkillUpdatesRequest>(&cfg)?;

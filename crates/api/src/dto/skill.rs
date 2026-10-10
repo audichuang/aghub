@@ -676,6 +676,28 @@ pub struct SkillUpdateResponse {
 	pub status: SkillUpdateStatusResponse,
 }
 
+/// `GET /skills/check-updates` body. A failed lock auto-heal never drops
+/// `results`; it is reported beside them in `heal_error`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckSkillUpdatesResponse {
+	pub results: Vec<SkillUpdateResponse>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub heal_error: Option<SkillHealErrorResponse>,
+}
+
+/// Why the post-check lock auto-heal did not land. Wire code from
+/// `aghub_core::error_codes` (e.g. `SKILL_MUTATION_LOCK_BUSY`).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillHealErrorResponse {
+	pub code: String,
+	pub retryable: bool,
+}
+
 /// Request to re-fetch and overwrite an installed skill from its lock source.
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]

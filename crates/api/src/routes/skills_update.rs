@@ -10,12 +10,10 @@
 //! Every gix error string is redacted of URL userinfo upstream so a token can
 //! never leak into the response.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aghub_core::models::ResourceScope;
-use chrono::Utc;
 use rocket::http::Status;
 use rocket::serde::json::Json;
 
@@ -24,7 +22,8 @@ use crate::credentials::source_auth::SourceAuth;
 use crate::dto::skill::{
 	AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
 	ApplySkillUpdateResponse, ApplySkillUpdatesRequest,
-	ApplySkillUpdatesResponse, SkillUpdateResponse, SkillUpdateStatusResponse,
+	ApplySkillUpdatesResponse, CheckSkillUpdatesResponse,
+	SkillHealErrorResponse, SkillUpdateResponse, SkillUpdateStatusResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
@@ -35,14 +34,14 @@ use skill_update::mutation::{
 	resync_locked_skills, FetchRenameError, FetchedRenameRequest,
 	LockedResyncError, LockedResyncRequest, LockedSkillsResyncRequest,
 };
-use skill_update::projection::{self, HealPrecondition, Identities};
+use skill_update::projection::{self, Identities};
 // Only the `#[cfg(unix)]` StubBackendUnavailableResolver test uses this —
 // match its gate exactly or Windows clippy flags an unused import.
 #[cfg(all(test, unix))]
 use skill_update::TokenResolution;
 use skill_update::{
-	run_update_check, CheckOutput, EntryInput, FetchError, Fetcher, GitFetcher,
-	RefResolver, TokenResolver,
+	run_update_check, EntryInput, FetchError, Fetcher, GitFetcher, RefResolver,
+	TokenResolver,
 };
 
 /// Upper bound on one batch's `names`. Defined ONCE, in `dto::limits`, and
@@ -129,135 +128,6 @@ fn lock_entries_for_scope(
 		}
 	}
 	Ok(inputs)
-}
-
-/// Heal `name` only if the live entry is still EXACTLY the one the check read.
-///
-/// A check reads the lock unlocked, spends seconds on the network, and only then
-/// takes the mutation lock. By write time another process may have
-///
-/// - repointed this name at a different source/ref/skillPath and written ITS
-///   correct hash, or
-/// - run `apply-update` on this very entry — same coordinates, but the content
-///   hash and refCommit have moved on.
-///
-/// Both make the stale heal wrong, and both look fine to a name lookup. Writing
-/// it anyway leaves a baseline the entry never came from, so every later check
-/// reports a phantom "update available" until something rewrites the entry.
-fn heal_precondition_holds(
-	identities: &Identities,
-	name: &str,
-	live: HealPrecondition,
-) -> bool {
-	identities.get(name) == Some(&live)
-}
-
-fn write_auto_healed_hashes(
-	outputs: &[CheckOutput],
-	project_root: Option<&Path>,
-	global_identities: &Identities,
-	project_identities: &Identities,
-) -> Result<(), ApiError> {
-	// One record per global name: hash and OID apply under a SINGLE
-	// precondition check (writing the hash first would invalidate the
-	// precondition a second OID pass re-checks, so the OID never lands).
-	let mut global_heals: HashMap<String, (Option<&String>, Option<&String>)> =
-		HashMap::new();
-	let mut project_heals = HashMap::new();
-	for output in outputs {
-		match output.key.scope.as_str() {
-			"global" => {
-				// refCommit heal is GLOBAL-only (the project lock is
-				// VCS-tracked) and independent of heal_hash (a known-stored
-				// entry has no heal_hash).
-				if output.heal_hash.is_some() || output.heal_oid.is_some() {
-					let slot = global_heals
-						.entry(output.key.name.clone())
-						.or_insert((None, None));
-					slot.0 = slot.0.or(output.heal_hash.as_ref());
-					slot.1 = slot.1.or(output.heal_oid.as_ref());
-				}
-			}
-			"project" => {
-				if let Some(hash) = &output.heal_hash {
-					project_heals.insert(output.key.name.clone(), hash.clone());
-				}
-			}
-			_ => {}
-		}
-	}
-
-	if !global_heals.is_empty() {
-		skill::lock::global::modify_skill_lock_changed(|lock| {
-			let now = Utc::now().to_rfc3339();
-			let mut changed = false;
-			for (name, (hash, oid)) in &global_heals {
-				let Some(entry) = lock.skills.get_mut(name) else {
-					continue;
-				};
-				if !heal_precondition_holds(
-					global_identities,
-					name,
-					HealPrecondition::of_global_entry(entry),
-				) {
-					continue;
-				}
-				if let Some(hash) = hash {
-					changed |= entry.apply_content_hash(hash, &now);
-				}
-				if let Some(oid) = oid {
-					if entry.ref_commit.as_deref() != Some(oid.as_str()) {
-						entry.ref_commit = Some((*oid).clone());
-						entry.updated_at = now.clone();
-						changed = true;
-					}
-				}
-			}
-			((), changed)
-		})
-		.map_err(|e| {
-			ApiError::new(
-				Status::InternalServerError,
-				format!("Failed to auto-heal global skill lock: {e}"),
-				"SKILL_LOCK_ERROR",
-			)
-		})?;
-	}
-
-	if !project_heals.is_empty() {
-		let root = project_root.ok_or_else(|| {
-			ApiError::new(
-				Status::BadRequest,
-				"project_root is required to auto-heal project skill lock",
-				"MISSING_PARAM",
-			)
-		})?;
-		skill::lock::local::modify_local_lock_changed(Some(root), |lock| {
-			let mut changed = false;
-			for (name, hash) in &project_heals {
-				if let Some(entry) = lock.skills.get_mut(name) {
-					if !heal_precondition_holds(
-						project_identities,
-						name,
-						HealPrecondition::of_project_entry(entry),
-					) {
-						continue;
-					}
-					changed |= entry.apply_computed_hash(hash);
-				}
-			}
-			((), changed)
-		})
-		.map_err(|e| {
-			ApiError::new(
-				Status::InternalServerError,
-				format!("Failed to auto-heal project skill lock: {e}"),
-				"SKILL_LOCK_ERROR",
-			)
-		})?;
-	}
-
-	Ok(())
 }
 
 fn apply_error(
@@ -429,19 +299,52 @@ fn apply_locked_resync_batch_error(
 	}
 }
 
-/// `GET /skills/check-updates` — returns a per-skill update status list.
+/// `GET /skills/check-updates` — returns the per-skill update status list, plus
+/// `healError` when the post-check lock auto-heal did not land.
 #[get("/skills/check-updates?<query..>")]
 pub async fn check_skill_updates(
 	query: CheckUpdatesParams,
 	forwarded: ForwardedGitTokens,
 	_origin: TrustedLocalOrigin,
-) -> ApiResult<Vec<SkillUpdateResponse>> {
+) -> ApiResult<CheckSkillUpdatesResponse> {
 	let resolved = ScopeParams {
 		scope: query.scope.clone(),
 		project_root: query.project_root.clone(),
 	}
 	.resolve()?;
 	let offline = query.offline.unwrap_or(false);
+	// One repository behind both: the preflight's tip resolution and the fetch
+	// that may follow it share the composite, its snapshot memo, and its token
+	// context.
+	let git_fetcher = GitFetcher::new();
+	let ref_resolver: Arc<dyn RefResolver> =
+		Arc::new(git_fetcher.ref_resolver());
+	let fetcher: Arc<dyn Fetcher> = Arc::new(git_fetcher);
+	let auth_started = std::time::Instant::now();
+	let resolver = SourceAuth::load(forwarded).await;
+	log::info!(
+		"check-updates: credential resolve took={:?}",
+		auth_started.elapsed()
+	);
+	check_skill_updates_inner(
+		resolved,
+		offline,
+		fetcher,
+		ref_resolver,
+		&resolver,
+	)
+	.await
+}
+
+/// The check itself, with the token resolver injected so a test can drive it
+/// without the request guards.
+pub(crate) async fn check_skill_updates_inner(
+	resolved: ResolvedScope,
+	offline: bool,
+	fetcher: Arc<dyn Fetcher>,
+	ref_resolver: Arc<dyn RefResolver>,
+	resolver: &dyn TokenResolver,
+) -> ApiResult<CheckSkillUpdatesResponse> {
 	// Log the resolved `offline`: the two modes differ by orders of magnitude
 	// and the query string alone does not say which one ran.
 	let route_started = std::time::Instant::now();
@@ -458,41 +361,39 @@ pub async fn check_skill_updates(
 		inputs_started.elapsed()
 	);
 
-	// One repository behind both: the preflight's tip resolution and the fetch
-	// that may follow it share the composite, its snapshot memo, and its token
-	// context.
-	let git_fetcher = GitFetcher::new();
-	let ref_resolver: Arc<dyn RefResolver> =
-		Arc::new(git_fetcher.ref_resolver());
-	let fetcher: Arc<dyn Fetcher> = Arc::new(git_fetcher);
-	let auth_started = std::time::Instant::now();
-	let resolver = SourceAuth::load(forwarded).await;
-	log::info!(
-		"check-updates: credential resolve took={:?}",
-		auth_started.elapsed()
-	);
 	let check_started = std::time::Instant::now();
 	let outputs =
-		run_update_check(entries, fetcher, ref_resolver, &resolver, offline)
+		run_update_check(entries, fetcher, ref_resolver, resolver, offline)
 			.await;
 	log::info!(
 		"check-updates: fetch+compare results={} took={:?}",
 		outputs.len(),
 		check_started.elapsed()
 	);
-	// Writes the lock under the mutation lock, so off the async worker
-	// (`crates/api/AGENTS.md`); the fetches above stay outside.
-	crate::blocking::in_mutation_pool(|| {
-		write_auto_healed_hashes(
+
+	// The route only decides THAT it heals; the write and its precondition live
+	// in skill_update::projection. Writes the lock under the mutation lock, so
+	// off the async worker (`crates/api/AGENTS.md`). A failed heal must not
+	// discard the computed results, so its error is reported beside them.
+	let heal_error = crate::blocking::in_mutation_pool(|| {
+		Ok(projection::write_auto_healed_hashes(
 			&outputs,
 			project_root.as_deref(),
 			&global_identities,
 			&project_identities,
 		)
+		.err())
 	})
-	.await?;
+	.await?
+	.map(|e| {
+		log::warn!("check-updates: auto-heal failed: {e}");
+		SkillHealErrorResponse {
+			code: aghub_core::error_codes::wire_code(&e).to_string(),
+			retryable: aghub_core::error_codes::retryable(&e),
+		}
+	});
 
-	let mut out: Vec<SkillUpdateResponse> = outputs
+	let mut results: Vec<SkillUpdateResponse> = outputs
 		.into_iter()
 		.map(|output| SkillUpdateResponse {
 			name: output.key.name,
@@ -500,14 +401,17 @@ pub async fn check_skill_updates(
 			status: SkillUpdateStatusResponse::from(output.status),
 		})
 		.collect();
-	out.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
+	results.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
 
 	log::info!(
 		"check-updates: done offline={offline} results={} total={:?}",
-		out.len(),
+		results.len(),
 		route_started.elapsed()
 	);
-	Ok(Json(out))
+	Ok(Json(CheckSkillUpdatesResponse {
+		results,
+		heal_error,
+	}))
 }
 
 /// `POST /skills/apply-update` — re-fetch a locked skill and replace installs.
@@ -854,8 +758,7 @@ pub(crate) async fn accept_rename_inner(
 mod tests {
 	use super::*;
 	use aghub_core::skills::lock::update_lock_hash;
-	use aghub_core::skills::update::SkillUpdateStatus;
-	use skill_update::{EntryKey, SourceRef};
+	use skill_update::SourceRef;
 
 	/// Empty source-auth snapshot for synchronous route-core tests.
 	fn empty_keyring_resolver() -> SourceAuth {
@@ -1810,18 +1713,6 @@ mod tests {
 		}
 	}
 
-	fn healed_output(name: &str, scope: &str, hash: &str) -> CheckOutput {
-		CheckOutput {
-			key: EntryKey {
-				name: name.to_string(),
-				scope: scope.to_string(),
-			},
-			status: SkillUpdateStatus::UpToDate,
-			heal_hash: Some(hash.to_string()),
-			heal_oid: None,
-		}
-	}
-
 	/// The route's `offline` reaches the DISK SWEEP, not just the orchestrator.
 	///
 	/// Nothing downstream can catch a mis-wire here: the orchestrator's offline
@@ -1909,287 +1800,6 @@ mod tests {
 			out[0].status,
 			aghub_core::skills::update::SkillUpdateStatus::Uncheckable { .. }
 		));
-	}
-
-	/// The identities production captures from the CURRENT global lock — i.e.
-	/// the same read that decides what a check fetches.
-	fn global_identities_now() -> Identities {
-		global_lock_entries(true).1
-	}
-
-	#[test]
-	fn auto_heal_writes_global_content_hash() {
-		with_isolated_state(|| {
-			let mut lock = skill::SkillLockFile::default();
-			let mut entry = global_entry();
-			entry.skill_folder_hash = "tree-v1".to_string();
-			lock.skills.insert("legacy".into(), entry);
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-
-			assert!(write_auto_healed_hashes(
-				&[healed_output("legacy", "global", "abc123")],
-				None,
-				&global_identities_now(),
-				&Identities::new(),
-			)
-			.is_ok());
-
-			let lock = skill::lock::global::read_skill_lock();
-			assert_eq!(
-				lock.skills["legacy"].content_hash.as_deref(),
-				Some("abc123")
-			);
-			assert_eq!(lock.skills["legacy"].skill_folder_hash, "");
-		});
-	}
-
-	#[test]
-	fn auto_heal_writes_global_ref_commit() {
-		with_isolated_state(|| {
-			let mut lock = skill::SkillLockFile::default();
-			lock.skills.insert("legacy".into(), global_entry());
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-
-			// A freshly-fetched global member carries heal_oid (and no heal_hash);
-			// write_auto_healed_hashes must still persist refCommit.
-			let mut output = healed_output("legacy", "global", "ignored");
-			output.heal_hash = None;
-			output.heal_oid = Some("deadbeefcafef00d".to_string());
-
-			assert!(write_auto_healed_hashes(
-				&[output],
-				None,
-				&global_identities_now(),
-				&Identities::new(),
-			)
-			.is_ok());
-
-			let lock = skill::lock::global::read_skill_lock();
-			assert_eq!(
-				lock.skills["legacy"].ref_commit.as_deref(),
-				Some("deadbeefcafef00d")
-			);
-		});
-	}
-
-	/// The REAL shape of a legacy/npx heal: an entry with an unknown hash and no
-	/// refCommit produces BOTH `heal_hash` and `heal_oid` from one check, and
-	/// both must land in that single write. (`auto_heal_writes_global_ref_commit`
-	/// above forces `heal_hash = None`, so it cannot see the two interacting —
-	/// applying the hash moves the entry, and a second precondition check against
-	/// the pre-fetch snapshot then rejects the OID.)
-	#[test]
-	fn auto_heal_lands_hash_and_ref_commit_in_one_write() {
-		with_isolated_state(|| {
-			let mut lock = skill::SkillLockFile::default();
-			lock.skills.insert("legacy".into(), global_entry());
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-
-			let mut output = healed_output("legacy", "global", "healed-hash");
-			output.heal_oid = Some("deadbeefcafef00d".to_string());
-			assert!(write_auto_healed_hashes(
-				&[output],
-				None,
-				&global_identities_now(),
-				&Identities::new(),
-			)
-			.is_ok());
-
-			let entry =
-				&skill::lock::global::read_skill_lock().skills["legacy"];
-			assert_eq!(entry.content_hash.as_deref(), Some("healed-hash"));
-			assert_eq!(
-				entry.ref_commit.as_deref(),
-				Some("deadbeefcafef00d"),
-				"the OID must land in the same write as the hash — otherwise the \
-				 next check has to fetch the whole source again to re-derive it"
-			);
-		});
-	}
-
-	/// The read ORDER inside `global_lock_entries`, pinned deterministically: the
-	/// npx-style write happens while the check is between its two reads. Reading
-	/// the lock FIRST means the snapshot predates that write, so the writer's
-	/// precondition sees a live lock that has moved on and refuses the heal.
-	/// Hash-then-lock would snapshot npx's OWN state, pair it with the disk hash
-	/// read before npx ran, and sail through the precondition.
-	#[test]
-	fn a_check_snapshots_the_lock_before_hashing_disk() {
-		with_isolated_state(|| {
-			let mut lock = skill::SkillLockFile::default();
-			let mut entry = global_entry();
-			entry.skill_folder_hash = "npx-tree-a".to_string();
-			lock.skills.insert("legacy".into(), entry);
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-
-			let (_entries, identities) = projection::global_lock_entries_with(
-				skill::lock::global::read_skill_lock,
-				|_wanted| {
-					// npx finishes updating to tree B right here.
-					let mut updated = global_entry();
-					updated.skill_folder_hash = "npx-tree-b".to_string();
-					let mut lock = skill::SkillLockFile::default();
-					lock.skills.insert("legacy".into(), updated);
-					skill::lock::global::write_skill_lock(&lock).unwrap();
-					// The disk hash the check read: still the pre-npx tree.
-					projection::LocalHashes {
-						hashes: HashMap::from([(
-							"legacy".to_string(),
-							"disk-hash-a".to_string(),
-						)]),
-						..Default::default()
-					}
-				},
-			);
-
-			assert!(write_auto_healed_hashes(
-				&[healed_output("legacy", "global", "disk-hash-a")],
-				None,
-				&identities,
-				&Identities::new(),
-			)
-			.is_ok());
-
-			let entry =
-				&skill::lock::global::read_skill_lock().skills["legacy"];
-			assert_eq!(
-				entry.skill_folder_hash, "npx-tree-b",
-				"the heal was derived from the pre-npx disk hash; it must not \
-				 land on npx's newer entry or blank its baseline"
-			);
-			assert_eq!(entry.content_hash, None);
-		});
-	}
-
-	/// npx writes its own baseline into `skillFolderHash`, and
-	/// `apply_content_hash` CLEARS that field. So a concurrent `npx skills
-	/// update` — same source/ref/path, and it leaves `contentHash`/`refCommit`
-	/// untouched — is invisible to a precondition that only compares those two:
-	/// the stale heal would overwrite npx's newer state and blank the field npx
-	/// uses to decide whether to check for updates at all.
-	#[test]
-	fn auto_heal_skips_an_entry_npx_updated_during_the_fetch() {
-		with_isolated_state(|| {
-			let mut lock = skill::SkillLockFile::default();
-			let mut entry = global_entry();
-			entry.skill_folder_hash = "npx-tree-a".to_string();
-			lock.skills.insert("legacy".into(), entry);
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-			let identities = global_identities_now();
-
-			// Mid-fetch: npx updates the same entry to a newer tree.
-			let mut updated = global_entry();
-			updated.skill_folder_hash = "npx-tree-b".to_string();
-			let mut lock = skill::SkillLockFile::default();
-			lock.skills.insert("legacy".into(), updated);
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-
-			assert!(write_auto_healed_hashes(
-				&[healed_output("legacy", "global", "stale-hash")],
-				None,
-				&identities,
-				&Identities::new(),
-			)
-			.is_ok());
-
-			let entry =
-				&skill::lock::global::read_skill_lock().skills["legacy"];
-			assert_eq!(
-				entry.skill_folder_hash, "npx-tree-b",
-				"a stale heal must not blank the folder hash npx just wrote"
-			);
-			assert_eq!(entry.content_hash, None);
-		});
-	}
-
-	/// A check reads the lock, spends SECONDS fetching, and only then takes the
-	/// mutation lock to write its heals. If another process repoints the same
-	/// NAME at a different source in that window (and writes that source's own
-	/// correct hash), the stale heal must not land on the new entry — otherwise
-	/// every later check compares against a baseline that never belonged to it
-	/// and reports a phantom update forever.
-	#[test]
-	fn auto_heal_skips_an_entry_repointed_during_the_fetch() {
-		with_isolated_state(|| {
-			// Pre-fetch: `legacy` points at owner/repo. This is the read the
-			// check's fetch is based on.
-			let mut lock = skill::SkillLockFile::default();
-			lock.skills.insert("legacy".into(), global_entry());
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-			let identities = global_identities_now();
-
-			// Mid-fetch: another mutation repoints the name at owner/other and
-			// records THAT source's hash and tip.
-			let mut repointed = global_entry();
-			repointed.source = "owner/other".to_string();
-			repointed.source_url = "https://github.com/owner/other".to_string();
-			repointed.content_hash = Some("other-hash".to_string());
-			repointed.ref_commit = Some("bbbbbbbb".to_string());
-			let mut lock = skill::SkillLockFile::default();
-			lock.skills.insert("legacy".into(), repointed);
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-
-			// The stale check finally writes: owner/repo's hash and tip.
-			let mut output = healed_output("legacy", "global", "repo-hash");
-			output.heal_oid = Some("aaaaaaaa".to_string());
-			assert!(write_auto_healed_hashes(
-				&[output],
-				None,
-				&identities,
-				&Identities::new(),
-			)
-			.is_ok());
-
-			let lock = skill::lock::global::read_skill_lock();
-			let entry = &lock.skills["legacy"];
-			assert_eq!(
-				entry.content_hash.as_deref(),
-				Some("other-hash"),
-				"owner/repo's hash must not overwrite owner/other's entry"
-			);
-			assert_eq!(entry.ref_commit.as_deref(), Some("bbbbbbbb"));
-		});
-	}
-
-	/// The same window, but the racing mutation is an `apply-update` on THIS
-	/// entry: the coordinates never change, only the hash and refCommit move
-	/// forward. An identity-only compare-and-set sees no difference and rolls
-	/// both back to what the stale check saw.
-	#[test]
-	fn auto_heal_skips_an_entry_updated_during_the_fetch() {
-		with_isolated_state(|| {
-			let mut lock = skill::SkillLockFile::default();
-			lock.skills.insert("legacy".into(), global_entry());
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-			let identities = global_identities_now();
-
-			// Mid-fetch: apply-update advances this entry to the new content.
-			let mut updated = global_entry();
-			updated.content_hash = Some("new-hash".to_string());
-			updated.ref_commit = Some("cccccccc".to_string());
-			let mut lock = skill::SkillLockFile::default();
-			lock.skills.insert("legacy".into(), updated);
-			skill::lock::global::write_skill_lock(&lock).unwrap();
-
-			let mut output = healed_output("legacy", "global", "stale-hash");
-			output.heal_oid = Some("aaaaaaaa".to_string());
-			assert!(write_auto_healed_hashes(
-				&[output],
-				None,
-				&identities,
-				&Identities::new(),
-			)
-			.is_ok());
-
-			let lock = skill::lock::global::read_skill_lock();
-			let entry = &lock.skills["legacy"];
-			assert_eq!(
-				entry.content_hash.as_deref(),
-				Some("new-hash"),
-				"a stale check must not roll back a newer apply-update"
-			);
-			assert_eq!(entry.ref_commit.as_deref(), Some("cccccccc"));
-		});
 	}
 
 	#[test]
@@ -2300,44 +1910,124 @@ mod tests {
 		});
 	}
 
+	/// A busy mutation lock during the post-check heal must not turn the check
+	/// into a 500: the results come back and the busy heal is reported beside
+	/// them as retryable. Unix-only because it reuses `LocalRepoFetcher`.
+	#[cfg(unix)]
 	#[test]
-	fn auto_heal_writes_project_computed_hash_only() {
-		with_isolated_state(|| {
-			let project = tempfile::tempdir().unwrap();
-			let mut local = skill::LocalSkillLockFile::default();
-			local.skills.insert(
-				"legacy".into(),
-				skill::LocalSkillLockEntry {
-					source_url: None,
-					ref_commit: None,
-					source: "owner/repo".to_string(),
-					ref_name: Some("main".to_string()),
-					source_type: "github".to_string(),
-					computed_hash: skill::EMPTY_SKILLS_LOCK_DIGEST.to_string(),
-					skill_path: Some("SKILL.md".to_string()),
+	fn check_updates_reports_retryable_busy_heal_and_keeps_results() {
+		/// Restores one env var on drop, including during a panic.
+		struct Restore(&'static str, Option<std::ffi::OsString>);
+		impl Drop for Restore {
+			fn drop(&mut self) {
+				match self.1.take() {
+					Some(value) => std::env::set_var(self.0, value),
+					None => std::env::remove_var(self.0),
+				}
+			}
+		}
+
+		/// Stub resolver. Never reached: an unknown stored hash disables the
+		/// ls-refs preflight, so the check goes straight to the fetch.
+		struct NoTip;
+		impl RefResolver for NoTip {
+			fn resolve(
+				&self,
+				_source_ref: &SourceRef,
+				_token: Option<&str>,
+			) -> Result<skill_update::TipObservation, FetchError> {
+				Err(FetchError::network("no tip"))
+			}
+		}
+
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let data = tempfile::tempdir().unwrap();
+		let _data_env =
+			Restore("AGHUB_DATA_DIR", std::env::var_os("AGHUB_DATA_DIR"));
+		std::env::set_var("AGHUB_DATA_DIR", data.path());
+		let _timeout_env = Restore(
+			"AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS",
+			std::env::var_os("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS"),
+		);
+		std::env::set_var("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS", "100");
+
+		// Installed project copy, with a placeholder computed hash so the
+		// orchestrator emits a heal.
+		let project = tempfile::tempdir().unwrap();
+		let body = "---\nname: locked\ndescription: d\n---\nbody\n";
+		let installed = project.path().join(".claude/skills/locked");
+		std::fs::create_dir_all(&installed).unwrap();
+		std::fs::write(installed.join("SKILL.md"), body).unwrap();
+		let mut local = skill::LocalSkillLockFile::default();
+		local.skills.insert(
+			"locked".into(),
+			skill::LocalSkillLockEntry {
+				source_url: None,
+				ref_commit: None,
+				source: "owner/repo".to_string(),
+				ref_name: Some("main".to_string()),
+				source_type: "github".to_string(),
+				computed_hash: skill::EMPTY_SKILLS_LOCK_DIGEST.to_string(),
+				skill_path: Some("locked/SKILL.md".to_string()),
+			},
+		);
+		skill::write_local_lock(&local, Some(project.path())).unwrap();
+
+		// Upstream copy the local fetcher hands back.
+		let upstream = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(upstream.path().join("locked")).unwrap();
+		std::fs::write(upstream.path().join("locked/SKILL.md"), body).unwrap();
+
+		// Another aghub process holds the project mutation lock.
+		let lock_path =
+			skill::lock::MutationScope::Project(project.path().to_path_buf())
+				.lock_path();
+		std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+		let held = std::fs::File::options()
+			.read(true)
+			.write(true)
+			.create(true)
+			.truncate(false)
+			.open(&lock_path)
+			.unwrap();
+		held.try_lock().expect("must acquire external file lock");
+
+		let outcome = rocket::tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap()
+			.block_on(check_skill_updates_inner(
+				ResolvedScope::Project {
+					root: project.path().to_path_buf(),
 				},
-			);
-			skill::lock::local::write_local_lock(&local, Some(project.path()))
-				.unwrap();
+				false,
+				Arc::new(LocalRepoFetcher {
+					root: upstream.path().to_path_buf(),
+				}),
+				Arc::new(NoTip),
+				&empty_keyring_resolver(),
+			));
+		let json = match outcome {
+			Ok(json) => json.into_inner(),
+			Err(error) => {
+				panic!("check should return Ok: {}", error.body.error)
+			}
+		};
 
-			let (_entries, project_identities) =
-				project_lock_entries(Some(project.path()), true);
-			assert!(write_auto_healed_hashes(
-				&[healed_output("legacy", "project", "def456")],
-				Some(project.path()),
-				&Identities::new(),
-				&project_identities,
-			)
-			.is_ok());
-
-			let local =
-				skill::lock::local::read_local_lock(Some(project.path()));
-			assert_eq!(local.skills["legacy"].computed_hash, "def456");
-			assert!(
-				skill::lock::global::read_skill_lock().skills.is_empty(),
-				"project auto-heal must not touch the global lock"
-			);
-		});
+		let body = serde_json::to_value(json).unwrap();
+		assert_eq!(body["results"].as_array().unwrap().len(), 1);
+		assert_eq!(body["results"][0]["name"], "locked");
+		assert_eq!(body["healError"]["code"], "SKILL_MUTATION_LOCK_BUSY");
+		assert_eq!(body["healError"]["retryable"], true);
+		assert_eq!(
+			skill::lock::local::read_local_lock(Some(project.path())).skills
+				["locked"]
+				.computed_hash,
+			skill::EMPTY_SKILLS_LOCK_DIGEST,
+			"a busy heal must write nothing"
+		);
 	}
 
 	/// A public repo with no stored hash recomputes locally and never panics;

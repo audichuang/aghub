@@ -19,7 +19,7 @@ routes and CLI `apply-update` / `source`. Network/credentials live here;
 | TTL result cache          | `lib.rs` `ResultCache`        | Keyed by `SourceRef`; crate-private, built per call inside `run_update_check()`                                                                                                                                                                                                         |
 | Inject auth               | `lib.rs` `TokenResolver`      | CLI env / API own resolver                                                                                                                                                                                                                                                              |
 | Source list/diff/classify | `sources.rs`                  | API + CLI `source`. Exactly THREE public entry points — `list_sources`, `diff_source`, `plan_source_sync`; everything else is `pub(crate)`                                                                                                                                              |
-| Lock → check inputs       | `projection.rs`               | API route + CLI `check` share it: the `wanted` hash filter, the per-root hash memo, the offline skip, and the lock-before-disk read order                                                                                                                                               |
+| Lock → check inputs       | `projection.rs`               | API route + CLI `check` share it: the `wanted` hash filter, the per-root hash memo, the offline skip, and the lock-before-disk read order. The API's post-check heal writer (`write_auto_healed_hashes`) lives here too; `check` never calls it                                         |
 | Source mutation flows     | `mutation.rs`                 | install / resync / accept-rename — API + CLI                                                                                                                                                                                                                                            |
 | Repo fetch + catalog      | `repository.rs`               | `SkillRepository` + `FetchSelection` (consumes `aghub-git`'s `RepoSnapshot`)                                                                                                                                                                                                            |
 | Network adapters          | `git.rs`                      | `GitFetcher` / `GitRefResolver`                                                                                                                                                                                                                                                         |
@@ -86,6 +86,16 @@ clock before REST took over the github path.
   source sessions — never build a second fallback chain.
 - **`fetch_source_with_resolver` is token-first**: resolve once, then fetch once;
   anonymous is used only when no token exists.
+
+## Deliberate surface differences
+
+CLI and API call the same entries; these are the ONLY intended divergences.
+
+- **check auto-heal**: `GET /skills/check-updates` calls
+  `projection::write_auto_healed_hashes` after the check; `aghub-cli check` never
+  does — check does not write the lock. A busy mutation lock is reported in the
+  response's `healError` (retryable `SKILL_MUTATION_LOCK_BUSY`), never a 500, and
+  the results are still returned.
 
 ## TESTING
 

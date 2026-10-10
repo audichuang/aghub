@@ -83,6 +83,7 @@ import type {
 	CCPluginUpdateConfigRequest,
 	CCPluginUpdateRequest,
 	CCPluginUpdateResponse,
+	CheckSkillUpdatesResponse,
 	UpdateSubAgentRequest,
 } from "../generated/dto";
 
@@ -512,7 +513,8 @@ export function createApi(baseUrl: string) {
 							? { headers: forwardedTokens }
 							: {}),
 					})
-					.json();
+					.json<CheckSkillUpdatesResponse>()
+					.then((body) => body.results);
 			},
 			applyUpdate(
 				body: ApplySkillUpdateRequest,
