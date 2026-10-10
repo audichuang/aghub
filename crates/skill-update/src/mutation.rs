@@ -119,11 +119,12 @@ pub struct FetchedInstallRequest<'a> {
 	pub expected_name: Option<&'a str>,
 	pub scope: WriteScope,
 	pub target_agents: &'a [AgentType],
-	/// The ref the caller chose from an UNLOCKED pre-fetch read of the scope's
-	/// cohort (`sources::import_ref`). When `Some`, the install is refused if the
-	/// cohort was repinned during the fetch, instead of healing it back. `None`
-	/// = no expectation (an explicit `--ref` repin).
-	pub expected_ref: Option<&'a str>,
+	/// `Some(r)`: the ref the caller took from an UNLOCKED pre-fetch read of the
+	/// scope's cohort (`sources::import_ref`; inner `None` = the default branch).
+	/// Under the mutation lock the install is refused unless the cohort for this
+	/// source is empty or exactly `[r]`, so a mixed or repinned cohort is never
+	/// healed onto `r`. `None`: no expectation (an explicit `--ref` repin).
+	pub expected_ref: Option<Option<&'a str>>,
 }
 
 #[derive(Debug)]
@@ -161,13 +162,31 @@ pub fn install_fetched_source(
 				&request.scope,
 				&request.source.source_url,
 			);
+			// One install records one ref; a mixed cohort is `source sync`'s
+			// MultipleRefs refusal, never healed onto whichever ref sorts first.
+			if recorded.len() > 1 {
+				return Err(InstallMutationError::Install(
+					aghub_core::ConfigError::ValidationFailed(format!(
+						"This source's skills are pinned to more than one ref in this scope ({}); nothing was written. Run `source sync` with --ref to put them on one ref first",
+						recorded
+							.iter()
+							.map(|r| format!(
+								"'{}'",
+								r.as_deref().unwrap_or("the default branch")
+							))
+							.collect::<Vec<_>>()
+							.join(", "),
+					)),
+				));
+			}
 			if let Some(now) =
-				recorded.first().filter(|r| r.as_deref() != Some(expected))
+				recorded.first().filter(|r| r.as_deref() != expected)
 			{
 				return Err(InstallMutationError::Install(
 					aghub_core::ConfigError::ValidationFailed(format!(
-						"This source is now pinned to '{}' in this scope, not the '{expected}' this install fetched; nothing was written. Re-run to install from the current ref",
+						"This source is now pinned to '{}' in this scope, not the '{}' this install fetched; nothing was written. Re-run to install from the current ref",
 						now.as_deref().unwrap_or("the default branch"),
+						expected.unwrap_or("the default branch"),
 					)),
 				));
 			}

@@ -1390,7 +1390,7 @@ pub(crate) async fn install_skill_with_repo(
 							expected_name: None,
 							scope: write_scope.clone(),
 							target_agents: &agent_types,
-							expected_ref: lock_source.ref_name.as_deref(),
+							expected_ref: Some(lock_source.ref_name.as_deref()),
 						},
 					)
 					.map_err(fetched_install_error_message)
@@ -2005,10 +2005,10 @@ pub async fn git_install_skills(
 	}
 	let source = install_lock_source_from_resolved(&resolved, ref_name);
 	// Only a ref taken from the scope's cohort is re-checked under the lock.
-	let expected_ref = source
-		.ref_name
-		.clone()
-		.filter(|_| session.requested_branch().is_none());
+	let expected_ref: Option<Option<String>> = session
+		.requested_branch()
+		.is_none()
+		.then(|| source.ref_name.clone());
 
 	// Reject absolute / `..` paths BEFORE any fetch or install write.
 	// Security: out-of-tree paths must fail with 400 without I/O.
@@ -2088,7 +2088,7 @@ pub async fn git_install_skills(
 					expected_name: None,
 					scope: write_scope.clone(),
 					target_agents: &target_agents,
-					expected_ref: expected_ref.as_deref(),
+					expected_ref: expected_ref.as_ref().map(|r| r.as_deref()),
 				},
 			) {
 				Ok(report) => {
@@ -7353,6 +7353,98 @@ mod tests {
 			)
 			.unwrap()
 			.contains("main body"));
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn install_skill_refuses_a_mixed_cohort_instead_of_moving_the_entry_onto_another_ref(
+	) {
+		with_isolated_env(|home, _state| {
+			let project = home.join("proj");
+			std::fs::create_dir_all(&project).unwrap();
+			let mut lock = skill::LocalSkillLockFile::new();
+			lock.skills.insert(
+				"other".to_string(),
+				skill::LocalSkillLockEntry {
+					source: "o/r".to_string(),
+					source_url: Some("https://github.com/o/r".to_string()),
+					source_type: "github".to_string(),
+					ref_name: Some("main".to_string()),
+					skill_path: Some("other/SKILL.md".to_string()),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+				},
+			);
+			lock.skills.insert(
+				"alpha".to_string(),
+				skill::LocalSkillLockEntry {
+					source: "o/r".to_string(),
+					source_url: Some("https://github.com/o/r".to_string()),
+					source_type: "github".to_string(),
+					ref_name: Some("stable".to_string()),
+					skill_path: Some("alpha/SKILL.md".to_string()),
+					computed_hash: "h".to_string(),
+					ref_commit: Some("stable-commit".into()),
+				},
+			);
+			skill::write_local_lock(&lock, Some(&project)).unwrap();
+			std::fs::create_dir_all(project.join(".aghub/alpha")).unwrap();
+			std::fs::write(
+				project.join(".aghub/alpha/SKILL.md"),
+				"---\nname: alpha\ndescription: d\n---\nstable body\n",
+			)
+			.unwrap();
+
+			let req = crate::dto::skill::InstallSkillRequest {
+				source: "https://github.com/o/r".to_string(),
+				agents: vec!["claude".to_string()],
+				skills: vec!["alpha".to_string()],
+				scope: "project".to_string(),
+				project_path: Some(project.display().to_string()),
+				install_all: Some(false),
+			};
+
+			// The route fetches `first()` of the mixed cohort (`main`). The
+			// install must refuse, not move alpha onto `main`.
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(TwoBranchCatalog {
+						head_is_main: false,
+						repin_root: None,
+					}),
+				),
+			);
+			let resp =
+				block_on(super::install_skill_with_repo(req, repo, None))
+					.ok()
+					.expect("route handled the install")
+					.into_inner();
+			assert!(!resp.success);
+			assert!(
+				resp.agents.iter().any(|row| row
+					.error
+					.as_deref()
+					.is_some_and(|e| e.contains("more than one ref"))),
+				"{:?}",
+				resp.agents
+			);
+			let lock = skill::read_local_lock(Some(&project));
+			assert_eq!(
+				lock.skills["alpha"].ref_name.as_deref(),
+				Some("stable"),
+				"a mixed cohort must not move alpha onto main"
+			);
+			assert_eq!(
+				lock.skills["alpha"].ref_commit.as_deref(),
+				Some("stable-commit")
+			);
+			let body =
+				std::fs::read_to_string(project.join(".aghub/alpha/SKILL.md"))
+					.unwrap();
+			assert!(body.contains("stable body"));
+			assert!(!body.contains("main body"));
 		});
 	}
 
