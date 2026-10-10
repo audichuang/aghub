@@ -206,6 +206,7 @@ async fn import_records_the_real_default_branch_and_check_reports_no_false_updat
 				expected_name: None,
 				scope,
 				target_agents: &[aghub_core::models::AgentType::Claude],
+				expected_ref: None,
 			},
 		)
 		.unwrap();

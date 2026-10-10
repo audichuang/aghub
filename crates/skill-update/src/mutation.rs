@@ -119,6 +119,11 @@ pub struct FetchedInstallRequest<'a> {
 	pub expected_name: Option<&'a str>,
 	pub scope: WriteScope,
 	pub target_agents: &'a [AgentType],
+	/// The ref the caller chose from an UNLOCKED pre-fetch read of the scope's
+	/// cohort (`sources::import_ref`). When `Some`, the install is refused if the
+	/// cohort was repinned during the fetch, instead of healing it back. `None`
+	/// = no expectation (an explicit `--ref` repin).
+	pub expected_ref: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -140,6 +145,36 @@ pub fn install_fetched_source(
 > {
 	let skill_file = fetched_skill_file(fetched, request.lock_skill_path)
 		.ok_or(InstallMutationError::InvalidSkillPath)?;
+	// Re-check the cohort under the mutation lock and keep holding it (the core
+	// install re-enters it) so no repin lands between this check and the write.
+	let _guard = match request.expected_ref {
+		Some(expected) => {
+			let guard = aghub_core::skills::lock::mutation_guard(
+				"install skill",
+				request.scope.resource_scope(),
+				request.scope.project_root(),
+			)
+			.map_err(|e| {
+				InstallMutationError::Install(aghub_core::ConfigError::Io(e))
+			})?;
+			let recorded = crate::sources::recorded_refs(
+				&request.scope,
+				&request.source.source_url,
+			);
+			if let Some(now) =
+				recorded.first().filter(|r| r.as_deref() != Some(expected))
+			{
+				return Err(InstallMutationError::Install(
+					aghub_core::ConfigError::ValidationFailed(format!(
+						"This source is now pinned to '{}' in this scope, not the '{expected}' this install fetched; nothing was written. Re-run to install from the current ref",
+						now.as_deref().unwrap_or("the default branch"),
+					)),
+				));
+			}
+			Some(guard)
+		}
+		None => None,
+	};
 	aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
 		core_install_request(fetched, &request, &skill_file),
 	)

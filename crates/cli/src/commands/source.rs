@@ -1347,6 +1347,7 @@ fn install_request<'a>(
 		expected_name: Some(&d.name),
 		scope: scope.clone(),
 		target_agents,
+		expected_ref: None,
 	}
 }
 

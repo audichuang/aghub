@@ -1390,6 +1390,7 @@ pub(crate) async fn install_skill_with_repo(
 							expected_name: None,
 							scope: write_scope.clone(),
 							target_agents: &agent_types,
+							expected_ref: lock_source.ref_name.as_deref(),
 						},
 					)
 					.map_err(fetched_install_error_message)
@@ -2003,6 +2004,11 @@ pub async fn git_install_skills(
 		));
 	}
 	let source = install_lock_source_from_resolved(&resolved, ref_name);
+	// Only a ref taken from the scope's cohort is re-checked under the lock.
+	let expected_ref = source
+		.ref_name
+		.clone()
+		.filter(|_| session.requested_branch().is_none());
 
 	// Reject absolute / `..` paths BEFORE any fetch or install write.
 	// Security: out-of-tree paths must fail with 400 without I/O.
@@ -2082,6 +2088,7 @@ pub async fn git_install_skills(
 					expected_name: None,
 					scope: write_scope.clone(),
 					target_agents: &target_agents,
+					expected_ref: expected_ref.as_deref(),
 				},
 			) {
 				Ok(report) => {
@@ -7053,6 +7060,9 @@ mod tests {
 	#[cfg(unix)]
 	struct TwoBranchCatalog {
 		head_is_main: bool,
+		/// `repin_root`: during the fetch, rewrite every entry in this project's lock
+		/// to `stable` — a concurrent `source sync --ref stable`.
+		repin_root: Option<std::path::PathBuf>,
 	}
 
 	#[cfg(unix)]
@@ -7112,6 +7122,13 @@ mod tests {
 			paths: &[&str],
 			dest: &std::path::Path,
 		) -> aghub_git::Result<()> {
+			if let Some(root) = &self.repin_root {
+				let mut lock = skill::read_local_lock(Some(root.as_path()));
+				for entry in lock.skills.values_mut() {
+					entry.ref_name = Some("stable".to_string());
+				}
+				skill::write_local_lock(&lock, Some(root.as_path())).unwrap();
+			}
 			for p in paths {
 				std::fs::create_dir_all(dest.join(p)).unwrap();
 				std::fs::write(
@@ -7159,6 +7176,7 @@ mod tests {
 					None,
 					std::sync::Arc::new(TwoBranchCatalog {
 						head_is_main: false,
+						repin_root: None,
 					}),
 				),
 			);
@@ -7207,6 +7225,7 @@ mod tests {
 					None,
 					std::sync::Arc::new(TwoBranchCatalog {
 						head_is_main: true,
+						repin_root: None,
 					}),
 				),
 			);
@@ -7241,6 +7260,99 @@ mod tests {
 			)
 			.unwrap()
 			.contains("develop body"));
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn install_skill_refuses_when_the_entry_is_repinned_during_the_fetch() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("proj");
+			std::fs::create_dir_all(&project).unwrap();
+			let mut lock = skill::LocalSkillLockFile::new();
+			lock.skills.insert(
+				"other".to_string(),
+				skill::LocalSkillLockEntry {
+					source: "o/r".to_string(),
+					source_url: Some("https://github.com/o/r".to_string()),
+					source_type: "github".to_string(),
+					ref_name: Some("main".to_string()),
+					skill_path: Some("other/SKILL.md".to_string()),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+				},
+			);
+			skill::write_local_lock(&lock, Some(&project)).unwrap();
+
+			let req = || crate::dto::skill::InstallSkillRequest {
+				source: "https://github.com/o/r".to_string(),
+				agents: vec!["claude".to_string()],
+				skills: vec!["alpha".to_string()],
+				scope: "project".to_string(),
+				project_path: Some(project.display().to_string()),
+				install_all: Some(false),
+			};
+
+			// Setup sanity: the first install records the cohort's `main`.
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(TwoBranchCatalog {
+						head_is_main: false,
+						repin_root: None,
+					}),
+				),
+			);
+			let resp =
+				block_on(super::install_skill_with_repo(req(), repo, None))
+					.ok()
+					.expect("install ok")
+					.into_inner();
+			assert!(resp.success, "{:?}", resp.agents);
+			assert_eq!(
+				skill::read_local_lock(Some(&project)).skills["alpha"]
+					.ref_name
+					.as_deref(),
+				Some("main")
+			);
+
+			// Second install: the pre-fetch read sees `main`, but the fetch repins
+			// the scope to `stable`. The install must refuse, not heal back to `main`.
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(TwoBranchCatalog {
+						head_is_main: false,
+						repin_root: Some(project.clone()),
+					}),
+				),
+			);
+			let resp =
+				block_on(super::install_skill_with_repo(req(), repo, None))
+					.ok()
+					.expect("route handled the install")
+					.into_inner();
+			assert!(!resp.success);
+			assert!(
+				resp.agents.iter().any(|row| row
+					.error
+					.as_deref()
+					.is_some_and(|e| e.contains("now pinned to 'stable'"))),
+				"{:?}",
+				resp.agents
+			);
+			assert_eq!(
+				skill::read_local_lock(Some(&project)).skills["alpha"]
+					.ref_name
+					.as_deref(),
+				Some("stable"),
+				"the repin must survive; a heal back to main is the bug"
+			);
+			assert!(std::fs::read_to_string(
+				project.join(".aghub/alpha/SKILL.md")
+			)
+			.unwrap()
+			.contains("main body"));
 		});
 	}
 
