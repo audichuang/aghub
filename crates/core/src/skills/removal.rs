@@ -2879,6 +2879,66 @@ pub(crate) mod tests {
 	}
 
 	#[test]
+	fn commit_refuses_a_renamed_fork_in_the_shared_slot() {
+		let root = tempfile::tempdir().unwrap();
+		let name = "renamed-fork";
+
+		let master = root.path().join(".aghub").join(name);
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(
+			master.join("SKILL.md"),
+			"---\nname: renamed-fork\ndescription: d\n---\nmaster bytes\n",
+		)
+		.unwrap();
+
+		// A fork under a folder name that is NOT the sanitized skill name. Only
+		// its frontmatter `name` links it to this skill, which is how
+		// `candidate_entries` finds it.
+		let forked = root
+			.path()
+			.join(".agents")
+			.join("skills")
+			.join("renamed-fork-dir");
+		std::fs::create_dir_all(&forked).unwrap();
+		let fork_bytes =
+			"---\nname: renamed-fork\ndescription: d\n---\nbytes only here\n";
+		std::fs::write(forked.join("SKILL.md"), fork_bytes).unwrap();
+
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			// The plan WOULD delete the forked directory.
+			paths: vec![forked.clone()],
+			skipped: vec![],
+			needs_confirm: false,
+			shared_master_kept: false,
+			still_read_from: Vec::new(),
+			incomplete: false,
+		};
+
+		let result = RemovalOutcome::commit(
+			plan,
+			&[root.path().to_path_buf()],
+			crate::models::ResourceScope::ProjectOnly,
+			Some(root.path()),
+			name,
+		);
+
+		let Err(err) = result else {
+			panic!("a renamed fork must refuse the commit, not be deleted");
+		};
+		assert!(
+			err.to_string().contains("renamed-fork-dir"),
+			"the refusal must name the renamed folder, got: {err}"
+		);
+		assert_eq!(
+			std::fs::read_to_string(forked.join("SKILL.md")).unwrap(),
+			fork_bytes,
+			"the refusal must land BEFORE execute_removal"
+		);
+		assert!(master.join("SKILL.md").is_file());
+	}
+
+	#[test]
 	fn commit_downgrades_to_partial_when_executor_skips_path() {
 		let root = tempfile::tempdir().unwrap();
 		let name = "skipped-skill";

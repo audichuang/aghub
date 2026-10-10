@@ -28,7 +28,7 @@ codegraph — enumerated trees drift):
   `app_data_dir()`, the one app data root every surface delegates to; `registry/` — `get()` + `ALL_AGENTS`, which is just `aghub_agents::agents::ALL_DESCRIPTORS`; add agents THERE
 - `skills/` — the skill subsystem (`ls` for the full list). Load-bearing, and
   the three biggest files are the ones the root AGENTS.md keeps pointing at:
-  `shape.rs` (`classify_shape` / `candidate_referrers` / `plan_repair`),
+  `shape.rs` (`classify_shape` / `candidate_referrers` / `observe_shape` / `plan_repair` — observation vs policy: `observe_shape` is the collapsed candidates + shapes + the shared dir's renamed folders, with scope/root; `plan_repair` = observation + policy (managed, git probe, actions, compat sweep and its four guards); `verify_shape` reads observation only and spawns no git; doctor's link axis uses `classify_shape` + `AgentDirs`, never `plan_repair`),
   `removal.rs` (`read_effect_after` / `plan_removal`), `repair.rs`, `health.rs` (`report`: one scope's lock↔Master rows + link audit; compat dirs = `AgentDirs::compat_dirs`, shared with repair). Then
   `enumerate.rs` (the ONE skill-directory walker and marker rule — root `SKILL.md` or
   `skill.md`, `SkillMarker` three-state; discovery, prune, shape and removal all call it and each

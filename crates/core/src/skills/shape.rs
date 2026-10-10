@@ -1144,6 +1144,109 @@ mod tests {
 		);
 	}
 
+	/// Observation must not spawn git: the delete preview and commit call
+	/// `verify_shape`, and a `.git` ancestor is what made the old path probe.
+	#[test]
+	fn verify_shape_refuses_without_spawning_git() {
+		// Fork: a real directory in the shared slot beside the Master.
+		let (_tmp, root) = project_fixture();
+		write_skill(&root.join(".aghub").join("foo"), "master");
+		write_skill(&shared_slot(&root), "npx wrote this");
+		fs::write(root.join(".git"), "not a gitfile\n").unwrap();
+
+		let before = GIT_SPAWNS.with(|n| n.get());
+		let err = verify_shape(ResourceScope::ProjectOnly, Some(&root), "foo")
+			.unwrap_err()
+			.to_string();
+		assert_eq!(
+			GIT_SPAWNS.with(|n| n.get()),
+			before,
+			"verify_shape must not spawn git"
+		);
+		assert!(err.contains("a forked copy"), "{err}");
+		assert!(
+			err.contains(&shared_slot(&root).display().to_string()),
+			"{err}"
+		);
+
+		// Aliased: the shared slot is a symlink back into the store.
+		let (_tmp2, root2) = project_fixture();
+		let store = root2.join(".aghub");
+		write_skill(&store.join("foo"), "---\nname: foo\n---\n");
+		fs::create_dir_all(root2.join(".agents")).unwrap();
+		unix_fs::symlink(&store, root2.join(".agents").join("skills")).unwrap();
+		fs::write(root2.join(".git"), "not a gitfile\n").unwrap();
+
+		let before = GIT_SPAWNS.with(|n| n.get());
+		let err = verify_shape(ResourceScope::ProjectOnly, Some(&root2), "foo")
+			.unwrap_err()
+			.to_string();
+		assert_eq!(
+			GIT_SPAWNS.with(|n| n.get()),
+			before,
+			"verify_shape must not spawn git"
+		);
+		assert!(err.contains("an aliased master"), "{err}");
+	}
+
+	/// The by-name delete reaches a folder in the shared dir whose name is NOT
+	/// the sanitized skill name; observation must report it as a renamed row.
+	#[test]
+	fn observe_shape_reports_rows_and_renamed_shared_entries() {
+		let (_tmp, root) = project_fixture();
+		write_skill(
+			&root.join(".aghub").join("foo"),
+			"---\nname: foo\ndescription: d\n---\n",
+		);
+		let renamed = root.join(".agents").join("skills").join("foo-dir");
+		write_skill(&renamed, "---\nname: foo\ndescription: d\n---\nfork\n");
+
+		let o = observe_shape(ResourceScope::ProjectOnly, Some(&root), "foo")
+			.unwrap();
+		assert_eq!(o.scope, ResourceScope::ProjectOnly);
+		assert_eq!(o.project_root.as_deref(), Some(root.as_path()));
+		assert_eq!(o.master, root.join(".aghub/foo"));
+		assert!(o.master_exists);
+
+		assert_eq!(o.renamed.len(), 1);
+		assert_eq!(o.renamed[0].path, renamed);
+		assert!(o.renamed[0].shared);
+		assert_eq!(
+			o.renamed[0].shape,
+			SkillShape::Violation(ViolationKind::ForkedCopy)
+		);
+
+		let shared: Vec<_> = o.referrers.iter().filter(|r| r.shared).collect();
+		assert_eq!(shared.len(), 1);
+		assert_eq!(shared[0].path, shared_slot(&root));
+		assert_eq!(shared[0].shape, SkillShape::Absent);
+
+		// Repair's row set is unchanged: the observed paths are exactly the
+		// plan's non-compat rows, and the renamed folder is not among them.
+		let plan = plan_repair(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			"foo",
+			false,
+			&[],
+		)
+		.unwrap();
+		let planned: std::collections::BTreeSet<PathBuf> = plan
+			.actions
+			.iter()
+			.filter(|a| a.action != ReferrerAction::Unlink)
+			.map(|a| a.path.clone())
+			.collect();
+		let observed: std::collections::BTreeSet<PathBuf> =
+			o.referrers.iter().map(|r| r.path.clone()).collect();
+		assert_eq!(observed, planned);
+		assert!(!observed.contains(&renamed));
+
+		assert!(
+			observe_shape(ResourceScope::Both, Some(&root), "foo").is_none()
+		);
+	}
+
 	/// The shared slot is ONE directory that many agents resolve to. Reporting
 	/// it once per agent would give a user eight identical rows and eight
 	/// identical refusals for a single problem.
@@ -1881,6 +1984,14 @@ pub(crate) enum GitTracked {
 const GIT_PROBE_TIMEOUT: std::time::Duration =
 	std::time::Duration::from_secs(10);
 
+// Test-only: git probes spawned on THIS thread. Thread-local so parallel tests
+// cannot disturb it, and no `PATH` swap (env mutation is unsound in this binary).
+#[cfg(test)]
+thread_local! {
+	pub(crate) static GIT_SPAWNS: std::cell::Cell<usize> =
+		const { std::cell::Cell::new(0) };
+}
+
 /// Runs `cmd` to completion for at most `limit`. `Ok(None)` means the deadline
 /// passed: the child was killed and reaped, so nothing is left running.
 fn status_within(
@@ -1941,6 +2052,8 @@ pub(crate) fn git_tracked(path: &Path) -> GitTracked {
 		// skill when the desktop app runs a bulk repair.
 		cmd.creation_flags(0x0800_0000);
 	}
+	#[cfg(test)]
+	GIT_SPAWNS.with(|n| n.set(n.get() + 1));
 	match status_within(&mut cmd, GIT_PROBE_TIMEOUT) {
 		Ok(Some(s)) if s.success() => GitTracked::Yes,
 		// Exactly 1 is "no pathspec matched": the definite negative.
@@ -2198,26 +2311,43 @@ pub(crate) fn compat_unlink_authorized(
 	observed
 }
 
-/// Compute the repair plan for one skill. Pure: reads the filesystem, writes
-/// nothing.
+/// One observed candidate Referrer: path, shape, who writes there. No action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedReferrer {
+	pub agents: Vec<&'static str>,
+	pub path: PathBuf,
+	pub shape: SkillShape,
+	/// True for the shared `.agents/skills` dir (the slot AND renamed folders in it).
+	pub shared: bool,
+}
+
+/// The OBSERVATION half of the shape chain: what is on disk for one skill at
+/// one scope. Pure reads — never the lock, never `disabled_agents`, never git.
+#[derive(Debug, Clone)]
+pub struct ShapeObservation {
+	pub scope: ResourceScope,
+	pub project_root: Option<PathBuf>,
+	pub name: String,
+	pub master: PathBuf,
+	pub master_exists: bool,
+	/// Write-dir candidates collapsed by path, in registry order. The ONLY rows
+	/// `plan_repair` acts on.
+	pub referrers: Vec<ObservedReferrer>,
+	/// Folders in the shared dir that discovery lists under `name` but that are
+	/// NOT `<shared>/<sanitized-name>` — entries a delete really sweeps
+	/// (`removal::candidate_entries`). Only `verify_shape` reads them; repair
+	/// policy is unchanged and does not act on them.
+	pub renamed: Vec<ObservedReferrer>,
+}
+
+/// Observe what is on disk for one skill at one scope. Pure reads.
 ///
-/// `in_lock` is the caller's answer to "does a lock entry name this skill". It
-/// is a parameter rather than a lock read here because D5 hangs on it — only a
-/// lock-named skill may be adopted as a Master; anything else is content aghub
-/// did not install and must not move — and because the lock read must fail
-/// CLOSED at the surface that reports it (root AGENTS.md), which is a decision
-/// this pure function has no business making.
-///
-/// `grant_to` is the migration-time question, also the caller's: which agents
-/// read this skill TODAY and are therefore owed an explicit Referrer once the
-/// Master moves. Empty means "grant nobody new".
-pub fn plan_repair(
+/// `None` for [`ResourceScope::Both`] and for a scope with no store root.
+pub fn observe_shape(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	name: &str,
-	in_lock: bool,
-	grant_to: &[&str],
-) -> Option<RepairPlan> {
+) -> Option<ShapeObservation> {
 	// `Both` is the default scope of doctor / check / source list, and it names
 	// no single store. Answering with an empty plan would report `is_noop` for a
 	// host that badly needs migrating.
@@ -2249,18 +2379,86 @@ pub fn plan_repair(
 
 	let master_exists = referrer_or_master_exists(&master);
 
-	// TWO passes, load-bearing: whether a Referrer is owed depends on whether a
-	// Master will EXIST, and during a migration it is only about to be adopted
-	// out of the shared slot. See docs/history/core-skills-shape.md#migration-created-no-per-agent-referrers
-	let shaped: Vec<(PathBuf, bool, SkillShape, Vec<&'static str>)> = order
+	let referrers: Vec<ObservedReferrer> = order
 		.into_iter()
 		.map(|path| {
 			let shared = shared_slot.as_deref() == Some(path.as_path());
 			let shape = classify_shape(&path, &master);
 			let agents = by_path.remove(&path).unwrap_or_default();
-			(path, shared, shape, agents)
+			ObservedReferrer {
+				agents,
+				path,
+				shape,
+				shared,
+			}
 		})
 		.collect();
+
+	// What a delete really sweeps in the shared dir: the slot UNION every folder
+	// discovery lists under `name` (`removal::candidate_entries`, the planner's
+	// own function). The slot itself is already a row above. `incomplete` is
+	// ignored on purpose: this feeds a guard that REFUSES, so it fails open like
+	// `removal::read_effect_after`.
+	let shared_dir = shared_referrer_dir(store_root(scope, project_root));
+	let shared_agents = referrers
+		.iter()
+		.find(|row| row.shared)
+		.map(|row| row.agents.clone())
+		.unwrap_or_default();
+	let renamed: Vec<ObservedReferrer> = shared_dir
+		.map(|dir| {
+			crate::skills::removal::candidate_entries(&dir, name, &safe)
+				.0
+				.into_iter()
+				.filter(|entry| shared_slot.as_deref() != Some(entry.as_path()))
+				.map(|path| ObservedReferrer {
+					agents: shared_agents.clone(),
+					shape: classify_shape(&path, &master),
+					path,
+					shared: true,
+				})
+				.collect()
+		})
+		.unwrap_or_default();
+
+	Some(ShapeObservation {
+		scope,
+		project_root: project_root.map(Path::to_path_buf),
+		name: name.to_string(),
+		master,
+		master_exists,
+		referrers,
+		renamed,
+	})
+}
+
+/// Compute the repair plan for one skill. Pure: reads the filesystem, writes
+/// nothing.
+///
+/// `in_lock` is the caller's answer to "does a lock entry name this skill". It
+/// is a parameter rather than a lock read here because D5 hangs on it — only a
+/// lock-named skill may be adopted as a Master; anything else is content aghub
+/// did not install and must not move — and because the lock read must fail
+/// CLOSED at the surface that reports it (root AGENTS.md), which is a decision
+/// this pure function has no business making.
+///
+/// `grant_to` is the migration-time question, also the caller's: which agents
+/// read this skill TODAY and are therefore owed an explicit Referrer once the
+/// Master moves. Empty means "grant nobody new".
+pub fn plan_repair(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	name: &str,
+	in_lock: bool,
+	grant_to: &[&str],
+) -> Option<RepairPlan> {
+	let ShapeObservation {
+		master,
+		master_exists,
+		referrers,
+		..
+	} = observe_shape(scope, project_root, name)?;
+	let safe = skill::sanitize_name(name);
 
 	// A slot only disabled agents use is not aghub's to touch
 	// (`crate::agent_settings`): it plans `Leave` whatever its shape. Decided
@@ -2273,18 +2471,27 @@ pub fn plan_repair(
 
 	// Exactly one adoption, and only from the shared slot — never by registry
 	// order. See docs/history/core-skills-shape.md#private-copy-won-adoption-by-registry-order
-	let adopting = shaped.iter().any(|(_, shared, shape, agents)| {
-		*shared
+	let adopting = referrers.iter().any(|row| {
+		row.shared
 			&& in_lock
-			&& *shape == SkillShape::UnmigratedCopy
-			&& managed(agents)
+			&& row.shape == SkillShape::UnmigratedCopy
+			&& managed(&row.agents)
 	});
+	// TWO passes, load-bearing: whether a Referrer is owed depends on whether a
+	// Master will EXIST, and during a migration it is only about to be adopted
+	// out of the shared slot. See docs/history/core-skills-shape.md#migration-created-no-per-agent-referrers
 	// "Is there something to point at by the time Referrers are written?"
 	let will_have_master = master_exists || adopting;
 
-	let mut planned: Vec<PlannedReferrer> = shaped
+	let mut planned: Vec<PlannedReferrer> = referrers
 		.into_iter()
-		.map(|(path, shared, shape, agents)| {
+		.map(|row| {
+			let ObservedReferrer {
+				agents,
+				path,
+				shape,
+				shared,
+			} = row;
 			let action = if managed(&agents) {
 				action_for(
 					&shape,
@@ -2549,10 +2756,14 @@ fn action_for(
 
 /// Refuse a removal that would destroy bytes existing nowhere else.
 ///
-/// **Shares [`plan_repair`]'s observation, NOT its policy**: it reuses the
-/// collapsed candidate set but ignores the action column. Repair refuses what
-/// it cannot FIX; removal refuses only what it cannot UNDO (unlinking a
-/// dangling link destroys nothing).
+/// **Reads [`observe_shape`] only**, never the lock, `disabled_agents` or git,
+/// so a delete preview and commit spawn no `git` process. It also checks the
+/// shared dir's renamed folders ([`ShapeObservation::renamed`]), which a delete
+/// sweeps. Compat-dir rows of [`plan_repair`] are not consulted any more, which
+/// loses nothing: they are links or unreadable entries (classified `Absent`),
+/// never `ForkedCopy`/`AliasedMaster`. Repair refuses what it cannot FIX;
+/// removal refuses only what it cannot UNDO (unlinking a dangling link destroys
+/// nothing).
 /// See docs/history/core-skills-shape.md#verify-shape-reused-repair-refusals
 ///
 /// Exactly two shapes block:
@@ -2573,35 +2784,42 @@ fn action_for(
 /// - Link shapes (`Dangling`, `ForeignTarget`, `Chain`) and the master-side
 ///   violations are repair problems, not delete hazards.
 ///
-/// `in_lock: false` cannot change the verdict (it only picks `AdoptAsMaster`
-/// vs `LeaveForeign`, which this ignores); a lock read here would fail open.
+/// No lock is read here: a lock read would fail open, and the verdict does not
+/// depend on it (`AdoptAsMaster` vs `LeaveForeign` is repair policy).
 ///
 /// `Ok(())` for [`ResourceScope::Both`] and for a scope with no store root:
-/// `plan_repair` names no single store there, and refusing every removal a
+/// `observe_shape` names no single store there, and refusing every removal a
 /// scopeless caller makes would be a guess, not a guard.
 pub fn verify_shape(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	name: &str,
 ) -> crate::errors::Result<()> {
-	let Some(plan) = plan_repair(scope, project_root, name, false, &[]) else {
+	let Some(observed) = observe_shape(scope, project_root, name) else {
 		return Ok(());
 	};
 	// Exhaustive on the blocking shapes ON PURPOSE, so a wrong detail is
 	// unreachable. See docs/history/core-skills-shape.md#verify-shape-printed-two-shapes-in-one-detail
-	let blocker = plan.actions.iter().find_map(|a| match &a.shape {
-		SkillShape::Violation(ViolationKind::ForkedCopy) if a.shared => Some((
-			a,
-			"a real directory sits in the shared slot where a link to the \
-			 store belongs, and its content may exist nowhere else",
-		)),
-		SkillShape::AliasedMaster => Some((
-			a,
-			"it IS the master reached through a symlinked parent, so the \
-			 \"duplicate\" is the only copy",
-		)),
-		_ => None,
-	});
+	let blocker =
+		observed
+			.referrers
+			.iter()
+			.chain(&observed.renamed)
+			.find_map(|a| {
+				match &a.shape {
+			SkillShape::Violation(ViolationKind::ForkedCopy) if a.shared => Some((
+				a,
+				"a real directory sits in the shared slot where a link to the \
+				 store belongs, and its content may exist nowhere else",
+			)),
+			SkillShape::AliasedMaster => Some((
+				a,
+				"it IS the master reached through a symlinked parent, so the \
+				 \"duplicate\" is the only copy",
+			)),
+			_ => None,
+		}
+			});
 	let Some((blocker, detail)) = blocker else {
 		return Ok(());
 	};
@@ -2619,15 +2837,15 @@ pub fn verify_shape(
 		"Cannot remove skill '{name}': {} at {}{writers} — {detail}. Run \
 		 `aghub-cli repair {name}` first; deleting now could destroy content \
 		 aghub cannot recover.",
-		blocker.shape_label(),
+		blocker.shape.label(),
 		blocker.path.display(),
 	)))
 }
 
-impl PlannedReferrer {
+impl SkillShape {
 	/// Short human label for the observed shape, for error text.
-	fn shape_label(&self) -> &'static str {
-		match &self.shape {
+	fn label(&self) -> &'static str {
+		match self {
 			SkillShape::Conformant => "a conformant referrer",
 			SkillShape::Absent => "nothing",
 			SkillShape::UnmigratedCopy => "an un-migrated copy",
