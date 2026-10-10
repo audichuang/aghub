@@ -1,5 +1,7 @@
 use super::*;
-use crate::models::{AgentType, ResourceScope};
+use crate::models::AgentType;
+#[cfg(unix)]
+use crate::models::ResourceScope;
 use crate::skills::prune::test_lock::env_lock;
 #[cfg(unix)]
 use crate::skills::removal;
@@ -1760,7 +1762,11 @@ fn test_by_path_unlinks_junction_keeps_master() {
 	let root = temp.path().join("project");
 	let master = root.join(".aghub/foo");
 	fs::create_dir_all(&master).unwrap();
-	fs::write(master.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+	fs::write(
+		master.join("SKILL.md"),
+		"---\nname: foo\ndescription: d\n---\n",
+	)
+	.unwrap();
 
 	let claude = root.join(".claude/skills");
 	fs::create_dir_all(&claude).unwrap();

@@ -1470,6 +1470,9 @@ mod tests {
 		);
 	}
 
+	// Global scope reads `dirs::home_dir()/.aghub`; on Windows that ignores HOME
+	// and lands in the real profile.
+	#[cfg(unix)]
 	#[test]
 	fn report_global_scope_does_not_read_project_lock() {
 		use crate::skills::prune::test_lock::GlobalLockGuard;

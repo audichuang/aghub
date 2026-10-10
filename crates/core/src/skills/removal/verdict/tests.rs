@@ -519,6 +519,9 @@ fn test_remove_skill_planned_kept() {
 	);
 }
 
+// Global scope: `dirs::home_dir()` ignores HOME on Windows, so the fixture
+// under the fake home is invisible there.
+#[cfg(unix)]
 #[test]
 fn test_remove_skill_planned_refused_shared_slot() {
 	let tmp = tempfile::tempdir().unwrap();

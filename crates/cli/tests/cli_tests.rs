@@ -18149,6 +18149,11 @@ fn apply_update_outdated_and_source_sync_share_mutation_lock_busy_code_and_retry
 	drop(held_file);
 }
 
+// `-g` writes resolve the home via `dirs::home_dir()`, which on Windows reads
+// the known-folder profile and ignores HOME/USERPROFILE: there this test wrote
+// `.aghub`/`.claude` into the runner's real profile, an ancestor of every
+// tempdir, and flipped `coverage_project_without_root_errors`.
+#[cfg(unix)]
 #[test]
 fn add_skills_from_path_tracks_skill_in_doctor() {
 	let home = tempfile::tempdir().unwrap();
