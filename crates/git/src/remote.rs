@@ -187,6 +187,38 @@ pub fn resolve_ref_oid(
 	Ok(select_ref_oid(&refs, wanted))
 }
 
+/// The remote default branch's NAME: the `refs/heads/<name>` target of an
+/// advertised `HEAD` symref. `None` when HEAD is not advertised as a symref
+/// (no symref capability, detached, unborn); callers then record no ref
+/// rather than guess one.
+pub fn default_branch_from_refs(
+	refs: &[gix::protocol::handshake::Ref],
+) -> Option<String> {
+	use gix::bstr::ByteSlice;
+	use gix::protocol::handshake::Ref;
+
+	refs.iter().find_map(|r| match r {
+		Ref::Symbolic {
+			full_ref_name,
+			target,
+			..
+		} if full_ref_name.to_str_lossy().as_ref() == "HEAD" => target
+			.to_str_lossy()
+			.strip_prefix("refs/heads/")
+			.map(String::from),
+		_ => None,
+	})
+}
+
+/// The remote default branch name via one ref advertisement (no object download).
+pub fn resolve_default_branch(
+	options: RemoteOptions<'_>,
+) -> Result<Option<String>> {
+	let url = resolve_remote_url(&options, false)?;
+	let refs = discover_remote_refs(url.as_str())?;
+	Ok(default_branch_from_refs(&refs))
+}
+
 pub(crate) fn branches_from_remote_refs(
 	remote_refs: &[gix::protocol::handshake::Ref],
 ) -> Vec<String> {
@@ -271,6 +303,47 @@ mod tests {
 			select_ref_oid(&refs, Some("v1.0")),
 			Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
 		);
+	}
+
+	#[test]
+	fn default_branch_from_refs_names_the_head_symref_target() {
+		use gix::protocol::handshake::Ref;
+		let oid = gix::ObjectId::from_hex(
+			b"dddddddddddddddddddddddddddddddddddddddd",
+		)
+		.unwrap();
+		let refs = vec![
+			Ref::Symbolic {
+				full_ref_name: "HEAD".into(),
+				target: "refs/heads/develop".into(),
+				tag: None,
+				object: oid,
+			},
+			Ref::Direct {
+				full_ref_name: "refs/heads/develop".into(),
+				object: oid,
+			},
+			Ref::Direct {
+				full_ref_name: "refs/heads/main".into(),
+				object: oid,
+			},
+		];
+		assert_eq!(
+			default_branch_from_refs(&refs),
+			Some("develop".to_string())
+		);
+		// HEAD advertised only as a plain Direct ref names no branch.
+		let refs = vec![
+			Ref::Direct {
+				full_ref_name: "HEAD".into(),
+				object: oid,
+			},
+			Ref::Direct {
+				full_ref_name: "refs/heads/main".into(),
+				object: oid,
+			},
+		];
+		assert_eq!(default_branch_from_refs(&refs), None);
 	}
 
 	#[test]

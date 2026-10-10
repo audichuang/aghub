@@ -1202,11 +1202,11 @@ pub(crate) async fn install_skill_with_repo(
 			let (selected, fetched) = match timeout(
 				Duration::from_secs(300),
 				tokio::task::spawn_blocking(move || {
-					let snapshot = repo_for_task
-						.resolve(&source_ref, token_for_task.as_deref())
+					let claim = repo_for_task
+						.resolve_pinned(&source_ref, token_for_task.as_deref())
 						.map_err(InstallFetchError::Repo)?;
 					let catalog = repo_for_task
-						.list(&snapshot)
+						.list_pinned(&claim)
 						.map_err(InstallFetchError::Repo)?;
 					let selected = select_catalog_paths(
 						&catalog.skills,
@@ -1216,8 +1216,8 @@ pub(crate) async fn install_skill_with_repo(
 					let paths: Vec<skill::SkillPath> =
 						selected.iter().map(|(_, p)| p.clone()).collect();
 					let fetched = repo_for_task
-						.fetch(
-							&snapshot,
+						.fetch_pinned(
+							&claim,
 							skill_update::FetchSelection::Skills(&paths),
 						)
 						.map_err(InstallFetchError::Repo)?;
@@ -1764,12 +1764,14 @@ pub async fn git_scan_skills(
 	};
 	let token_for_scan = credential_token.clone();
 	let repo_for_scan = repo.clone();
-	let (claim, skills) = tokio::task::spawn_blocking(move || {
-		scan_repo_catalog(
+	let (claim, skills, import_ref) = tokio::task::spawn_blocking(move || {
+		let (claim, skills) = scan_repo_catalog(
 			&repo_for_scan,
 			&source_ref,
 			token_for_scan.as_deref(),
-		)
+		)?;
+		let import_ref = repo_for_scan.import_ref(&claim);
+		Ok::<_, skill_update::SkillRepoError>((claim, skills, import_ref))
 	})
 	.await
 	.map_err(|e| {
@@ -1793,14 +1795,9 @@ pub async fn git_scan_skills(
 	})
 	.await?;
 
-	// No local clone HEAD: prefer the request branch, else guess main/master.
-	let current_branch = req.branch.clone().unwrap_or_else(|| {
-		["main", "master"]
-			.iter()
-			.find(|b| branches.contains(&b.to_string()))
-			.map(|b| b.to_string())
-			.unwrap_or_default()
-	});
+	// The shared import-ref decision: the asked branch, else the remote's real
+	// default branch, else "" (install then records no ref). Never a guess.
+	let current_branch = import_ref.unwrap_or_default();
 
 	// Store the commit-pinned repository handle until install/sync.
 	let session_id = uuid::Uuid::new_v4().to_string();
@@ -7459,7 +7456,7 @@ mod tests {
 
 	// ─── Ticket 08: desktop scan/install partial-fetch + session slimming ─────
 	//
-	// The desktop scan browses via `SkillRepository::list` (no whole-repo clone
+	// The desktop scan browses via `SkillRepository::list_pinned` (no whole-repo clone
 	// on the github path) and installs via `fetch` (only the selected skill),
 	// with the scan session pinning the resolved commit. These tests drive that
 	// contract through a request-RECORDING GitHub REST transport (mirrors the

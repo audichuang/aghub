@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aghub_git::{
@@ -21,8 +21,8 @@ use crate::{https_only_token, FetchError, FetchedRepo, SourceRef};
 const FETCH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const CATALOG_MAX_DEPTH: usize = 10;
 
-/// Which backend resolved a given `commit_oid`. Memoized so `list`/`fetch`
-/// always hit the same slot that produced the snapshot.
+/// Which backend resolved a snapshot. Carried on the [`PinnedSnapshot`] claim
+/// so list/fetch always hit the slot that produced the snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackendKind {
 	Rest,
@@ -112,17 +112,6 @@ pub fn skill_repo_to_fetch_error(e: SkillRepoError) -> FetchError {
 pub struct SkillRepository {
 	rest: Option<Arc<dyn RepoFetchBackend>>,
 	gix: Arc<dyn RepoFetchBackend>,
-	/// `commit_oid` → backend that resolved the immutable snapshot. Consulted
-	/// only by callers that did NOT come through a [`PinnedSnapshot`]; a claim
-	/// carries its own backend, which is what keeps two sources landing on one
-	/// commit from routing each other's operations.
-	memo: Mutex<HashMap<String, BackendKind>>,
-	/// `commit_oid` → the coordinates REST resolved it from. Lets a download
-	/// that REST refuses AFTER resolving (blob admission) be re-served by gix,
-	/// which can only fetch a ref tip — so the re-served tip must name this
-	/// same commit, or nothing is staged.
-	rest_origins:
-		Mutex<HashMap<String, (aghub_git::SourceRef, Option<Credentials>)>>,
 }
 
 /// A backend operation's outcome, keeping REST's "declined" apart from real
@@ -191,7 +180,7 @@ impl PinnedSnapshot {
 	}
 
 	/// The branch/ref this snapshot was resolved from. `None` = the remote
-	/// default branch, whose real name is not discovered yet (B8 fills it).
+	/// default branch; [`SkillRepository::import_ref`] learns its real name.
 	pub fn branch(&self) -> Option<&str> {
 		self.origin.0.ref_.as_deref()
 	}
@@ -228,37 +217,13 @@ impl SkillRepository {
 		rest: Option<Arc<dyn RepoFetchBackend>>,
 		gix: Arc<dyn RepoFetchBackend>,
 	) -> Self {
-		Self {
-			rest,
-			gix,
-			memo: Mutex::new(HashMap::new()),
-			rest_origins: Mutex::new(HashMap::new()),
-		}
-	}
-
-	/// Legacy memo path for callers not yet on claims (removed in B8).
-	pub fn resolve(
-		&self,
-		sr: &SourceRef,
-		token: Option<&str>,
-	) -> Result<RepoSnapshot, SkillRepoError> {
-		let pinned = self.resolve_pinned(sr, token)?;
-		self.remember(&pinned.snapshot.commit_oid, pinned.backend)?;
-		if pinned.backend == BackendKind::Rest {
-			let (git_sr, auth) = &pinned.origin;
-			self.remember_rest_origin(
-				&pinned.snapshot.commit_oid,
-				git_sr,
-				auth,
-			)?;
-		}
-		Ok(pinned.snapshot)
+		Self { rest, gix }
 	}
 
 	/// Resolve the tip to an immutable snapshot and return the CLAIM: snapshot +
 	/// the backend that produced it + its coordinates. THE single fallback owner:
 	/// REST on github hosts when present, else gix; REST `RestFallback` → gix
-	/// once. Touches no per-instance memo — the claim alone is enough to list/fetch.
+	/// once.
 	pub fn resolve_pinned(
 		&self,
 		sr: &SourceRef,
@@ -323,7 +288,7 @@ impl SkillRepository {
 	/// The tip commit OID of `sr.ref_` **without downloading objects** — the
 	/// update-check preflight's "has upstream moved?".
 	///
-	/// REST answers in one pooled request and memoizes the snapshot; off REST
+	/// REST answers in one pooled request; off REST
 	/// this uses a git ref advertisement (ls-refs), NOT
 	/// [`RepoFetchBackend::resolve`], which on gix performs the depth-1 fetch the
 	/// preflight exists to avoid. Returns the OID plus, when REST served it, a
@@ -345,12 +310,6 @@ impl SkillRepository {
 						sr.ref_,
 						started.elapsed()
 					);
-					self.remember(&snap.commit_oid, BackendKind::Rest)?;
-					self.remember_rest_origin(
-						&snap.commit_oid,
-						&git_sr,
-						&auth,
-					)?;
 					return Ok((
 						snap.commit_oid.clone(),
 						Some(PinnedSnapshot {
@@ -395,9 +354,9 @@ impl SkillRepository {
 	}
 
 	/// Materialize `selection` from a claim a preflight already pinned — no tip
-	/// resolution, and the backend comes from the claim rather than the
-	/// commit-oid-keyed memo, so a concurrent group that landed on the same
-	/// commit cannot route this operation to its own slot.
+	/// resolution. The backend comes from the claim itself, so a concurrent
+	/// group that landed on the same commit cannot route this operation to
+	/// its own slot.
 	pub fn fetch_pinned(
 		&self,
 		pinned: &PinnedSnapshot,
@@ -411,8 +370,8 @@ impl SkillRepository {
 		)
 	}
 
-	/// List the catalog of a claim on the backend the claim names — no memo,
-	/// no prior `resolve` on this instance. A REST decline stays a clean error.
+	/// List the catalog of a claim on the backend the claim names. A REST
+	/// decline stays a clean error.
 	pub fn list_pinned(
 		&self,
 		pinned: &PinnedSnapshot,
@@ -443,7 +402,25 @@ impl SkillRepository {
 			.map_err(map_git_error)
 	}
 
-	/// Shared fetch coordinate for [`Self::resolve`] / [`Self::resolve_tip`]:
+	/// The ref an import records for `claim`: the ref it was resolved from, else
+	/// the remote default branch's REAL name (one ref advertisement), else `None`
+	/// — the next check then follows the default branch. Never guesses
+	/// main/master: a repo whose default is `develop` but which also has `main`
+	/// would record `main`, report a false update, and update onto the wrong
+	/// branch. REST serves no ref advertisement (it declines, as for
+	/// `list_branches`), so this asks the gix slot.
+	pub fn import_ref(&self, claim: &PinnedSnapshot) -> Option<String> {
+		if let Some(branch) = claim.branch() {
+			return Some(branch.to_string());
+		}
+		let (git_sr, auth) = &claim.origin;
+		self.gix
+			.default_branch(git_sr, auth.as_ref())
+			.ok()
+			.flatten()
+	}
+
+	/// Shared fetch coordinate for [`Self::resolve_pinned`] / [`Self::resolve_tip`]:
 	/// clone URL, https-only credentials, and whether the REST slot may serve
 	/// this host. Deriving it once is what keeps the two entry points from
 	/// disagreeing about which backend owns a source.
@@ -475,16 +452,6 @@ impl SkillRepository {
 
 	/// Read tree + shared discovery policy + SKILL.md frontmatter blobs.
 	/// Carries the snapshot on the catalog for a later pinned `fetch`.
-	pub fn list(
-		&self,
-		snapshot: &RepoSnapshot,
-	) -> Result<SkillCatalog, SkillRepoError> {
-		let backend = self.memo_for(&snapshot.commit_oid)?;
-		// A decline here stays a clean error (`From<Attempt>`); only the fetch
-		// path re-serves it over gix.
-		Ok(self.list_with_backend(snapshot, backend)?)
-	}
-
 	fn list_with_backend(
 		&self,
 		snapshot: &RepoSnapshot,
@@ -561,28 +528,9 @@ impl SkillRepository {
 		})
 	}
 
-	/// Materialize ONLY the selection into a fresh TempDir; return
-	/// [`FetchedRepo`] pinned to `snapshot` (never re-resolves the ref).
-	pub fn fetch(
-		&self,
-		snapshot: &RepoSnapshot,
-		selection: FetchSelection<'_>,
-	) -> Result<FetchedRepo, SkillRepoError> {
-		let backend = self.memo_for(&snapshot.commit_oid)?;
-		let origin = self
-			.rest_origins
-			.lock()
-			.map_err(|_| {
-				SkillRepoError::Network("rest origin lock poisoned".to_string())
-			})?
-			.get(&snapshot.commit_oid)
-			.cloned();
-		self.fetch_or_regix(snapshot, backend, origin, selection)
-	}
-
 	/// Fetch on `backend`; when REST declines a snapshot it already resolved —
 	/// listing the catalog or downloading the selection — re-serve the SAME
-	/// commit over gix instead of failing. Public `list` keeps the clean error.
+	/// commit over gix instead of failing. `list_pinned` keeps the clean error.
 	///
 	/// gix cannot fetch a commit by OID, so the commit equality below is what
 	/// keeps the caller on the snapshot it decided about. See
@@ -681,36 +629,8 @@ impl SkillRepository {
 		})
 	}
 
-	fn remember(
-		&self,
-		commit_oid: &str,
-		kind: BackendKind,
-	) -> Result<(), SkillRepoError> {
-		let mut memo = self.memo.lock().map_err(|_| {
-			SkillRepoError::Network("backend memo lock poisoned".to_string())
-		})?;
-		memo.insert(commit_oid.to_string(), kind);
-		Ok(())
-	}
-
-	fn remember_rest_origin(
-		&self,
-		commit_oid: &str,
-		git_sr: &aghub_git::SourceRef,
-		auth: &Option<Credentials>,
-	) -> Result<(), SkillRepoError> {
-		let mut origins = self.rest_origins.lock().map_err(|_| {
-			SkillRepoError::Network("rest origin lock poisoned".to_string())
-		})?;
-		origins.insert(commit_oid.to_string(), (git_sr.clone(), auth.clone()));
-		Ok(())
-	}
-
-	/// Run `operation` on `backend`. Callers reach this either through a
-	/// [`PinnedSnapshot`] claim (which names its own backend) or through
-	/// [`Self::memo_for`] — the memo is keyed by commit oid alone, so prefer a
-	/// claim wherever one exists: two sources landing on one commit overwrite
-	/// each other's memo entry.
+	/// Run `operation` on `backend`. Callers pass the backend a
+	/// [`PinnedSnapshot`] claim names.
 	fn run_on<T>(
 		&self,
 		backend: BackendKind,
@@ -740,20 +660,6 @@ impl SkillRepository {
 				}
 			}
 		}
-	}
-
-	fn memo_for(
-		&self,
-		commit_oid: &str,
-	) -> Result<BackendKind, SkillRepoError> {
-		let memo = self.memo.lock().map_err(|_| {
-			SkillRepoError::Network("backend memo lock poisoned".to_string())
-		})?;
-		memo.get(commit_oid).copied().ok_or_else(|| {
-			SkillRepoError::Network(format!(
-				"no backend memoized for commit {commit_oid}"
-			))
-		})
 	}
 }
 
@@ -947,7 +853,7 @@ mod tests {
 			backend.clone() as Arc<dyn RepoFetchBackend>,
 		);
 		let snap = repo
-			.resolve(
+			.resolve_pinned(
 				&SourceRef {
 					source: "https://example.com/o/r.git".into(),
 					ref_: Some("main".into()),
@@ -955,7 +861,7 @@ mod tests {
 				None,
 			)
 			.unwrap();
-		let catalog = repo.list(&snap).unwrap();
+		let catalog = repo.list_pinned(&snap).unwrap();
 		assert_eq!(catalog.skills.len(), 1);
 		assert_eq!(catalog.skills[0].skill_path, "skills/demo");
 		assert_eq!(catalog.skills[0].name, "demo");
@@ -965,7 +871,7 @@ mod tests {
 		);
 		assert_eq!(catalog.skills[0].version.as_deref(), Some("1.0.0"));
 		assert_eq!(catalog.skills[0].author.as_deref(), Some("acme"));
-		assert_eq!(catalog.snapshot.commit_oid, snap.commit_oid);
+		assert_eq!(catalog.snapshot.commit_oid, snap.commit_oid());
 		assert!(
 			backend.read_tree_calls.load(Ordering::SeqCst) >= 1,
 			"list must read the tree"

@@ -119,6 +119,19 @@ pub trait RepoFetchBackend: Send + Sync {
 			"branch listing not served by this backend",
 		))
 	}
+
+	/// Name of the remote default branch (what `source.ref_ = None` resolves to),
+	/// or `Ok(None)` when the remote does not say. `source.ref_` is ignored.
+	/// Default: this slot declines (see `advertise_tip`).
+	fn default_branch(
+		&self,
+		_source: &SourceRef,
+		_auth: Option<&Credentials>,
+	) -> Result<Option<String>> {
+		Err(GitError::rest_fallback(
+			"default branch not served by this backend",
+		))
+	}
 }
 
 /// Shallow (depth-1) gix bare-fetch backend with a final system-git fallback
@@ -434,6 +447,19 @@ impl RepoFetchBackend for GixShallow {
 			}
 			Err(gix_error) => Err(gix_error),
 		}
+	}
+
+	fn default_branch(
+		&self,
+		source: &SourceRef,
+		auth: Option<&Credentials>,
+	) -> Result<Option<String>> {
+		let mut opts = crate::remote::RemoteOptions::new(&source.url);
+		if let Some(credentials) = auth {
+			opts = opts.with_auth(credentials.clone());
+		}
+		// ponytail: no system-git tail — a host only the OS credential helper can reach records no ref (next check follows the default branch); add the tail if such hosts need a recorded ref.
+		crate::remote::resolve_default_branch(opts)
 	}
 }
 

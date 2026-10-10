@@ -401,12 +401,18 @@ fn fetch_downloads_only_the_selected_skills_blobs_no_over_fetch() {
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
 
-	let snap = repo.resolve(&github_source(), None).unwrap();
-	assert_eq!(snap.commit_oid, COMMIT_OID, "lock records the COMMIT oid");
-	assert_ne!(snap.commit_oid, snap.tree_oid, "OIDs stay distinct");
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
+	assert_eq!(snap.commit_oid(), COMMIT_OID, "lock records the COMMIT oid");
+	assert_ne!(
+		snap.commit_oid(),
+		snap.snapshot().tree_oid,
+		"OIDs stay distinct"
+	);
 
 	let music = SkillPath::parse("skills/music").unwrap();
-	let fetched = repo.fetch(&snap, FetchSelection::Skills(&[music])).unwrap();
+	let fetched = repo
+		.fetch_pinned(&snap, FetchSelection::Skills(&[music]))
+		.unwrap();
 
 	// The selected skill (and only it) materialized.
 	assert!(fetched.root.join("skills/music/SKILL.md").exists());
@@ -497,16 +503,18 @@ fn fetch_uses_the_pinned_snapshot_not_a_moved_branch_tip() {
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
 
-	let snap = repo.resolve(&github_source(), None).unwrap();
-	assert_eq!(snap.commit_oid, COMMIT_A);
-	assert_eq!(snap.tree_oid, TREE_A);
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
+	assert_eq!(snap.commit_oid(), COMMIT_A);
+	assert_eq!(snap.snapshot().tree_oid, TREE_A);
 
 	// Branch advances between resolve and fetch.
 	advanced.store(true, Ordering::SeqCst);
 	recorded.lock().unwrap().clear();
 
 	let music = SkillPath::parse("skills/music").unwrap();
-	let fetched = repo.fetch(&snap, FetchSelection::Skills(&[music])).unwrap();
+	let fetched = repo
+		.fetch_pinned(&snap, FetchSelection::Skills(&[music]))
+		.unwrap();
 
 	// The PINNED commit is what was fetched + recorded — never the moved tip.
 	assert_eq!(
@@ -554,9 +562,11 @@ fn rest_fallback_routes_to_gix_once_inside_the_repository() {
 
 	// github host => REST is TRIED first; its RestFallback must route to gix,
 	// decided ONCE inside the repository (never re-decided per surface).
-	let snap = repo.resolve(&github_source(), None).unwrap();
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
 	let path = SkillPath::parse("skills/music").unwrap();
-	let fetched = repo.fetch(&snap, FetchSelection::Skills(&[path])).unwrap();
+	let fetched = repo
+		.fetch_pinned(&snap, FetchSelection::Skills(&[path]))
+		.unwrap();
 
 	assert_eq!(
 		rest.resolve_calls.load(Ordering::SeqCst),
@@ -590,8 +600,8 @@ fn post_resolve_rest_fallback_returns_clean_error_without_staging() {
 		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
 		Arc::new(NeverBackend),
 	);
-	let snapshot = repo.resolve(&github_source(), None).unwrap();
-	let error = repo.list(&snapshot).unwrap_err();
+	let snapshot = repo.resolve_pinned(&github_source(), None).unwrap();
+	let error = repo.list_pinned(&snapshot).unwrap_err();
 
 	assert!(matches!(error, SkillRepoError::Network(_)));
 	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 0);
@@ -663,16 +673,16 @@ fn fetch_refused_by_rest_budget_after_resolve_is_served_by_gix_at_the_same_commi
 		gix.clone() as Arc<dyn RepoFetchBackend>,
 	);
 
-	let snap = repo.resolve(&github_source(), None).unwrap();
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
 	let path = SkillPath::parse("skills/music").unwrap();
 	let fetched = repo
-		.fetch(&snap, FetchSelection::Skills(&[path]))
+		.fetch_pinned(&snap, FetchSelection::Skills(&[path]))
 		.expect("a budget refusal must not fail an update gix can serve");
 
 	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 1);
 	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 1);
 	assert_eq!(gix.materialize_calls.load(Ordering::SeqCst), 1);
-	assert_eq!(fetched.oid(), snap.commit_oid);
+	assert_eq!(fetched.oid(), snap.commit_oid());
 	assert_eq!(
 		fs::read(fetched.root.join("skills/music/SKILL.md")).unwrap(),
 		b"gix-served body\n"
@@ -692,10 +702,10 @@ fn fetch_refused_by_rest_budget_errors_when_gix_sees_a_moved_tip() {
 		gix.clone() as Arc<dyn RepoFetchBackend>,
 	);
 
-	let snap = repo.resolve(&github_source(), None).unwrap();
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
 	let path = SkillPath::parse("skills/music").unwrap();
 	let error = repo
-		.fetch(&snap, FetchSelection::Skills(&[path]))
+		.fetch_pinned(&snap, FetchSelection::Skills(&[path]))
 		.expect_err(
 			"a different tip is not the snapshot the caller decided on",
 		);
@@ -838,9 +848,9 @@ fn catalog_fetch_refused_by_rest_while_listing_is_served_by_gix() {
 
 	// Source sync / diff / rename take this route; apply-update takes the
 	// Skills route. Both must survive the same refusal.
-	let snap = repo.resolve(&github_source(), None).unwrap();
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
 	let fetched = repo
-		.fetch(&snap, FetchSelection::CatalogSnapshot)
+		.fetch_pinned(&snap, FetchSelection::CatalogSnapshot)
 		.expect("a listing REST declined must be re-served over gix");
 
 	assert!(fetched.root.join("skills/music/SKILL.md").exists());
@@ -852,14 +862,17 @@ fn catalog_fetch_refused_by_rest_while_listing_is_served_by_gix() {
 }
 
 #[test]
-fn public_list_refused_by_rest_stays_a_clean_error() {
+fn list_pinned_refused_by_rest_stays_a_clean_error() {
 	let repo = SkillRepository::with_backends(
 		Some(Arc::new(ListDeclinedRest)),
 		Arc::new(NeverBackend),
 	);
-	let snap = repo.resolve(&github_source(), None).unwrap();
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
 
-	assert!(matches!(repo.list(&snap), Err(SkillRepoError::Network(_))));
+	assert!(matches!(
+		repo.list_pinned(&snap),
+		Err(SkillRepoError::Network(_))
+	));
 }
 
 #[test]
@@ -1087,16 +1100,16 @@ esac
 		source: "https://127.0.0.1:1/acme/skills.git".to_string(),
 		ref_: Some("main".to_string()),
 	};
-	let snapshot = repo.resolve(&source, None).unwrap();
+	let snapshot = repo.resolve_pinned(&source, None).unwrap();
 	let path = SkillPath::parse("skills/private").unwrap();
 	let fetched = repo
-		.fetch(&snapshot, FetchSelection::Skills(&[path]))
+		.fetch_pinned(&snapshot, FetchSelection::Skills(&[path]))
 		.unwrap();
 
 	assert!(marker.exists(), "system-git fallback was not reached");
 	assert!(
 		fetched.root.join("skills/private/SKILL.md").exists(),
-		"system-git content must continue through SkillRepository::fetch"
+		"system-git content must continue through SkillRepository::fetch_pinned"
 	);
 }
 
@@ -1116,9 +1129,9 @@ fn production_repository_threads_deadline_to_first_rest_request() {
 	});
 	let repo = SkillRepository::with_http_transport(transport);
 
-	let snapshot = repo.resolve(&github_source(), None).unwrap();
+	let snapshot = repo.resolve_pinned(&github_source(), None).unwrap();
 
-	assert_eq!(snapshot.commit_oid, COMMIT_OID);
+	assert_eq!(snapshot.commit_oid(), COMMIT_OID);
 	assert!(saw_timeout.load(Ordering::SeqCst));
 }
 
@@ -1171,10 +1184,12 @@ fn root_skill_within_bounds_fetches_the_whole_root_folder() {
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
 
-	let snap = repo.resolve(&github_source(), None).unwrap();
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
 	let root = SkillPath::parse("").unwrap();
 	assert!(root.is_root());
-	let fetched = repo.fetch(&snap, FetchSelection::Skills(&[root])).unwrap();
+	let fetched = repo
+		.fetch_pinned(&snap, FetchSelection::Skills(&[root]))
+		.unwrap();
 
 	// The whole root folder is materialized, not just SKILL.md.
 	assert!(fetched.root.join("SKILL.md").exists());
@@ -1206,10 +1221,10 @@ fn oversized_root_tree_is_refused_and_downloads_no_blobs() {
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
 
-	let snap = repo.resolve(&github_source(), None).unwrap();
+	let snap = repo.resolve_pinned(&github_source(), None).unwrap();
 	let root = SkillPath::parse("").unwrap();
 	let err = repo
-		.fetch(&snap, FetchSelection::Skills(&[root]))
+		.fetch_pinned(&snap, FetchSelection::Skills(&[root]))
 		.unwrap_err();
 
 	assert!(
@@ -1454,11 +1469,11 @@ fn gix_root_skill_over_limit_is_refused_before_materialization() {
 		source: format!("git://{address}/large-root-origin"),
 		ref_: Some("main".to_string()),
 	};
-	let snapshot = repo.resolve(&source, None).unwrap();
+	let snapshot = repo.resolve_pinned(&source, None).unwrap();
 	let root = SkillPath::parse("").unwrap();
 
 	let error = repo
-		.fetch(&snapshot, FetchSelection::Skills(&[root]))
+		.fetch_pinned(&snapshot, FetchSelection::Skills(&[root]))
 		.unwrap_err();
 
 	assert_eq!(error.code(), "ROOT_SKILL_TOO_LARGE");
@@ -1504,9 +1519,9 @@ fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
 	let hello = SkillPath::parse("skills/hello").unwrap();
 
 	// v1: resolve pins the tip, fetch materializes the skill's content.
-	let v1 = repo.resolve(&source, None).unwrap();
+	let v1 = repo.resolve_pinned(&source, None).unwrap();
 	let fetched = repo
-		.fetch(&v1, FetchSelection::Skills(std::slice::from_ref(&hello)))
+		.fetch_pinned(&v1, FetchSelection::Skills(std::slice::from_ref(&hello)))
 		.unwrap();
 	let content =
 		fs::read_to_string(fetched.root.join("skills/hello/SKILL.md")).unwrap();
@@ -1521,13 +1536,14 @@ fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
 	.unwrap();
 	run_git(git, &origin, &["commit", "-q", "-a", "-m", "v2"]);
 
-	let v2 = repo.resolve(&source, None).unwrap();
+	let v2 = repo.resolve_pinned(&source, None).unwrap();
 	assert_ne!(
-		v2.commit_oid, v1.commit_oid,
+		v2.commit_oid(),
+		v1.commit_oid(),
 		"re-resolve must see the advanced upstream tip, not a cached one"
 	);
 	let fetched2 = repo
-		.fetch(&v2, FetchSelection::Skills(std::slice::from_ref(&hello)))
+		.fetch_pinned(&v2, FetchSelection::Skills(std::slice::from_ref(&hello)))
 		.unwrap();
 	let content2 =
 		fs::read_to_string(fetched2.root.join("skills/hello/SKILL.md"))
@@ -1571,9 +1587,9 @@ fn list_filters_over_depth_skill_metadata_before_blob_requests() {
 	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(transport));
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
-	let snapshot = repo.resolve(&github_source(), None).unwrap();
+	let snapshot = repo.resolve_pinned(&github_source(), None).unwrap();
 
-	let catalog = repo.list(&snapshot).unwrap();
+	let catalog = repo.list_pinned(&snapshot).unwrap();
 
 	assert_eq!(catalog.skills.len(), 1);
 	assert_eq!(catalog.skills[0].name, "ok");
@@ -1645,10 +1661,10 @@ fn catalog_snapshot_fetches_only_discovered_skills_and_changelog() {
 	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(transport));
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
-	let snapshot = repo.resolve(&github_source(), None).unwrap();
+	let snapshot = repo.resolve_pinned(&github_source(), None).unwrap();
 
 	let fetched = repo
-		.fetch(&snapshot, FetchSelection::CatalogSnapshot)
+		.fetch_pinned(&snapshot, FetchSelection::CatalogSnapshot)
 		.unwrap();
 
 	assert!(fetched.root.join("skills/a/SKILL.md").exists());
@@ -1727,9 +1743,9 @@ fn real_github_rest_catalog_and_install_are_pinned_and_hashed() {
 		ref_: Some(FIXTURE_COMMIT.to_string()),
 	};
 
-	let snapshot = repo.resolve(&source, Some(token.as_str())).unwrap();
-	assert_eq!(snapshot.commit_oid, FIXTURE_COMMIT);
-	let catalog = repo.list(&snapshot).unwrap();
+	let snapshot = repo.resolve_pinned(&source, Some(token.as_str())).unwrap();
+	assert_eq!(snapshot.commit_oid(), FIXTURE_COMMIT);
+	let catalog = repo.list_pinned(&snapshot).unwrap();
 	let skill = catalog
 		.skills
 		.iter()
@@ -1737,7 +1753,7 @@ fn real_github_rest_catalog_and_install_are_pinned_and_hashed() {
 		.expect("the pinned fixture must expose find-skills");
 	let selected = SkillPath::parse(&skill.skill_path).unwrap();
 	let fetched = repo
-		.fetch(
+		.fetch_pinned(
 			&snapshot,
 			FetchSelection::Skills(std::slice::from_ref(&selected)),
 		)
@@ -1960,7 +1976,7 @@ fn a_same_commit_identity_collision_falls_back_to_gix() {
 	);
 
 	// First source takes the REST slot for this commit.
-	repo.resolve(&github_source(), None).unwrap();
+	repo.resolve_pinned(&github_source(), None).unwrap();
 	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 0);
 
 	// A different repo on the SAME commit must not inherit that context.
@@ -1968,14 +1984,14 @@ fn a_same_commit_identity_collision_falls_back_to_gix() {
 		source: "https://github.com/forkco/skills.git".to_string(),
 		ref_: Some("main".to_string()),
 	};
-	let snapshot = repo.resolve(&fork, Some("ghp_FORK")).unwrap();
+	let snapshot = repo.resolve_pinned(&fork, Some("ghp_FORK")).unwrap();
 
 	assert_eq!(
 		gix.resolve_calls.load(Ordering::SeqCst),
 		1,
 		"the declined source must be served by gix, not refused outright"
 	);
-	assert_eq!(snapshot.commit_oid, COMMIT_OID);
+	assert_eq!(snapshot.commit_oid(), COMMIT_OID);
 }
 
 /// A commit responder whose tip MOVES on demand, so a test can interleave two

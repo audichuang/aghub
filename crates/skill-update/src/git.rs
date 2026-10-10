@@ -80,8 +80,7 @@ impl Fetcher for GitFetcher {
 	}
 
 	/// Skips resolution entirely: the claim already names the snapshot AND the
-	/// backend that produced it, so this cannot buy the tip a second time nor be
-	/// routed to another source's backend slot by the commit-oid-keyed memo.
+	/// backend that produced it, so this cannot buy the tip a second time.
 	fn fetch_pinned(
 		&self,
 		_source_ref: &SourceRef,

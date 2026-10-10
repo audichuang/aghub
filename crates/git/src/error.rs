@@ -42,7 +42,7 @@ pub enum GitError {
 	/// what to do based on WHEN it surfaces: a `RestFallback` at **resolve**
 	/// re-routes to the gix transport; a `RestFallback` **after** a successful
 	/// resolve (a `truncated` tree, a blob-admission refusal) is a clean error
-	/// from `SkillRepository::list`, while its `fetch` re-resolves over gix and
+	/// from `SkillRepository::list_pinned`, while its `fetch` re-resolves over gix and
 	/// materializes only if the tip is the SAME commit (gix 0.84 cannot fetch a
 	/// commit by OID). This is the ONLY error a REST backend raises for
 	/// transient / unsupported-capability / not-GitHub conditions (truncated

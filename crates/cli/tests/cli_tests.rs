@@ -4238,6 +4238,72 @@ fn a_source_spanning_two_forges_diffs_each_scope_against_its_own_origin() {
 	);
 }
 
+/// Two scopes that record the same repository share ONE fetch (the memo), and
+/// each scope still judges the complete catalog. A selective fetch leaking
+/// into the shared memo would starve one of the scopes of `alpha` or `beta`.
+#[cfg(unix)]
+#[test]
+fn source_diff_across_two_scopes_fetches_once_and_both_scopes_are_complete() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	write_source_skill(src.path(), "beta", "beta");
+
+	let global = state.path().join("skills");
+	std::fs::create_dir_all(&global).unwrap();
+	std::fs::write(
+		global.join(".skill-lock.json"),
+		r#"{"version":3,"skills":{
+		  "alpha":{"source":"owner/repo","sourceType":"github",
+		    "sourceUrl":"https://github.com/owner/repo.git",
+		    "skillPath":"alpha/SKILL.md","skillFolderHash":"stale",
+		    "installedAt":"t","updatedAt":"t"}}}"#,
+	)
+	.unwrap();
+	std::fs::write(
+		project.path().join("skills-lock.json"),
+		r#"{"version":1,"skills":{
+		  "beta":{"source":"owner/repo","sourceType":"github",
+		    "sourceUrl":"https://github.com/owner/repo.git",
+		    "skillPath":"beta/SKILL.md","computedHash":"stale"}}}"#,
+	)
+	.unwrap();
+	let fetch_log = state.path().join("fetch.log");
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_LOG", &fetch_log)
+		.args(["source", "diff", "owner/repo", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let views = json.as_array().expect("one view per scope");
+	assert_eq!(views.len(), 2, "json: {json}");
+	for view in views {
+		let mut names: Vec<&str> = view["skills"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|skill| skill["name"].as_str().unwrap())
+			.collect();
+		names.sort();
+		assert_eq!(names, ["alpha", "beta"], "json: {json}");
+	}
+	assert_eq!(
+		std::fs::read_to_string(&fetch_log).unwrap().lines().count(),
+		1,
+		"two scopes, one fetch"
+	);
+}
+
 #[test]
 fn source_diff_json_uses_wire_state_strings() {
 	let home = tempfile::TempDir::new().unwrap();

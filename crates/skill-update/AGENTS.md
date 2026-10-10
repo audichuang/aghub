@@ -57,7 +57,7 @@ last-writer-wins, and since several source spellings normalize to one coordinate
 groups are keyed by the RAW string, a slow observation of an older tip could
 overwrite a newer one — the fetch then materialized a tip nobody judged and the
 row read `UpToDate` for a source that had moved. A claim also carries its backend,
-so it bypasses the commit-oid-keyed `memo` that two sources can overwrite.
+there is no commit-oid-keyed memo to consult, so list/fetch need no prior `resolve` on the same instance.
 
 **Anything that answers without looking upstream must still verify the local
 copy** (`locally_intact`): the preflight skip, the pinned-SHA shortcut, and the
@@ -96,6 +96,7 @@ CLI and API call the same entries; these are the ONLY intended divergences.
   does — check does not write the lock. A busy mutation lock is reported in the
   response's `healError` (retryable `SKILL_MUTATION_LOCK_BUSY`), never a 500, and
   the results are still returned.
+- **import ref**: the desktop git import records the remote's real default-branch name (`SkillRepository::import_ref`); `aghub-cli source sync` records `--ref`, else the existing lock ref, else nothing — it must stay in the source's ref cohort. Neither guesses.
 
 ## TESTING
 

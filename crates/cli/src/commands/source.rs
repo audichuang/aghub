@@ -134,6 +134,15 @@ impl skill_update::Fetcher for CliFetcher {
 	) -> Result<skill_update::FetchedRepo, FetchError> {
 		#[cfg(debug_assertions)]
 		if let Some(root) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT") {
+			// e2e round-trip counter: one line per fetch the hook serves.
+			if let Some(log) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_LOG") {
+				use std::io::Write;
+				let _ = std::fs::OpenOptions::new()
+					.create(true)
+					.append(true)
+					.open(log)
+					.and_then(|mut file| writeln!(file, "fetch"));
+			}
 			let root = std::path::PathBuf::from(root);
 			return if root.is_dir() {
 				Ok(skill_update::FetchedRepo {
@@ -212,6 +221,7 @@ fn fetch_key(sr: &SourceRef) -> FetchKey {
 /// `source diff` calls [`sources::diff_source`] once per read scope; without
 /// this a two-scope diff pays two identical round trips. `FetchedRepo`'s
 /// temp-dir guard is an `Arc`, so a memo hit shares the same keep-alive.
+/// Only `FetchSelection::CatalogSnapshot` fetches are shared.
 struct MemoFetcher<'a> {
 	inner: &'a dyn skill_update::Fetcher,
 	seen: std::sync::Mutex<HashMap<FetchKey, skill_update::FetchedRepo>>,
@@ -245,6 +255,12 @@ impl skill_update::Fetcher for MemoFetcher<'_> {
 		token: Option<&str>,
 		selection: FetchSelection<'_>,
 	) -> Result<skill_update::FetchedRepo, FetchError> {
+		// Only a whole-catalog fetch is shareable: a `Skills` selection is a PARTIAL
+		// tree, and serving it to another caller would hand that caller an
+		// incomplete tree. Selective fetches pass through, never memoized.
+		if !matches!(selection, FetchSelection::CatalogSnapshot) {
+			return self.inner.fetch(sr, token, selection);
+		}
 		let key = fetch_key(sr);
 		let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
 		if let Some(hit) = seen.get(&key) {
@@ -968,10 +984,11 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// Record the RESOLVED ref (explicit `--ref` or the lock's), so a pinned
 	// source keeps its pin, as the API does.
 	//
-	// Known divergence: with neither, the CLI records `None` while the API
-	// records the default-branch name — `FetchedRepo` exposes only the tip
-	// OID, and a second ls-refs round trip is not worth it. Same tree either
-	// way.
+	// With neither, nothing is recorded and the next check follows the default
+	// branch. The CLI never guesses a name; the desktop import records the real
+	// one via `SkillRepository::import_ref`. Sync cannot: its ref must match the
+	// existing cohort, and a recorded name beside `None` entries is a mixed
+	// cohort that the next `source sync` refuses.
 	let lock_source = skill::InstallLockSource {
 		source: resolved.lock_source(),
 		source_type: resolved.source_type.as_str().to_string(),
@@ -1623,7 +1640,8 @@ fn narrow_by_name<T>(
 mod tests {
 	use super::{
 		apply_update_row, diff_with, narrow_by_name, plan_target_agents,
-		resync_row_error, select_env_token, FetchError, SyncActionView,
+		resync_row_error, select_env_token, FetchError, MemoFetcher,
+		SyncActionView,
 	};
 	use aghub_core::models::AgentType;
 	use aghub_core::WriteScope;
@@ -1632,6 +1650,30 @@ mod tests {
 
 	fn s(v: &str) -> Option<String> {
 		Some(v.to_string())
+	}
+
+	use skill_update::{FetchSelection, Fetcher, SourceRef};
+
+	/// Counts the round trips the inner fetcher actually performs.
+	struct CountingFetcher {
+		root: PathBuf,
+		calls: std::sync::atomic::AtomicUsize,
+	}
+	impl Fetcher for CountingFetcher {
+		fn fetch(
+			&self,
+			_sr: &SourceRef,
+			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
+		) -> Result<skill_update::FetchedRepo, FetchError> {
+			self.calls
+				.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			Ok(skill_update::FetchedRepo {
+				root: self.root.clone(),
+				snapshot: aghub_git::RepoSnapshot::default(),
+				_guard: None,
+			})
+		}
 	}
 
 	/// `source diff` calls the deep entry point ONCE PER SCOPE, and each call
@@ -1651,28 +1693,6 @@ mod tests {
 	/// fetched the one repository twice.
 	#[test]
 	fn two_scopes_over_one_ref_cost_one_fetch() {
-		use skill_update::{FetchSelection, Fetcher, SourceRef};
-
-		struct CountingFetcher {
-			root: PathBuf,
-			calls: std::sync::atomic::AtomicUsize,
-		}
-		impl Fetcher for CountingFetcher {
-			fn fetch(
-				&self,
-				_sr: &SourceRef,
-				_token: Option<&str>,
-				_selection: FetchSelection<'_>,
-			) -> Result<skill_update::FetchedRepo, FetchError> {
-				self.calls
-					.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				Ok(skill_update::FetchedRepo {
-					root: self.root.clone(),
-					snapshot: aghub_git::RepoSnapshot::default(),
-					_guard: None,
-				})
-			}
-		}
 		struct NoToken;
 		impl skill_update::TokenResolver for NoToken {
 			fn resolve(&self, _source: &str) -> skill_update::TokenResolution {
@@ -1724,6 +1744,42 @@ mod tests {
 			"one repository at one ref, one round trip — the second scope must \
 			 be served from the memo even though it resolved a different \
 			 SPELLING of the same repo"
+		);
+	}
+
+	/// Only a whole-catalog fetch is shared. A `Skills` selection is a partial
+	/// tree, so memoizing it would hand a later caller an incomplete catalog.
+	#[test]
+	fn memo_shares_only_a_whole_catalog_fetch() {
+		let upstream = tempfile::tempdir().unwrap();
+		let inner = CountingFetcher {
+			root: upstream.path().to_path_buf(),
+			calls: std::sync::atomic::AtomicUsize::new(0),
+		};
+		let memo = MemoFetcher::new(&inner);
+		let sr = SourceRef {
+			source: "owner/repo".into(),
+			ref_: None,
+		};
+		let a = [skill::SkillPath::parse("alpha").unwrap()];
+		let b = [skill::SkillPath::parse("beta").unwrap()];
+
+		memo.fetch(&sr, None, FetchSelection::Skills(&a)).unwrap();
+		memo.fetch(&sr, None, FetchSelection::Skills(&b)).unwrap();
+		assert_eq!(
+			inner.calls.load(std::sync::atomic::Ordering::Relaxed),
+			2,
+			"different selections must not share one partial tree"
+		);
+
+		memo.fetch(&sr, None, FetchSelection::CatalogSnapshot)
+			.unwrap();
+		memo.fetch(&sr, None, FetchSelection::CatalogSnapshot)
+			.unwrap();
+		assert_eq!(
+			inner.calls.load(std::sync::atomic::Ordering::Relaxed),
+			3,
+			"one repository, one catalog, one round trip"
 		);
 	}
 
