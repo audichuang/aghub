@@ -58,14 +58,15 @@ only for an agent nobody asked for. **For a requested agent, `linked` is the
 only pass.** Reading `withheld` as "fine" reports success for an agent that
 cannot see the skill.
 
-"Anywhere it privately reads" is load-bearing, because an agent reads more dirs
-than it writes. A Referrer in one of its own PRIVATE read-only dirs counts as
-`linked` — that is how an install made before an agent moved its write slot
-stays covered instead of auditing as a `withheld` the user cannot act on. The
-SHARED slot is deliberately excluded from that: sitting in `.agents/skills` with
-no Referrer of your own IS the withheld state. Getting out of a read-only compat
-dir is `repair`'s job, and it works because repair's grant roster asks READ
-paths while its candidate slots come from WRITE dirs.
+An agent reads more dirs than it writes, and the audit counts all of them. When
+the write slot is empty, `doctor` looks in the agent's other read dirs — the
+same compat dirs `repair`'s sweep visits, the shared `.agents/skills` included —
+and a Referrer found there is `linked`; the row's `path` names the dir it was
+found in, which may not be the write slot. That is how an install made before an
+agent moved its write slot stays covered instead of auditing as a `withheld` the
+user cannot act on. Getting out of a read-only compat dir is `repair`'s job, and
+it works because repair's grant roster asks READ paths while its candidate slots
+come from WRITE dirs.
 
 ## 1. Establish the matrix
 

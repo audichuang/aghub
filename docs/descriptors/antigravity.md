@@ -27,10 +27,11 @@ own dirs, never another agent's private one.
 Both are pinned by tests rather than left to be rediscovered. Both beat the
 alternative, which was not reading the dirs and stranding the skills outright.
 
-- **`doctor --verify-links` inspects the WRITE slot only**, so a skill an older
-  release installed into `.gemini/antigravity/skills` audits as `withheld` even
-  though Antigravity really does read it. `aghub repair [name] --yes` clears
-  it: `repair` plans WRITE dirs so it never sees the compat dir, but
+- **A skill an older release installed into `.gemini/antigravity/skills` stays
+  outside the write slot.** `doctor --verify-links` reports it `linked` (with an
+  empty write slot it falls back to the compat dirs and names the path where the
+  Referrer was found), but only `aghub repair [name] --yes` moves the grant into
+  the write slot: `repair` plans WRITE dirs so it never sees the compat dir, but
   `readers_of` asks the READ paths, so the stranded skill puts antigravity in
   `grant_to` and its empty write slot is planned `Create`. `aghub add` is NOT
   the way — the skill already loads, so both its branches refuse

@@ -1424,7 +1424,7 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn report_compat_dir_shared_with_other_agents_agrees_with_repair() {
+	fn report_shared_slot_referrer_is_linked() {
 		use crate::skills::prune::test_lock::GlobalLockGuard;
 		use std::os::unix::fs::symlink;
 
