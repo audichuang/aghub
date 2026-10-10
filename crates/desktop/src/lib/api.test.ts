@@ -266,3 +266,28 @@ test("getApiErrorCode extracts wire code from HTTPError data", () => {
 	assert.equal(getApiErrorCode(errNoData), undefined);
 	assert.equal(getApiErrorCode(new Error("oops")), undefined);
 });
+
+test("skills.checkUpdates accepts both the object body and a legacy array body", async () => {
+	const original = globalThis.fetch;
+	const row = { name: "s" } as never;
+	try {
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify([row]), {
+				status: 200,
+			})) as typeof fetch;
+		assert.deepEqual(
+			await createApi("http://api.test/").skills.checkUpdates(),
+			[row],
+		);
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify({ results: [row] }), {
+				status: 200,
+			})) as typeof fetch;
+		assert.deepEqual(
+			await createApi("http://api.test/").skills.checkUpdates(),
+			[row],
+		);
+	} finally {
+		globalThis.fetch = original;
+	}
+});

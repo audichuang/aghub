@@ -499,22 +499,30 @@ export function createApi(baseUrl: string) {
 				forwardedTokens?: GitForwardHeaders,
 			): Promise<SkillUpdateResponse[]> {
 				// Network-heavy (clones each source); give it a long timeout.
-				return client
-					.get("skills/check-updates", {
-						searchParams: {
-							scope,
-							...(offline ? { offline: "true" } : {}),
-							...(projectRoot
-								? { project_root: projectRoot }
+				return (
+					client
+						.get("skills/check-updates", {
+							searchParams: {
+								scope,
+								...(offline ? { offline: "true" } : {}),
+								...(projectRoot
+									? { project_root: projectRoot }
+									: {}),
+							},
+							timeout: 120000,
+							...(forwardedTokens
+								? { headers: forwardedTokens }
 								: {}),
-						},
-						timeout: 120000,
-						...(forwardedTokens
-							? { headers: forwardedTokens }
-							: {}),
-					})
-					.json<CheckSkillUpdatesResponse>()
-					.then((body) => body.results);
+						})
+						// A same-minor older aghub-api (remote VM) still answers a bare
+						// array; the version gate only compares major.minor.
+						.json<
+							CheckSkillUpdatesResponse | SkillUpdateResponse[]
+						>()
+						.then((body) =>
+							Array.isArray(body) ? body : body.results,
+						)
+				);
 			},
 			applyUpdate(
 				body: ApplySkillUpdateRequest,
