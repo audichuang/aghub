@@ -1188,10 +1188,6 @@ pub(crate) async fn install_skill_with_repo(
 		InstallMaterialization,
 	) = match aghub_git::resolve_remote_source(&req.source) {
 		Ok(resolved) => {
-			let source_ref = skill_update::SourceRef {
-				source: req.source.clone(),
-				ref_: None,
-			};
 			let install_all = req.install_all.unwrap_or(false);
 			let requested = req.skills.clone();
 			let repo_for_task = repo.clone();
@@ -1202,15 +1198,22 @@ pub(crate) async fn install_skill_with_repo(
 			let (selected, fetched, ref_name) = match timeout(
 				Duration::from_secs(300),
 				tokio::task::spawn_blocking(move || {
+					// Fetch the ref the lock will record: an existing cohort's ref (a recorded
+					// `None` = the default branch), else the default branch (`sources::import_ref`).
+					let recorded = skill_update::sources::recorded_refs(
+						&scope_for_task,
+						&source_for_task,
+					);
+					let source_ref = skill_update::SourceRef {
+						source: source_for_task.clone(),
+						ref_: recorded.first().cloned().flatten(),
+					};
 					let claim = repo_for_task
 						.resolve_pinned(&source_ref, token_for_task.as_deref())
 						.map_err(InstallFetchError::Repo)?;
 					let ref_name = skill_update::sources::import_ref(
 						None,
-						&skill_update::sources::recorded_refs(
-							&scope_for_task,
-							&source_for_task,
-						),
+						&recorded,
 						|| repo_for_task.import_ref(&claim),
 					);
 					let catalog = repo_for_task
@@ -1970,6 +1973,20 @@ pub async fn git_install_skills(
 		// The scan already paid for the default branch's name.
 		|| Some(session.current_branch().to_string()).filter(|b| !b.is_empty()),
 	);
+	// The session holds the scanned branch's commit; recording another ref (the
+	// scope's cohort) would pin these bytes to a branch they did not come from.
+	if let Some(cohort) = ref_name
+		.as_deref()
+		.filter(|r| *r != session.current_branch())
+	{
+		return Err(ApiError::new(
+			Status::BadRequest,
+			format!(
+				"This source is already installed in this scope from '{cohort}'; nothing was written. Re-scan with branch '{cohort}' to install from it"
+			),
+			skill_update::mutation::SKILL_SOURCE_MISMATCH_CODE,
+		));
+	}
 	let source = install_lock_source_from_resolved(&resolved, ref_name);
 
 	// Reject absolute / `..` paths BEFORE any fetch or install write.
@@ -6901,6 +6918,255 @@ mod tests {
 			// that would be a mixed cohort the next `source sync` refuses.
 			let recorded = skill::read_local_lock(Some(&project));
 			assert_eq!(recorded.skills["my-skill"].ref_name, None);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn git_install_refuses_a_cohort_ref_the_scan_did_not_fetch() {
+		with_isolated_env(|home, _state| {
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let app_sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("sessions state");
+			let fixture = tempdir().unwrap();
+			let dst = fixture.path().join("my-skill");
+			std::fs::create_dir_all(&dst).unwrap();
+			std::fs::write(
+				dst.join("SKILL.md"),
+				"---\nname: my-skill\ndescription: d\n---\n",
+			)
+			.unwrap();
+
+			// The project already records `other` pinned to `main`: the cohort is `main`.
+			let project = home.join("proj");
+			std::fs::create_dir_all(&project).unwrap();
+			let mut lock = skill::LocalSkillLockFile::new();
+			lock.skills.insert(
+				"other".to_string(),
+				skill::LocalSkillLockEntry {
+					source: "o/r".to_string(),
+					source_url: Some("https://github.com/o/r".to_string()),
+					source_type: "github".to_string(),
+					ref_name: Some("main".to_string()),
+					skill_path: Some("other/SKILL.md".to_string()),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+				},
+			);
+			skill::write_local_lock(&lock, Some(&project)).unwrap();
+
+			// The scan found `develop` as the default branch; nothing was asked for.
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(SessionLocalBackend::new(
+						fixture.path(),
+					)),
+				),
+			);
+			let claim = repo
+				.resolve_pinned(
+					&skill_update::SourceRef {
+						source: "https://github.com/o/r".to_string(),
+						ref_: None,
+					},
+					None,
+				)
+				.expect("resolve fixture session");
+			app_sessions.insert(
+				"sess-cohort".to_string(),
+				PinnedSourceSession::new(
+					repo,
+					claim,
+					"https://github.com/o/r".to_string(),
+					None,
+					vec!["develop".to_string()],
+					"develop".to_string(),
+				),
+			);
+			let response = client
+				.post("/api/v1/skills/git/install")
+				.json(&serde_json::json!({
+					"session_id": "sess-cohort",
+					"skill_paths": ["my-skill"],
+					"agents": ["claude"],
+					"scope": "project",
+					"project_root": project.to_str().unwrap()
+				}))
+				.dispatch();
+			assert_eq!(
+				response.status(),
+				rocket::http::Status::BadRequest,
+				"a cohort ref the scan did not fetch is refused"
+			);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+			assert_eq!(body["code"], "SKILL_SOURCE_MISMATCH");
+			// Nothing was written: no lock entry, no Master copy.
+			let recorded = skill::read_local_lock(Some(&project));
+			assert!(!recorded.skills.contains_key("my-skill"));
+			assert!(
+				!project.join(".aghub/my-skill").exists(),
+				"nothing may be materialized"
+			);
+			// The cohort's own entry is untouched.
+			assert_eq!(
+				recorded.skills["other"].ref_name.as_deref(),
+				Some("main")
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	const COHORT_DEVELOP: &str = "dddddddddddddddddddddddddddddddddddddddd";
+	#[cfg(unix)]
+	const COHORT_MAIN: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+	/// Two branches: `develop` (the default) and `main`, each with its own `alpha`.
+	#[cfg(unix)]
+	struct TwoBranchCatalog;
+
+	#[cfg(unix)]
+	fn cohort_skill_md(commit: &str) -> String {
+		let body = if commit == COHORT_MAIN {
+			"main body"
+		} else {
+			"develop body"
+		};
+		format!("---\nname: alpha\ndescription: d\n---\n{body}\n")
+	}
+
+	#[cfg(unix)]
+	impl aghub_git::RepoFetchBackend for TwoBranchCatalog {
+		fn resolve(
+			&self,
+			src: &aghub_git::SourceRef,
+			_a: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+			let oid = if src.ref_.as_deref() == Some("main") {
+				COHORT_MAIN
+			} else {
+				COHORT_DEVELOP
+			};
+			Ok(aghub_git::RepoSnapshot {
+				commit_oid: oid.into(),
+				tree_oid: oid.into(),
+				commit_time: None,
+			})
+		}
+		fn read_tree(
+			&self,
+			s: &aghub_git::RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			Ok(aghub_git::RepoTree {
+				entries: vec![aghub_git::TreeEntry {
+					path: "alpha/SKILL.md".into(),
+					mode: aghub_git::StagedEntryMode::Regular,
+					oid: s.commit_oid.clone(),
+					size: Some(cohort_skill_md(&s.commit_oid).len() as u64),
+				}],
+			})
+		}
+		fn read_blobs(
+			&self,
+			s: &aghub_git::RepoSnapshot,
+			_o: &[String],
+		) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+			Ok(vec![aghub_git::Blob {
+				oid: s.commit_oid.clone(),
+				bytes: cohort_skill_md(&s.commit_oid).into_bytes(),
+			}])
+		}
+		fn materialize(
+			&self,
+			s: &aghub_git::RepoSnapshot,
+			paths: &[&str],
+			dest: &std::path::Path,
+		) -> aghub_git::Result<()> {
+			for p in paths {
+				std::fs::create_dir_all(dest.join(p)).unwrap();
+				std::fs::write(
+					dest.join(p).join("SKILL.md"),
+					cohort_skill_md(&s.commit_oid),
+				)
+				.unwrap();
+			}
+			Ok(())
+		}
+		fn default_branch(
+			&self,
+			_s: &aghub_git::SourceRef,
+			_a: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<Option<String>> {
+			Ok(Some("develop".into()))
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn install_skill_fetches_the_scopes_cohort_ref_not_the_default_branch() {
+		with_isolated_env(|home, _state| {
+			// The project records `alpha`'s cohort as `main` (a different ref than
+			// the default branch `develop`).
+			let project = home.join("proj");
+			std::fs::create_dir_all(&project).unwrap();
+			let mut lock = skill::LocalSkillLockFile::new();
+			lock.skills.insert(
+				"other".to_string(),
+				skill::LocalSkillLockEntry {
+					source: "o/r".to_string(),
+					source_url: Some("https://github.com/o/r".to_string()),
+					source_type: "github".to_string(),
+					ref_name: Some("main".to_string()),
+					skill_path: Some("other/SKILL.md".to_string()),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+				},
+			);
+			skill::write_local_lock(&lock, Some(&project)).unwrap();
+
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(TwoBranchCatalog),
+				),
+			);
+			let req = crate::dto::skill::InstallSkillRequest {
+				source: "https://github.com/o/r".to_string(),
+				agents: vec!["claude".to_string()],
+				skills: vec!["alpha".to_string()],
+				scope: "project".to_string(),
+				project_path: Some(project.display().to_string()),
+				install_all: Some(false),
+			};
+			let resp =
+				block_on(super::install_skill_with_repo(req, repo, None))
+					.ok()
+					.expect("install ok")
+					.into_inner();
+			assert!(resp.success, "{:?}", resp.agents);
+
+			// The fetched bytes, the recorded ref and its commit must all be the
+			// cohort's `main`, not the default branch `develop`.
+			let lock = skill::read_local_lock(Some(&project));
+			assert_eq!(lock.skills["alpha"].ref_name.as_deref(), Some("main"));
+			assert_eq!(
+				lock.skills["alpha"].ref_commit.as_deref(),
+				Some(COHORT_MAIN)
+			);
+			assert!(std::fs::read_to_string(
+				project.join(".aghub/alpha/SKILL.md")
+			)
+			.unwrap()
+			.contains("main body"));
 		});
 	}
 
