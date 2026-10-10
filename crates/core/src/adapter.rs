@@ -255,8 +255,7 @@ impl AgentAdapter for &'static AgentDescriptor {
 	}
 
 	fn supports_mcp_operations(&self) -> bool {
-		self.capabilities.mcp.scopes.global
-			|| self.capabilities.mcp.scopes.project
+		AgentDescriptor::supports_mcp_scope(self, ResourceScope::Both)
 	}
 
 	fn mcp_supports_transport(&self, transport: &McpTransport) -> bool {

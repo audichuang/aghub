@@ -3,6 +3,7 @@
 //! Ported from xdg-config-paths.test.ts and openclaw-paths.test.ts.
 
 use aghub_agents::agents::{amp, cursor, kimi, openclaw, opencode, pi};
+use aghub_core::models::ResourceScope;
 use std::path::{Path, PathBuf};
 
 // Serializes every test in this binary that reads OR mutates global env
@@ -240,7 +241,7 @@ fn test_openclaw_skills_enabled() {
 		.find(|d| d.id == "openclaw")
 		.unwrap();
 	assert!(
-		descriptor.capabilities.skills.scopes.global,
+		descriptor.supports_skill_scope(ResourceScope::GlobalOnly),
 		"OpenClaw should have skills capability enabled"
 	);
 }

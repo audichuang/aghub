@@ -26,30 +26,14 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,
 	capabilities: Capabilities {
-		skills: SkillCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
-			universal: false,
-		},
+		skills: SkillCapabilities { universal: false },
 		mcp: McpCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
 			stdio: true,
 			remote: true,
 			// Factory stores project-toggle overrides at user scope. Aghub's
 			// current scope writer cannot express that without mutating the
 			// project file, so do not advertise an unsafe toggle operation.
 			enable_disable: false,
-		},
-		sub_agents: SubAgentCapabilities {
-			scopes: ScopeSupport {
-				global: false,
-				project: false,
-			},
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {

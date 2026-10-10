@@ -10,21 +10,6 @@ use aghub_agents::{
 };
 use std::path::PathBuf;
 
-#[test]
-fn sub_agent_project_backing_path_matches_capability() {
-	let root = std::path::Path::new("/virtual-project");
-	for descriptor in agents::ALL_DESCRIPTORS {
-		assert_eq!(
-			descriptor
-				.sub_agent_dir(Some(root), ResourceScope::ProjectOnly)
-				.is_some(),
-			descriptor.supports_sub_agent_scope(ResourceScope::ProjectOnly),
-			"{} sub-agent backing path/capability mismatch",
-			descriptor.id,
-		);
-	}
-}
-
 /// Helper to get home directory for path assertions
 fn home() -> PathBuf {
 	dirs::home_dir().expect("home dir should exist")
@@ -972,7 +957,8 @@ fn test_mcp_capabilities_scopes_global() {
 			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
-				desc.capabilities.mcp.scopes.global, *val,
+				desc.supports_mcp_scope(ResourceScope::GlobalOnly),
+				*val,
 				"mcp.scopes.global mismatch for {:?}",
 				agent_type
 			);
@@ -1020,7 +1006,8 @@ fn test_mcp_capabilities_scopes_project() {
 			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
-				desc.capabilities.mcp.scopes.project, *val,
+				desc.supports_mcp_scope(ResourceScope::ProjectOnly),
+				*val,
 				"mcp.scopes.project mismatch for {:?}",
 				agent_type
 			);
@@ -1123,7 +1110,8 @@ fn test_skills_capabilities_scopes_global() {
 			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
-				desc.capabilities.skills.scopes.global, *val,
+				desc.supports_skill_scope(ResourceScope::GlobalOnly),
+				*val,
 				"skills.scopes.global mismatch for {:?}",
 				agent_type
 			);
@@ -1171,7 +1159,8 @@ fn test_skills_capabilities_scopes_project() {
 			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
-				desc.capabilities.skills.scopes.project, *val,
+				desc.supports_skill_scope(ResourceScope::ProjectOnly),
+				*val,
 				"skills.scopes.project mismatch for {:?}",
 				agent_type
 			);
@@ -1271,7 +1260,8 @@ fn test_sub_agent_capabilities_scopes_global() {
 			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
-				desc.capabilities.sub_agents.scopes.global, *val,
+				desc.supports_sub_agent_scope(ResourceScope::GlobalOnly),
+				*val,
 				"sub_agents.scopes.global mismatch for {:?}",
 				agent_type
 			);
@@ -1319,7 +1309,8 @@ fn test_sub_agent_capabilities_scopes_project() {
 			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
-				desc.capabilities.sub_agents.scopes.project, *val,
+				desc.supports_sub_agent_scope(ResourceScope::ProjectOnly),
+				*val,
 				"sub_agents.scopes.project mismatch for {:?}",
 				agent_type
 			);
@@ -1609,4 +1600,73 @@ fn skill_write_slot_is_first_read_dir() {
 		}
 	}
 	assert!(checked > 0, "no agent/scope was checked");
+}
+
+/// Scope support is derived from which bindings a descriptor declares (MCP
+/// paths, skill write slots, sub-agent dirs). Pin that every declared binding
+/// also RESOLVES, so "supports" never promises a path that comes back None,
+/// and nothing is bound that the agent does not claim. No exceptions: an agent
+/// that must split the two gets a named, asserted row here.
+#[test]
+fn scope_support_matches_bindings() {
+	let mut env = default_env();
+	let home = tempfile::tempdir().unwrap();
+	env.saved.push(("HOME", std::env::var_os("HOME")));
+	std::env::set_var("HOME", home.path());
+	let project = tempfile::tempdir().unwrap();
+	let root = project.path();
+	let (global, proj) =
+		(ResourceScope::GlobalOnly, ResourceScope::ProjectOnly);
+
+	let mut checked = 0;
+	for (agent_type, desc) in all_descriptors() {
+		let rows = [
+			(
+				"skills",
+				global,
+				desc.supports_skill_scope(global),
+				desc.global_skill_paths.and_then(|p| (p.write)()).is_some(),
+			),
+			(
+				"skills",
+				proj,
+				desc.supports_skill_scope(proj),
+				desc.project_skill_paths
+					.and_then(|p| (p.write)(root))
+					.is_some(),
+			),
+			(
+				"mcp",
+				global,
+				desc.supports_mcp_scope(global),
+				desc.mcp_global_path.and_then(|f| f()).is_some(),
+			),
+			(
+				"mcp",
+				proj,
+				desc.supports_mcp_scope(proj),
+				desc.mcp_project_path.and_then(|f| f(root)).is_some(),
+			),
+			(
+				"sub_agents",
+				global,
+				desc.supports_sub_agent_scope(global),
+				desc.sub_agent_global_dir.and_then(|f| f()).is_some(),
+			),
+			(
+				"sub_agents",
+				proj,
+				desc.supports_sub_agent_scope(proj),
+				desc.sub_agent_project_dir.and_then(|f| f(root)).is_some(),
+			),
+		];
+		for (resource, scope, declared, bound) in rows {
+			assert_eq!(
+				declared, bound,
+				"{agent_type:?} {resource} {scope:?}: declared {declared}, binding resolves {bound}"
+			);
+			checked += 1;
+		}
+	}
+	assert_eq!(checked, AgentType::ALL.len() * 6);
 }

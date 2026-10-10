@@ -62,27 +62,11 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	mcp_project_path: None,
 	global_data_dir,
 	capabilities: Capabilities {
-		skills: SkillCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
-			universal: true,
-		},
+		skills: SkillCapabilities { universal: true },
 		mcp: McpCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: false,
-			},
 			stdio: true,
 			remote: true,
 			enable_disable: false,
-		},
-		sub_agents: SubAgentCapabilities {
-			scopes: ScopeSupport {
-				global: false,
-				project: false,
-			},
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
@@ -106,6 +90,7 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::models::ResourceScope;
 	use crate::{AgentConfig, McpServer, McpTransport};
 	use std::path::{Path, PathBuf};
 
@@ -144,7 +129,7 @@ mod tests {
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 		let descriptor = &DESCRIPTOR;
 
-		assert!(!descriptor.capabilities.mcp.scopes.project);
+		assert!(!descriptor.supports_mcp_scope(ResourceScope::ProjectOnly));
 		assert!(!descriptor.capabilities.mcp.enable_disable);
 		assert!(descriptor.mcp_project_path.is_none());
 		assert_eq!(value["mcpServers"]["remote"]["transport"], "http");

@@ -58,34 +58,11 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,
 	capabilities: Capabilities {
-		skills: SkillCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
-			universal: false,
-		},
+		skills: SkillCapabilities { universal: false },
 		mcp: McpCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
 			stdio: true,
 			remote: true,
 			enable_disable: true,
-		},
-		// omp DOES have sub-agents (`~/.omp/agent/agents/<name>.md`), but its
-		// frontmatter carries `tools` / `model` / `spawns` / `thinkingLevel` /
-		// `output` / `blocking`. aghub now preserves unowned frontmatter keys on
-		// save, so the data-loss objection is closed — what is still missing is
-		// any attested source for the PROJECT-scope dir. Ship read/write off
-		// until that is verified rather than guessing a path aghub would write
-		// into and omp would never read.
-		sub_agents: SubAgentCapabilities {
-			scopes: ScopeSupport {
-				global: false,
-				project: false,
-			},
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
@@ -98,6 +75,13 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,
+	// omp DOES have sub-agents (`~/.omp/agent/agents/<name>.md`), but its
+	// frontmatter carries `tools` / `model` / `spawns` / `thinkingLevel` /
+	// `output` / `blocking`. aghub now preserves unowned frontmatter keys on
+	// save, so the data-loss objection is closed — what is still missing is
+	// any attested source for the PROJECT-scope dir. Ship read/write off
+	// until that is verified rather than guessing a path aghub would write
+	// into and omp would never read.
 	sub_agent_global_dir: None,
 	sub_agent_project_dir: None,
 	cli_name: "omp",

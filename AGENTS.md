@@ -249,7 +249,9 @@ BUILD. A missing step-7 asset fails no build, lint or typecheck — only
 
 1. `crates/agents/src/agents/<name>.rs` — descriptor — declares the MCP binding
    (two paths + parse/serialize; all `None` when the agent has no MCP) and
-   writes no MCP load/save fns (naming gotchas: `crates/agents/AGENTS.md`)
+   writes no MCP load/save fns. Scope support is NOT declared: it is derived from
+   which bindings are `Some` (MCP paths, skill write slots, sub-agent dirs), pinned by
+   `descriptor_regression::scope_support_matches_bindings` (naming gotchas: `crates/agents/AGENTS.md`)
 2. `crates/agents/src/agents/mod.rs` — `pub mod`, **and ONE `agent_roster!`
    row**: `Variant => "id", module, ["alias", …];`. That macro emits the
    `AgentType` enum, `ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and

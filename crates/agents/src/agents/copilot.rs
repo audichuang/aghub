@@ -139,27 +139,11 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,
 	capabilities: Capabilities {
-		skills: SkillCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
-			universal: false,
-		},
+		skills: SkillCapabilities { universal: false },
 		mcp: McpCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
 			stdio: true,
 			remote: true,
 			enable_disable: false,
-		},
-		sub_agents: SubAgentCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {

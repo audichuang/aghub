@@ -70,27 +70,13 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	global_data_dir,
 	capabilities: Capabilities {
 		skills: SkillCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
 			// `$DSH_AGENTS_HOME` (default `~/.agents`) is NOT the XDG group.
 			universal: false,
 		},
 		mcp: McpCapabilities {
-			scopes: ScopeSupport {
-				global: false,
-				project: false,
-			},
 			stdio: false,
 			remote: false,
 			enable_disable: false,
-		},
-		sub_agents: SubAgentCapabilities {
-			scopes: ScopeSupport {
-				global: false,
-				project: false,
-			},
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {

@@ -56,29 +56,11 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	mcp_project_path: Some(mcp_project_path),
 	global_data_dir,
 	capabilities: Capabilities {
-		skills: SkillCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
-			universal: false,
-		},
+		skills: SkillCapabilities { universal: false },
 		mcp: McpCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
 			stdio: true,
 			remote: true,
 			enable_disable: true,
-		},
-		// No sub-agent story is documented. Off rather than guessing a path
-		// aghub would write into and ZCode would never read.
-		sub_agents: SubAgentCapabilities {
-			scopes: ScopeSupport {
-				global: false,
-				project: false,
-			},
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
@@ -91,6 +73,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,
+	// No sub-agent story is documented. Off rather than guessing a path
+	// aghub would write into and ZCode would never read.
 	sub_agent_global_dir: None,
 	sub_agent_project_dir: None,
 	cli_name: "zcode",

@@ -1,4 +1,4 @@
-use aghub_core::models::AgentType;
+use aghub_core::models::{AgentType, ResourceScope};
 use aghub_core::registry;
 
 #[test]
@@ -11,7 +11,7 @@ fn registry_resolves_hermes_not_fallback() {
 	// global-only: has a global MCP path, no project path
 	assert!(d.mcp_global_path.is_some());
 	assert!(d.mcp_project_path.is_none());
-	assert!(d.capabilities.skills.scopes.global);
-	assert!(!d.capabilities.skills.scopes.project);
+	assert!(d.supports_skill_scope(ResourceScope::GlobalOnly));
+	assert!(!d.supports_skill_scope(ResourceScope::ProjectOnly));
 	assert!(d.capabilities.mcp.enable_disable);
 }

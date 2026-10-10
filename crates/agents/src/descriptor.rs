@@ -26,35 +26,21 @@ pub type OptionalPathFn = fn() -> Option<PathBuf>;
 pub type OptionalProjectPathFn = fn(&Path) -> Option<PathBuf>;
 
 #[derive(Debug, Clone, Copy)]
-pub struct ScopeSupport {
-	pub global: bool,
-	pub project: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct SkillCapabilities {
-	pub scopes: ScopeSupport,
 	pub universal: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct McpCapabilities {
-	pub scopes: ScopeSupport,
 	pub stdio: bool,
 	pub remote: bool,
 	pub enable_disable: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct SubAgentCapabilities {
-	pub scopes: ScopeSupport,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct Capabilities {
 	pub skills: SkillCapabilities,
 	pub mcp: McpCapabilities,
-	pub sub_agents: SubAgentCapabilities,
 }
 
 /// A scope's skill dirs: the ONE slot aghub writes, plus the dirs the agent
@@ -88,14 +74,22 @@ pub struct AgentDescriptor {
 	pub mcp_serialize_config: Option<McpSerializeFn>,
 	/// Global MCP config path. The core adapter reads it with `mcp_parse_config`
 	/// and writes it with `mcp_serialize_config`; nothing else derives MCP I/O.
+	/// `Some` IS the global MCP scope support (`supports_mcp_scope`); pinned by
+	/// `descriptor_regression::scope_support_matches_bindings`.
 	pub mcp_global_path: Option<OptionalPathFn>,
 	/// Project MCP config path. The core adapter reads it with `mcp_parse_config`
 	/// and writes it with `mcp_serialize_config`; nothing else derives MCP I/O.
+	/// `Some` IS the project MCP scope support (`supports_mcp_scope`); pinned by
+	/// `descriptor_regression::scope_support_matches_bindings`.
 	pub mcp_project_path: Option<OptionalProjectPathFn>,
 	/// Agent-specific global data directory used for availability checks.
 	pub global_data_dir: fn() -> Option<PathBuf>,
 	pub capabilities: Capabilities,
+	/// `Some` IS the global skill scope support (`supports_skill_scope`); pinned by
+	/// `descriptor_regression::scope_support_matches_bindings`.
 	pub global_skill_paths: Option<GlobalSkillPaths>,
+	/// `Some` IS the project skill scope support (`supports_skill_scope`); pinned by
+	/// `descriptor_regression::scope_support_matches_bindings`.
 	pub project_skill_paths: Option<ProjectSkillPaths>,
 	/// Load sub-agents for the requested scope.
 	/// Implementation is fully internal — no path information is exposed.
@@ -105,7 +99,11 @@ pub struct AgentDescriptor {
 	pub save_sub_agents: SaveSubAgentsFn,
 	/// Backing directory used by both sub-agent load and save. Exposed so
 	/// mutations can lock the physical directory, including symlink aliases.
+	/// `Some` IS the global sub-agent scope support (`supports_sub_agent_scope`); pinned by
+	/// `descriptor_regression::scope_support_matches_bindings`.
 	pub sub_agent_global_dir: Option<OptionalPathFn>,
+	/// `Some` IS the project sub-agent scope support (`supports_sub_agent_scope`); pinned by
+	/// `descriptor_regression::scope_support_matches_bindings`.
 	pub sub_agent_project_dir: Option<OptionalProjectPathFn>,
 	pub cli_name: &'static str,
 	pub validate_args: &'static [&'static str],
@@ -133,41 +131,35 @@ impl AgentDescriptor {
 		}
 	}
 
-	pub fn supports_skill_scope(&self, scope: ResourceScope) -> bool {
+	pub const fn supports_skill_scope(&self, scope: ResourceScope) -> bool {
 		match scope {
-			ResourceScope::GlobalOnly => self.capabilities.skills.scopes.global,
-			ResourceScope::ProjectOnly => {
-				self.capabilities.skills.scopes.project
-			}
+			ResourceScope::GlobalOnly => self.global_skill_paths.is_some(),
+			ResourceScope::ProjectOnly => self.project_skill_paths.is_some(),
 			ResourceScope::Both => {
-				self.capabilities.skills.scopes.global
-					|| self.capabilities.skills.scopes.project
+				self.global_skill_paths.is_some()
+					|| self.project_skill_paths.is_some()
 			}
 		}
 	}
 
-	pub fn supports_mcp_scope(&self, scope: ResourceScope) -> bool {
+	pub const fn supports_mcp_scope(&self, scope: ResourceScope) -> bool {
 		match scope {
-			ResourceScope::GlobalOnly => self.capabilities.mcp.scopes.global,
-			ResourceScope::ProjectOnly => self.capabilities.mcp.scopes.project,
+			ResourceScope::GlobalOnly => self.mcp_global_path.is_some(),
+			ResourceScope::ProjectOnly => self.mcp_project_path.is_some(),
 			ResourceScope::Both => {
-				self.capabilities.mcp.scopes.global
-					|| self.capabilities.mcp.scopes.project
+				self.mcp_global_path.is_some()
+					|| self.mcp_project_path.is_some()
 			}
 		}
 	}
 
-	pub fn supports_sub_agent_scope(&self, scope: ResourceScope) -> bool {
+	pub const fn supports_sub_agent_scope(&self, scope: ResourceScope) -> bool {
 		match scope {
-			ResourceScope::GlobalOnly => {
-				self.capabilities.sub_agents.scopes.global
-			}
-			ResourceScope::ProjectOnly => {
-				self.capabilities.sub_agents.scopes.project
-			}
+			ResourceScope::GlobalOnly => self.sub_agent_global_dir.is_some(),
+			ResourceScope::ProjectOnly => self.sub_agent_project_dir.is_some(),
 			ResourceScope::Both => {
-				self.capabilities.sub_agents.scopes.global
-					|| self.capabilities.sub_agents.scopes.project
+				self.sub_agent_global_dir.is_some()
+					|| self.sub_agent_project_dir.is_some()
 			}
 		}
 	}
@@ -179,21 +171,13 @@ impl AgentDescriptor {
 	) -> Option<PathBuf> {
 		match scope {
 			ResourceScope::GlobalOnly => {
-				if !self.capabilities.skills.scopes.global {
-					return None;
-				}
 				self.global_skill_paths.and_then(|paths| (paths.write)())
 			}
-			ResourceScope::ProjectOnly => {
-				if !self.capabilities.skills.scopes.project {
-					return None;
-				}
-				project_root
-					.and_then(|root| {
-						self.project_skill_paths.map(|p| (p.write)(root))
-					})
-					.flatten()
-			}
+			ResourceScope::ProjectOnly => project_root
+				.and_then(|root| {
+					self.project_skill_paths.map(|p| (p.write)(root))
+				})
+				.flatten(),
 			ResourceScope::Both => None,
 		}
 	}
@@ -245,7 +229,7 @@ impl AgentDescriptor {
 		let mut paths = Vec::new();
 
 		if (scope == ResourceScope::ProjectOnly || scope == ResourceScope::Both)
-			&& self.capabilities.skills.scopes.project
+			&& self.supports_skill_scope(ResourceScope::ProjectOnly)
 		{
 			if let Some(root) = project_root {
 				paths.extend(self.project_skill_read_paths(root));
@@ -253,7 +237,7 @@ impl AgentDescriptor {
 		}
 
 		if (scope == ResourceScope::GlobalOnly || scope == ResourceScope::Both)
-			&& self.capabilities.skills.scopes.global
+			&& self.supports_skill_scope(ResourceScope::GlobalOnly)
 		{
 			paths.extend(self.global_skill_read_paths());
 		}
@@ -268,19 +252,10 @@ impl AgentDescriptor {
 	) -> Option<PathBuf> {
 		match scope {
 			ResourceScope::GlobalOnly => {
-				if !self.capabilities.mcp.scopes.global {
-					return None;
-				}
 				self.mcp_global_path.and_then(|path| path())
 			}
-			ResourceScope::ProjectOnly => {
-				if !self.capabilities.mcp.scopes.project {
-					return None;
-				}
-				project_root.and_then(|root| {
-					self.mcp_project_path.and_then(|p| p(root))
-				})
-			}
+			ResourceScope::ProjectOnly => project_root
+				.and_then(|root| self.mcp_project_path.and_then(|p| p(root))),
 			ResourceScope::Both => None,
 		}
 	}

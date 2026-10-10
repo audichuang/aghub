@@ -60,8 +60,12 @@ pub fn list_agents(_origin: TrustedLocalOrigin) -> Json<Vec<AgentInfo>> {
 				capabilities: CapabilitiesDto {
 					skills: SkillCapabilitiesDto {
 						scopes: ScopeSupportDto {
-							global: d.capabilities.skills.scopes.global,
-							project: d.capabilities.skills.scopes.project,
+							global: d.supports_skill_scope(
+								aghub_core::models::ResourceScope::GlobalOnly,
+							),
+							project: d.supports_skill_scope(
+								aghub_core::models::ResourceScope::ProjectOnly,
+							),
 						},
 						universal: d.capabilities.skills.universal,
 						mutable_global: d
@@ -74,8 +78,12 @@ pub fn list_agents(_origin: TrustedLocalOrigin) -> Json<Vec<AgentInfo>> {
 					},
 					mcp: McpCapabilitiesDto {
 						scopes: ScopeSupportDto {
-							global: d.capabilities.mcp.scopes.global,
-							project: d.capabilities.mcp.scopes.project,
+							global: d.supports_mcp_scope(
+								aghub_core::models::ResourceScope::GlobalOnly,
+							),
+							project: d.supports_mcp_scope(
+								aghub_core::models::ResourceScope::ProjectOnly,
+							),
 						},
 						stdio: d.capabilities.mcp.stdio,
 						remote: d.capabilities.mcp.remote,
@@ -83,8 +91,12 @@ pub fn list_agents(_origin: TrustedLocalOrigin) -> Json<Vec<AgentInfo>> {
 					},
 					sub_agents: SubAgentCapabilitiesDto {
 						scopes: ScopeSupportDto {
-							global: d.capabilities.sub_agents.scopes.global,
-							project: d.capabilities.sub_agents.scopes.project,
+							global: d.supports_sub_agent_scope(
+								aghub_core::models::ResourceScope::GlobalOnly,
+							),
+							project: d.supports_sub_agent_scope(
+								aghub_core::models::ResourceScope::ProjectOnly,
+							),
 						},
 					},
 				},

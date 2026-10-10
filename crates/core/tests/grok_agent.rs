@@ -1,4 +1,4 @@
-use aghub_core::models::AgentType;
+use aghub_core::models::{AgentType, ResourceScope};
 use aghub_core::registry;
 
 #[test]
@@ -11,12 +11,12 @@ fn registry_resolves_grok_not_fallback() {
 	// Symmetric global + project for skills and MCP
 	assert!(d.mcp_global_path.is_some());
 	assert!(d.mcp_project_path.is_some());
-	assert!(d.capabilities.skills.scopes.global);
-	assert!(d.capabilities.skills.scopes.project);
-	assert!(d.capabilities.mcp.scopes.global);
-	assert!(d.capabilities.mcp.scopes.project);
+	assert!(d.supports_skill_scope(ResourceScope::GlobalOnly));
+	assert!(d.supports_skill_scope(ResourceScope::ProjectOnly));
+	assert!(d.supports_mcp_scope(ResourceScope::GlobalOnly));
+	assert!(d.supports_mcp_scope(ResourceScope::ProjectOnly));
 	assert!(d.capabilities.mcp.enable_disable);
 	// Symmetric global + project for sub-agents
-	assert!(d.capabilities.sub_agents.scopes.global);
-	assert!(d.capabilities.sub_agents.scopes.project);
+	assert!(d.supports_sub_agent_scope(ResourceScope::GlobalOnly));
+	assert!(d.supports_sub_agent_scope(ResourceScope::ProjectOnly));
 }

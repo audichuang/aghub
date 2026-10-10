@@ -18,7 +18,7 @@ Role map (not a full file tree — `ls` / codegraph for that):
 
 **`AgentDescriptor`** (static per agent): holds id, display_name, the MCP binding (`mcp_global_path`, `mcp_project_path`, `mcp_parse_config`, `mcp_serialize_config` — all four `None` = no MCP), skill/sub-agent path fns, capabilities. The core adapter (`crates/core/src/adapter.rs`) is the only MCP reader/writer: it checks the scope capability, resolves the declared path, parses it (missing file = empty) and writes the backing file with the declared serializer. A descriptor carries no MCP I/O of its own.
 
-**`Capabilities`**: `{ skills: SkillCapabilities, mcp: McpCapabilities, sub_agents: SubAgentCapabilities }` — scopes (global/project), transport support (stdio/remote), enable/disable toggle.
+**`Capabilities`**: `{ skills: SkillCapabilities { universal }, mcp: McpCapabilities { stdio, remote, enable_disable } }` — transport support and enable/disable toggle. Scope support (global/project) is NOT a field: `supports_*_scope` derives it from which bindings are `Some`.
 
 **`AgentConfig`**: normalized `{ mcps: Vec<McpServer>, skills: Vec<Skill>, sub_agents: Vec<SubAgent> }`.
 

@@ -39,27 +39,11 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	mcp_project_path: MCP_PROJECT_PATH,
 	global_data_dir,
 	capabilities: Capabilities {
-		skills: SkillCapabilities {
-			scopes: ScopeSupport {
-				global: true,
-				project: true,
-			},
-			universal: false,
-		},
+		skills: SkillCapabilities { universal: false },
 		mcp: McpCapabilities {
-			scopes: ScopeSupport {
-				global: false,
-				project: true,
-			},
 			stdio: true,
 			remote: true,
 			enable_disable: true,
-		},
-		sub_agents: SubAgentCapabilities {
-			scopes: ScopeSupport {
-				global: false,
-				project: false,
-			},
 		},
 	},
 	global_skill_paths: Some(GlobalSkillPaths {
@@ -83,11 +67,12 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::models::ResourceScope;
 	use std::path::Path;
 
 	const _: () = {
-		assert!(!DESCRIPTOR.capabilities.mcp.scopes.global);
-		assert!(DESCRIPTOR.capabilities.mcp.scopes.project);
+		assert!(!DESCRIPTOR.supports_mcp_scope(ResourceScope::GlobalOnly));
+		assert!(DESCRIPTOR.supports_mcp_scope(ResourceScope::ProjectOnly));
 	};
 
 	#[test]
