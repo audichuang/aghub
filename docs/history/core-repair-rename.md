@@ -40,17 +40,17 @@ Rule: re-ask `compat_unlink_permitted` (link-only, resolves to this master or
 the adopt source, nobody else's write slot) at write time, and record only
 what `Linker::unlink_reporting` says this call removed.
 
-Deliberately still open: the fourth guard ("the write slot covers it
-afterwards") is decided once in `plan_repair` against the plan, not the disk.
-`RepairPlan` carries no `scope` / `project_root`, so the executor cannot
-re-derive and re-classify the covering write slot. A non-aghub actor breaking
-that slot between plan time and step 6 (the mutation lock only serializes
-aghub against aghub) would leave repair detaching the agent's last surviving
-link. Closing it means threading scope/root onto `RepairPlan`; judged more
-plumbing than the risk buys. The check → remove pair is also still two
-syscalls; narrowing that needs `unlinkat` against a directory fd.
+The fourth guard ("the write slot covers it afterwards") was once decided only
+in `plan_repair`, against the plan: `RepairPlan` carried no scope/root, so a
+non-aghub actor breaking the covering slot between plan and step 6 (the mutation
+lock only serializes aghub against aghub) left repair detaching the agent's last
+link. Closed (D8, #65): `RepairPlan` carries `scope` / `project_root`, and step 6
+re-asks `compat_unlink_authorized` with coverage read from the disk (each
+reader's own slot Conformant). The check → remove pair is still two syscalls;
+narrowing that needs `unlinkat` against a directory fd.
 
 - Tests: `skills::repair::tests::a_compat_entry_that_changed_since_planning_is_never_reported_as_unlinked`,
+  `skills::repair::tests::a_covering_slot_broken_after_planning_keeps_the_compat_referrer`,
   `skills::repair::tests::the_compat_sweep_never_takes_what_it_must_not`
 - Commits: 19c5ff64 (recheck + fourth-guard gap), deefc56b (`unlink_reporting`)
 

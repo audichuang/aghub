@@ -1920,6 +1920,10 @@ pub struct RepairPlan {
 	pub master: PathBuf,
 	pub master_exists: bool,
 	pub actions: Vec<PlannedReferrer>,
+	/// The scope this plan was made for, so `execute_repair` can re-ask guard 4
+	/// against the disk at write time.
+	pub scope: ResourceScope,
+	pub project_root: Option<PathBuf>,
 }
 
 impl RepairPlan {
@@ -2579,8 +2583,8 @@ pub fn plan_repair(
 	// [`compat_unlink_permitted`], which `execute_repair` step 6 re-runs right
 	// before unlinking. The fourth, THE WRITE SLOT COVERS IT AFTERWARDS, is
 	// decided here because it reads the PLAN, not the disk (a slot about to be
-	// Created/Relinked covers the agent, so no second run is needed); a
-	// `RepairPlan` carries no scope, so execution cannot re-ask it. It gates
+	// Created/Relinked covers the agent, so no second run is needed);
+	// `execute_repair` step 6 re-asks it against the disk (every reader's own slot Conformant) using the plan's scope/root, so a slot broken after planning cancels the detach. It gates
 	// only the destructive half, inside [`compat_unlink_authorized`], and is
 	// asked of EVERY reader of the entry — otherwise the cleanup revokes the
 	// skill for an agent whose only Referrer was the compat one.
@@ -2696,6 +2700,8 @@ pub fn plan_repair(
 		master,
 		master_exists,
 		actions: planned,
+		scope,
+		project_root: project_root.map(Path::to_path_buf),
 	})
 }
 

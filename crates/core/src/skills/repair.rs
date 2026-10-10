@@ -3,6 +3,9 @@
 //! **The plan is the ONLY input.** Nothing here re-runs `classify_shape`: a
 //! second classification is a second opinion that can disagree across the
 //! window (concurrent npx). The caller re-plans if it wants a fresher view.
+//! One exception: step 6 re-asks the four compat-unlink guards against the disk
+//! right before unlinking. That re-read can only CANCEL a planned detach, never
+//! add a write.
 //!
 //! **Ordering is crash-safety.** A process dying at ANY point leaves one of two
 //! readable states: the old real directory still serving the skill, or the
@@ -30,7 +33,9 @@ use crate::errors::{ConfigError, Result};
 use crate::scope::WriteScope;
 use crate::skills::linker::Linker;
 use crate::skills::shape::{
+	classify_shape, compat_roster, compat_unlink_authorized,
 	compat_unlink_permitted, ReferrerAction, RefuseReason, RepairPlan,
+	SkillShape,
 };
 
 /// What repair DID, not what the skill IS. One per shape, per the spec table.
@@ -461,7 +466,7 @@ pub fn execute_repair(
 		{
 			report.outcome = RepairOutcome::Reconciled;
 		}
-		let dest = quarantine_dir(&plan.master, &plan.name);
+		let dest = quarantine_dir(&plan.master, &plan.name)?;
 		report.quarantined = Some(dest.clone());
 		report.referrers.push(action.path.clone());
 		if dry_run {
@@ -493,11 +498,8 @@ pub fn execute_repair(
 		// else's write slot) are answered fresh by `compat_unlink_permitted`,
 		// and only a row it STILL permits is unlinked and reported.
 		//
-		// The FOURTH guard ("the write slot covers it afterwards") is decided
-		// once in `plan_repair` and NOT re-asked: `RepairPlan` carries no
-		// scope/root to re-classify the write slot. Known open gap — a non-aghub
-		// actor breaking that slot mid-run leaves this unlinking the agent's
-		// last link. See docs/history/core-repair-rename.md#compat-unlink-recheck-and-the-fourth-guard
+		// All four guards are re-asked here: three by `compat_unlink_permitted`,
+		// the fourth below against the plan's scope/root. See docs/history/core-repair-rename.md#compat-unlink-recheck-and-the-fourth-guard
 		if !compat_unlink_permitted(
 			&action.path,
 			&plan.master,
@@ -506,6 +508,27 @@ pub fn execute_repair(
 		)
 		.map_err(|e| io_err("recheck compat referrer before unlink", e))?
 		{
+			continue;
+		}
+		// GUARD 4, re-asked at write time against the disk: steps 4-5 have
+		// run, so every agent reading this entry must be served by its OWN
+		// write slot right now (a Conformant link to the Master). A slot a
+		// non-aghub actor broke after planning cancels the detach.
+		let safe = skill::sanitize_name(&plan.name);
+		let roster = compat_roster(plan.scope, plan.project_root.as_deref());
+		let disabled = crate::agent_settings::disabled_agents();
+		let covered: std::collections::HashSet<&'static str> = roster
+			.iter()
+			.filter(|agent| !disabled.contains(agent.id))
+			.filter(|agent| {
+				agent.write.as_ref().is_some_and(|dir| {
+					classify_shape(&dir.join(&safe), &plan.master)
+						== SkillShape::Conformant
+				})
+			})
+			.map(|agent| agent.id)
+			.collect();
+		if !compat_unlink_authorized(&action.path, &safe, &roster, &covered) {
 			continue;
 		}
 		// `unlink_reporting`, not `unlink` (which folds `NotFound` into
@@ -526,18 +549,32 @@ pub fn execute_repair(
 	Ok(report)
 }
 
-/// `.aghub/.quarantine/<name>/<stamp>/`.
+/// `.aghub/.quarantine/<sanitized-name>/<stamp>/`.
 ///
 /// Invisible to the store scan only because `top_level_skill_dirs` is one
 /// level deep and needs a root skill marker — any new `.aghub` enumerator must
 /// skip it too (`is_store_bookkeeping`).
-fn quarantine_dir(master: &Path, name: &str) -> PathBuf {
-	master
+///
+/// `name` is the RAW name (`repair ../../x`, a lock key), so it is sanitized
+/// like the Master, and the result must stay strictly inside `.quarantine`:
+/// exactly one normal path component, never `..`, `/` or a root.
+fn quarantine_dir(master: &Path, name: &str) -> Result<PathBuf> {
+	let safe = skill::sanitize_name(name);
+	let mut parts = Path::new(&safe).components();
+	if !matches!(
+		(parts.next(), parts.next()),
+		(Some(std::path::Component::Normal(_)), None)
+	) {
+		return Err(ConfigError::InvalidConfig(format!(
+			"quarantine name '{safe}' would leave .quarantine"
+		)));
+	}
+	Ok(master
 		.parent()
 		.unwrap_or(master)
 		.join(".quarantine")
-		.join(name)
-		.join(stamp())
+		.join(safe)
+		.join(stamp()))
 }
 
 /// Temp-link, rename away, rename over. See the module docs.
@@ -1177,6 +1214,82 @@ mod tests {
 			compat.join("SKILL.md").is_file(),
 			"a real directory must never be deleted by the compat-detach step"
 		);
+	}
+
+	/// Guard 4 is re-asked at write time: a covering slot broken between
+	/// planning and step 6 must cancel the compat detach, not leave the agent
+	/// with no link at all. Pins the write-time re-ask.
+	/// See docs/history/core-repair-rename.md#compat-unlink-recheck-and-the-fourth-guard
+	#[test]
+	fn a_covering_slot_broken_after_planning_keeps_the_compat_referrer() {
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "shared");
+		let write_slot = root.join(".cline").join("skills").join(name);
+		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &write_slot).unwrap();
+		let compat = root.join(".clinerules").join("skills").join(name);
+		fs::create_dir_all(compat.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &compat).unwrap();
+
+		let p = plan(&root, name, true);
+		assert_eq!(
+			p.actions
+				.iter()
+				.find(|a| a.path == compat)
+				.map(|a| a.action.clone()),
+			Some(crate::skills::shape::ReferrerAction::Unlink),
+			"fixture premise: the compat referrer must be planned for detach"
+		);
+
+		// Between planning and writing, a non-aghub actor removes cline's own
+		// slot. The plan still says "covered"; only a write-time re-ask of
+		// guard 4 notices the compat link is now cline's only way in.
+		fs::remove_file(&write_slot).unwrap();
+
+		let report = execute_repair(&p, false).unwrap();
+
+		assert!(
+			Linker::is_link(&compat),
+			"the compat link is now cline's only way in and must survive"
+		);
+		assert_eq!(
+			fs::canonicalize(&compat).unwrap(),
+			fs::canonicalize(&master).unwrap()
+		);
+		assert!(report.unlinked.is_empty(), "{:?}", report.unlinked);
+		assert_ne!(report.outcome, RepairOutcome::Tidied);
+	}
+
+	/// A raw `../../` name must not move the fork outside `.aghub/.quarantine`:
+	/// the quarantine is keyed by the sanitized name, one level deep.
+	#[test]
+	fn a_quarantine_never_leaves_dot_quarantine_for_a_slash_dot_dot_name() {
+		let (_tmp, root) = fixture();
+		let name = "../../escape";
+		let master = root.join(".aghub").join("escape");
+		write_skill(&master, name, "same");
+		let slot = root.join(".agents").join("skills").join("escape");
+		write_skill(&slot, name, "same");
+
+		// The real entry both surfaces reach through `repair_all`.
+		let report =
+			repair_skill(&WriteScope::project(&root), name, true, false)
+				.unwrap();
+
+		let q = report.quarantined.unwrap();
+		assert_eq!(
+			q.parent().unwrap(),
+			root.join(".aghub").join(".quarantine").join("escape"),
+			"quarantine uses the sanitized name, one level inside .quarantine"
+		);
+		assert!(q.join("SKILL.md").is_file(), "the fork really moved there");
+		assert!(
+			!root.join("escape").exists(),
+			"nothing may be created outside .quarantine (where the raw ../../ name lands)"
+		);
+		assert!(Linker::is_link(&slot));
 	}
 
 	/// The three things the sweep must NEVER take. Each is its own way to lose
