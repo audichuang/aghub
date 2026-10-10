@@ -10,9 +10,9 @@ import {
 	Spinner,
 	toast,
 } from "@heroui/react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as pathe from "pathe";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { SkillResponse } from "../generated/dto";
 import { useAgentName } from "../hooks/use-agent-name";
@@ -21,7 +21,6 @@ import {
 	deleteSkill,
 	fetchSkillHoldersForGroup,
 	splitDeleteTargets,
-	type BackendHolders,
 } from "../requests/delete-skill";
 import type { LocationGroup, SkillGroup } from "./skill-detail-helpers";
 
@@ -192,34 +191,26 @@ export function DeleteSkillDialog({
 
 	const skill = group.items[0];
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
-	const [backendHolders, setBackendHolders] = useState<BackendHolders | null>(
-		null,
-	);
-	const [loadingHolders, setLoadingHolders] = useState(false);
-	const [holdersError, setHoldersError] = useState<string | null>(null);
-
-	useEffect(() => {
-		if (!isOpen || !skill) {
-			setBackendHolders(null);
-			setHoldersError(null);
-			setLoadingHolders(false);
-			return;
-		}
-		setLoadingHolders(true);
-		setHoldersError(null);
-
-		fetchSkillHoldersForGroup(api, skill.name, group.items, projectPath)
-			.then((holders) => {
-				setBackendHolders(holders);
-				setLoadingHolders(false);
-			})
-			.catch((err) => {
-				setHoldersError(
-					err instanceof Error ? err.message : String(err),
-				);
-				setLoadingHolders(false);
-			});
-	}, [api, isOpen, skill, group.items, projectPath]);
+	const holdersQuery = useQuery({
+		queryKey: ["skill-holders", skill?.name, group.items, projectPath],
+		queryFn: () =>
+			fetchSkillHoldersForGroup(
+				api,
+				skill!.name,
+				group.items,
+				projectPath,
+			),
+		enabled: isOpen && !!skill,
+		gcTime: 0,
+		retry: false,
+	});
+	const backendHolders = isOpen ? (holdersQuery.data ?? null) : null;
+	const loadingHolders = isOpen && holdersQuery.isFetching;
+	const holdersError = holdersQuery.error
+		? holdersQuery.error instanceof Error
+			? holdersQuery.error.message
+			: String(holdersQuery.error)
+		: null;
 
 	const targets = useMemo(
 		() =>

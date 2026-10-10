@@ -1,7 +1,7 @@
 import { ExclamationTriangleIcon } from "@heroicons/react/24/solid";
 import { Button, Checkbox, Modal, Spinner, toast } from "@heroui/react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
@@ -11,7 +11,6 @@ import {
 	collectUnmanagedDeleteTargets,
 	deleteSkill,
 	fetchBulkHolders,
-	type BackendHolders,
 	type BulkDeleteGroup,
 } from "../requests/delete-skill";
 import { invalidateMcpQueries } from "../requests/mcps";
@@ -39,39 +38,21 @@ export function BulkDeleteDialog({
 	const queryClient = useQueryClient();
 
 	const [includeUnmanaged, setIncludeUnmanaged] = useState(false);
-	const [backendHolders, setBackendHolders] = useState<BackendHolders | null>(
-		null,
-	);
-	const [loadingHolders, setLoadingHolders] = useState(false);
-	const [holdersError, setHoldersError] = useState<string | null>(null);
-
-	useEffect(() => {
-		if (!isOpen) {
-			setBackendHolders(null);
-			setHoldersError(null);
-			setLoadingHolders(false);
-			return;
-		}
-		setLoadingHolders(true);
-		setHoldersError(null);
-
-		fetchBulkHolders({
-			api,
-			groups,
-			resourceType,
-			projectPath,
-		})
-			.then((holders) => {
-				setBackendHolders(holders);
-				setLoadingHolders(false);
-			})
-			.catch((err) => {
-				setHoldersError(
-					err instanceof Error ? err.message : String(err),
-				);
-				setLoadingHolders(false);
-			});
-	}, [api, isOpen, groups, resourceType, projectPath]);
+	const holdersQuery = useQuery({
+		queryKey: ["bulk-holders", groups, resourceType, projectPath],
+		queryFn: () =>
+			fetchBulkHolders({ api, groups, resourceType, projectPath }),
+		enabled: isOpen,
+		gcTime: 0,
+		retry: false,
+	});
+	const backendHolders = isOpen ? (holdersQuery.data ?? null) : null;
+	const loadingHolders = isOpen && holdersQuery.isFetching;
+	const holdersError = holdersQuery.error
+		? holdersQuery.error instanceof Error
+			? holdersQuery.error.message
+			: String(holdersQuery.error)
+		: null;
 
 	const unmanagedItems = useMemo(
 		() =>
