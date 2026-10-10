@@ -157,10 +157,26 @@ impl From<Attempt> for SkillRepoError {
 ///
 /// Opaque on purpose: only [`SkillRepository`] can mint one, so a claim always
 /// names a snapshot this repository really resolved.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PinnedSnapshot {
 	snapshot: RepoSnapshot,
 	backend: BackendKind,
+	/// Coordinates this claim was resolved from. Lets a REST decline AFTER
+	/// resolve re-serve the same commit over gix from the claim alone — no
+	/// per-instance map, so a claim works on any repository instance.
+	origin: (aghub_git::SourceRef, Option<Credentials>),
+}
+
+impl std::fmt::Debug for PinnedSnapshot {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// Credentials are deliberately not printed: `TipObservation` derives
+		// Debug over this type.
+		f.debug_struct("PinnedSnapshot")
+			.field("snapshot", &self.snapshot)
+			.field("backend", &self.backend)
+			.field("ref", &self.origin.0.ref_)
+			.finish_non_exhaustive()
+	}
 }
 
 impl PinnedSnapshot {
@@ -172,6 +188,12 @@ impl PinnedSnapshot {
 	/// The snapshot this claim pins.
 	pub fn snapshot(&self) -> &RepoSnapshot {
 		&self.snapshot
+	}
+
+	/// The branch/ref this snapshot was resolved from. `None` = the remote
+	/// default branch, whose real name is not discovered yet (B8 fills it).
+	pub fn branch(&self) -> Option<&str> {
+		self.origin.0.ref_.as_deref()
 	}
 }
 
@@ -214,14 +236,34 @@ impl SkillRepository {
 		}
 	}
 
-	/// Resolve the tip to an immutable snapshot. THE single fallback owner:
-	/// REST on github hosts when present, else gix; REST `RestFallback` → gix
-	/// once. Memoizes which backend served the `commit_oid`.
+	/// Legacy memo path for callers not yet on claims (removed in B8).
 	pub fn resolve(
 		&self,
 		sr: &SourceRef,
 		token: Option<&str>,
 	) -> Result<RepoSnapshot, SkillRepoError> {
+		let pinned = self.resolve_pinned(sr, token)?;
+		self.remember(&pinned.snapshot.commit_oid, pinned.backend)?;
+		if pinned.backend == BackendKind::Rest {
+			let (git_sr, auth) = &pinned.origin;
+			self.remember_rest_origin(
+				&pinned.snapshot.commit_oid,
+				git_sr,
+				auth,
+			)?;
+		}
+		Ok(pinned.snapshot)
+	}
+
+	/// Resolve the tip to an immutable snapshot and return the CLAIM: snapshot +
+	/// the backend that produced it + its coordinates. THE single fallback owner:
+	/// REST on github hosts when present, else gix; REST `RestFallback` → gix
+	/// once. Touches no per-instance memo — the claim alone is enough to list/fetch.
+	pub fn resolve_pinned(
+		&self,
+		sr: &SourceRef,
+		token: Option<&str>,
+	) -> Result<PinnedSnapshot, SkillRepoError> {
 		let (git_sr, auth, try_rest) = self.coordinates(sr, token)?;
 
 		// Timing spans below are the ONLY visibility into where a slow source
@@ -238,13 +280,11 @@ impl SkillRepository {
 						sr.ref_,
 						started.elapsed()
 					);
-					self.remember(&snap.commit_oid, BackendKind::Rest)?;
-					self.remember_rest_origin(
-						&snap.commit_oid,
-						&git_sr,
-						&auth,
-					)?;
-					return Ok(snap);
+					return Ok(PinnedSnapshot {
+						snapshot: snap,
+						backend: BackendKind::Rest,
+						origin: (git_sr.clone(), auth.clone()),
+					});
 				}
 				Err(GitError::RestFallback(_)) => {
 					// Single fall-through to gix; never re-decided later.
@@ -273,8 +313,11 @@ impl SkillRepository {
 			gix_started.elapsed(),
 			started.elapsed()
 		);
-		self.remember(&snap.commit_oid, BackendKind::Gix)?;
-		Ok(snap)
+		Ok(PinnedSnapshot {
+			snapshot: snap,
+			backend: BackendKind::Gix,
+			origin: (git_sr, auth),
+		})
 	}
 
 	/// The tip commit OID of `sr.ref_` **without downloading objects** — the
@@ -313,6 +356,7 @@ impl SkillRepository {
 						Some(PinnedSnapshot {
 							snapshot: snap,
 							backend: BackendKind::Rest,
+							origin: (git_sr.clone(), auth.clone()),
 						}),
 					));
 				}
@@ -328,11 +372,9 @@ impl SkillRepository {
 		}
 
 		let ls_refs_started = Instant::now();
-		let mut opts = aghub_git::RemoteOptions::new(&git_sr.url);
-		if let Some(credentials) = auth {
-			opts = opts.with_auth(credentials);
-		}
-		let tip = aghub_git::resolve_ref_oid(opts, git_sr.ref_.as_deref())
+		let tip = self
+			.gix
+			.advertise_tip(&git_sr, auth.as_ref())
 			.map_err(map_git_error)?;
 		log::info!(
 			"skill repo tip: backend=ls-refs ref={:?} found={} took={:?} \
@@ -361,7 +403,44 @@ impl SkillRepository {
 		pinned: &PinnedSnapshot,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, SkillRepoError> {
-		self.fetch_or_regix(&pinned.snapshot, pinned.backend, selection)
+		self.fetch_or_regix(
+			&pinned.snapshot,
+			pinned.backend,
+			Some(pinned.origin.clone()),
+			selection,
+		)
+	}
+
+	/// List the catalog of a claim on the backend the claim names — no memo,
+	/// no prior `resolve` on this instance. A REST decline stays a clean error.
+	pub fn list_pinned(
+		&self,
+		pinned: &PinnedSnapshot,
+	) -> Result<SkillCatalog, SkillRepoError> {
+		Ok(self.list_with_backend(&pinned.snapshot, pinned.backend)?)
+	}
+
+	/// Remote branch names through THE same chain as fetch: REST slot on github
+	/// hosts when present (a decline falls through), then the gix slot (whose
+	/// own tail is system git for HTTPS non-GitHub hosts). Surfaces never build
+	/// their own branch-listing fallback.
+	pub fn list_branches(
+		&self,
+		sr: &SourceRef,
+		token: Option<&str>,
+	) -> Result<Vec<String>, SkillRepoError> {
+		let (git_sr, auth, try_rest) = self.coordinates(sr, token)?;
+		if try_rest {
+			let rest = self.rest.as_ref().expect("checked above");
+			match rest.list_branches(&git_sr, auth.as_ref()) {
+				Ok(branches) => return Ok(branches),
+				Err(GitError::RestFallback(_)) => {}
+				Err(e) => return Err(map_git_error(e)),
+			}
+		}
+		self.gix
+			.list_branches(&git_sr, auth.as_ref())
+			.map_err(map_git_error)
 	}
 
 	/// Shared fetch coordinate for [`Self::resolve`] / [`Self::resolve_tip`]:
@@ -490,7 +569,15 @@ impl SkillRepository {
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, SkillRepoError> {
 		let backend = self.memo_for(&snapshot.commit_oid)?;
-		self.fetch_or_regix(snapshot, backend, selection)
+		let origin = self
+			.rest_origins
+			.lock()
+			.map_err(|_| {
+				SkillRepoError::Network("rest origin lock poisoned".to_string())
+			})?
+			.get(&snapshot.commit_oid)
+			.cloned();
+		self.fetch_or_regix(snapshot, backend, origin, selection)
 	}
 
 	/// Fetch on `backend`; when REST declines a snapshot it already resolved —
@@ -504,6 +591,7 @@ impl SkillRepository {
 		&self,
 		snapshot: &RepoSnapshot,
 		backend: BackendKind,
+		origin: Option<(aghub_git::SourceRef, Option<Credentials>)>,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, SkillRepoError> {
 		let reason = match self.fetch_with_backend(snapshot, backend, selection)
@@ -512,14 +600,6 @@ impl SkillRepository {
 			Err(Attempt::RestDeclined(reason)) => reason,
 			Err(Attempt::Failed(error)) => return Err(error),
 		};
-		let origin = self
-			.rest_origins
-			.lock()
-			.map_err(|_| {
-				SkillRepoError::Network("rest origin lock poisoned".to_string())
-			})?
-			.get(&snapshot.commit_oid)
-			.cloned();
 		let Some((git_sr, auth)) = origin else {
 			return Err(SkillRepoError::Network(reason));
 		};

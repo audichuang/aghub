@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use skill_update::{FetchedRepo, SkillRepoError, SkillRepository};
+use skill_update::{
+	FetchedRepo, PinnedSnapshot, SkillRepoError, SkillRepository,
+};
 use tokio::time::timeout;
 
 const SESSION_TTL: Duration = Duration::from_secs(10 * 60);
@@ -17,11 +19,11 @@ pub(crate) enum PinnedSourceFetchError {
 
 #[derive(Clone)]
 pub(crate) struct PinnedSourceSession {
-	/// The skill-aware repository that resolved `snapshot` (the single REST→gix
-	/// fallback owner). The repository and immutable snapshot stay paired so a
-	/// later selective fetch cannot accidentally re-resolve a moving branch.
+	/// The skill-aware repository (the single REST→gix fallback owner) and the
+	/// claim it minted. The repository and claim stay paired so a later
+	/// selective fetch cannot accidentally re-resolve a moving branch.
 	repository: Arc<SkillRepository>,
-	snapshot: aghub_git::RepoSnapshot,
+	claim: PinnedSnapshot,
 	created_at: Instant,
 	/// The original clone URL (without credentials).
 	url: String,
@@ -34,7 +36,7 @@ pub(crate) struct PinnedSourceSession {
 impl PinnedSourceSession {
 	pub(crate) fn new(
 		repository: Arc<SkillRepository>,
-		snapshot: aghub_git::RepoSnapshot,
+		claim: PinnedSnapshot,
 		url: String,
 		credential_token: Option<String>,
 		branches: Vec<String>,
@@ -42,7 +44,7 @@ impl PinnedSourceSession {
 	) -> Self {
 		Self {
 			repository,
-			snapshot,
+			claim,
 			created_at: Instant::now(),
 			url,
 			credential_token,
@@ -69,7 +71,7 @@ impl PinnedSourceSession {
 
 	#[cfg(test)]
 	pub(crate) fn commit_oid(&self) -> &str {
-		&self.snapshot.commit_oid
+		self.claim.commit_oid()
 	}
 
 	pub(crate) async fn fetch_skills(
@@ -77,13 +79,13 @@ impl PinnedSourceSession {
 		skill_paths: &[skill::SkillPath],
 	) -> Result<FetchedRepo, PinnedSourceFetchError> {
 		let repository = Arc::clone(&self.repository);
-		let snapshot = self.snapshot.clone();
+		let claim = self.claim.clone();
 		let skill_paths = skill_paths.to_vec();
 		match timeout(
 			FETCH_TIMEOUT,
 			tokio::task::spawn_blocking(move || {
-				repository.fetch(
-					&snapshot,
+				repository.fetch_pinned(
+					&claim,
 					skill_update::FetchSelection::Skills(&skill_paths),
 				)
 			}),
@@ -203,14 +205,62 @@ impl PinnedSourceSessions {
 mod tests {
 	use super::*;
 
-	fn session() -> PinnedSourceSession {
-		PinnedSourceSession::new(
-			Arc::new(SkillRepository::new()),
-			aghub_git::RepoSnapshot {
-				commit_oid: "commit".to_string(),
-				tree_oid: "tree".to_string(),
+	/// Fake gix slot: every resolve answers one fixed commit, nothing else is
+	/// reachable. Lets a test mint a real claim without the network.
+	struct FixedBackend;
+
+	impl aghub_git::RepoFetchBackend for FixedBackend {
+		fn resolve(
+			&self,
+			_s: &aghub_git::SourceRef,
+			_a: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+			Ok(aghub_git::RepoSnapshot {
+				commit_oid: "commit".into(),
+				tree_oid: "tree".into(),
 				commit_time: None,
-			},
+			})
+		}
+		fn read_tree(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			unreachable!()
+		}
+		fn read_blobs(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_o: &[String],
+		) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+			unreachable!()
+		}
+		fn materialize(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_p: &[&str],
+			_d: &std::path::Path,
+		) -> aghub_git::Result<()> {
+			unreachable!()
+		}
+	}
+
+	fn session() -> PinnedSourceSession {
+		let repo = Arc::new(SkillRepository::with_backends(
+			None,
+			Arc::new(FixedBackend),
+		));
+		let claim = repo
+			.resolve_pinned(
+				&skill_update::SourceRef {
+					source: "https://github.com/owner/repo.git".into(),
+					ref_: Some("main".into()),
+				},
+				None,
+			)
+			.unwrap();
+		PinnedSourceSession::new(
+			repo,
+			claim,
 			"https://github.com/owner/repo.git".to_string(),
 			None,
 			vec!["main".to_string()],

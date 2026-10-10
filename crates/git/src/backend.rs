@@ -94,6 +94,31 @@ pub trait RepoFetchBackend: Send + Sync {
 		paths: &[&str],
 		dest: &Path,
 	) -> Result<()>;
+
+	/// Tip commit OID of `source.ref_` (None = remote default branch) from a ref
+	/// advertisement — no object download. Default: this slot declines, so
+	/// `SkillRepository` falls through to the next slot.
+	fn advertise_tip(
+		&self,
+		_source: &SourceRef,
+		_auth: Option<&Credentials>,
+	) -> Result<Option<String>> {
+		Err(GitError::rest_fallback(
+			"tip advertisement not served by this backend",
+		))
+	}
+
+	/// Remote branch names (sorted, de-duplicated). `source.ref_` is ignored.
+	/// Default: this slot declines (see `advertise_tip`).
+	fn list_branches(
+		&self,
+		_source: &SourceRef,
+		_auth: Option<&Credentials>,
+	) -> Result<Vec<String>> {
+		Err(GitError::rest_fallback(
+			"branch listing not served by this backend",
+		))
+	}
 }
 
 /// Shallow (depth-1) gix bare-fetch backend with a final system-git fallback
@@ -374,6 +399,41 @@ impl RepoFetchBackend for GixShallow {
 		stage_tree_entries(staged, paths, dest).map_err(|e| {
 			GitError::clone_failed(format!("Staging materialize failed: {e}"))
 		})
+	}
+
+	fn advertise_tip(
+		&self,
+		source: &SourceRef,
+		auth: Option<&Credentials>,
+	) -> Result<Option<String>> {
+		let mut opts = crate::remote::RemoteOptions::new(&source.url);
+		if let Some(credentials) = auth {
+			opts = opts.with_auth(credentials.clone());
+		}
+		// No system-git tail here (unchanged behaviour): a failed advertisement is
+		// a soft preflight miss, and the full fetch that follows has that tail.
+		crate::remote::resolve_ref_oid(opts, source.ref_.as_deref())
+	}
+
+	fn list_branches(
+		&self,
+		source: &SourceRef,
+		auth: Option<&Credentials>,
+	) -> Result<Vec<String>> {
+		let mut opts = crate::remote::RemoteOptions::new(&source.url);
+		if let Some(credentials) = auth {
+			opts = opts.with_auth(credentials.clone());
+		}
+		// Same system-git condition as `fetch_tip`, so branch listing and fetch
+		// reach the OS credential helper for exactly the same hosts.
+		match crate::remote::list_remote_branches(opts) {
+			Ok(branches) => Ok(branches),
+			Err(gix_error) if should_try_system_git(&source.url) => {
+				crate::system_git::list_remote_branches_system_git(&source.url)
+					.map_err(|_| gix_error)
+			}
+			Err(gix_error) => Err(gix_error),
+		}
 	}
 }
 

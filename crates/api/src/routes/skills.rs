@@ -107,7 +107,9 @@ async fn list_branches_for_scan<F>(
 	fetcher: F,
 ) -> Result<Vec<String>, ApiError>
 where
-	F: FnOnce() -> aghub_git::Result<Vec<String>> + Send + 'static,
+	F: FnOnce() -> Result<Vec<String>, skill_update::SkillRepoError>
+		+ Send
+		+ 'static,
 {
 	if let Some(cached) = cached_branches {
 		return Ok(cached);
@@ -125,7 +127,10 @@ where
 		.map_err(|e| {
 			ApiError::new(
 				Status::BadRequest,
-				format!("Failed to list remote branches: {e}"),
+				format!(
+					"Failed to list remote branches: {}",
+					e.detail().unwrap_or(e.code())
+				),
 				"BRANCHES_ERROR",
 			)
 		})
@@ -1749,8 +1754,9 @@ pub async fn git_scan_skills(
 		.map(|session| session.branches().to_vec());
 
 	// Skill-aware catalog scan: resolve + list only (no whole-repo clone).
-	// The same `SkillRepository` instance is retained on the session so a later
-	// install/sync `fetch` reuses the backend memo for this commit.
+	// The same `SkillRepository` instance is retained on the session, together
+	// with the claim it minted, so a later install/sync `fetch` stays pinned to
+	// this commit.
 	let repo = std::sync::Arc::new(skill_update::SkillRepository::new());
 	let source_ref = skill_update::SourceRef {
 		source: req.url.clone(),
@@ -1758,7 +1764,7 @@ pub async fn git_scan_skills(
 	};
 	let token_for_scan = credential_token.clone();
 	let repo_for_scan = repo.clone();
-	let (snapshot, skills) = tokio::task::spawn_blocking(move || {
+	let (claim, skills) = tokio::task::spawn_blocking(move || {
 		scan_repo_catalog(
 			&repo_for_scan,
 			&source_ref,
@@ -1773,27 +1779,17 @@ pub async fn git_scan_skills(
 
 	// List remote branches (use cache from previous session if
 	// available to avoid an extra network call on branch switch)
-	let branch_url = req.url.clone();
+	let repo_for_branches = repo.clone();
+	let branch_source = skill_update::SourceRef {
+		source: req.url.clone(),
+		ref_: None,
+	};
 	let credential_token_for_branches = credential_token.clone();
 	let branches = list_branches_for_scan(cached_branches, move || {
-		match credential_token_for_branches {
-			Some(token) => aghub_git::list_remote_branches(
-				aghub_git::RemoteOptions::new(&branch_url)
-					.with_credentials("x-access-token", token),
-			),
-			// No token: try gix unauthenticated, then fall back to the system
-			// `git` binary so the OS credential helper authenticates — matching
-			// the scan path so branch listing succeeds for the same repos.
-			None => match aghub_git::list_remote_branches(
-				aghub_git::RemoteOptions::new(&branch_url),
-			) {
-				Ok(branches) => Ok(branches),
-				Err(_) if aghub_git::system_git_available() => {
-					aghub_git::list_remote_branches_system_git(&branch_url)
-				}
-				Err(e) => Err(e),
-			},
-		}
+		repo_for_branches.list_branches(
+			&branch_source,
+			credential_token_for_branches.as_deref(),
+		)
 	})
 	.await?;
 
@@ -1813,7 +1809,7 @@ pub async fn git_scan_skills(
 	// shallow-clone cache are not retained longer than needed.
 	let session = PinnedSourceSession::new(
 		repo,
-		snapshot,
+		claim,
 		req.url,
 		credential_token,
 		branches.clone(),
@@ -1840,11 +1836,11 @@ pub(crate) fn scan_repo_catalog(
 	source_ref: &skill_update::SourceRef,
 	token: Option<&str>,
 ) -> Result<
-	(aghub_git::RepoSnapshot, Vec<GitScanSkillEntry>),
+	(skill_update::PinnedSnapshot, Vec<GitScanSkillEntry>),
 	skill_update::SkillRepoError,
 > {
-	let snapshot = repo.resolve(source_ref, token)?;
-	let catalog = repo.list(&snapshot)?;
+	let claim = repo.resolve_pinned(source_ref, token)?;
+	let catalog = repo.list_pinned(&claim)?;
 	let skills = catalog
 		.skills
 		.into_iter()
@@ -1856,7 +1852,7 @@ pub(crate) fn scan_repo_catalog(
 			path: c.skill_path, // repo-relative FOLDER ("" for a root skill)
 		})
 		.collect();
-	Ok((snapshot, skills))
+	Ok((claim, skills))
 }
 
 fn map_skill_repo_error(e: skill_update::SkillRepoError) -> ApiError {
@@ -2410,7 +2406,7 @@ mod tests {
 		)
 	}
 
-	/// Calls `resolve` so the repository's commit→backend memo is populated.
+	/// Calls `resolve_pinned` so the session holds a claim it can fetch from.
 	fn session_with_backend(
 		backend: std::sync::Arc<dyn aghub_git::RepoFetchBackend>,
 		url: &str,
@@ -2425,7 +2421,7 @@ mod tests {
 			Some(current_branch.to_string())
 		};
 		let snapshot = repo
-			.resolve(
+			.resolve_pinned(
 				&skill_update::SourceRef {
 					source: url.to_string(),
 					ref_,
@@ -2452,13 +2448,25 @@ mod tests {
 		url: &str,
 		credential_token: Option<String>,
 	) -> PinnedSourceSession {
+		let repo =
+			std::sync::Arc::new(skill_update::SkillRepository::with_backends(
+				None,
+				std::sync::Arc::new(SessionLocalBackend::new(
+					std::path::PathBuf::new(),
+				)),
+			));
+		let claim = repo
+			.resolve_pinned(
+				&skill_update::SourceRef {
+					source: url.to_string(),
+					ref_: None,
+				},
+				None,
+			)
+			.expect("resolve dummy session");
 		PinnedSourceSession::new(
-			std::sync::Arc::new(skill_update::SkillRepository::new()),
-			aghub_git::RepoSnapshot {
-				commit_oid: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
-				tree_oid: "cafebabecafebabecafebabecafebabeaaaaaaaa".into(),
-				commit_time: None,
-			},
+			repo,
+			claim,
 			url.to_string(),
 			credential_token,
 			vec![],
@@ -6141,7 +6149,7 @@ mod tests {
 		let runtime = tokio::runtime::Runtime::new().unwrap();
 		let error = runtime
 			.block_on(list_branches_for_scan(None, || {
-				Err(aghub_git::GitError::clone_failed("boom"))
+				Err(skill_update::SkillRepoError::Network("boom".to_string()))
 			}))
 			.unwrap_err();
 		assert_eq!(error.status, Status::BadRequest);
@@ -7693,7 +7701,11 @@ mod tests {
 					.expect("scan should list the catalog");
 
 			// The scan pins the resolved COMMIT oid.
-			assert_eq!(snap.commit_oid, COMMIT_OID, "scan pins the commit oid");
+			assert_eq!(
+				snap.commit_oid(),
+				COMMIT_OID,
+				"scan pins the commit oid"
+			);
 
 			// Both skills are listed, addressed by their repo-relative FOLDER.
 			let paths: BTreeSet<String> =
@@ -7759,9 +7771,9 @@ mod tests {
 					Arc::new(NoGixBackend),
 				));
 				let snap = repo
-					.resolve(&github_source(), None)
+					.resolve_pinned(&github_source(), None)
 					.expect("resolve pins the scanned commit");
-				assert_eq!(snap.commit_oid, COMMIT_OID);
+				assert_eq!(snap.commit_oid(), COMMIT_OID);
 
 				let app_data = tempdir().unwrap();
 				let client = Client::tracked(crate::build_rocket(
@@ -7906,10 +7918,10 @@ mod tests {
 
 				// Scan pins COMMIT_A / TREE_A.
 				let snap = repo
-					.resolve(&github_source(), None)
+					.resolve_pinned(&github_source(), None)
 					.expect("resolve pins the scanned commit");
-				assert_eq!(snap.commit_oid, COMMIT_A);
-				assert_eq!(snap.tree_oid, TREE_A);
+				assert_eq!(snap.commit_oid(), COMMIT_A);
+				assert_eq!(snap.snapshot().tree_oid, TREE_A);
 
 				// Branch advances AFTER the scan pinned COMMIT_A.
 				advanced.store(true, Ordering::SeqCst);
@@ -8451,9 +8463,10 @@ mod tests {
 					Some(rest),
 					Arc::new(NoGixBackend),
 				));
-				let snap =
-					repo.resolve(&github_source(), None).expect("resolve");
-				assert_eq!(snap.commit_oid, COMMIT_OID);
+				let snap = repo
+					.resolve_pinned(&github_source(), None)
+					.expect("resolve");
+				assert_eq!(snap.commit_oid(), COMMIT_OID);
 				let project = home.join("proj-b");
 				std::fs::create_dir_all(&project).unwrap();
 				let app_data = tempdir().unwrap();
@@ -8645,9 +8658,10 @@ mod tests {
 				std::collections::BTreeMap<String, String>,
 			) {
 				with_isolated_env(|home, _state| {
-					let snap =
-						repo.resolve(&github_source(), None).expect("resolve");
-					assert_eq!(snap.commit_oid, FB_COMMIT);
+					let snap = repo
+						.resolve_pinned(&github_source(), None)
+						.expect("resolve");
+					assert_eq!(snap.commit_oid(), FB_COMMIT);
 					let project = home.join("proj");
 					std::fs::create_dir_all(&project).unwrap();
 					let app_data = tempdir().unwrap();

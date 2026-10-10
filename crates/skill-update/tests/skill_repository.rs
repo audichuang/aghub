@@ -862,6 +862,92 @@ fn public_list_refused_by_rest_stays_a_clean_error() {
 	assert!(matches!(repo.list(&snap), Err(SkillRepoError::Network(_))));
 }
 
+#[test]
+fn a_claim_lists_and_fetches_on_a_fresh_repository_instance() {
+	let fixture = tempfile::tempdir().unwrap();
+	let music = fixture.path().join("skills/music");
+	fs::create_dir_all(&music).unwrap();
+	fs::write(music.join("SKILL.md"), MUSIC_SKILL_MD).unwrap();
+	let gix = Arc::new(CatalogGix {
+		inner: LocalDirBackend::new(fixture.path()),
+	});
+	let resolver = SkillRepository::with_backends(
+		None,
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+	// A second instance that never resolved anything: list/fetch must work from
+	// the claim alone.
+	let consumer = SkillRepository::with_backends(
+		None,
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+
+	let claim = resolver.resolve_pinned(&github_source(), None).unwrap();
+
+	let catalog = consumer.list_pinned(&claim).unwrap();
+	assert_eq!(catalog.snapshot.commit_oid, claim.commit_oid());
+	assert_eq!(catalog.skills.len(), 1);
+	assert_eq!(catalog.skills[0].skill_path, "skills/music");
+	assert_eq!(catalog.skills[0].name, "music");
+
+	let path = SkillPath::parse("skills/music").unwrap();
+	let fetched = consumer
+		.fetch_pinned(&claim, FetchSelection::Skills(&[path]))
+		.expect("a claim fetches without a prior resolve on this instance");
+	assert_eq!(fetched.oid(), claim.commit_oid());
+	assert_eq!(
+		fs::read(fetched.root.join("skills/music/SKILL.md")).unwrap(),
+		MUSIC_SKILL_MD
+	);
+}
+
+#[test]
+fn pinned_fetch_on_a_fresh_instance_refused_by_rest_budget_is_served_by_gix() {
+	let fixture = music_fixture();
+	let rest = Arc::new(AdmissionDeclinedRest::default());
+	let gix = Arc::new(LocalDirBackend::new(fixture.path()));
+	let resolver = SkillRepository::with_backends(
+		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+	let consumer = SkillRepository::with_backends(
+		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+
+	let claim = resolver.resolve_pinned(&github_source(), None).unwrap();
+	let path = SkillPath::parse("skills/music").unwrap();
+	let fetched = consumer
+		.fetch_pinned(&claim, FetchSelection::Skills(&[path]))
+		.expect("a budget refusal must not fail an update gix can serve");
+
+	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(gix.materialize_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(fetched.oid(), claim.commit_oid());
+	assert_eq!(
+		fs::read(fetched.root.join("skills/music/SKILL.md")).unwrap(),
+		b"gix-served body\n"
+	);
+}
+
+#[test]
+fn branch_listing_walks_the_fetch_fallback_chain() {
+	let gix = Arc::new(ResolveCountingGix::default());
+	let rest: Arc<dyn RepoFetchBackend> =
+		Arc::new(AlwaysFallbackRest::default());
+	let repo = SkillRepository::with_backends(
+		Some(rest),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+
+	let branches = repo.list_branches(&github_source(), None).unwrap();
+
+	assert_eq!(branches, vec!["develop", "main"]);
+	assert_eq!(gix.list_branches_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 0);
+}
+
 /// ONE env lock for this whole test binary.
 ///
 /// `non_github_private_host_reaches_system_git_through_skill_repository`
@@ -1717,6 +1803,8 @@ fn resolve_tip_costs_one_rest_request_and_downloads_no_objects() {
 #[derive(Default)]
 struct ResolveCountingGix {
 	resolve_calls: AtomicUsize,
+	advertise_calls: AtomicUsize,
+	list_branches_calls: AtomicUsize,
 }
 
 impl RepoFetchBackend for ResolveCountingGix {
@@ -1731,6 +1819,22 @@ impl RepoFetchBackend for ResolveCountingGix {
 			tree_oid: TREE_OID.into(),
 			commit_time: None,
 		})
+	}
+	fn advertise_tip(
+		&self,
+		_s: &GitSourceRef,
+		_a: Option<&Credentials>,
+	) -> aghub_git::Result<Option<String>> {
+		self.advertise_calls.fetch_add(1, Ordering::SeqCst);
+		Ok(Some(COMMIT_OID.into()))
+	}
+	fn list_branches(
+		&self,
+		_s: &GitSourceRef,
+		_a: Option<&Credentials>,
+	) -> aghub_git::Result<Vec<String>> {
+		self.list_branches_calls.fetch_add(1, Ordering::SeqCst);
+		Ok(vec!["develop".into(), "main".into()])
 	}
 	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
 		Ok(RepoTree {
@@ -1754,16 +1858,10 @@ impl RepoFetchBackend for ResolveCountingGix {
 	}
 }
 
-/// Off the REST path the tip must come from a ref advertisement, NOT from the gix
-/// backend's `resolve` — that one answers by performing the depth-1 object fetch,
-/// so routing the preflight through it would pay the exact cost the preflight
-/// exists to avoid, on every non-github host.
-///
-/// The remote here is a closed port, so the advertisement attempt fails fast with
-/// no network dependency. Two assertions together pin the path: the gix slot was
-/// never consulted, AND the error is the one our own advertisement wrapper
-/// produces — which a `resolve_tip` that skipped the advertisement and returned a
-/// bare Network error could not produce.
+/// Off the REST path the tip must come from the gix slot's ref advertisement
+/// (`advertise_tip`), NOT from its `resolve` — that one answers by performing the
+/// depth-1 object fetch, so routing the preflight through it would pay the exact
+/// cost the preflight exists to avoid, on every non-github host.
 #[test]
 fn resolve_tip_off_the_rest_path_advertises_and_never_fetches_through_gix() {
 	let gix = Arc::new(ResolveCountingGix::default());
@@ -1776,34 +1874,27 @@ fn resolve_tip_off_the_rest_path_advertises_and_never_fetches_through_gix() {
 		ref_: Some("main".to_string()),
 	};
 
-	let result = repo.resolve_tip(&source, None);
+	let (tip, pinned) = repo.resolve_tip(&source, None).unwrap();
 
+	assert_eq!(tip, COMMIT_OID);
+	assert!(pinned.is_none(), "an advertisement pins no snapshot");
+	assert_eq!(gix.advertise_calls.load(Ordering::SeqCst), 1);
 	assert_eq!(
 		gix.resolve_calls.load(Ordering::SeqCst),
 		0,
 		"the preflight must not resolve through the object-fetching gix backend"
 	);
-	let detail = match &result {
-		Err(SkillRepoError::Network(detail)) => detail.clone(),
-		other => panic!("expected a soft network failure, got {other:?}"),
-	};
-	assert!(
-		detail.contains("Git clone failed"),
-		"the failure must come from the ref advertisement actually being \
-		 attempted (our `discover_remote_refs` wrapper's wording), not from \
-		 short-circuiting to a generic error: {detail}"
-	);
 }
 
-/// A non-https remote is refused BY the advertisement layer, so it never reaches
-/// the gix backend's object-fetching resolve either. Pins that the "no objects"
-/// property does not quietly depend on the remote being reachable.
+/// A non-https remote is refused BY the real gix slot's advertisement
+/// (`advertise_tip` → `resolve_ref_oid`), before any network access. Pins that
+/// the "no objects" property does not quietly depend on the remote being
+/// reachable.
 #[test]
 fn resolve_tip_refuses_a_non_https_remote_without_touching_gix() {
-	let gix = Arc::new(ResolveCountingGix::default());
 	let repo = SkillRepository::with_backends(
 		None,
-		gix.clone() as Arc<dyn RepoFetchBackend>,
+		Arc::new(GixShallow::new()) as Arc<dyn RepoFetchBackend>,
 	);
 	let source = SourceRef {
 		source: "git://127.0.0.1:1/acme".to_string(),
@@ -1812,7 +1903,6 @@ fn resolve_tip_refuses_a_non_https_remote_without_touching_gix() {
 
 	let result = repo.resolve_tip(&source, None);
 
-	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 0);
 	let detail = match &result {
 		Err(SkillRepoError::Network(detail)) => detail.clone(),
 		other => panic!("expected a soft network failure, got {other:?}"),

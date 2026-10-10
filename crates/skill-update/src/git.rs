@@ -70,12 +70,12 @@ impl Fetcher for GitFetcher {
 		token: Option<&str>,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError> {
-		let snap = self
+		let pinned = self
 			.repo
-			.resolve(source_ref, token)
+			.resolve_pinned(source_ref, token)
 			.map_err(skill_repo_to_fetch_error)?;
 		self.repo
-			.fetch(&snap, selection)
+			.fetch_pinned(&pinned, selection)
 			.map_err(skill_repo_to_fetch_error)
 	}
 
