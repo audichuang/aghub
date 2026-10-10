@@ -1574,3 +1574,39 @@ fn test_project_skill_paths() {
 		}
 	}
 }
+
+/// first-dir-wins makes read[0] the skill's `source_path` — the path a delete
+/// removes and `check` hashes — so for every agent and scope the write slot
+/// must be the first read dir, or aghub writes one dir and deletes another.
+#[test]
+fn skill_write_slot_is_first_read_dir() {
+	let mut env = default_env();
+	let home = tempfile::tempdir().unwrap();
+	env.saved.push(("HOME", std::env::var_os("HOME")));
+	std::env::set_var("HOME", home.path());
+	let project = tempfile::tempdir().unwrap();
+
+	let mut checked = 0;
+	for (agent_type, desc) in all_descriptors() {
+		for (scope, root) in [
+			(ResourceScope::GlobalOnly, None),
+			(ResourceScope::ProjectOnly, Some(project.path())),
+		] {
+			let write = desc.skill_write_path(root, scope);
+			let read = desc.skill_read_paths(root, scope);
+			if desc.supports_skill_scope(scope) {
+				assert!(
+					write.is_some(),
+					"{agent_type:?} supports {scope:?} skills but has no write slot"
+				);
+				checked += 1;
+			}
+			assert_eq!(
+				write.as_ref(),
+				read.first(),
+				"{agent_type:?} {scope:?}: write slot must be read[0], got read {read:?}"
+			);
+		}
+	}
+	assert!(checked > 0, "no agent/scope was checked");
+}

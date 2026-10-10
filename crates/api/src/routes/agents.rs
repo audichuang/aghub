@@ -28,19 +28,20 @@ pub fn list_agents(_origin: TrustedLocalOrigin) -> Json<Vec<AgentInfo>> {
 	let agents = registry::iter_all()
 		.map(|d| {
 			let project_root = Path::new("");
-			let project_read = d
-				.project_skill_paths
-				.map(|paths| {
-					(paths.read)(project_root)
-						.into_iter()
-						.map(format_path)
-						.collect()
-				})
-				.unwrap_or_default();
-			let project_write = d
-				.project_skill_paths
-				.and_then(|paths| (paths.write)(project_root))
-				.map(format_path);
+			// The derived list re-appends the universal `.agents/skills` that
+			// a universal agent's own list already ends with; dedup keeps this
+			// DTO field unchanged.
+			let mut project_read_paths =
+				d.project_skill_read_paths(project_root);
+			project_read_paths.dedup();
+			let project_read =
+				project_read_paths.into_iter().map(format_path).collect();
+			let project_write_path = d.skill_write_path(
+				Some(project_root),
+				aghub_core::models::ResourceScope::ProjectOnly,
+			);
+			let mutable_project = project_write_path.is_some();
+			let project_write = project_write_path.map(format_path);
 			let global_read = d
 				.global_skill_read_paths()
 				.into_iter()
@@ -69,7 +70,7 @@ pub fn list_agents(_origin: TrustedLocalOrigin) -> Json<Vec<AgentInfo>> {
 								aghub_core::models::ResourceScope::GlobalOnly,
 							)
 							.is_some(),
-						mutable_project: d.project_skill_paths.is_some(),
+						mutable_project,
 					},
 					mcp: McpCapabilitiesDto {
 						scopes: ScopeSupportDto {
