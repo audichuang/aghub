@@ -90,15 +90,7 @@ pub fn compute_skill_folder_hashes(
 pub fn compute_skill_folder_comparison_hash(
 	dir: &Path,
 ) -> Result<String, HashError> {
-	let files = collect_skill_files(dir)?;
-	let paths: std::collections::HashSet<&str> =
-		files.iter().map(|(path, _)| path.as_str()).collect();
-	let compared = files
-		.iter()
-		.filter(|(path, _)| !generated_python_cache(path, &paths))
-		.cloned()
-		.collect();
-	hash_files(compared)
+	compute_skill_folder_hashes(dir).map(|(_, comparison)| comparison)
 }
 
 fn generated_python_cache(
@@ -564,13 +556,14 @@ mod tests {
 		fs::write(dir.path().join("__pycache__/orphan.cpython-312.pyc"), b"o")
 			.unwrap();
 		let paired = compute_skill_folder_hashes(dir.path()).unwrap();
-		assert_eq!(
-			paired,
-			(
-				compute_skill_folder_hash(dir.path()).unwrap(),
-				compute_skill_folder_comparison_hash(dir.path()).unwrap(),
-			)
-		);
+		assert_eq!(paired.0, compute_skill_folder_hash(dir.path()).unwrap());
+		// Comparison half: every file except the cache of run.py (orphan kept).
+		let compared = collect_skill_files(dir.path())
+			.unwrap()
+			.into_iter()
+			.filter(|(path, _)| path != "__pycache__/run.cpython-312.pyc")
+			.collect();
+		assert_eq!(paired.1, hash_files(compared).unwrap());
 		assert_ne!(paired.0, paired.1);
 	}
 

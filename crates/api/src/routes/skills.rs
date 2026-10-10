@@ -1237,16 +1237,19 @@ pub(crate) async fn install_skill_with_repo(
 					// Name the ref FIRST, then resolve exactly that ref: resolving
 					// HEAD and asking its name in a second call races a default
 					// branch switch (bytes from one branch, lock naming another).
-					let fetch_ref = match recorded.first() {
-						Some(cohort) => cohort.clone(),
-						None => repo_for_task.default_branch(
-							&skill_update::SourceRef {
-								source: source_for_task.clone(),
-								ref_: None,
-							},
-							token_for_task.as_deref(),
-						),
-					};
+					let fetch_ref = skill_update::sources::import_ref(
+						None,
+						&recorded,
+						|| {
+							repo_for_task.default_branch(
+								&skill_update::SourceRef {
+									source: source_for_task.clone(),
+									ref_: None,
+								},
+								token_for_task.as_deref(),
+							)
+						},
+					);
 					let claim = repo_for_task
 						.resolve_pinned(
 							&skill_update::SourceRef {
@@ -1256,11 +1259,6 @@ pub(crate) async fn install_skill_with_repo(
 							token_for_task.as_deref(),
 						)
 						.map_err(InstallFetchError::Repo)?;
-					let ref_name = skill_update::sources::import_ref(
-						None,
-						&recorded,
-						|| fetch_ref.clone(),
-					);
 					let catalog = repo_for_task
 						.list_pinned(&claim)
 						.map_err(InstallFetchError::Repo)?;
@@ -1277,7 +1275,7 @@ pub(crate) async fn install_skill_with_repo(
 							skill_update::FetchSelection::Skills(&paths),
 						)
 						.map_err(InstallFetchError::Repo)?;
-					Ok::<_, InstallFetchError>((selected, fetched, ref_name))
+					Ok::<_, InstallFetchError>((selected, fetched, fetch_ref))
 				}),
 			)
 			.await

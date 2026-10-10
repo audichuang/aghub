@@ -546,6 +546,7 @@ pub(crate) fn source_matches(
 /// (API) and single-scope (CLI) baseline builders so the logic stays DRY. On a
 /// duplicate `skill_path` the LAST inserted scope wins (the merged path inserts
 /// global first, then project — so project shadows global).
+#[allow(clippy::type_complexity)]
 fn insert_scope_entries(
 	baseline: &mut Baseline,
 	source_type: &mut String,
@@ -553,114 +554,98 @@ fn insert_scope_entries(
 	scope: &WriteScope,
 	want: &str,
 ) {
-	match scope {
-		WriteScope::Global => {
-			let matching: Vec<(String, skill::SkillLockEntry)> =
-				skill::get_all_locked_skills()
-					.into_iter()
-					.filter(|(_, entry)| {
-						source_matches(
-							want,
-							&entry.source,
-							Some(&entry.source_url),
-							&entry.source_type,
-						)
-					})
-					.collect();
-			// The verdict module owns the local baseline, exactly as `check` reads it:
-			// managed agents only, a withheld Master hashed from the store, disagreeing
-			// copies reported as ambiguous. An empty set skips the agent scan.
-			let wanted: HashSet<String> = matching
-				.iter()
-				.filter(|(_, entry)| entry.skill_path.is_some())
-				.map(|(name, _)| name.clone())
-				.collect();
-			let local = crate::verdict::local_hashes_with(
-				false,
-				scope.resource_scope(),
-				scope.project_root(),
-				&wanted,
-				|| crate::mutation::scan_agents(scope),
-			);
-			for (name, entry) in matching {
-				if source_type.is_empty() {
-					*source_type = entry.source_type.clone();
-				}
-				if recorded_ref.is_none() {
-					*recorded_ref = entry.ref_name.clone();
-				}
-				if let Some(skill_path) = entry.skill_path.clone() {
-					let local_comparison_hash =
-						local.comparison_hashes.get(&name).cloned();
-					let local_ambiguous = local.ambiguous.contains(&name);
-					baseline.insert(
-						skill_path,
-						BaselineEntry {
-							installed_name: name,
-							stored_hash: entry
-								.content_hash
-								.clone()
-								.unwrap_or_default(),
-							local_comparison_hash,
-							local_ambiguous,
-							scope_label: "global".to_string(),
-							ref_name: entry.ref_name.clone(),
-						},
-					);
-				}
-			}
+	// Each arm only maps its lock to (name, source_type, ref_name, skill_path,
+	// stored_hash) after the source filter; the rest is shared.
+	let (label, matching): (
+		&str,
+		Vec<(String, String, Option<String>, Option<String>, String)>,
+	) = match scope {
+		WriteScope::Global => (
+			"global",
+			skill::get_all_locked_skills()
+				.into_iter()
+				.filter(|(_, e)| {
+					source_matches(
+						want,
+						&e.source,
+						Some(&e.source_url),
+						&e.source_type,
+					)
+				})
+				.map(|(name, e)| {
+					(
+						name,
+						e.source_type,
+						e.ref_name,
+						e.skill_path,
+						e.content_hash.unwrap_or_default(),
+					)
+				})
+				.collect(),
+		),
+		WriteScope::Project { root } => (
+			"project",
+			skill::read_local_lock(Some(root))
+				.skills
+				.into_iter()
+				.filter(|(_, e)| {
+					source_matches(
+						want,
+						&e.source,
+						e.source_url.as_deref(),
+						&e.source_type,
+					)
+				})
+				.map(|(name, e)| {
+					(
+						name,
+						e.source_type,
+						e.ref_name,
+						e.skill_path,
+						e.computed_hash,
+					)
+				})
+				.collect(),
+		),
+	};
+	// The verdict module owns the local baseline, exactly as `check` reads it:
+	// managed agents only, a withheld Master hashed from the store, disagreeing
+	// copies reported as ambiguous. An empty set skips the agent scan.
+	let wanted: HashSet<String> = matching
+		.iter()
+		.filter(|(_, _, _, skill_path, _)| skill_path.is_some())
+		.map(|(name, ..)| name.clone())
+		.collect();
+	let local = crate::verdict::local_hashes_with(
+		false,
+		scope.resource_scope(),
+		scope.project_root(),
+		&wanted,
+		|| crate::mutation::scan_agents(scope),
+	);
+	for (name, entry_source_type, ref_name, skill_path, stored_hash) in matching
+	{
+		if source_type.is_empty() {
+			*source_type = entry_source_type;
 		}
-		WriteScope::Project { root } => {
-			let matching: Vec<(String, skill::LocalSkillLockEntry)> =
-				skill::read_local_lock(Some(root))
-					.skills
-					.into_iter()
-					.filter(|(_, entry)| {
-						source_matches(
-							want,
-							&entry.source,
-							entry.source_url.as_deref(),
-							&entry.source_type,
-						)
-					})
-					.collect();
-			// Same verdict-owned baseline as the global arm above.
-			let wanted: HashSet<String> = matching
-				.iter()
-				.filter(|(_, entry)| entry.skill_path.is_some())
-				.map(|(name, _)| name.clone())
-				.collect();
-			let local = crate::verdict::local_hashes_with(
-				false,
-				scope.resource_scope(),
-				scope.project_root(),
-				&wanted,
-				|| crate::mutation::scan_agents(scope),
+		if recorded_ref.is_none() {
+			*recorded_ref = ref_name.clone();
+		}
+		if let Some(skill_path) = skill_path {
+			baseline.insert(
+				skill_path,
+				BaselineEntry {
+					local_comparison_hash: local
+						.comparison_hashes
+						.get(&name)
+						.cloned(),
+					local_ambiguous: local.ambiguous.contains(&name),
+					installed_name: name,
+					stored_hash,
+					scope_label: label.to_string(),
+					ref_name,
+				},
 			);
-			for (name, entry) in matching {
-				if source_type.is_empty() {
-					*source_type = entry.source_type.clone();
-				}
-				if recorded_ref.is_none() {
-					*recorded_ref = entry.ref_name.clone();
-				}
-				if let Some(skill_path) = entry.skill_path.clone() {
-					let local_comparison_hash =
-						local.comparison_hashes.get(&name).cloned();
-					let local_ambiguous = local.ambiguous.contains(&name);
-					baseline.insert(
-						skill_path,
-						BaselineEntry {
-							installed_name: name,
-							stored_hash: entry.computed_hash,
-							local_comparison_hash,
-							local_ambiguous,
-							scope_label: "project".to_string(),
-							ref_name: entry.ref_name.clone(),
-						},
-					);
-				}
-			}
 		}
 	}
 }
