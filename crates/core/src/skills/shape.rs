@@ -30,8 +30,6 @@ use std::path::{Path, PathBuf};
 
 use aghub_agents::ResourceScope;
 
-use std::str::FromStr;
-
 use crate::skills::linker::{master_store_dir, shared_referrer_dir, Linker};
 use crate::skills::removal::entry_identity;
 
@@ -80,13 +78,8 @@ fn skill_write_dir(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> Option<PathBuf> {
-	match crate::AgentType::from_str(descriptor.id) {
-		Ok(agent_type) => crate::create_adapter(agent_type)
-			.target_skills_dir(project_root, scope),
-		// Defensive: every registry id resolves today. Falling back to the
-		// descriptor bypasses the test path override, same as `classify_paths`.
-		Err(_) => descriptor.skill_write_path(project_root, scope),
-	}
+	crate::create_adapter(descriptor.agent_type)
+		.target_skills_dir(project_root, scope)
 }
 
 /// One agent's skills READ dirs for a scope: its write dir plus every
@@ -100,17 +93,8 @@ fn skill_read_dirs(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> Vec<PathBuf> {
-	match crate::AgentType::from_str(descriptor.id) {
-		Ok(agent_type) => crate::create_adapter(agent_type)
-			.get_skills_paths(project_root, scope),
-		Err(_) => match scope {
-			ResourceScope::GlobalOnly => descriptor.global_skill_read_paths(),
-			ResourceScope::ProjectOnly => project_root
-				.map(|root| descriptor.project_skill_read_paths(root))
-				.unwrap_or_default(),
-			ResourceScope::Both => Vec::new(),
-		},
-	}
+	crate::create_adapter(descriptor.agent_type)
+		.get_skills_paths(project_root, scope)
 }
 
 /// Which root the STORE resolves against for a scope.

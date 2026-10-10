@@ -70,6 +70,7 @@ fn save_mcps(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "zed",
+	agent_type: crate::AgentType::Zed,
 	display_name: "Zed",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),

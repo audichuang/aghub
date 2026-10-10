@@ -156,6 +156,7 @@ fn save_sub_agents(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "opencode",
+	agent_type: crate::AgentType::OpenCode,
 	display_name: "OpenCode",
 	mcp_parse_config: Some(mcp_strategy::PARSE_JSON_OPCODE),
 	mcp_serialize_config: Some(mcp_strategy::SERIALIZE_JSON_OPCODE),

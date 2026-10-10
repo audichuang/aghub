@@ -111,3 +111,19 @@ fn agent_type_all_lists_each_agent_exactly_once() {
 		);
 	}
 }
+
+#[test]
+fn every_descriptor_carries_its_own_agent_type() {
+	// Holders of a descriptor read `agent_type` instead of parsing `id`, so a
+	// module declaring another row's variant would hand that agent's identity
+	// (paths, lock keys, attribution) to every consumer.
+	for agent in AgentType::ALL {
+		assert_eq!(
+			agent.descriptor().agent_type,
+			*agent,
+			"agents/<module>.rs for {agent:?} declares `agent_type: {:?}` — it \
+			 must name its own agent_roster! variant",
+			agent.descriptor().agent_type
+		);
+	}
+}

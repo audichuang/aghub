@@ -123,6 +123,7 @@ fn global_skill_write_path() -> Option<PathBuf> {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "openclaw",
+	agent_type: crate::AgentType::Openclaw,
 	display_name: "OpenClaw",
 	mcp_parse_config: Some(json_openclaw::parse),
 	mcp_serialize_config: Some(json_openclaw::serialize),

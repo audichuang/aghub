@@ -33,6 +33,10 @@ impl AgentAdapter for &'static AgentDescriptor {
 		self.id
 	}
 
+	fn agent_type(&self) -> crate::AgentType {
+		self.agent_type
+	}
+
 	fn sub_agent_dir(
 		&self,
 		project_root: Option<&Path>,

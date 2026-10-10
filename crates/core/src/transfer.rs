@@ -697,9 +697,7 @@ fn protected_targets(
 	}
 	if roster {
 		for descriptor in registry::iter_all() {
-			let Ok(agent) = descriptor.id.parse::<AgentType>() else {
-				continue;
-			};
+			let agent = descriptor.agent_type;
 			if removing.iter().any(|target| target.agent == agent)
 				|| protect.iter().any(|kept| kept.target.agent == agent)
 			{

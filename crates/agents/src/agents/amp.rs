@@ -81,6 +81,7 @@ define_skill_paths! {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "amp",
+	agent_type: crate::AgentType::Amp,
 	display_name: "Amp",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),

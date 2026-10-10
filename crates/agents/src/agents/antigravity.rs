@@ -108,6 +108,7 @@ fn save_sub_agents(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "antigravity",
+	agent_type: crate::AgentType::Antigravity,
 	display_name: "Antigravity",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),

@@ -45,6 +45,7 @@ define_skill_paths! {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "augmentcode",
+	agent_type: crate::AgentType::AugmentCode,
 	display_name: "AugmentCode",
 	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
 	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),

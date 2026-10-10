@@ -33,6 +33,7 @@ fn save_mcps(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "jetbrains-ai",
+	agent_type: crate::AgentType::JetBrainsAi,
 	display_name: "JetBrains AI",
 	mcp_parse_config: None,
 	mcp_serialize_config: None,

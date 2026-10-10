@@ -19,6 +19,7 @@ define_skill_paths! {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "factory",
+	agent_type: crate::AgentType::Factory,
 	display_name: "Factory",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),

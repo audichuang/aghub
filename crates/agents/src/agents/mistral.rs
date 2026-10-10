@@ -63,6 +63,7 @@ define_skill_paths! {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "mistral",
+	agent_type: crate::AgentType::Mistral,
 	display_name: "Mistral Le Chat",
 	mcp_parse_config: Some(toml_mistral::parse),
 	mcp_serialize_config: Some(toml_mistral::serialize),

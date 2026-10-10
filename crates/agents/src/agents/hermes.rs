@@ -77,6 +77,7 @@ fn global_skills_write() -> Option<PathBuf> {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "hermes",
+	agent_type: crate::AgentType::Hermes,
 	display_name: "Hermes",
 	mcp_parse_config: Some(mcp_strategy::parse_yaml_hermes_mcp_servers),
 	mcp_serialize_config: Some(mcp_strategy::serialize_yaml_hermes_mcp_servers),

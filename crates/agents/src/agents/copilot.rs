@@ -160,6 +160,7 @@ fn save_sub_agents(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "copilot",
+	agent_type: crate::AgentType::Copilot,
 	display_name: "GitHub Copilot",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),

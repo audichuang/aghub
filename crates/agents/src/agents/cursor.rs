@@ -43,6 +43,7 @@ fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "cursor",
+	agent_type: crate::AgentType::Cursor,
 	display_name: "Cursor",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),

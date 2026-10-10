@@ -78,6 +78,7 @@ fn project_skill_write_path(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "cline",
+	agent_type: crate::AgentType::Cline,
 	display_name: "Cline",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),

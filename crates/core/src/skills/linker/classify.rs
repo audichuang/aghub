@@ -13,10 +13,8 @@
 //! (`.agents/skills`); granting to one grants to all, so it is computed once
 //! here and carried on the plan, never rediscovered by a consumer.
 
-use crate::AgentType;
 use aghub_agents::{AgentDescriptor, ResourceScope};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 /// Where an agent's Referrer for a skill goes at a scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,14 +107,8 @@ pub fn agent_link_need(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> LinkNeed {
-	let write_dir = match AgentType::from_str(descriptor.id) {
-		Ok(agent_type) => crate::create_adapter(agent_type)
-			.target_skills_dir(project_root, scope),
-		// Defensive fallback for unknown ids (all registry ids resolve via
-		// from_str today); uses descriptor paths directly, intentionally
-		// bypassing the SKILLS_PATH_OVERRIDE test hook.
-		Err(_) => descriptor.skill_write_path(project_root, scope),
-	};
+	let write_dir = crate::create_adapter(descriptor.agent_type)
+		.target_skills_dir(project_root, scope);
 	match write_dir {
 		Some(referrer_dir) => LinkNeed::NeedsLink { referrer_dir },
 		None => LinkNeed::Unsupported,

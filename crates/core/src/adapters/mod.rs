@@ -8,6 +8,7 @@ use std::process::Command;
 /// Trait for adapting different agent configuration formats
 pub trait AgentAdapter: Send + Sync {
 	fn name(&self) -> &'static str;
+	fn agent_type(&self) -> crate::AgentType;
 	fn supports_skill_scope(&self, scope: ResourceScope) -> bool;
 	fn supports_mcp_scope(&self, scope: ResourceScope) -> bool;
 	fn supports_sub_agent_scope(&self, scope: ResourceScope) -> bool;

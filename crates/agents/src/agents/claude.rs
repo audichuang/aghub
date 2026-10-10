@@ -91,6 +91,7 @@ fn save_sub_agents(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "claude",
+	agent_type: crate::AgentType::Claude,
 	display_name: "Claude Code",
 	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
 	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),

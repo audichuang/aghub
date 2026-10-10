@@ -127,6 +127,7 @@ fn save_sub_agents(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "grok",
+	agent_type: crate::AgentType::Grok,
 	display_name: "Grok",
 	mcp_parse_config: Some(mcp_strategy::parse_toml_grok_mcp_servers),
 	mcp_serialize_config: Some(mcp_strategy::serialize_toml_grok_mcp_servers),

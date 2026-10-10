@@ -28,6 +28,7 @@ fn project_skill_write_path(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "warp",
+	agent_type: crate::AgentType::Warp,
 	display_name: "Warp",
 	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
 	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),

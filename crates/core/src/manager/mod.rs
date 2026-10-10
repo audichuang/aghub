@@ -97,14 +97,9 @@ impl ConfigManager {
 		self.adapter.name()
 	}
 
-	/// The [`AgentType`](crate::models::AgentType) backing this manager, resolved
-	/// from the adapter's id. The `unwrap_or` is unreachable: the sole
-	/// `impl AgentAdapter` returns a registry descriptor's `id`, which parses.
+	/// The [`AgentType`](crate::models::AgentType) backing this manager.
 	pub fn agent_type(&self) -> crate::models::AgentType {
-		self.adapter
-			.name()
-			.parse()
-			.unwrap_or(crate::models::AgentType::Claude)
+		self.adapter.agent_type()
 	}
 
 	/// Returns the [`WriteScope`] this manager targets.

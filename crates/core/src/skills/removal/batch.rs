@@ -585,9 +585,7 @@ pub fn find_skill_holders_crediting(
 	let mut holders = Vec::new();
 	let mut unreadable = Vec::new();
 	for descriptor in registry::iter_all() {
-		let Ok(agent) = descriptor.id.parse::<AgentType>() else {
-			continue;
-		};
+		let agent = descriptor.agent_type;
 		// Through the ADAPTER, never the descriptor: the skills-path test
 		// override lives only there, and bypassing it would answer about the
 		// developer's real home instead of the fixture.
@@ -750,39 +748,36 @@ fn check_unreadable_exhaustive(
 	project_root: Option<&Path>,
 ) -> Result<()> {
 	if is_exhaustive && !unreadable.is_empty() {
-		let unreadable_agents: Vec<String> = unreadable
-			.iter()
-			.map(|&id| {
-				if let Ok(agent) = id.parse::<AgentType>() {
-					let dirs = crate::create_adapter(agent)
-						.get_skills_paths(project_root, scope);
-					let failing_dirs: Vec<PathBuf> = dirs
-						.iter()
-						.filter(|d| {
-							matches!(
-								std::fs::read_dir(d),
-								Err(e) if e.kind() != std::io::ErrorKind::NotFound
-							)
-						})
-						.cloned()
-						.collect();
-					let reported_dirs = if failing_dirs.is_empty() {
-						&dirs
-					} else {
-						&failing_dirs
-					};
-					let dirs_str = reported_dirs
-						.iter()
-						.map(|d| d.display().to_string())
-						.collect::<Vec<_>>()
-						.join(", ");
-					if dirs_str.is_empty() {
-						id.to_string()
-					} else {
-						format!("{id} ({dirs_str})")
-					}
+		let unreadable_agents: Vec<String> = registry::iter_all()
+			.filter(|d| unreadable.contains(&d.id))
+			.map(|descriptor| {
+				let id = descriptor.id;
+				let dirs = crate::create_adapter(descriptor.agent_type)
+					.get_skills_paths(project_root, scope);
+				let failing_dirs: Vec<PathBuf> = dirs
+					.iter()
+					.filter(|d| {
+						matches!(
+							std::fs::read_dir(d),
+							Err(e) if e.kind() != std::io::ErrorKind::NotFound
+						)
+					})
+					.cloned()
+					.collect();
+				let reported_dirs = if failing_dirs.is_empty() {
+					&dirs
 				} else {
+					&failing_dirs
+				};
+				let dirs_str = reported_dirs
+					.iter()
+					.map(|d| d.display().to_string())
+					.collect::<Vec<_>>()
+					.join(", ");
+				if dirs_str.is_empty() {
 					id.to_string()
+				} else {
+					format!("{id} ({dirs_str})")
 				}
 			})
 			.collect();

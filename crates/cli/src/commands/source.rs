@@ -932,7 +932,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 						LinkNeed::Unsupported
 					)
 				})
-				.filter_map(|d| d.id.parse::<AgentType>().ok())
+				.map(|d| d.agent_type)
 				.collect()
 		}
 		AgentSelection::List(agents) => agents.clone(),

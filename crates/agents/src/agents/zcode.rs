@@ -51,6 +51,7 @@ fn project_skill_write_path(
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "zcode",
+	agent_type: crate::AgentType::ZCode,
 	display_name: "ZCode",
 	mcp_parse_config: Some(parse_mcp_config),
 	mcp_serialize_config: Some(serialize_mcp_config),

@@ -94,6 +94,7 @@ define_skill_paths! {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "kilocode",
+	agent_type: crate::AgentType::KiloCode,
 	display_name: "KiloCode",
 	mcp_parse_config: Some(json_opencode::parse),
 	mcp_serialize_config: Some(json_opencode::serialize),

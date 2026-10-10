@@ -49,6 +49,7 @@ fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "pi",
+	agent_type: crate::AgentType::Pi,
 	display_name: "Pi Coding Agent",
 	mcp_parse_config: None,
 	mcp_serialize_config: None,

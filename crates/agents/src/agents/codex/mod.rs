@@ -40,6 +40,7 @@ fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "codex",
+	agent_type: crate::AgentType::Codex,
 	display_name: "OpenAI Codex",
 	mcp_parse_config: Some(mcp_strategy::PARSE_TOML),
 	mcp_serialize_config: Some(mcp_strategy::SERIALIZE_TOML),

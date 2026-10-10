@@ -65,6 +65,8 @@ fn no_project_path(_: &Path) -> Option<PathBuf> {
 
 static ADAPTER_TEST_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "adapter-test",
+	// Fixture outside the roster; identity is never read here.
+	agent_type: AgentType::Claude,
 	display_name: "Adapter Test",
 	mcp_parse_config: None,
 	mcp_serialize_config: None,
