@@ -262,6 +262,7 @@ branch.
   unless narrowed (as do `doctor`, `source list` and `source diff`). Most
   mutating commands default to global, but `source sync` is not one of them —
   it requires an explicit `-g` or `-p`.
+- `check --online` measures only copies held by enabled agents, plus a Master no enabled agent links. A copy only a disabled agent reads neither counts as the installed copy nor makes the row `uncheckable`.
 - `apply-update <NAME>` applies one locked update and refuses outright without
   `--yes` — it has no preview. `apply-update --outdated` (every
   `updateAvailable` row in one scope) DOES preview without `--yes`. Use

@@ -43,6 +43,48 @@ pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 	hash_files(collect_skill_files(dir)?)
 }
 
+/// Raw and comparison digests from ONE traversal and ONE read of each file, so
+/// the two can never describe different folder states.
+/// Each digest is byte-identical to its single-purpose function
+/// (`compute_skill_folder_hash` / `compute_skill_folder_comparison_hash`).
+pub fn compute_skill_folder_hashes(
+	dir: &Path,
+) -> Result<(String, String), HashError> {
+	let mut files = collect_skill_files(dir)?;
+	// Same collation as `hash_files`; filtering a sorted list keeps its order.
+	let mut collator = feruca::Collator::new(
+		feruca::Tailoring::Cldr(feruca::Locale::Root),
+		false,
+		true,
+	);
+	files.sort_by(|a, b| collator.collate(&a.0, &b.0));
+	let compared: Vec<bool> = {
+		let paths: std::collections::HashSet<&str> =
+			files.iter().map(|(path, _)| path.as_str()).collect();
+		files
+			.iter()
+			.map(|(path, _)| !generated_python_cache(path, &paths))
+			.collect()
+	};
+
+	let mut raw = Sha256::new();
+	let mut cmp = Sha256::new();
+	let mut read_bytes = 0;
+	for ((rel, abs), compared) in files.iter().zip(compared) {
+		raw.update(rel.as_bytes());
+		if compared {
+			cmp.update(rel.as_bytes());
+		}
+		update_from_file(abs, &mut read_bytes, MAX_TOTAL_BYTES, |chunk| {
+			raw.update(chunk);
+			if compared {
+				cmp.update(chunk);
+			}
+		})?;
+	}
+	Ok((lower_hex(&raw.finalize()), lower_hex(&cmp.finalize())))
+}
+
 /// Compare installed and upstream content without CPython's generated cache.
 /// Never use this digest for locks or security: those retain every file.
 pub fn compute_skill_folder_comparison_hash(
@@ -120,12 +162,9 @@ fn hash_files(
 	let mut read_bytes = 0;
 	for (rel, abs) in &files {
 		hasher.update(rel.as_bytes());
-		update_hasher_from_file(
-			&mut hasher,
-			abs,
-			&mut read_bytes,
-			MAX_TOTAL_BYTES,
-		)?;
+		update_from_file(abs, &mut read_bytes, MAX_TOTAL_BYTES, |chunk| {
+			hasher.update(chunk)
+		})?;
 	}
 	Ok(lower_hex(&hasher.finalize()))
 }
@@ -148,11 +187,11 @@ pub fn collect_skill_files(
 	Ok(files)
 }
 
-fn update_hasher_from_file(
-	hasher: &mut Sha256,
+fn update_from_file(
 	path: &Path,
 	total_bytes: &mut u64,
 	max_total_bytes: u64,
+	mut sink: impl FnMut(&[u8]),
 ) -> Result<(), HashError> {
 	let mut file = std::fs::File::open(path)?;
 	let mut buf = [0_u8; 16 * 1024];
@@ -172,7 +211,7 @@ fn update_hasher_from_file(
 				"max total bytes {max_total_bytes} exceeded"
 			)));
 		}
-		hasher.update(&buf[..read]);
+		sink(&buf[..read]);
 	}
 	Ok(())
 }
@@ -503,12 +542,36 @@ mod tests {
 		let dir = tempdir().unwrap();
 		let file = dir.path().join("large");
 		fs::write(&file, b"12345").unwrap();
-		let mut hasher = Sha256::new();
+		let mut hashed = Vec::new();
 		let mut total_bytes = 0;
 		assert!(matches!(
-			update_hasher_from_file(&mut hasher, &file, &mut total_bytes, 4),
+			update_from_file(&file, &mut total_bytes, 4, |chunk| {
+				hashed.extend_from_slice(chunk)
+			}),
 			Err(HashError::Bounds(_))
 		));
+	}
+
+	#[test]
+	fn paired_hashes_equal_the_single_purpose_digests() {
+		let dir = tempdir().unwrap();
+		fs::create_dir_all(dir.path().join("__pycache__")).unwrap();
+		fs::write(dir.path().join("SKILL.md"), b"skill").unwrap();
+		fs::write(dir.path().join("run.py"), b"print('hi')").unwrap();
+		fs::write(dir.path().join("__pycache__/run.cpython-312.pyc"), b"c")
+			.unwrap();
+		// No orphan.py, so this cache file is NOT excluded from comparison.
+		fs::write(dir.path().join("__pycache__/orphan.cpython-312.pyc"), b"o")
+			.unwrap();
+		let paired = compute_skill_folder_hashes(dir.path()).unwrap();
+		assert_eq!(
+			paired,
+			(
+				compute_skill_folder_hash(dir.path()).unwrap(),
+				compute_skill_folder_comparison_hash(dir.path()).unwrap(),
+			)
+		);
+		assert_ne!(paired.0, paired.1);
 	}
 
 	#[cfg(unix)]

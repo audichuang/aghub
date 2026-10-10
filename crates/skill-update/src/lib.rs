@@ -27,6 +27,8 @@ pub use repository::{
 
 pub mod projection;
 
+pub mod verdict;
+
 pub mod sources;
 
 /// Tokens are HTTPS-only. Passing one to ssh/scp/git would turn transport auth
@@ -43,9 +45,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::verdict::{lock_hash_unknown, Verdict};
 use aghub_core::skills::update::{
-	compare_known_hashes, detect_rename, sanitize_skill_path,
-	SkillUpdateStatus, UncheckableReason,
+	detect_rename, sanitize_skill_path, SkillUpdateStatus, UncheckableReason,
 };
 
 /// The lock→disk resolver for an installed skill's on-disk roots now lives in
@@ -81,6 +83,9 @@ pub struct EntryInput {
 	pub local_hash: Option<String>,
 	/// Hash with generated caches excluded, used for local/upstream comparison.
 	pub local_comparison_hash: Option<String>,
+	/// The managed agents' readable copies disagree; there is no single local
+	/// baseline (`verdict::Verdict::Ambiguous`).
+	pub local_ambiguous: bool,
 	/// Stored repo-level commit OID (`refCommit`) from the lock, when present.
 	/// Drives the tip preflight: an unchanged tip lets the group skip the
 	/// fetch. `None` (project lock / npx / legacy) → never a preflight skip.
@@ -384,25 +389,13 @@ fn probe_skill_hash_in_repo(
 	};
 	let folder = skill_file.parent().unwrap_or(repo_root);
 	let name = skill::parse(&skill_file).ok().map(|skill| skill.name);
-	match (
-		skill::compute_skill_folder_hash(folder),
-		skill::compute_skill_folder_comparison_hash(folder),
-	) {
-		(Ok(hash), Ok(comparison_hash)) => HashProbe::Fresh {
+	match skill::compute_skill_folder_hashes(folder) {
+		Ok((hash, comparison_hash)) => HashProbe::Fresh {
 			hash,
 			comparison_hash,
 			name,
 		},
-		_ => HashProbe::Uncheckable(UncheckableReason::Local),
-	}
-}
-
-fn lock_hash_unknown(stored_hash: Option<&str>) -> bool {
-	match stored_hash {
-		None => true,
-		Some("") => true,
-		Some(hash) if skill::is_placeholder_digest(hash) => true,
-		Some(_) => false,
+		Err(_) => HashProbe::Uncheckable(UncheckableReason::Local),
 	}
 }
 
@@ -523,49 +516,34 @@ fn classify_member_from_probe(
 					};
 				}
 			}
-			let unknown = lock_hash_unknown(member.stored_hash.as_deref());
-			// Compare actual content when readable; stored lock digests remain raw.
-			let (baseline, upstream) = match member
-				.local_comparison_hash
-				.as_deref()
-			{
-				Some(local) => (Some(local), comparison_hash),
-				None if !unknown => (member.stored_hash.as_deref(), fresh_hash),
-				None => (None, fresh_hash),
-			};
-			let Some(baseline) = baseline else {
-				return CheckOutput {
-					key,
-					status: SkillUpdateStatus::Uncheckable {
-						reason: UncheckableReason::Local,
-					},
-					heal_hash: None,
-					heal_oid: None,
-				};
-			};
-			let status =
-				compare_known_hashes(baseline, upstream, upstream_commit_time);
-			// The lock agreeing with upstream does NOT mean the installed copy is
-			// current — it means upstream has not moved since we recorded it. With
-			// no readable local copy (folder deleted, unreadable, or two agent
-			// copies disagreeing) that came out as `UpToDate` for a skill that is
-			// not on disk, which is the one answer a user acts on by doing
-			// nothing. `UpdateAvailable` stays as-is: an update really does exist,
-			// and applying it restores the folder.
-			let status =
-				if status == SkillUpdateStatus::UpToDate
-					&& !unknown && member.local_comparison_hash.is_none()
-				{
+			let status = match crate::verdict::judge(
+				member,
+				fresh_hash,
+				comparison_hash,
+			) {
+				Verdict::UpToDate => SkillUpdateStatus::UpToDate,
+				Verdict::UpdateAvailable { current, available } => {
+					SkillUpdateStatus::UpdateAvailable {
+						current,
+						available,
+						upstream_commit_time,
+					}
+				}
+				// Check's vocabulary has no "ambiguous": both mean no local evidence.
+				Verdict::Uncheckable | Verdict::Ambiguous => {
 					SkillUpdateStatus::Uncheckable {
 						reason: UncheckableReason::Local,
 					}
-				} else {
-					status
-				};
+				}
+			};
 			CheckOutput {
 				key,
 				status,
-				heal_hash: unknown.then(|| member.local_hash.clone()).flatten(),
+				// Heal with the RAW local hash, never the comparison hash
+				// (sources.rs `source_and_update_check_agree_on_python_cache_and_real_changes`).
+				heal_hash: lock_hash_unknown(member.stored_hash.as_deref())
+					.then(|| member.local_hash.clone())
+					.flatten(),
 				heal_oid: None,
 			}
 		}
@@ -1138,6 +1116,7 @@ mod tests {
 			stored_hash: None,
 			local_hash: None,
 			local_comparison_hash: None,
+			local_ambiguous: false,
 			ref_commit: None,
 		}
 	}

@@ -1890,6 +1890,7 @@ mod tests {
 			stored_hash: None,
 			local_hash: None,
 			local_comparison_hash: None,
+			local_ambiguous: false,
 			ref_commit: None,
 		}];
 		let git_fetcher = GitFetcher::new();
@@ -2354,6 +2355,7 @@ mod tests {
 			stored_hash: None,
 			local_hash: None,
 			local_comparison_hash: None,
+			local_ambiguous: false,
 			ref_commit: None,
 		}];
 		let git_fetcher = GitFetcher::new();
@@ -2387,6 +2389,7 @@ mod tests {
 			stored_hash: None,
 			local_hash: None,
 			local_comparison_hash: None,
+			local_ambiguous: false,
 			ref_commit: None,
 		}];
 		let git_fetcher = GitFetcher::new();
