@@ -1204,17 +1204,32 @@ pub(crate) async fn install_skill_with_repo(
 						&scope_for_task,
 						&source_for_task,
 					);
-					let source_ref = skill_update::SourceRef {
-						source: source_for_task.clone(),
-						ref_: recorded.first().cloned().flatten(),
+					// Name the ref FIRST, then resolve exactly that ref: resolving
+					// HEAD and asking its name in a second call races a default
+					// branch switch (bytes from one branch, lock naming another).
+					let fetch_ref = match recorded.first() {
+						Some(cohort) => cohort.clone(),
+						None => repo_for_task.default_branch(
+							&skill_update::SourceRef {
+								source: source_for_task.clone(),
+								ref_: None,
+							},
+							token_for_task.as_deref(),
+						),
 					};
 					let claim = repo_for_task
-						.resolve_pinned(&source_ref, token_for_task.as_deref())
+						.resolve_pinned(
+							&skill_update::SourceRef {
+								source: source_for_task.clone(),
+								ref_: fetch_ref.clone(),
+							},
+							token_for_task.as_deref(),
+						)
 						.map_err(InstallFetchError::Repo)?;
 					let ref_name = skill_update::sources::import_ref(
 						None,
 						&recorded,
-						|| repo_for_task.import_ref(&claim),
+						|| fetch_ref.clone(),
 					);
 					let catalog = repo_for_task
 						.list_pinned(&claim)
@@ -7031,8 +7046,14 @@ mod tests {
 	const COHORT_MAIN: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 	/// Two branches: `develop` (the default) and `main`, each with its own `alpha`.
+	///
+	/// `head_is_main`: the remote's HEAD still serves `main` while its
+	/// advertisement already names `develop` — the default switched between the
+	/// two calls.
 	#[cfg(unix)]
-	struct TwoBranchCatalog;
+	struct TwoBranchCatalog {
+		head_is_main: bool,
+	}
 
 	#[cfg(unix)]
 	fn cohort_skill_md(commit: &str) -> String {
@@ -7051,10 +7072,10 @@ mod tests {
 			src: &aghub_git::SourceRef,
 			_a: Option<&aghub_git::Credentials>,
 		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
-			let oid = if src.ref_.as_deref() == Some("main") {
-				COHORT_MAIN
-			} else {
-				COHORT_DEVELOP
+			let oid = match src.ref_.as_deref() {
+				Some("main") => COHORT_MAIN,
+				None if self.head_is_main => COHORT_MAIN,
+				_ => COHORT_DEVELOP,
 			};
 			Ok(aghub_git::RepoSnapshot {
 				commit_oid: oid.into(),
@@ -7136,7 +7157,9 @@ mod tests {
 			let repo = std::sync::Arc::new(
 				skill_update::SkillRepository::with_backends(
 					None,
-					std::sync::Arc::new(TwoBranchCatalog),
+					std::sync::Arc::new(TwoBranchCatalog {
+						head_is_main: false,
+					}),
 				),
 			);
 			let req = crate::dto::skill::InstallSkillRequest {
@@ -7167,6 +7190,57 @@ mod tests {
 			)
 			.unwrap()
 			.contains("main body"));
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn install_skill_records_the_branch_it_fetched_when_the_default_switches() {
+		with_isolated_env(|home, _state| {
+			// A new source for this scope: no lock, so the default-branch lookup
+			// runs. The remote's HEAD still serves `main` while it names `develop`.
+			let project = home.join("proj");
+			std::fs::create_dir_all(&project).unwrap();
+
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(TwoBranchCatalog {
+						head_is_main: true,
+					}),
+				),
+			);
+			let req = crate::dto::skill::InstallSkillRequest {
+				source: "https://github.com/o/r".to_string(),
+				agents: vec!["claude".to_string()],
+				skills: vec!["alpha".to_string()],
+				scope: "project".to_string(),
+				project_path: Some(project.display().to_string()),
+				install_all: Some(false),
+			};
+			let resp =
+				block_on(super::install_skill_with_repo(req, repo, None))
+					.ok()
+					.expect("install ok")
+					.into_inner();
+			assert!(resp.success, "{:?}", resp.agents);
+
+			// The recorded branch and its commit must match the bytes fetched:
+			// all of `develop`, never `main` bytes under a `develop` name.
+			let lock = skill::read_local_lock(Some(&project));
+			assert_eq!(
+				lock.skills["alpha"].ref_name.as_deref(),
+				Some("develop")
+			);
+			assert_eq!(
+				lock.skills["alpha"].ref_commit.as_deref(),
+				Some(COHORT_DEVELOP)
+			);
+			assert!(std::fs::read_to_string(
+				project.join(".aghub/alpha/SKILL.md")
+			)
+			.unwrap()
+			.contains("develop body"));
 		});
 	}
 

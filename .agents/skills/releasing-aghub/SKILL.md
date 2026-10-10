@@ -99,6 +99,11 @@ gh run watch <ci-run-id> --repo audichuang/aghub --exit-status   # MUST be GREEN
 
 # 1. pick the next version (independent monotonic semver; do NOT hand-edit manifests —
 #    CI seds the tag into Cargo.toml / desktop package.json / tauri.conf.json)
+#    A changed /api/v1 response SHAPE (not an added optional field) needs a MINOR
+#    bump: the remote-VM gate (aghub_remote::ssh::is_version_compatible) pairs any
+#    equal major.minor, so a patch lets an older desktop talk to a newer VM
+#    aghub-api. `git cliff --unreleased` marks such commits [**breaking**].
+#    GET /skills/check-updates (array → {results, healError}, #48) ships in 2.40.0+.
 git tag vX.Y.Z && git push fork vX.Y.Z
 
 # 2. watch it to completion (grab the run id from the line below)

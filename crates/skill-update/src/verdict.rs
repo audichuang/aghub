@@ -27,8 +27,9 @@ pub struct LocalHashes {
 	pub folders_hashed: usize,
 	/// Copies served from the per-root memo instead of a fresh tree read.
 	pub roots_reused: usize,
-	/// Names whose readable copies DISAGREE (comparison hash) across managed
-	/// agents. They carry no hash; the verdict reports them as ambiguous.
+	/// Names whose managed copies DISAGREE (comparison hash), or one of which
+	/// could not be hashed. They carry no hash; the verdict reports them as
+	/// ambiguous.
 	pub ambiguous: HashSet<String>,
 }
 
@@ -102,6 +103,12 @@ pub(crate) fn local_hashes_with(
 					out.folders_hashed += 1;
 					let Ok(pair) = skill::compute_skill_folder_hashes(&root)
 					else {
+						// A managed copy we could not read is local evidence we
+						// cannot vouch for: it vetoes "current" instead of letting
+						// a healthy sibling stand in as the baseline.
+						out.hashes.remove(&skill.name);
+						out.comparison_hashes.remove(&skill.name);
+						out.ambiguous.insert(skill.name);
 						continue;
 					};
 					hash_by_root.insert(root.clone(), pair.clone());
@@ -195,7 +202,7 @@ pub enum Verdict {
 	},
 	/// No local evidence: no readable copy and nothing to say it is current.
 	Uncheckable,
-	/// The managed agents' copies disagree.
+	/// The managed agents' copies disagree, or one could not be read.
 	Ambiguous,
 }
 
@@ -294,6 +301,69 @@ mod tests {
 		);
 		assert!(!hashes.comparison_hashes.contains_key("shared"));
 		assert!(hashes.ambiguous.contains("shared"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn an_unreadable_copy_vetoes_current_instead_of_being_skipped() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let project = tempfile::tempdir().unwrap();
+		for agent in [".claude", ".cursor", ".opencode"] {
+			let root = project.path().join(agent).join("skills/shared");
+			write_skill(&root, "shared");
+			std::fs::write(root.join("run.py"), "print('same')").unwrap();
+			std::fs::create_dir(root.join("__pycache__")).unwrap();
+			std::fs::write(root.join("__pycache__/run.cpython-312.pyc"), agent)
+				.unwrap();
+		}
+		std::fs::write(
+			project.path().join(".cursor/skills/shared/run.py"),
+			"print('edited')",
+		)
+		.unwrap();
+		let pyc = project
+			.path()
+			.join(".cursor/skills/shared/__pycache__/run.cpython-312.pyc");
+		std::fs::set_permissions(&pyc, std::fs::Permissions::from_mode(0o000))
+			.unwrap();
+		if std::fs::read(&pyc).is_ok() {
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+
+		let wanted = HashSet::from(["shared".to_string()]);
+		let out = local_hashes_with(
+			false,
+			ResourceScope::ProjectOnly,
+			Some(project.path()),
+			&wanted,
+			|| {
+				aghub_core::load_all_agents(
+					ResourceScope::ProjectOnly,
+					Some(project.path()),
+				)
+			},
+		);
+		assert!(out.ambiguous.contains("shared"));
+		assert!(!out.comparison_hashes.contains_key("shared"));
+
+		// The lock agrees with upstream, which used to read as UpToDate.
+		let claude_copy = project.path().join(".claude/skills/shared");
+		let upstream_raw =
+			skill::compute_skill_folder_hash(&claude_copy).unwrap();
+		let upstream =
+			skill::compute_skill_folder_comparison_hash(&claude_copy).unwrap();
+		assert_eq!(
+			judge(
+				Some(upstream_raw.as_str()),
+				out.comparison_hashes.get("shared").map(String::as_str),
+				out.ambiguous.contains("shared"),
+				&upstream_raw,
+				&upstream,
+			),
+			Verdict::Ambiguous
+		);
 	}
 
 	/// Write `name` as a plain skill folder under `dir`.
