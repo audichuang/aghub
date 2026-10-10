@@ -63,7 +63,6 @@ impl McpCreateAttribution {
 					if let Some(persisted) = read() {
 						self.written_backings
 							.insert(backing, (persisted, output.clone()));
-						return Ok(output);
 					}
 				}
 				Ok(output)
@@ -523,67 +522,18 @@ pub fn run_mcp_create_batch(
 ) -> Result<AgentBatchView, ConfigError> {
 	let write_scope = scope.resource_scope();
 	let project_root = scope.project_root();
-
-	let unsupported: Vec<(String, String)> = agents
-		.iter()
-		.filter_map(|agent| {
-			mcp_agent_preflight(
-				*agent,
-				write_scope,
-				false,
-				Some(&server.transport),
-			)
-			.err()
-			.map(|reason| (agent.as_str().to_string(), reason))
-		})
-		.collect();
-
-	if !unsupported.is_empty() {
-		return Err(ConfigError::from(BatchUnsupported::new(
-			"MCP",
-			unsupported,
-		)));
-	}
-
 	let mut attribution = McpCreateAttribution::new(&server.name);
-	let mut results = Vec::with_capacity(agents.len());
-
-	for agent in agents {
-		let res = mutate(*agent);
-		let attributed =
-			attribution.attribute(*agent, project_root, write_scope, res);
-		match attributed {
-			Ok(output) => {
-				results.push(AgentOpResultView {
-					agent: agent.as_str().to_string(),
-					ok: true,
-					outcome: None,
-					code: None,
-					output: Some(output),
-					error: None,
-				});
-			}
-			Err(error) => {
-				results.push(AgentOpResultView {
-					agent: agent.as_str().to_string(),
-					ok: false,
-					outcome: None,
-					code: None,
-					output: None,
-					error: Some(error.to_string()),
-				});
-			}
-		}
-	}
-
-	let success_count = results.iter().filter(|r| r.ok).count();
-	let failed_count = results.len() - success_count;
-
-	Ok(AgentBatchView {
-		success_count,
-		failed_count,
-		results,
-	})
+	run_mcp_agent_mutation(
+		agents,
+		write_scope,
+		false,
+		Some(&server.transport),
+		|agent| {
+			attribution
+				.attribute(agent, project_root, write_scope, mutate(agent))
+				.map_err(|error| error.to_string())
+		},
+	)
 }
 
 /// Run one skill mutation across agents with scope capability preflight owned

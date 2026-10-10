@@ -204,20 +204,17 @@ pub fn install_local_skill(
 		is_already_installed,
 	)?;
 
-	if let Some(canonical) = adoption.canonical.as_ref() {
-		if canonical.exists()
-			&& req.install_name.is_some()
-			&& effective_name != source_name
-		{
-			return Err(ConfigError::resource_exists("skill", effective_name));
-		}
-	}
-
 	let canonical_dir = adoption.canonical.as_ref().ok_or_else(|| {
 		ConfigError::ValidationFailed(format!(
 			"Master for skill '{effective_name}' could not be resolved"
 		))
 	})?;
+	if canonical_dir.exists()
+		&& req.install_name.is_some()
+		&& effective_name != source_name
+	{
+		return Err(ConfigError::resource_exists("skill", effective_name));
+	}
 	let master_exists = canonical_dir.exists();
 	let master_hash = if master_exists {
 		Some(crate::skills::adoption::hash_master(
@@ -291,11 +288,6 @@ pub fn install_local_skill(
 	}
 
 	if wrote_master && effective_name != source_name {
-		let canonical_dir = adoption.canonical.as_ref().ok_or_else(|| {
-			ConfigError::ValidationFailed(format!(
-				"Master for skill '{effective_name}' could not be resolved"
-			))
-		})?;
 		if let Err(e) = crate::manager::skill::rewrite_master_skill_name(
 			canonical_dir,
 			effective_name,
@@ -313,11 +305,6 @@ pub fn install_local_skill(
 
 	// Parse the materialized Master before the lock write, so a Master that
 	// does not parse rolls back without leaving a ghost lock entry.
-	let canonical_dir = adoption.canonical.as_ref().ok_or_else(|| {
-		ConfigError::ValidationFailed(format!(
-			"Master for skill '{effective_name}' could not be resolved"
-		))
-	})?;
 	let installed_skill = match crate::manager::skill::master_on_disk(
 		canonical_dir,
 		effective_name,
@@ -342,19 +329,13 @@ pub fn install_local_skill(
 	let wrote_lock = wrote_master || (is_adoption && covered_any);
 
 	if wrote_lock {
-		let canonical = adoption.canonical.as_ref().ok_or_else(|| {
-			ConfigError::ValidationFailed(format!(
-				"Master for skill '{effective_name}' could not be resolved before the \
-				 source lock write; the lock was not written"
-			))
-		})?;
 		crate::skills::adoption::ensure_link_free_master(
 			effective_name,
-			canonical,
+			canonical_dir,
 		)?;
 		// No re-hash here: a fresh Master is the copier's output of source_root (which drops npx-excluded files), and an adopted Master was already hash-matched above under the same guard.
 		let lock_source_dir = if effective_name != source_name {
-			canonical.as_path()
+			canonical_dir.as_path()
 		} else {
 			&source_root
 		};
