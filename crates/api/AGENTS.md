@@ -30,7 +30,7 @@ All under `/api/v1/`. **Source of truth: `lib.rs` + `routes/*.rs`.** Module → 
 | --------------- | -------------------------------------------------------------------------------------------------------- |
 | `agents`        | list agents + availability                                                                               |
 | `mcps`          | per-agent MCP CRUD, all-agents list, transfer/reconcile, multi-agent batch create (`core::batch` policy) |
-| `skills`        | skill CRUD/import/transfer/reconcile/by-path/prune/install/content/tree/lock/git                         |
+| `skills`        | skill CRUD/import/transfer/reconcile/by-path/prune/install/content/tree/lock/git/health                  |
 | `skills_update` | check-updates, apply-update, accept-rename                                                               |
 | `sources`       | source list + diff                                                                                       |
 | `coverage`      | static per-agent capability matrix (`classify_all`) — reads no master, names no skill                    |

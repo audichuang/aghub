@@ -601,6 +601,51 @@ pub fn list_withheld_skills(
 	Ok(Json(masters.iter().map(SkillResponse::from).collect()))
 }
 
+/// Query for `GET /skills/health`: `scope`/`project_root` as `ScopeParams`,
+/// plus the optional `agents` roster (same parsing as CLI `-a`, `all` allowed).
+#[derive(rocket::FromForm)]
+pub struct SkillHealthParams {
+	scope: Option<String>,
+	project_root: Option<String>,
+	agents: Option<String>,
+}
+
+/// Read-only skill health: the same rows as CLI `doctor --json`, from the same
+/// core module (`skills::health::report`). `agents` present = the referrer
+/// audit (CLI `--verify-links -a <agents>`). An unreadable lock fails the
+/// request — `report` probes it fail-closed.
+#[get("/skills/health?<params..>")]
+pub fn skills_health(
+	_origin: TrustedLocalOrigin,
+	params: SkillHealthParams,
+) -> ApiResult<Vec<aghub_core::skills::health::DoctorRow>> {
+	use aghub_core::models::AgentSelection;
+	let resolved = ScopeParams {
+		scope: params.scope,
+		project_root: params.project_root,
+	}
+	.resolve()?;
+	let roster = match params.agents.as_deref() {
+		None => None,
+		Some(raw) => Some(
+			match AgentSelection::parse(raw).map_err(|error| {
+				ApiError::new(Status::BadRequest, error, "INVALID_PARAM")
+			})? {
+				AgentSelection::All => AgentType::ALL.to_vec(),
+				AgentSelection::List(agents) => agents,
+			},
+		),
+	};
+	let mut rows = Vec::new();
+	for scope in crate::routes::sources::scopes_for(&resolved) {
+		rows.extend(
+			aghub_core::skills::health::report(&scope, roster.as_deref())
+				.map_err(ApiError::from)?,
+		);
+	}
+	Ok(Json(rows))
+}
+
 /// Holders of a skill split into managed and unmanaged agents.
 #[get("/skills/<name>/holders?<scope..>")]
 pub fn get_skill_holders(
@@ -3154,6 +3199,118 @@ mod tests {
 		}
 		let _restore = Restore(old);
 		f(data.path())
+	}
+
+	/// `GET /skills/health` answers exactly what core `report` answers, and the
+	/// answer itself is pinned (not just two equal empties).
+	#[cfg(unix)]
+	#[test]
+	fn skills_health_matches_core_report_for_unsanitized_name() {
+		with_isolated_env(|home, state| {
+			with_pinned_data_dir(|_data| {
+				let master = home.join(".aghub/pdf-tools");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: PDF Tools\ndescription: PDF manipulation\n---\n",
+				)
+				.unwrap();
+				let claude_skills = home.join(".claude/skills");
+				std::fs::create_dir_all(&claude_skills).unwrap();
+				std::os::unix::fs::symlink(
+					&master,
+					claude_skills.join("pdf-tools"),
+				)
+				.unwrap();
+				let lock_dir = state.join("skills");
+				std::fs::create_dir_all(&lock_dir).unwrap();
+				std::fs::write(
+					lock_dir.join(".skill-lock.json"),
+					r#"{"version":3,"skills":{"PDF Tools":{"source":"owner/pdf-tools","sourceType":"github","sourceUrl":"https://github.com/owner/pdf-tools","skillPath":"SKILL.md","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}"#,
+				)
+				.unwrap();
+
+				let app_data = tempdir().unwrap();
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						app_data.path().to_path_buf(),
+					),
+				)
+				.expect("client");
+				let response = client
+					.get("/api/v1/skills/health?scope=global&agents=claude")
+					.dispatch();
+				assert_eq!(response.status(), Status::Ok);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.unwrap();
+
+				let expected = serde_json::to_value(
+					aghub_core::skills::health::report(
+						&WriteScope::Global,
+						Some(&[AgentType::Claude]),
+					)
+					.unwrap(),
+				)
+				.unwrap();
+				assert_eq!(body, expected);
+
+				assert_eq!(body.as_array().map(Vec::len), Some(1));
+				assert_eq!(body[0]["skill"], "PDF Tools");
+				assert_eq!(body[0]["health"], "ok");
+				assert_eq!(body[0]["master"], "dir");
+				assert_eq!(body[0]["linkAudit"]["state"], "verified");
+			})
+		})
+	}
+
+	/// An unreadable lock must fail the request (fail-closed in core `report`),
+	/// not answer 200 from the master directory alone, and the error must not
+	/// leak an absolute path.
+	#[test]
+	fn skills_health_fails_on_unreadable_lock_without_leaking_path() {
+		with_isolated_env(|home, state| {
+			with_pinned_data_dir(|_data| {
+				let master = home.join(".aghub/pdf-tools");
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					"---\nname: pdf-tools\ndescription: PDF manipulation\n---\n",
+				)
+				.unwrap();
+				let lock_dir = state.join("skills");
+				std::fs::create_dir_all(&lock_dir).unwrap();
+				std::fs::write(
+					lock_dir.join(".skill-lock.json"),
+					"<<<<<<< HEAD\nnot json\n",
+				)
+				.unwrap();
+
+				let app_data = tempdir().unwrap();
+				let client = rocket::local::blocking::Client::tracked(
+					crate::build_rocket(
+						rocket::Config::default(),
+						app_data.path().to_path_buf(),
+					),
+				)
+				.expect("client");
+				let response =
+					client.get("/api/v1/skills/health?scope=global").dispatch();
+				assert_eq!(response.status(), Status::InternalServerError);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.unwrap();
+				assert_eq!(body["code"], "IO_ERROR");
+
+				let error = body["error"].as_str().expect("error string");
+				assert!(!error.contains(&home.display().to_string()));
+				assert!(!error.contains(&state.display().to_string()));
+				assert!(!error.contains("/skills/.skill-lock.json"));
+			})
+		})
 	}
 
 	#[cfg(unix)]

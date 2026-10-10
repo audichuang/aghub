@@ -32,7 +32,7 @@ use skill_update::{FetchError, FetchedRepo, Fetcher, GitFetcher, SourceRef};
 /// Resolve a request scope into the domain's per-scope list: `Global` →
 /// `[Global]`, `Project` → `[Project]`, `All` → `[Global]` plus the project
 /// scope when a project root is known.
-fn scopes_for(resolved: &ResolvedScope) -> Vec<WriteScope> {
+pub(crate) fn scopes_for(resolved: &ResolvedScope) -> Vec<WriteScope> {
 	match resolved {
 		ResolvedScope::Global => vec![WriteScope::Global],
 		ResolvedScope::Project { root } => {
