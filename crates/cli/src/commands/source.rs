@@ -996,12 +996,10 @@ fn sync(args: SyncArgs) -> Result<()> {
 			)
 		})?;
 	// Record the ref the plan fetched: the shared decision (`sources::import_ref`).
-	let lock_source = skill::InstallLockSource {
-		source: resolved.lock_source(),
-		source_type: resolved.source_type.as_str().to_string(),
-		source_url: resolved.source_url.clone(),
-		ref_name: sync_plan.git_ref.clone(),
-	};
+	let lock_source = skill_update::fetched_install::install_lock_source(
+		&resolved,
+		sync_plan.git_ref.clone(),
+	);
 	let fetched = skill_update::mutation::FetchedSource::from_repo(repo);
 
 	if !args.yes {

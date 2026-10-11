@@ -409,18 +409,6 @@ fn file_install_source(
 	)))
 }
 
-fn install_lock_source_from_resolved(
-	source: &aghub_git::ResolvedRemoteSource,
-	ref_name: Option<String>,
-) -> skill::InstallLockSource {
-	skill::InstallLockSource {
-		source: source.lock_source(),
-		source_type: source.source_type.as_str().to_string(),
-		source_url: source.source_url.clone(),
-		ref_name,
-	}
-}
-
 /// Test-only full-clone helper for the `file://` install fallback. Production
 /// install goes through [`SkillRepository`] partial fetch instead.
 #[cfg(test)]
@@ -1160,43 +1148,29 @@ pub(crate) async fn install_skill_with_repo(
 	// Raw agent ids are part of the predictable target preflight. If any id is
 	// unknown, attribute the rejection to every requested agent in request order
 	// and stop before source materialization or install writes.
-	let parsed_agents = req
-		.agents
-		.iter()
-		.map(|agent_str| {
-			(
-				agent_str.clone(),
-				agent_str
-					.parse::<AgentType>()
-					.map_err(|_| format!("Unknown agent '{agent_str}'")),
-			)
-		})
-		.collect::<Vec<_>>();
-	if parsed_agents.iter().any(|(_, agent)| agent.is_err()) {
-		let agents: Vec<GitInstallResultEntry> = parsed_agents
-			.into_iter()
-			.map(|(agent, parsed)| GitInstallResultEntry {
-				name: String::new(),
-				agent,
+	let agents = match skill_update::fetched_install::InstallAgents::parse(
+		&req.agents,
+	) {
+		Ok(agents) => agents,
+		Err(rejection) => {
+			let agents: Vec<GitInstallResultEntry> = rejection
+				.rows(&[String::new()])
+				.into_iter()
+				.map(install_row_entry)
+				.collect();
+			log_install_results("skills/install", resource_scope, &agents);
+			return Ok(Json(InstallSkillResponse {
 				success: false,
-				error: Some(parsed.err().unwrap_or_else(|| {
-					"Another requested agent is invalid; nothing was written"
-						.to_string()
-				})),
-			})
-			.collect();
-		log_install_results("skills/install", resource_scope, &agents);
-		return Ok(Json(InstallSkillResponse {
-			success: false,
-			agents,
-		}));
-	}
-	let target_agents = parsed_agents
-		.into_iter()
-		.filter_map(|(agent_str, agent)| {
-			agent.ok().map(|agent| (agent_str, agent))
-		})
-		.collect::<Vec<_>>();
+				agents,
+			}));
+		}
+	};
+	let target_agents: Vec<(String, AgentType)> = agents
+		.ids()
+		.iter()
+		.cloned()
+		.zip(agents.types().iter().copied())
+		.collect();
 
 	// Owns the materialized source through the install loop. The production
 	// variant keeps root + immutable commit identity behind one deep interface.
@@ -1309,7 +1283,9 @@ pub(crate) async fn install_skill_with_repo(
 				.collect();
 
 			let lock_source =
-				install_lock_source_from_resolved(&resolved, ref_name);
+				skill_update::fetched_install::install_lock_source(
+					&resolved, ref_name,
+				);
 			(
 				lock_source,
 				items,
@@ -1399,8 +1375,7 @@ pub(crate) async fn install_skill_with_repo(
 		}
 	};
 
-	let agent_types: Vec<AgentType> =
-		target_agents.iter().map(|(_, a)| *a).collect();
+	let agent_types: Vec<AgentType> = agents.types().to_vec();
 
 	// The install loop below is fully synchronous and takes the mutation lock per
 	// skill, so it runs on the blocking pool. Everything above — scope parsing,
@@ -1958,34 +1933,15 @@ fn forwarded_token_for_url(
 	SourceAuth::forwarded_for_scan(forwarded, url)
 }
 
-/// `(valid (raw, parsed), invalid (raw, message))`, both in request order.
-type InstallAgentPartition = (Vec<(String, AgentType)>, Vec<(String, String)>);
-
-/// Partition `agents` (raw strings from the request) into valid/invalid
-/// entries in request order. Invalid entries carry the error message to
-/// surface back to the caller.
-///
-/// Valid means the id parses. Scope support is intentionally NOT filtered
-/// here: the deep install seam must see every known requested target so its
-/// all-target preflight can reject a mixed list before writing the Master.
-/// Invalid means an unknown raw agent id.
-fn partition_install_agents_in_request_order(
-	agents: &[String],
-) -> InstallAgentPartition {
-	let mut valid: Vec<(String, AgentType)> = Vec::new();
-	let mut invalid: Vec<(String, String)> = Vec::new();
-	for agent_str in agents {
-		match agent_str.parse::<AgentType>() {
-			Ok(agent_type) => valid.push((agent_str.clone(), agent_type)),
-			Err(_) => {
-				invalid.push((
-					agent_str.clone(),
-					format!("Unknown agent '{agent_str}'"),
-				));
-			}
-		}
+fn install_row_entry(
+	r: skill_update::fetched_install::InstallRow,
+) -> GitInstallResultEntry {
+	GitInstallResultEntry {
+		name: r.name,
+		agent: r.agent,
+		success: r.success,
+		error: r.error,
 	}
-	(valid, invalid)
 }
 
 #[post("/skills/git/install", data = "<body>")]
@@ -2031,7 +1987,8 @@ pub async fn git_install_skills(
 			skill_update::mutation::SKILL_SOURCE_MISMATCH_CODE,
 		));
 	}
-	let source = install_lock_source_from_resolved(&resolved, ref_name);
+	let source =
+		skill_update::fetched_install::install_lock_source(&resolved, ref_name);
 	// Only a ref taken from the scope's cohort is re-checked under the lock.
 	let expected_ref: Option<Option<String>> = session
 		.requested_branch()
@@ -2068,37 +2025,24 @@ pub async fn git_install_skills(
 
 	let mut results = Vec::new();
 
-	let (valid_agents, invalid_agents) =
-		partition_install_agents_in_request_order(&req.agents);
-
-	if !invalid_agents.is_empty() {
-		for skill_path in &req.skill_paths {
-			for agent_str in &req.agents {
-				let error = invalid_agents
-					.iter()
-					.find(|(invalid, _)| invalid == agent_str)
-					.map(|(_, error)| error.clone())
-					.unwrap_or_else(|| {
-						"Another requested agent is invalid; nothing was written"
-							.to_string()
-					});
-				results.push(GitInstallResultEntry {
-					name: skill_path.clone(),
-					agent: agent_str.clone(),
-					success: false,
-					error: Some(error),
-				});
-			}
+	let agents = match skill_update::fetched_install::InstallAgents::parse(
+		&req.agents,
+	) {
+		Ok(agents) => agents,
+		Err(rejection) => {
+			let results: Vec<GitInstallResultEntry> = rejection
+				.rows(&req.skill_paths)
+				.into_iter()
+				.map(install_row_entry)
+				.collect();
+			// This remains a successfully handled request, so retain the route's
+			// exclusive pinned-session consumption semantics.
+			session.consume();
+			log_install_results("skills/git/install", resource_scope, &results);
+			return Ok(Json(GitInstallResponse { results }));
 		}
-		// This remains a successfully handled request, so retain the route's
-		// exclusive pinned-session consumption semantics.
-		session.consume();
-		log_install_results("skills/git/install", resource_scope, &results);
-		return Ok(Json(GitInstallResponse { results }));
-	}
-
-	let target_agents: Vec<AgentType> =
-		valid_agents.iter().map(|(_, agent)| *agent).collect();
+	};
+	let target_agents: Vec<AgentType> = agents.types().to_vec();
 
 	// The install loop takes the mutation lock per skill and is synchronous, so it
 	// runs on the blocking pool; the fetch above stays on the async worker.
@@ -2120,8 +2064,8 @@ pub async fn git_install_skills(
 				},
 			) {
 				Ok(report) => {
-					for ((agent_str, _), agent_result) in
-						valid_agents.iter().zip(report.agent_results)
+					for (agent_str, agent_result) in
+						agents.ids().iter().zip(report.agent_results)
 					{
 						let success = agent_result.error.is_none();
 						results.push(GitInstallResultEntry {
@@ -2143,7 +2087,7 @@ pub async fn git_install_skills(
 				// route, where `install_git_skill_*` errors became failure entries.
 				Err(error) => {
 					let message = fetched_install_error_message(error);
-					for (agent_str, _) in &valid_agents {
+					for agent_str in agents.ids() {
 						results.push(GitInstallResultEntry {
 							name: skill_path.clone(),
 							agent: agent_str.clone(),
@@ -8391,27 +8335,30 @@ mod tests {
 		let req_agents = vec!["claude".to_string(), "opencode".to_string()];
 		let resource_scope = ResourceScope::ProjectOnly;
 
-		let (valid, invalid) =
-			partition_install_agents_in_request_order(&req_agents);
+		let agents =
+			skill_update::fetched_install::InstallAgents::parse(&req_agents)
+				.expect("known agents parse");
+		assert_eq!(agents.ids(), &req_agents[..]);
 
-		// also verify unknown agents go to invalid
-		let (v2, inv2) = partition_install_agents_in_request_order(&[
+		// also verify unknown agents are rejected
+		let rejection = skill_update::fetched_install::InstallAgents::parse(&[
 			"claude".to_string(),
 			"not-a-real-agent".to_string(),
-		]);
-		assert_eq!(v2.len(), 1, "only claude is valid");
-		assert_eq!(inv2.len(), 1, "not-a-real-agent is invalid");
+		])
+		.expect_err("unknown agent must be rejected");
+		let rows = rejection.rows(&[String::new()]);
+		assert_eq!(rows.len(), 2);
 		assert!(
-			inv2[0].1.contains("Unknown agent"),
-			"wrong error: {}",
-			inv2[0].1,
+			rows[1].error.as_deref().unwrap().contains("Unknown agent"),
+			"wrong error: {:?}",
+			rows[1].error,
 		);
 
-		assert!(invalid.is_empty(), "unexpected invalids: {:?}", invalid);
-		assert_eq!(valid.len(), 2);
-		assert_eq!(valid[0].0, "claude");
-		assert_eq!(valid[1].0, "opencode");
-
+		let valid: Vec<(&String, AgentType)> = agents
+			.ids()
+			.iter()
+			.zip(agents.types().iter().copied())
+			.collect();
 		let target_agents: Vec<AgentType> =
 			valid.iter().map(|(_, a)| *a).collect();
 

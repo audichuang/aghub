@@ -16,6 +16,8 @@
 mod git;
 pub use git::{GitFetcher, GitRefResolver};
 
+pub mod fetched_install;
+
 pub mod mutation;
 
 mod repository;
