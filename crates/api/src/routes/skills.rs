@@ -8040,54 +8040,6 @@ mod tests {
 		});
 	}
 
-	/// A one-skill git repo at `work`, built with gix (no `git` subprocess).
-	#[cfg(unix)]
-	fn write_single_skill_git_fixture(work: &std::path::Path) {
-		use gix::objs::tree::{Entry, EntryKind};
-
-		const SKILL_MD: &[u8] = b"---\nname: my-skill\ndescription: d\n---\n";
-		let skill_dir = work.join("my-skill");
-		std::fs::create_dir_all(&skill_dir).unwrap();
-		std::fs::write(skill_dir.join("SKILL.md"), SKILL_MD).unwrap();
-
-		let repo = gix::init(work).unwrap();
-		let blob_id = repo.write_blob(SKILL_MD).unwrap().detach();
-		// Subtree: my-skill/ containing SKILL.md
-		let subtree_id = repo
-			.write_object(&gix::objs::Tree {
-				entries: vec![Entry {
-					mode: EntryKind::Blob.into(),
-					filename: "SKILL.md".into(),
-					oid: blob_id,
-				}],
-			})
-			.unwrap()
-			.detach();
-		// Root tree containing the my-skill/ subdirectory
-		let tree_id = repo
-			.write_object(&gix::objs::Tree {
-				entries: vec![Entry {
-					mode: EntryKind::Tree.into(),
-					filename: "my-skill".into(),
-					oid: subtree_id,
-				}],
-			})
-			.unwrap()
-			.detach();
-		let sig =
-			gix::actor::SignatureRef::from_bytes(b"t <t@t> 1000000000 +0000")
-				.unwrap();
-		repo.commit_as(
-			sig,
-			sig,
-			"HEAD",
-			"init",
-			tree_id,
-			std::iter::empty::<gix::ObjectId>(),
-		)
-		.unwrap();
-	}
-
 	#[cfg(unix)]
 	#[test]
 	fn install_skill_returns_per_agent_rows_symlink_only() {
@@ -8096,19 +8048,24 @@ mod tests {
 			// hosts with no reachable credential backend (CI runners).
 			let _keyring =
 				crate::credentials::test_hooks::MockKeyringBackend::new();
-			let work = home.join("work");
-			write_single_skill_git_fixture(&work);
 
 			let req = InstallSkillRequest {
-				source: format!("file://{}", work.display()),
+				source: "https://github.com/o/r".to_string(),
 				agents: vec!["claude".to_string()],
-				skills: vec!["my-skill".to_string()],
+				skills: vec!["alpha".to_string()],
 				scope: "global".to_string(),
 				project_path: None,
 				install_all: Some(false),
 			};
-			let repo =
-				std::sync::Arc::new(skill_update::SkillRepository::new());
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(TwoBranchCatalog {
+						head_is_main: false,
+						repin_root: None,
+					}),
+				),
+			);
 			let resp = block_on(install_skill_route_with_repo(
 				req,
 				ForwardedGitTokens::default(),
@@ -8123,7 +8080,7 @@ mod tests {
 				"per-agent rows present"
 			);
 			assert!(
-				home.join(".aghub/my-skill/SKILL.md").exists(),
+				home.join(".aghub/alpha/SKILL.md").exists(),
 				"master materialized (symlink-only)"
 			);
 		});
@@ -8201,23 +8158,28 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn install_skill_reports_success_on_idempotent_reinstall() {
-		with_isolated_env(|home, _state| {
+		with_isolated_env(|_home, _state| {
 			let _keyring =
 				crate::credentials::test_hooks::MockKeyringBackend::new();
-			let work = home.join("work");
-			write_single_skill_git_fixture(&work);
 
 			let install = || {
 				let req = InstallSkillRequest {
-					source: format!("file://{}", work.display()),
+					source: "https://github.com/o/r".to_string(),
 					agents: vec!["claude".to_string()],
-					skills: vec!["my-skill".to_string()],
+					skills: vec!["alpha".to_string()],
 					scope: "global".to_string(),
 					project_path: None,
 					install_all: Some(false),
 				};
-				let repo =
-					std::sync::Arc::new(skill_update::SkillRepository::new());
+				let repo = std::sync::Arc::new(
+					skill_update::SkillRepository::with_backends(
+						None,
+						std::sync::Arc::new(TwoBranchCatalog {
+							head_is_main: false,
+							repin_root: None,
+						}),
+					),
+				);
 				block_on(install_skill_route_with_repo(
 					req,
 					ForwardedGitTokens::default(),
@@ -8361,71 +8323,25 @@ mod tests {
 				crate::credentials::test_hooks::MockKeyringBackend::new();
 			let proj = home.join("proj");
 			std::fs::create_dir_all(proj.join(".claude")).unwrap();
-			let work = home.join("work");
-			let skill_dir = work.join("my-skill");
-			std::fs::create_dir_all(&skill_dir).unwrap();
-			std::fs::write(
-				skill_dir.join("SKILL.md"),
-				"---\nname: my-skill\ndescription: d\n---\n",
-			)
-			.unwrap();
-			// Build the git fixture with gix (no `git` subprocess).
-			{
-				use gix::objs::tree::{Entry, EntryKind};
-				let repo = gix::init(&work).unwrap();
-				let blob_id = repo
-					.write_blob(b"---\nname: my-skill\ndescription: d\n---\n")
-					.unwrap()
-					.detach();
-				// Subtree: my-skill/ containing SKILL.md
-				let subtree_id = repo
-					.write_object(&gix::objs::Tree {
-						entries: vec![Entry {
-							mode: EntryKind::Blob.into(),
-							filename: "SKILL.md".into(),
-							oid: blob_id,
-						}],
-					})
-					.unwrap()
-					.detach();
-				// Root tree containing the my-skill/ subdirectory
-				let tree_id = repo
-					.write_object(&gix::objs::Tree {
-						entries: vec![Entry {
-							mode: EntryKind::Tree.into(),
-							filename: "my-skill".into(),
-							oid: subtree_id,
-						}],
-					})
-					.unwrap()
-					.detach();
-				let sig = gix::actor::SignatureRef::from_bytes(
-					b"t <t@t> 1000000000 +0000",
-				)
-				.unwrap();
-				repo.commit_as(
-					sig,
-					sig,
-					"HEAD",
-					"init",
-					tree_id,
-					std::iter::empty::<gix::ObjectId>(),
-				)
-				.unwrap();
-			}
-
 			let resp = {
 				let _cwd = CwdGuard::change_to(home);
 				let req = InstallSkillRequest {
-					source: format!("file://{}", work.display()),
+					source: "https://github.com/o/r".to_string(),
 					agents: vec!["claude".to_string()],
-					skills: vec!["my-skill".to_string()],
+					skills: vec!["alpha".to_string()],
 					scope: "project".to_string(),
 					project_path: Some("proj".to_string()),
 					install_all: Some(false),
 				};
-				let repo =
-					std::sync::Arc::new(skill_update::SkillRepository::new());
+				let repo = std::sync::Arc::new(
+					skill_update::SkillRepository::with_backends(
+						None,
+						std::sync::Arc::new(TwoBranchCatalog {
+							head_is_main: false,
+							repin_root: None,
+						}),
+					),
+				);
 				block_on(install_skill_route_with_repo(
 					req,
 					ForwardedGitTokens::default(),
@@ -8445,7 +8361,7 @@ mod tests {
 				"no NonAbsoluteTarget error rows"
 			);
 			assert!(
-				proj.join(".aghub/my-skill/SKILL.md").exists(),
+				proj.join(".aghub/alpha/SKILL.md").exists(),
 				"master written at absolutized project root"
 			);
 		});
