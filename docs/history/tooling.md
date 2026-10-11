@@ -77,3 +77,35 @@ gain over 11s.
 Rule: `just test` and `preflight` use nextest; doc tests stay on `cargo test
 --doc`. Plain `cargo test` must keep passing, so the env-mutex rule still
 applies.
+
+## CI cache thrash and redundant steps
+
+`.github/workflows/ci.yml`, measured on main run of 2026-10-11.
+
+The repo's GHA cache sat at 11.46GB / 3937 entries, over GitHub's 10GB cap:
+sccache-GHA writes one entry per compiled object, rust-cache one ~850MB entry
+per OS × job key. LRU eviction left only 2 of the 9 rust-cache keys alive
+(`Windows-test`, `macOS-test`), so Test (ubuntu) ran its tests step cold in
+669s and Rust Lint (macOS) its clippy in 532s, against ~150s on warm legs.
+Two layers caching the same dependency artifacts were evicting each other.
+
+Changes:
+
+- sccache dropped from ci.yml; rust-cache stays. release.yml keeps its own
+  sccache setup (separate cache-scoping rules, see `releasing-aghub`).
+- Agent-validation step removed. `--features agent-validation` changes core's
+  feature set, so it recompiled core and every dependent and reran the suite
+  (66–139s per OS); the runners have no `claude`/`opencode` CLIs and the step
+  was `continue-on-error`, so it never gated anything.
+  `just test-with-validation` stays for local use.
+- Keyring smoke uses `--workspace --test keyring_smoke` instead of
+  `-p aghub-inference`: after `just test`, the `-p` form recompiled 59 crates
+  under a different feature fingerprint, the `--workspace` form 0.
+- TS typecheck moved from the 3-OS Test job into Frontend Lint (ubuntu, still
+  forced on every main push); the frontend Vite build runs on ubuntu only.
+  Rust Lint and Test no longer install bun — no Rust build reads
+  `node_modules`.
+
+Kept: the 3-OS release-profile CLI build (distinct from debug tests),
+test-on-every-main-push (release `verify-ci` depends on it),
+`cargo fetch --locked`.
