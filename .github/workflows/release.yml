@@ -122,8 +122,11 @@ jobs:
         name: Build Desktop (${{ matrix.target }})
         runs-on: ${{ matrix.os }}
         env:
-            SCCACHE_GHA_ENABLED: "true"
-            RUSTC_WRAPPER: "sccache"
+            # No compile cache: a tag run's GHA caches are scoped to that tag,
+            # so the next release can never read them; they only evicted
+            # main's CI caches. The empty value overrides the rustc-wrapper in
+            # .cargo/config.toml. docs/history/tooling.md#release-build-speed
+            RUSTC_WRAPPER: ""
         permissions:
             contents: write
         strategy:
@@ -169,12 +172,6 @@ jobs:
               uses: dtolnay/rust-toolchain@stable
               with:
                   targets: ${{ matrix.target }}
-
-            - name: Setup sccache
-              uses: mozilla-actions/sccache-action@v0.0.11
-
-            - name: Rust Cache
-              uses: Swatinem/rust-cache@v2
 
             - name: Cargo Fetch
               run: cargo fetch
@@ -244,7 +241,13 @@ jobs:
                   export AGHUB_RELEASE_VERSION="$VERSION"
                   echo "AGHUB_RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
                   # Built AFTER Sync Version, so it is version-locked to the tag.
-                  cargo build -p aghub-api --release --target "$TARGET"
+                  # Resolved together with the desktop crate and the feature
+                  # `tauri build` passes, so every shared dependency gets the
+                  # features "Build Tauri" will ask for and is not compiled a
+                  # second time there (it was ~445 crates). --bin keeps this
+                  # step to the api binary; the desktop crate needs ../dist.
+                  cargo build --release --target "$TARGET" -p aghub -p aghub-api \
+                      --bin aghub-api --features tauri/custom-protocol
                   cp "target/$TARGET/release/$BIN" "$STAGE/$BIN"
                   test -f "$STAGE/$BIN" \
                     || { echo "sidecar not staged at $STAGE/$BIN" >&2; exit 1; }
@@ -369,8 +372,11 @@ jobs:
         name: Build CLI (${{ matrix.target }})
         runs-on: ${{ matrix.os }}
         env:
-            SCCACHE_GHA_ENABLED: "true"
-            RUSTC_WRAPPER: "sccache"
+            # No compile cache: a tag run's GHA caches are scoped to that tag,
+            # so the next release can never read them; they only evicted
+            # main's CI caches. The empty value overrides the rustc-wrapper in
+            # .cargo/config.toml. docs/history/tooling.md#release-build-speed
+            RUSTC_WRAPPER: ""
         permissions:
             contents: write
         strategy:
@@ -407,12 +413,6 @@ jobs:
               uses: dtolnay/rust-toolchain@stable
               with:
                   targets: ${{ matrix.target }}
-
-            - name: Setup sccache
-              uses: mozilla-actions/sccache-action@v0.0.11
-
-            - name: Rust Cache
-              uses: Swatinem/rust-cache@v2
 
             - name: Cargo Fetch
               run: cargo fetch

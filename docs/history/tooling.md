@@ -118,3 +118,33 @@ restored nothing and compiled cold until Cargo.lock changed.
 Kept: the 3-OS release-profile CLI build (distinct from debug tests),
 test-on-every-main-push (release `verify-ci` depends on it),
 `cargo fetch --locked`.
+
+## Release build speed
+
+`.github/workflows/release.yml` `build-tauri` "Stage version-locked
+aghub-api", and both build jobs' cache setup. Measured 2026-10-11 with a
+throwaway branch workflow that ran the release builds without uploading.
+
+The sidecar step built `-p aghub-api` alone, then `tauri build` ran
+`cargo build --bins --features tauri/custom-protocol` for the desktop crate.
+The two resolve features differently (e.g. `proc-macro2/span-locations`,
+`serde_json/unbounded_depth`, `rustls/ring`), so ~445 shared crates compiled
+twice. Building the sidecar as
+`-p aghub -p aghub-api --bin aghub-api --features tauri/custom-protocol`
+gives it the desktop's feature set; `Build Tauri` then compiles only the
+Tauri-specific crates. The api binary gains no behaviour: the desktop already
+embeds the same api with those features.
+
+Cold desktop job, before → after: macOS arm64 1006s → 588s, Linux 1177s →
+638s. Windows 1163s → 808–1106s: Windows runners swung ±300s between
+identical runs, which is larger than any knob tried.
+
+Release also drops sccache and rust-cache (`RUSTC_WRAPPER: ""`). A tag run's
+caches are scoped to that tag, so no later release can read them; v2.40.1
+alone left 1179 such entries that only evicted main's CI caches.
+
+Rejected (two Windows samples each, within noise): a Dev Drive (ReFS) for
+target/cargo/rustup; building the desktop crate in the same cargo pass after
+an early `bun run build`; `rust-lld` as the MSVC linker; a Defender exclusion
+in CI. `CARGO_PROFILE_DEV_DEBUG=0` cut one macOS CI test build 593s → 397s
+but was within noise on Windows and drops line numbers from CI backtraces.
