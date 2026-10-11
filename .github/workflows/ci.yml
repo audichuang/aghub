@@ -146,7 +146,12 @@ jobs:
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: ${{ runner.os }}-lint
-                  cache-on-failure: true
+                  # Save only from main: a PR-scoped cache is invisible to every
+                  # other ref and only crowds the 10GB quota. No cache-on-failure:
+                  # a run that fails before compiling saves an EMPTY target, and
+                  # rust-cache never overwrites an exact key hit, so that empty
+                  # cache would stick until Cargo.lock changes.
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
@@ -237,7 +242,12 @@ jobs:
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: ${{ runner.os }}-test
-                  cache-on-failure: true
+                  # Save only from main: a PR-scoped cache is invisible to every
+                  # other ref and only crowds the 10GB quota. No cache-on-failure:
+                  # a run that fails before compiling saves an EMPTY target, and
+                  # rust-cache never overwrites an exact key hit, so that empty
+                  # cache would stick until Cargo.lock changes.
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
@@ -315,7 +325,12 @@ jobs:
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: ${{ runner.os }}-build
-                  cache-on-failure: true
+                  # Save only from main: a PR-scoped cache is invisible to every
+                  # other ref and only crowds the 10GB quota. No cache-on-failure:
+                  # a run that fails before compiling saves an EMPTY target, and
+                  # rust-cache never overwrites an exact key hit, so that empty
+                  # cache would stick until Cargo.lock changes.
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
             - name: Install root deps (frozen)
               if: matrix.os == 'ubuntu-latest'
               run: bun install --frozen-lockfile

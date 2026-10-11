@@ -109,6 +109,12 @@ Changes:
   Rust Lint and Test no longer install bun — no Rust build reads
   `node_modules`.
 
+rust-cache saves only from main (`save-if`), and no longer with
+`cache-on-failure`. The first sccache-less push failed before compiling, and
+`cache-on-failure: true` saved its empty target (1183 bytes) under the
+exact key; rust-cache never overwrites an exact hit, so every later run
+restored nothing and compiled cold until Cargo.lock changed.
+
 Kept: the 3-OS release-profile CLI build (distinct from debug tests),
 test-on-every-main-push (release `verify-ci` depends on it),
 `cargo fetch --locked`.
