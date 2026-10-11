@@ -55,3 +55,25 @@ have been consulted before a tag.
 
 Rule: preflight installs frozen (root and desktop) before any frontend gate,
 and runs `bun run test`.
+
+## cargo test serialized on the env mutex
+
+`justfile` `test` / `preflight`, `ci.yml` test job (installs `cargo-nextest`).
+
+`cargo test --workspace` took ~73s wall on a warm build (2026-10-11, 20 cores),
+48s of it the `aghub-api` lib binary alone: its route tests all take the one
+`test_env_lock`, and libtest runs a binary's tests as threads of ONE process,
+so they ran one at a time. `cargo nextest run --workspace` runs each test in
+its own process — every test owns its env — and finished the same 2873 tests
+in ~9.6s, green 6 runs in a row. Compile was not the bottleneck: an edit to a
+core source file re-links every test binary in ~11s (sccache + incremental +
+the default `rust-lld`).
+
+Rejected: merging the 44 integration-test files into one binary per crate. It
+would trim link time, but it merges their env mutexes' scopes and breaks the
+"one env mutex per binary" rule in `crates/core/AGENTS.md` Testing for little
+gain over 11s.
+
+Rule: `just test` and `preflight` use nextest; doc tests stay on `cargo test
+--doc`. Plain `cargo test` must keep passing, so the env-mutex rule still
+applies.

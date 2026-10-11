@@ -241,7 +241,7 @@ jobs:
             - name: Install just
               uses: taiki-e/install-action@v2
               with:
-                  tool: just
+                  tool: just,cargo-nextest
             - name: Setup sccache
               uses: mozilla-actions/sccache-action@v0.0.11
             - name: Rust Cache

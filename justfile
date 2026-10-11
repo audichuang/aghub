@@ -19,8 +19,11 @@ dev:
 # red CI leg reveals one problem per run and a platform-specific batch costs one
 # full cycle each. (Comments must live OUTSIDE the recipe body — an indented `#`
 # is handed to the shell, and cmd.exe on the Windows leg does not know it.)
+# nextest: one process per test, so env-mutex tests stop serializing (~73s -> ~10s).
+# Doc tests are not covered by nextest — run `cargo test --workspace --doc`.
+# See docs/history/tooling.md#cargo-test-serialized-on-the-env-mutex
 test:
-    cargo test --workspace --no-fail-fast
+    cargo nextest run --workspace --no-fail-fast
 
 # Run integration tests only
 integration-test:
@@ -66,7 +69,7 @@ preflight: && target-cap
     # The frontend unit tests, incl. the source-scan guards under src/lib, are
     # part of the release gate, not only CI.
     cd ./crates/desktop && bun run test
-    cargo test --workspace
+    cargo nextest run --workspace
     cargo test --workspace --doc
 
 # preflight runs this last. Local-only (bash): never wire it into `test`, which
