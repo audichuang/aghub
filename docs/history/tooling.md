@@ -91,7 +91,10 @@ Two layers caching the same dependency artifacts were evicting each other.
 
 Changes:
 
-- sccache dropped from ci.yml; rust-cache stays. release.yml keeps its own
+- sccache dropped from ci.yml; rust-cache stays. ci.yml must also set
+  `RUSTC_WRAPPER: ""`: the tracked `.cargo/config.toml` names sccache as
+  `rustc-wrapper`, and the first push without the override failed every
+  cargo step with `could not execute process sccache`. release.yml keeps its own
   sccache setup (separate cache-scoping rules, see `releasing-aghub`).
 - Agent-validation step removed. `--features agent-validation` changes core's
   feature set, so it recompiled core and every dependent and reran the suite
