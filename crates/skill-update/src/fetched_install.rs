@@ -221,6 +221,99 @@ pub fn fetch_remote_install(
 	})
 }
 
+/// Pre-fetch half of `/skills/git/install`, decided against a scanned session.
+pub struct ClaimInstallRequest<'a> {
+	/// `session.url()`: the `recorded_refs` key.
+	pub url: &'a str,
+	pub resolved: &'a aghub_git::ResolvedRemoteSource,
+	pub scope: WriteScope,
+	pub requested_branch: Option<&'a str>,
+	/// The branch the scan fetched; the session's bytes come from it.
+	pub current_branch: &'a str,
+	pub skill_paths: &'a [String],
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClaimInstallRefusal {
+	/// The scope's cohort ref differs from the scanned branch.
+	CohortMismatch {
+		cohort: String,
+	},
+	InvalidSkillPath,
+}
+
+/// A validated plan; becomes a [`PreparedInstall`] once the bytes are fetched.
+pub struct ClaimInstallPlan {
+	lock_source: skill::InstallLockSource,
+	scope: WriteScope,
+	expected_ref: Option<Option<String>>,
+	paths: Vec<skill::SkillPath>,
+	items: Vec<(String, String)>,
+}
+
+/// Order is the route's precedence: ref decision, cohort mismatch, then path
+/// validation (no I/O before the paths are known to be in-tree).
+pub fn plan_claim_install(
+	req: ClaimInstallRequest<'_>,
+) -> Result<ClaimInstallPlan, ClaimInstallRefusal> {
+	let ref_name = crate::sources::import_ref(
+		req.requested_branch,
+		&crate::sources::recorded_refs(&req.scope, req.url),
+		// The scan already paid for the default branch's name.
+		|| Some(req.current_branch.to_string()).filter(|b| !b.is_empty()),
+	);
+	// The session holds the scanned branch's commit; recording another ref would
+	// pin these bytes to a branch they did not come from.
+	if let Some(cohort) =
+		ref_name.as_deref().filter(|r| *r != req.current_branch)
+	{
+		return Err(ClaimInstallRefusal::CohortMismatch {
+			cohort: cohort.to_string(),
+		});
+	}
+	let paths: Vec<skill::SkillPath> = req
+		.skill_paths
+		.iter()
+		.map(|p| skill::SkillPath::parse(p))
+		.collect::<Result<_, _>>()
+		.map_err(|_| ClaimInstallRefusal::InvalidSkillPath)?;
+	let lock_source = install_lock_source(req.resolved, ref_name);
+	// Only a ref taken from the scope's cohort is re-checked under the lock.
+	let expected_ref = req
+		.requested_branch
+		.is_none()
+		.then(|| lock_source.ref_name.clone());
+	let items = req
+		.skill_paths
+		.iter()
+		.zip(&paths)
+		.map(|(raw, p)| (raw.clone(), skill::lock_skill_file_path(p.as_str())))
+		.collect();
+	Ok(ClaimInstallPlan {
+		lock_source,
+		scope: req.scope,
+		expected_ref,
+		paths,
+		items,
+	})
+}
+
+impl ClaimInstallPlan {
+	pub fn paths(&self) -> &[skill::SkillPath] {
+		&self.paths
+	}
+
+	pub fn into_prepared(self, fetched: crate::FetchedRepo) -> PreparedInstall {
+		PreparedInstall {
+			fetched: FetchedSource::from_repo(fetched),
+			lock_source: self.lock_source,
+			scope: self.scope,
+			expected_ref: self.expected_ref,
+			items: self.items,
+		}
+	}
+}
+
 impl PreparedInstall {
 	/// Install every item, taking the mutation lock PER SKILL inside
 	/// `install_fetched_source`. Callers run it on the mutation pool. A zip
@@ -351,5 +444,130 @@ mod tests {
 		assert_eq!(ls.source_url, resolved.source_url);
 		assert_eq!(ls.ref_name.as_deref(), Some("dev"));
 		assert_eq!(install_lock_source(&resolved, None).ref_name, None);
+	}
+
+	fn scope_with_cohort(
+		root: &std::path::Path,
+		ref_name: Option<&str>,
+	) -> WriteScope {
+		let mut lock = skill::LocalSkillLockFile::new();
+		lock.skills.insert(
+			"other".to_string(),
+			skill::LocalSkillLockEntry {
+				source: "o/r".to_string(),
+				source_url: Some("https://github.com/o/r".to_string()),
+				source_type: "github".to_string(),
+				ref_name: ref_name.map(str::to_string),
+				skill_path: Some("other/SKILL.md".to_string()),
+				computed_hash: "h".to_string(),
+				ref_commit: None,
+			},
+		);
+		skill::write_local_lock(&lock, Some(root)).unwrap();
+		WriteScope::project(root)
+	}
+
+	fn claim<'a>(
+		resolved: &'a aghub_git::ResolvedRemoteSource,
+		scope: WriteScope,
+		requested_branch: Option<&'a str>,
+		current_branch: &'a str,
+		skill_paths: &'a [String],
+	) -> Result<ClaimInstallPlan, ClaimInstallRefusal> {
+		plan_claim_install(ClaimInstallRequest {
+			url: "https://github.com/o/r",
+			resolved,
+			scope,
+			requested_branch,
+			current_branch,
+			skill_paths,
+		})
+	}
+
+	fn resolved() -> aghub_git::ResolvedRemoteSource {
+		aghub_git::resolve_remote_source("https://github.com/o/r").unwrap()
+	}
+
+	#[test]
+	fn claim_plan_refuses_a_cohort_the_scan_did_not_fetch() {
+		let dir = tempfile::tempdir().unwrap();
+		let scope = scope_with_cohort(dir.path(), Some("main"));
+		let err = claim(&resolved(), scope, None, "develop", &s(&["a"]))
+			.err()
+			.unwrap();
+		assert_eq!(
+			err,
+			ClaimInstallRefusal::CohortMismatch {
+				cohort: "main".to_string()
+			}
+		);
+	}
+
+	#[test]
+	fn claim_plan_keeps_a_none_cohort() {
+		let dir = tempfile::tempdir().unwrap();
+		let scope = scope_with_cohort(dir.path(), None);
+		let plan = claim(&resolved(), scope, None, "develop", &s(&["a"]))
+			.ok()
+			.unwrap();
+		assert_eq!(plan.lock_source.ref_name, None);
+		assert_eq!(plan.expected_ref, Some(None));
+	}
+
+	#[test]
+	fn claim_plan_reports_cohort_mismatch_before_an_invalid_path() {
+		let dir = tempfile::tempdir().unwrap();
+		let scope = scope_with_cohort(dir.path(), Some("main"));
+		let err = claim(&resolved(), scope, None, "develop", &s(&["/abs"]))
+			.err()
+			.unwrap();
+		assert!(matches!(err, ClaimInstallRefusal::CohortMismatch { .. }));
+		let dir = tempfile::tempdir().unwrap();
+		let scope = WriteScope::project(dir.path());
+		let err = claim(&resolved(), scope, None, "develop", &s(&["/abs"]))
+			.err()
+			.unwrap();
+		assert_eq!(err, ClaimInstallRefusal::InvalidSkillPath);
+	}
+
+	#[test]
+	fn explicit_branch_sets_no_expected_ref() {
+		let dir = tempfile::tempdir().unwrap();
+		let scope = WriteScope::project(dir.path());
+		let paths = s(&["skills/a", "b"]);
+		let plan =
+			claim(&resolved(), scope, Some("develop"), "develop", &paths)
+				.ok()
+				.unwrap();
+		assert_eq!(plan.expected_ref, None);
+		assert_eq!(plan.lock_source.ref_name.as_deref(), Some("develop"));
+		assert_eq!(plan.paths().len(), 2);
+		// Labels stay the raw requested paths; lock paths are npx-form.
+		assert_eq!(plan.items[0].0, "skills/a");
+		assert_eq!(plan.items[0].1, "skills/a/SKILL.md");
+	}
+
+	#[test]
+	fn default_closure_not_called_when_cohort_exists() {
+		// The cohort ref wins over the scan's branch: the mismatch names the
+		// cohort, never the default branch.
+		let dir = tempfile::tempdir().unwrap();
+		let scope = scope_with_cohort(dir.path(), Some("main"));
+		let err = claim(&resolved(), scope, None, "develop", &s(&["a"]))
+			.err()
+			.unwrap();
+		assert_eq!(
+			err,
+			ClaimInstallRefusal::CohortMismatch {
+				cohort: "main".to_string()
+			}
+		);
+		// With no cohort at all, the scan's branch is the default.
+		let dir = tempfile::tempdir().unwrap();
+		let scope = WriteScope::project(dir.path());
+		let plan = claim(&resolved(), scope, None, "develop", &s(&["a"]))
+			.ok()
+			.unwrap();
+		assert_eq!(plan.lock_source.ref_name.as_deref(), Some("develop"));
 	}
 }

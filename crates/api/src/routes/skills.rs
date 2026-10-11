@@ -1867,63 +1867,44 @@ pub async fn git_install_skills(
 		req.project_root.as_deref(),
 	)?;
 	let resource_scope = write_scope.resource_scope();
-	let ref_name = skill_update::sources::import_ref(
-		session.requested_branch(),
-		&skill_update::sources::recorded_refs(&write_scope, session.url()),
-		// The scan already paid for the default branch's name.
-		|| Some(session.current_branch().to_string()).filter(|b| !b.is_empty()),
-	);
-	// The session holds the scanned branch's commit; recording another ref (the
-	// scope's cohort) would pin these bytes to a branch they did not come from.
-	if let Some(cohort) = ref_name
-		.as_deref()
-		.filter(|r| *r != session.current_branch())
-	{
-		return Err(ApiError::new(
+	let plan = skill_update::fetched_install::plan_claim_install(
+		skill_update::fetched_install::ClaimInstallRequest {
+			url: session.url(),
+			resolved: &resolved,
+			scope: write_scope,
+			requested_branch: session.requested_branch(),
+			current_branch: session.current_branch(),
+			skill_paths: &req.skill_paths,
+		},
+	)
+	.map_err(|refusal| match refusal {
+		skill_update::fetched_install::ClaimInstallRefusal::CohortMismatch {
+			cohort,
+		} => ApiError::new(
 			Status::BadRequest,
 			format!(
 				"This source is already installed in this scope from '{cohort}'; nothing was written. Re-scan with branch '{cohort}' to install from it"
 			),
 			skill_update::mutation::SKILL_SOURCE_MISMATCH_CODE,
-		));
-	}
-	let source =
-		skill_update::fetched_install::install_lock_source(&resolved, ref_name);
-	// Only a ref taken from the scope's cohort is re-checked under the lock.
-	let expected_ref: Option<Option<String>> = session
-		.requested_branch()
-		.is_none()
-		.then(|| source.ref_name.clone());
-
-	// Reject absolute / `..` paths BEFORE any fetch or install write.
-	// Security: out-of-tree paths must fail with 400 without I/O.
-	let validated_paths: Vec<skill::SkillPath> = req
-		.skill_paths
-		.iter()
-		.map(|p| skill::SkillPath::parse(p))
-		.collect::<Result<_, _>>()
-		.map_err(|_| {
+		),
+		skill_update::fetched_install::ClaimInstallRefusal::InvalidSkillPath => {
 			ApiError::new(
 				Status::BadRequest,
 				"skill_path must be a relative path inside the cloned repository",
 				"SKILL_PATH_INVALID",
 			)
-		})?;
+		}
+	})?;
 
 	// Fetch once for all selected skill folders (partial materialization).
 	let fetched =
-		session
-			.fetch_skills(&validated_paths)
-			.await
-			.map_err(|error| {
-				map_pinned_source_fetch_error(
-					error,
-					"Skills installation timed out after 5 minutes",
-				)
-			})?;
-	let fetched = skill_update::mutation::FetchedSource::from_repo(fetched);
-
-	let mut results = Vec::new();
+		session.fetch_skills(plan.paths()).await.map_err(|error| {
+			map_pinned_source_fetch_error(
+				error,
+				"Skills installation timed out after 5 minutes",
+			)
+		})?;
+	let prepared = plan.into_prepared(fetched);
 
 	let agents = match skill_update::fetched_install::InstallAgents::parse(
 		&req.agents,
@@ -1942,63 +1923,14 @@ pub async fn git_install_skills(
 			return Ok(Json(GitInstallResponse { results }));
 		}
 	};
-	let target_agents: Vec<AgentType> = agents.types().to_vec();
-
 	// The install loop takes the mutation lock per skill and is synchronous, so it
 	// runs on the blocking pool; the fetch above stays on the async worker.
-	let skill_paths = req.skill_paths.clone();
-	let results = in_mutation_pool(move || {
-		for (skill_path, validated) in skill_paths.iter().zip(&validated_paths)
-		{
-			let lock_skill_path =
-				skill::lock_skill_file_path(validated.as_str());
-			match skill_update::mutation::install_fetched_source(
-				&fetched,
-				skill_update::mutation::FetchedInstallRequest {
-					source: &source,
-					lock_skill_path: &lock_skill_path,
-					expected_name: None,
-					scope: write_scope.clone(),
-					target_agents: &target_agents,
-					expected_ref: expected_ref.as_ref().map(|r| r.as_deref()),
-				},
-			) {
-				Ok(report) => {
-					for (agent_str, agent_result) in
-						agents.ids().iter().zip(report.agent_results)
-					{
-						let success = agent_result.error.is_none();
-						results.push(GitInstallResultEntry {
-							// Successful rows carry the parsed skill name (as the old
-							// route did); failures keep the requested `skill_path`.
-							name: if success {
-								report.name.clone()
-							} else {
-								skill_path.clone()
-							},
-							agent: agent_str.clone(),
-							success,
-							error: agent_result.error,
-						});
-					}
-				}
-				// A per-skill failure (e.g. parse error) is reported as per-agent
-				// failure rows and never aborts the whole request — matching the old
-				// route, where `install_git_skill_*` errors became failure entries.
-				Err(error) => {
-					let message = fetched_install_error_message(error);
-					for agent_str in agents.ids() {
-						results.push(GitInstallResultEntry {
-							name: skill_path.clone(),
-							agent: agent_str.clone(),
-							success: false,
-							error: Some(message.clone()),
-						});
-					}
-				}
-			}
-		}
-		Ok(results)
+	let results: Vec<GitInstallResultEntry> = in_mutation_pool(move || {
+		Ok(prepared
+			.install(&agents, fetched_install_error_message)
+			.into_iter()
+			.map(install_row_entry)
+			.collect())
 	})
 	.await?;
 
