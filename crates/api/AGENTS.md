@@ -26,20 +26,20 @@ Role map (`lib.rs` mounts the real route set — do not hardcode route counts):
 
 All under `/api/v1/`. **Source of truth: `lib.rs` + `routes/*.rs`.** Module → intent (paths drift; read the file):
 
-| Module          | Surface intent                                                                                           |
-| --------------- | -------------------------------------------------------------------------------------------------------- |
-| `agents`        | list agents + availability                                                                               |
-| `mcps`          | per-agent MCP CRUD, all-agents list, transfer/reconcile, multi-agent batch create (`core::batch` policy) |
-| `skills`        | skill CRUD/import/transfer/reconcile/by-path/prune/install/content/tree/lock/git/health                  |
-| `skills_update` | check-updates, apply-update, accept-rename                                                               |
-| `sources`       | source list + diff                                                                                       |
-| `coverage`      | static per-agent capability matrix (`classify_all`) — reads no master, names no skill                    |
-| `sub_agents`    | sub-agent CRUD + transfer/reconcile                                                                      |
-| `credentials`   | credential store + source bindings                                                                       |
-| `inference`     | provider inventory, keyring keys, per-agent bindings/routing/presets                                     |
-| `plugins`       | Claude Code plugin + marketplace lifecycle                                                               |
-| `integrations`  | code-editor open/preferences                                                                             |
-| `market`        | skills.sh search                                                                                         |
+| Module          | Surface intent                                                                                                                                                                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `agents`        | list agents + availability                                                                                                                                                                                                                       |
+| `mcps`          | per-agent MCP CRUD, all-agents list, transfer/reconcile, multi-agent batch create (`core::batch` policy)                                                                                                                                         |
+| `skills`        | skill CRUD/import/transfer/reconcile/by-path/prune/install/content/tree/lock/git/health. 兩條 install 路由是 `skill_update::fetched_install` 的 adapter，刻意保留不同的未知 agent 優先序（install 在 fetch 之前檢查、git/install 在 fetch 之後） |
+| `skills_update` | check-updates, apply-update, accept-rename                                                                                                                                                                                                       |
+| `sources`       | source list + diff                                                                                                                                                                                                                               |
+| `coverage`      | static per-agent capability matrix (`classify_all`) — reads no master, names no skill                                                                                                                                                            |
+| `sub_agents`    | sub-agent CRUD + transfer/reconcile                                                                                                                                                                                                              |
+| `credentials`   | credential store + source bindings                                                                                                                                                                                                               |
+| `inference`     | provider inventory, keyring keys, per-agent bindings/routing/presets                                                                                                                                                                             |
+| `plugins`       | Claude Code plugin + marketplace lifecycle                                                                                                                                                                                                       |
+| `integrations`  | code-editor open/preferences                                                                                                                                                                                                                     |
+| `market`        | skills.sh search                                                                                                                                                                                                                                 |
 
 Path params: `<agent>`, `<name>`. Scope via `ScopeParams` (`scope` + optional `project_root`). **No token auth** — see CORS below.
 
