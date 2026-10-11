@@ -953,45 +953,10 @@ pub(crate) async fn list_all_agents_skills(
 	Ok(Json(items))
 }
 
-/// Errors from the resolve/list/select/fetch stage of skill install.
-enum InstallFetchError {
-	Repo(skill_update::SkillRepoError),
-	SkillsNotFound { missing: String, available: String },
-	NoSkillsFound,
-	InvalidPath,
-}
-
-/// Map shared-policy selections to `(catalog_name, SkillPath)` pairs.
-fn select_catalog_paths(
-	catalog: &[skill_update::CatalogSkill],
-	requested: &[String],
-	install_all: bool,
-) -> Result<Vec<(String, skill::SkillPath)>, InstallFetchError> {
-	let selected =
-		skill::select_repo_skills(catalog, requested, install_all, |skill| {
-			skill.name.as_str()
-		})
-		.map_err(|error| match error {
-			skill::RepoSkillSelectionError::NoSkillsFound => {
-				InstallFetchError::NoSkillsFound
-			}
-			skill::RepoSkillSelectionError::SkillsNotFound {
-				missing,
-				available,
-			} => InstallFetchError::SkillsNotFound { missing, available },
-		})?;
-
-	selected
-		.into_iter()
-		.map(|skill| {
-			let path = skill::SkillPath::parse(&skill.skill_path)
-				.map_err(|_| InstallFetchError::InvalidPath)?;
-			Ok((skill.name.clone(), path))
-		})
-		.collect()
-}
-
-fn map_install_fetch_error(e: InstallFetchError) -> ApiError {
+fn map_install_fetch_error(
+	e: skill_update::fetched_install::InstallFetchError,
+) -> ApiError {
+	use skill_update::fetched_install::InstallFetchError;
 	match e {
 		InstallFetchError::Repo(err) => map_skill_repo_error(err),
 		InstallFetchError::SkillsNotFound { missing, available } => {
@@ -1165,282 +1130,217 @@ pub(crate) async fn install_skill_with_repo(
 			}));
 		}
 	};
-	let target_agents: Vec<(String, AgentType)> = agents
-		.ids()
-		.iter()
-		.cloned()
-		.zip(agents.types().iter().copied())
-		.collect();
-
 	// Owns the materialized source through the install loop. The production
 	// variant keeps root + immutable commit identity behind one deep interface.
 	enum InstallMaterialization {
-		Fetched(skill_update::mutation::FetchedSource),
+		Fetched(skill_update::fetched_install::PreparedInstall),
 		#[cfg(test)]
 		Clone {
 			temp_dir: tempfile::TempDir,
 			ref_commit: Option<String>,
+			lock_source: skill::InstallLockSource,
+			// (catalog name, npx-form lock skill path)
+			items: Vec<(String, String)>,
 		},
 	}
 
-	// (catalog name, npx-form lock skill path)
-	type InstallItem = (String, String);
+	let materialization: InstallMaterialization =
+		match aghub_git::resolve_remote_source(&req.source) {
+			Ok(resolved) => {
+				let fetch_req =
+					skill_update::fetched_install::RemoteInstallRequest {
+						source: req.source.clone(),
+						resolved,
+						scope: write_scope.clone(),
+						token,
+						skills: req.skills.clone(),
+						install_all: req.install_all.unwrap_or(false),
+					};
+				let repo_for_task = repo.clone();
 
-	let (lock_source, items, materialization): (
-		skill::InstallLockSource,
-		Vec<InstallItem>,
-		InstallMaterialization,
-	) = match aghub_git::resolve_remote_source(&req.source) {
-		Ok(resolved) => {
-			let install_all = req.install_all.unwrap_or(false);
-			let requested = req.skills.clone();
-			let repo_for_task = repo.clone();
-			let token_for_task = token;
-			let scope_for_task = write_scope.clone();
-			let source_for_task = req.source.clone();
-
-			let (selected, fetched, ref_name) = match timeout(
-				Duration::from_secs(300),
-				tokio::task::spawn_blocking(move || {
-					// Fetch the ref the lock will record: an existing cohort's ref (a recorded
-					// `None` = the default branch), else the default branch (`sources::import_ref`).
-					let recorded = skill_update::sources::recorded_refs(
-						&scope_for_task,
-						&source_for_task,
-					);
-					// Name the ref FIRST, then resolve exactly that ref: resolving
-					// HEAD and asking its name in a second call races a default
-					// branch switch (bytes from one branch, lock naming another).
-					let fetch_ref = skill_update::sources::import_ref(
-						None,
-						&recorded,
-						|| {
-							repo_for_task.default_branch(
-								&skill_update::SourceRef {
-									source: source_for_task.clone(),
-									ref_: None,
-								},
-								token_for_task.as_deref(),
-							)
-						},
-					);
-					let claim = repo_for_task
-						.resolve_pinned(
-							&skill_update::SourceRef {
-								source: source_for_task.clone(),
-								ref_: fetch_ref.clone(),
-							},
-							token_for_task.as_deref(),
+				let prepared = match timeout(
+					Duration::from_secs(300),
+					tokio::task::spawn_blocking(move || {
+						skill_update::fetched_install::fetch_remote_install(
+							&repo_for_task,
+							fetch_req,
 						)
-						.map_err(InstallFetchError::Repo)?;
-					let catalog = repo_for_task
-						.list_pinned(&claim)
-						.map_err(InstallFetchError::Repo)?;
-					let selected = select_catalog_paths(
-						&catalog.skills,
-						&requested,
-						install_all,
-					)?;
-					let paths: Vec<skill::SkillPath> =
-						selected.iter().map(|(_, p)| p.clone()).collect();
-					let fetched = repo_for_task
-						.fetch_pinned(
-							&claim,
-							skill_update::FetchSelection::Skills(&paths),
-						)
-						.map_err(InstallFetchError::Repo)?;
-					Ok::<_, InstallFetchError>((selected, fetched, fetch_ref))
-				}),
-			)
-			.await
-			{
-				Ok(Ok(Ok(v))) => v,
-				Ok(Ok(Err(e))) => return Err(map_install_fetch_error(e)),
-				Ok(Err(e)) => {
-					return Err(ApiError::from_join_error(
-						e,
-						"Clone task failed",
-						"CLONE_ERROR",
-					));
-				}
-				Err(_) => {
-					return Err(ApiError::new(
-						Status::RequestTimeout,
-						"Skills installation timed out after 5 minutes"
-							.to_string(),
-						"SKILLS_INSTALL_TIMEOUT",
-					));
-				}
-			};
-
-			let items: Vec<InstallItem> = selected
-				.into_iter()
-				.map(|(name, skill_path)| {
-					let lock_skill_path =
-						skill::lock_skill_file_path(skill_path.as_str());
-					(name, lock_skill_path)
-				})
-				.collect();
-
-			let lock_source =
-				skill_update::fetched_install::install_lock_source(
-					&resolved, ref_name,
-				);
-			(
-				lock_source,
-				items,
-				InstallMaterialization::Fetched(
-					skill_update::mutation::FetchedSource::from_repo(fetched),
-				),
-			)
-		}
-		Err(error) => {
-			#[cfg(test)]
-			{
-				if let Some((clone_url, lock_source)) =
-					file_install_source(&req.source)?
+					}),
+				)
+				.await
 				{
-					let clone_url_for_task = clone_url.clone();
-					let temp_dir = match timeout(
-						Duration::from_secs(300),
-						tokio::task::spawn_blocking(move || {
-							clone_skill_source_to_temp(
-								&clone_url_for_task,
-								true,
-							)
-						}),
-					)
-					.await
+					Ok(Ok(Ok(v))) => v,
+					Ok(Ok(Err(e))) => return Err(map_install_fetch_error(e)),
+					Ok(Err(e)) => {
+						return Err(ApiError::from_join_error(
+							e,
+							"Clone task failed",
+							"CLONE_ERROR",
+						));
+					}
+					Err(_) => {
+						return Err(ApiError::new(
+							Status::RequestTimeout,
+							"Skills installation timed out after 5 minutes"
+								.to_string(),
+							"SKILLS_INSTALL_TIMEOUT",
+						));
+					}
+				};
+				InstallMaterialization::Fetched(prepared)
+			}
+			Err(error) => {
+				#[cfg(test)]
+				{
+					if let Some((clone_url, lock_source)) =
+						file_install_source(&req.source)?
 					{
-						Ok(Ok(Ok(temp_dir))) => temp_dir,
-						Ok(Ok(Err(e))) => {
-							return Err(ApiError::new(
-								Status::BadRequest,
-								format!("Failed to clone skill source: {e}"),
-								"CLONE_FAILED",
-							));
-						}
-						Ok(Err(e)) => {
-							return Err(ApiError::from_join_error(
-								e,
-								"Clone task failed",
-								"CLONE_ERROR",
-							));
-						}
-						Err(_) => {
-							return Err(ApiError::new(
+						let clone_url_for_task = clone_url.clone();
+						let temp_dir = match timeout(
+							Duration::from_secs(300),
+							tokio::task::spawn_blocking(move || {
+								clone_skill_source_to_temp(
+									&clone_url_for_task,
+									true,
+								)
+							}),
+						)
+						.await
+						{
+							Ok(Ok(Ok(temp_dir))) => temp_dir,
+							Ok(Ok(Err(e))) => {
+								return Err(ApiError::new(
+									Status::BadRequest,
+									format!(
+										"Failed to clone skill source: {e}"
+									),
+									"CLONE_FAILED",
+								));
+							}
+							Ok(Err(e)) => {
+								return Err(ApiError::from_join_error(
+									e,
+									"Clone task failed",
+									"CLONE_ERROR",
+								));
+							}
+							Err(_) => {
+								return Err(ApiError::new(
 								Status::RequestTimeout,
 								"Skills installation timed out after 5 minutes"
 									.to_string(),
 								"SKILLS_INSTALL_TIMEOUT",
 							));
-						}
-					};
+							}
+						};
 
-					let selected_skills = skill::discover_repo_skills(
-						temp_dir.path(),
-						&req.skills,
-						req.install_all.unwrap_or(false),
-					)
-					.map_err(map_repo_discovery_error)?;
+						let selected_skills = skill::discover_repo_skills(
+							temp_dir.path(),
+							&req.skills,
+							req.install_all.unwrap_or(false),
+						)
+						.map_err(map_repo_discovery_error)?;
 
-					let ref_commit = gix::open(temp_dir.path())
-						.ok()
-						.and_then(|r| r.head_id().ok().map(|id| id.detach()))
-						.map(|oid| oid.to_string());
+						let ref_commit = gix::open(temp_dir.path())
+							.ok()
+							.and_then(|r| {
+								r.head_id().ok().map(|id| id.detach())
+							})
+							.map(|oid| oid.to_string());
 
-					let items: Vec<InstallItem> = selected_skills
-						.into_iter()
-						.map(|s| {
-							let lock_skill_path =
-								skill::lock_skill_file_path(&s.relative_dir);
-							(s.name, lock_skill_path)
-						})
-						.collect();
+						let items: Vec<(String, String)> = selected_skills
+							.into_iter()
+							.map(|s| {
+								let lock_skill_path =
+									skill::lock_skill_file_path(
+										&s.relative_dir,
+									);
+								(s.name, lock_skill_path)
+							})
+							.collect();
 
-					(
-						lock_source,
-						items,
 						InstallMaterialization::Clone {
 							temp_dir,
 							ref_commit,
-						},
-					)
-				} else {
-					return Err(map_remote_source_error(error));
+							lock_source,
+							items,
+						}
+					} else {
+						return Err(map_remote_source_error(error));
+					}
 				}
+				#[cfg(not(test))]
+				return Err(map_remote_source_error(error));
 			}
-			#[cfg(not(test))]
-			return Err(map_remote_source_error(error));
-		}
-	};
+		};
 
-	let agent_types: Vec<AgentType> = agents.types().to_vec();
-
-	// The install loop below is fully synchronous and takes the mutation lock per
+	// The install loop is fully synchronous and takes the mutation lock per
 	// skill, so it runs on the blocking pool. Everything above — scope parsing,
 	// agent preflight, the fetch — is unchanged and still decides errors first.
 	in_mutation_pool(move || {
-		let mut agent_rows: Vec<GitInstallResultEntry> = Vec::new();
-		for (name, lock_skill_path) in &items {
-			let installed = match &materialization {
-				InstallMaterialization::Fetched(fetched) => {
-					skill_update::mutation::install_fetched_source(
-						fetched,
-						skill_update::mutation::FetchedInstallRequest {
-							source: &lock_source,
-							lock_skill_path,
-							expected_name: None,
-							scope: write_scope.clone(),
-							target_agents: &agent_types,
-							expected_ref: Some(lock_source.ref_name.as_deref()),
-						},
-					)
-					.map_err(fetched_install_error_message)
-				}
-				#[cfg(test)]
-				InstallMaterialization::Clone {
-					temp_dir,
-					ref_commit,
-				} => install_test_clone(
-					temp_dir.path(),
-					ref_commit.as_deref(),
-					lock_skill_path,
-					&lock_source,
-					write_scope.clone(),
-					&agent_types,
-				),
-			};
-			match installed {
-				Ok(report) => {
-					for ((agent_str, _), agent_result) in
-						target_agents.iter().zip(report.agent_results)
-					{
-						let success = agent_result.error.is_none();
-						agent_rows.push(GitInstallResultEntry {
-							name: if success {
-								report.name.clone()
-							} else {
-								name.clone()
-							},
-							agent: agent_str.clone(),
-							success,
-							error: agent_result.error,
-						});
+		let agent_rows: Vec<GitInstallResultEntry> = match materialization {
+			InstallMaterialization::Fetched(prepared) => prepared
+				.install(&agents, fetched_install_error_message)
+				.into_iter()
+				.map(install_row_entry)
+				.collect(),
+			#[cfg(test)]
+			InstallMaterialization::Clone {
+				temp_dir,
+				ref_commit,
+				lock_source,
+				items,
+			} => {
+				let agent_types: Vec<AgentType> = agents.types().to_vec();
+				let target_agents: Vec<(String, AgentType)> = agents
+					.ids()
+					.iter()
+					.cloned()
+					.zip(agent_types.iter().copied())
+					.collect();
+				let mut agent_rows: Vec<GitInstallResultEntry> = Vec::new();
+				for (name, lock_skill_path) in &items {
+					let installed = install_test_clone(
+						temp_dir.path(),
+						ref_commit.as_deref(),
+						lock_skill_path,
+						&lock_source,
+						write_scope.clone(),
+						&agent_types,
+					);
+					match installed {
+						Ok(report) => {
+							for ((agent_str, _), agent_result) in
+								target_agents.iter().zip(report.agent_results)
+							{
+								let success = agent_result.error.is_none();
+								agent_rows.push(GitInstallResultEntry {
+									name: if success {
+										report.name.clone()
+									} else {
+										name.clone()
+									},
+									agent: agent_str.clone(),
+									success,
+									error: agent_result.error,
+								});
+							}
+						}
+						Err(message) => {
+							for (agent_str, _) in &target_agents {
+								agent_rows.push(GitInstallResultEntry {
+									name: name.clone(),
+									agent: agent_str.clone(),
+									success: false,
+									error: Some(message.clone()),
+								});
+							}
+						}
 					}
 				}
-				Err(message) => {
-					for (agent_str, _) in &target_agents {
-						agent_rows.push(GitInstallResultEntry {
-							name: name.clone(),
-							agent: agent_str.clone(),
-							success: false,
-							error: Some(message.clone()),
-						});
-					}
-				}
+				agent_rows
 			}
-		}
+		};
 
 		// Aggregate over OUTCOMES: `installed` is false for an idempotent
 		// re-install, which is still a success.

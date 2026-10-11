@@ -1,7 +1,13 @@
 //! The Fetched Source install flow shared by every surface: agent precheck with
 //! per-row attribution, and the one lock-source spelling an install records.
 
+use crate::mutation::{
+	install_fetched_source, FetchedInstallRequest, FetchedSource,
+	InstallMutationError,
+};
+use crate::{SkillRepoError, SkillRepository, SourceRef};
 use aghub_core::models::AgentType;
+use aghub_core::WriteScope;
 
 /// One per-(skill, agent) row of an install result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +95,189 @@ pub fn install_lock_source(
 		source_type: resolved.source_type.as_str().to_string(),
 		source_url: resolved.source_url.clone(),
 		ref_name,
+	}
+}
+
+/// Errors from the resolve/list/select/fetch stage of a remote install.
+#[derive(Debug)]
+pub enum InstallFetchError {
+	Repo(SkillRepoError),
+	SkillsNotFound { missing: String, available: String },
+	NoSkillsFound,
+	InvalidPath,
+}
+
+/// Map shared-policy selections to `(catalog_name, SkillPath)` pairs.
+fn select_catalog_paths(
+	catalog: &[crate::CatalogSkill],
+	requested: &[String],
+	install_all: bool,
+) -> Result<Vec<(String, skill::SkillPath)>, InstallFetchError> {
+	let selected =
+		skill::select_repo_skills(catalog, requested, install_all, |skill| {
+			skill.name.as_str()
+		})
+		.map_err(|error| match error {
+			skill::RepoSkillSelectionError::NoSkillsFound => {
+				InstallFetchError::NoSkillsFound
+			}
+			skill::RepoSkillSelectionError::SkillsNotFound {
+				missing,
+				available,
+			} => InstallFetchError::SkillsNotFound { missing, available },
+		})?;
+
+	selected
+		.into_iter()
+		.map(|skill| {
+			let path = skill::SkillPath::parse(&skill.skill_path)
+				.map_err(|_| InstallFetchError::InvalidPath)?;
+			Ok((skill.name.clone(), path))
+		})
+		.collect()
+}
+
+/// Owned input of [`fetch_remote_install`], so a caller can move it into
+/// `spawn_blocking`.
+pub struct RemoteInstallRequest {
+	/// The RAW request source: the `recorded_refs` key and fetch coordinate.
+	pub source: String,
+	pub resolved: aghub_git::ResolvedRemoteSource,
+	pub scope: WriteScope,
+	pub token: Option<String>,
+	pub skills: Vec<String>,
+	pub install_all: bool,
+}
+
+/// A commit-pinned Fetched Source bound to the scope its ref was decided in.
+pub struct PreparedInstall {
+	fetched: FetchedSource,
+	lock_source: skill::InstallLockSource,
+	scope: WriteScope,
+	expected_ref: Option<Option<String>>,
+	/// (row label, npx-form lock skill path)
+	items: Vec<(String, String)>,
+}
+
+/// Blocking and UNLOCKED: resolve, list, select and fetch a remote install.
+///
+/// The ref fetched is the one the lock will record: an existing cohort's ref
+/// (a recorded `None` = the default branch), else the default branch
+/// (`sources::import_ref`). It is NAMED first and then exactly that ref is
+/// resolved: resolving HEAD and asking its name in a second call races a
+/// default branch switch (bytes from one branch, lock naming another). One
+/// resolve, one list, one fetch.
+pub fn fetch_remote_install(
+	repo: &SkillRepository,
+	req: RemoteInstallRequest,
+) -> Result<PreparedInstall, InstallFetchError> {
+	let RemoteInstallRequest {
+		source,
+		resolved,
+		scope,
+		token,
+		skills,
+		install_all,
+	} = req;
+	let recorded = crate::sources::recorded_refs(&scope, &source);
+	let fetch_ref = crate::sources::import_ref(None, &recorded, || {
+		repo.default_branch(
+			&SourceRef {
+				source: source.clone(),
+				ref_: None,
+			},
+			token.as_deref(),
+		)
+	});
+	let claim = repo
+		.resolve_pinned(
+			&SourceRef {
+				source: source.clone(),
+				ref_: fetch_ref.clone(),
+			},
+			token.as_deref(),
+		)
+		.map_err(InstallFetchError::Repo)?;
+	let catalog = repo.list_pinned(&claim).map_err(InstallFetchError::Repo)?;
+	let selected = select_catalog_paths(&catalog.skills, &skills, install_all)?;
+	let paths: Vec<skill::SkillPath> =
+		selected.iter().map(|(_, p)| p.clone()).collect();
+	let fetched = repo
+		.fetch_pinned(&claim, crate::FetchSelection::Skills(&paths))
+		.map_err(InstallFetchError::Repo)?;
+
+	let lock_source = install_lock_source(&resolved, fetch_ref);
+	let expected_ref = Some(lock_source.ref_name.clone());
+	let items = selected
+		.into_iter()
+		.map(|(name, path)| (name, skill::lock_skill_file_path(path.as_str())))
+		.collect();
+	Ok(PreparedInstall {
+		fetched: FetchedSource::from_repo(fetched),
+		lock_source,
+		scope,
+		expected_ref,
+		items,
+	})
+}
+
+impl PreparedInstall {
+	/// Install every item, taking the mutation lock PER SKILL inside
+	/// `install_fetched_source`. Callers run it on the mutation pool. A zip
+	/// shorter than the agent list truncates rows, as before.
+	pub fn install(
+		self,
+		agents: &InstallAgents,
+		render: impl Fn(InstallMutationError) -> String,
+	) -> Vec<InstallRow> {
+		let mut rows = Vec::new();
+		for (name, lock_skill_path) in &self.items {
+			let installed = install_fetched_source(
+				&self.fetched,
+				FetchedInstallRequest {
+					source: &self.lock_source,
+					lock_skill_path,
+					expected_name: None,
+					scope: self.scope.clone(),
+					target_agents: agents.types(),
+					expected_ref: self
+						.expected_ref
+						.as_ref()
+						.map(|r| r.as_deref()),
+				},
+			)
+			.map_err(&render);
+			match installed {
+				Ok(report) => {
+					for (agent, agent_result) in
+						agents.ids().iter().zip(report.agent_results)
+					{
+						let success = agent_result.error.is_none();
+						rows.push(InstallRow {
+							name: if success {
+								report.name.clone()
+							} else {
+								name.clone()
+							},
+							agent: agent.clone(),
+							success,
+							error: agent_result.error,
+						});
+					}
+				}
+				Err(message) => {
+					for agent in agents.ids() {
+						rows.push(InstallRow {
+							name: name.clone(),
+							agent: agent.clone(),
+							success: false,
+							error: Some(message.clone()),
+						});
+					}
+				}
+			}
+		}
+		rows
 	}
 }
 
