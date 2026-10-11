@@ -11,7 +11,17 @@ use std::path::{Path, PathBuf};
 pub struct MarketplaceConfig {
 	pub name: String,
 	pub owner: MarketplaceOwner,
+	/// Third-party catalogs: one entry we cannot read must not drop the whole
+	/// marketplace from the market page.
+	#[serde(deserialize_with = "lenient_plugins")]
 	pub plugins: Vec<MarketplacePlugin>,
+}
+
+fn lenient_plugins<'de, D: Deserializer<'de>>(
+	deserializer: D,
+) -> std::result::Result<Vec<MarketplacePlugin>, D::Error> {
+	let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+	Ok(crate::cli::lenient_collect(values, "marketplace plugin"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,6 +373,24 @@ mod tests {
 
 		write(&tmp.path().join(".claude-plugin/marketplace.json"), "{");
 		assert!(load_marketplace(tmp.path()).await.is_none());
+	}
+
+	#[test]
+	fn one_unreadable_plugin_does_not_drop_the_marketplace() {
+		let json = r#"{
+            "name": "m",
+            "owner": { "name": "o" },
+            "plugins": [
+                { "name": "ok", "source": "./plugins/ok" },
+                { "name": "future", "source": { "source": "some-new-kind" } },
+                { "name": "string-author", "author": "Someone", "source": "./x" }
+            ]
+        }"#;
+
+		let config: MarketplaceConfig = serde_json::from_str(json).unwrap();
+		let names: Vec<_> =
+			config.plugins.iter().map(|p| p.name.as_str()).collect();
+		assert_eq!(names, ["ok"]);
 	}
 
 	#[test]

@@ -44,8 +44,8 @@ pub fn default_claude_json_path() -> Option<PathBuf> {
 
 /// Read the `skillUsage` map from a `~/.claude.json`-shaped file.
 ///
-/// Tolerant by design: a missing file, missing `skillUsage` key, or malformed
-/// entries yield an empty map rather than an error — the feature is read-only
+/// Tolerant by design: a missing file or missing `skillUsage` key yields an
+/// empty map, and a malformed entry is skipped, rather than an error — the feature is read-only
 /// and best-effort.
 pub fn read_skill_usage(claude_json: &Path) -> HashMap<String, RawUsage> {
 	let Ok(bytes) = std::fs::read(claude_json) else {
@@ -54,12 +54,18 @@ pub fn read_skill_usage(claude_json: &Path) -> HashMap<String, RawUsage> {
 	let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
 		return HashMap::new();
 	};
-	value
-		.get("skillUsage")
-		.and_then(|v| {
-			serde_json::from_value::<HashMap<String, RawUsage>>(v.clone()).ok()
+	// Per entry: one malformed entry must not zero every skill's count (which
+	// would make them all look unused).
+	let Some(map) = value.get("skillUsage").and_then(|v| v.as_object()) else {
+		return HashMap::new();
+	};
+	map.iter()
+		.filter_map(|(name, entry)| {
+			serde_json::from_value::<RawUsage>(entry.clone())
+				.ok()
+				.map(|usage| (name.clone(), usage))
 		})
-		.unwrap_or_default()
+		.collect()
 }
 
 /// Left-join installed skills against a usage map.
@@ -195,6 +201,24 @@ mod tests {
 		assert_eq!(usage["init"].last_used_at, Some(1779929056499));
 		assert_eq!(usage["orphan"].usage_count, 2);
 		assert_eq!(usage["orphan"].last_used_at, None);
+	}
+
+	#[test]
+	fn read_skips_malformed_entry_keeps_the_rest() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join(".claude.json");
+		std::fs::write(
+			&path,
+			r#"{"skillUsage": {
+				"init": { "usageCount": 6 },
+				"weird": { "usageCount": 1.5 }
+			}}"#,
+		)
+		.unwrap();
+
+		let usage = read_skill_usage(&path);
+		assert_eq!(usage.len(), 1);
+		assert_eq!(usage["init"].usage_count, 6);
 	}
 
 	#[test]

@@ -23,13 +23,13 @@ discovery + git/tarball materialization are in-crate.
 - CLI has **no "check for updates"** semantics — update = install-latest; no diff step
 - `manager.rs` (`load_via_cli`) and `lifecycle.rs` (`fetch_installed`) parse the
   same `plugin list` into **different** types (discovery vs management) — intentional
-- **Lenient per-entry parse** applies to the CLI **list** output —
-  `plugin_list_available` (catalog) and `marketplace_list` (via
-  `lenient_collect`) — one bad entry must not blank those. Strict
-  whole-document parse (one bad entry fails everything) is used both for the
-  installed `plugin list` (`ClaudeCli::plugin_list` → `Vec<CliInstalledPlugin>`)
-  AND for on-disk `MarketplaceConfig` (`serde_json::from_str` in
-  discovery/installer)
+- **Lenient per-entry parse** applies to every third-party list we read —
+  `plugin_list` (installed), `plugin_list_available` (catalog),
+  `marketplace_list` (all via `lenient_collect`) and on-disk
+  `MarketplaceConfig.plugins` — one bad entry is skipped + warned, never
+  blanks the list. Claude Code adds entry shapes faster than these typed views
+  (e.g. `<name>@skills-dir` entries carry no `installedAt`/`lastUpdated`). A
+  field a third party may omit gets `#[serde(default)]`, not a required type
 - Marketplace `"source": "directory"` (alias `"local"`) parses to
   `CliMarketplaceSource::Local` (`cli/types.rs`); the separate
   `MarketplaceEntry::Directory` is `registry_catalog.rs`'s plugins-subdir

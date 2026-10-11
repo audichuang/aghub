@@ -31,7 +31,7 @@ pub(crate) fn cli_scope(scope: InstallScope) -> &'static str {
 /// `source` discriminants like `directory`) evolves faster than these typed
 /// views; a single unrecognized entry must NOT blank the whole list (which is
 /// exactly how a directory-source marketplace once broke `marketplace list`).
-fn lenient_collect<T: serde::de::DeserializeOwned>(
+pub(crate) fn lenient_collect<T: serde::de::DeserializeOwned>(
 	values: Vec<serde_json::Value>,
 	what: &str,
 ) -> Vec<T> {
@@ -123,8 +123,11 @@ impl ClaudeCli {
 
 	pub async fn plugin_list(&self) -> Result<Vec<CliInstalledPlugin>> {
 		let output = self.spawn(&["plugin", "list", "--json"]).await?;
-		serde_json::from_slice(&output.stdout)
-			.context("failed to parse `claude plugin list --json` output")
+		let values: Vec<serde_json::Value> = serde_json::from_slice(
+			&output.stdout,
+		)
+		.context("failed to parse `claude plugin list --json` output")?;
+		Ok(lenient_collect(values, "installed plugin"))
 	}
 
 	pub async fn plugin_list_available(&self) -> Result<CliPluginCatalog> {
@@ -391,6 +394,37 @@ mod tests {
 		let kept: Vec<CliMarketplace> = lenient_collect(values, "marketplace");
 		assert_eq!(kept.len(), 1, "the unknown entry is skipped, not fatal");
 		assert_eq!(kept[0].name, "ok");
+	}
+
+	// plugin_list must use the same per-entry leniency as the other list
+	// parsers: one entry it cannot read must not fail the whole plugins page.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn plugin_list_skips_bad_entry_keeps_good() {
+		use std::os::unix::fs::PermissionsExt;
+		let dir = tempfile::tempdir().unwrap();
+		let script = dir.path().join("claude");
+		std::fs::write(
+			&script,
+			r#"#!/bin/sh
+cat <<'JSON'
+[
+ {"id":"good@m","version":"1","scope":"user","enabled":true,"installPath":"/x","installedAt":"t","lastUpdated":"t"},
+ {"id":"broken@m","scope":"user"}
+]
+JSON
+"#,
+		)
+		.unwrap();
+		std::fs::set_permissions(
+			&script,
+			std::fs::Permissions::from_mode(0o755),
+		)
+		.unwrap();
+		let cli = ClaudeCli { binary: script };
+		let plugins = cli.plugin_list().await.unwrap();
+		assert_eq!(plugins.len(), 1);
+		assert_eq!(plugins[0].id, "good@m");
 	}
 
 	#[test]

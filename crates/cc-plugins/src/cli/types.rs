@@ -11,7 +11,10 @@ pub struct CliInstalledPlugin {
 	pub scope: String,
 	pub enabled: bool,
 	pub install_path: String,
+	// Absent on plugins Claude Code loads from a skills dir (`<name>@skills-dir`).
+	#[serde(default)]
 	pub installed_at: String,
+	#[serde(default)]
 	pub last_updated: String,
 }
 
@@ -57,6 +60,8 @@ pub enum CliMarketplaceSource {
 pub struct CliAvailablePlugin {
 	pub plugin_id: String,
 	pub name: String,
+	// Some anthropic-plugin-directory catalog entries ship without one.
+	#[serde(default)]
 	pub description: String,
 	pub marketplace_name: String,
 	pub source: CliPluginSource,
@@ -129,6 +134,23 @@ mod tests {
 		assert_eq!(plugin.scope, "user");
 		assert!(plugin.enabled);
 		assert_eq!(plugin.version, "76b35e91d1c9");
+	}
+
+	#[test]
+	fn deserialize_skills_dir_plugin_without_timestamps() {
+		let json = r#"[{
+			"id": "prompt-glance@skills-dir",
+			"version": "0.1.0",
+			"scope": "user",
+			"enabled": true,
+			"installPath": "/Users/audi/.claude/skills/prompt-glance",
+			"hasUserConfig": true
+		}]"#;
+		let plugins: Vec<CliInstalledPlugin> =
+			serde_json::from_str(json).unwrap();
+		assert_eq!(plugins[0].id, "prompt-glance@skills-dir");
+		assert_eq!(plugins[0].installed_at, "");
+		assert_eq!(plugins[0].last_updated, "");
 	}
 
 	#[test]
@@ -245,6 +267,24 @@ mod tests {
 		}"#;
 		let mp: CliMarketplace = serde_json::from_str(json).unwrap();
 		assert!(matches!(mp.source, CliMarketplaceSource::Local { .. }));
+	}
+
+	#[test]
+	fn deserialize_available_plugin_without_description() {
+		let json = r#"{
+			"pluginId": "session-report@anthropic-plugin-directory",
+			"name": "session-report",
+			"marketplaceName": "anthropic-plugin-directory",
+			"source": {
+				"source": "git-subdir",
+				"url": "https://github.com/anthropics/claude-plugins-official",
+				"path": "plugins/session-report",
+				"sha": "a9fd21643fc10eb9c8c8b581902f6259937fa1a4"
+			}
+		}"#;
+		let plugin: CliAvailablePlugin = serde_json::from_str(json).unwrap();
+		assert_eq!(plugin.name, "session-report");
+		assert_eq!(plugin.description, "");
 	}
 
 	#[test]
