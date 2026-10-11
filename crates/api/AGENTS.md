@@ -117,7 +117,7 @@ line** — don't reword it). Pass `--port N` to pin one.
     - `SKILL_SOURCE_MISMATCH`: the API session URL does not match what the skill is locked to; request validation owned by the HTTP sync session guard.
     - `PROJECT_ROOT_REQUIRED`: `project_root` is required when `scope` is project; request-shape validation owned by the HTTP boundary.
     - `INVALID_SCOPE`: scope must be global or project; request-shape validation owned by the HTTP boundary.
-    - `confirm=true` requirement (`CONFIRMATION_REQUIRED`): safety gate requiring explicit confirmation to overwrite installed skills or accept renames; policy check owned by the HTTP surface.
+    - `confirm=true` requirement: safety gate requiring explicit confirmation to overwrite installed skills or accept renames; policy check owned by the HTTP surface. There is no dedicated code: batch `apply-updates` answers 400 `INVALID_PARAM`, while single apply / accept-rename answer 200 with an error row and no `code`.
     - batch-names cap (`INVALID_PARAM`): limit of 256 names per batch request; payload policy check owned by the HTTP boundary.
 
 ## ANTI-PATTERNS
