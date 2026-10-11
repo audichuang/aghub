@@ -7719,6 +7719,327 @@ mod tests {
 		});
 	}
 
+	/// Backend that fails the test the moment the install route touches the
+	/// network seam; pins "agent rows precede any fetch".
+	#[cfg(unix)]
+	struct PanicBackend;
+
+	#[cfg(unix)]
+	impl aghub_git::RepoFetchBackend for PanicBackend {
+		fn resolve(
+			&self,
+			_s: &aghub_git::SourceRef,
+			_a: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+			panic!("resolve must not run before the agent preflight");
+		}
+		fn read_tree(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			panic!("read_tree must not run before the agent preflight");
+		}
+		fn read_blobs(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_o: &[String],
+		) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+			panic!("read_blobs must not run before the agent preflight");
+		}
+		fn materialize(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_p: &[&str],
+			_d: &std::path::Path,
+		) -> aghub_git::Result<()> {
+			panic!("materialize must not run before the agent preflight");
+		}
+	}
+
+	/// Resolves and lists fine, but every materialization fails.
+	#[cfg(unix)]
+	struct MaterializeFailsBackend;
+
+	#[cfg(unix)]
+	impl aghub_git::RepoFetchBackend for MaterializeFailsBackend {
+		fn resolve(
+			&self,
+			_s: &aghub_git::SourceRef,
+			_a: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+			Ok(aghub_git::RepoSnapshot {
+				commit_oid: "9999999999999999999999999999999999999999".into(),
+				tree_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+				commit_time: None,
+			})
+		}
+		fn read_tree(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			Ok(aghub_git::RepoTree {
+				entries: Vec::new(),
+			})
+		}
+		fn read_blobs(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_o: &[String],
+		) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+			Ok(Vec::new())
+		}
+		fn materialize(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_p: &[&str],
+			_d: &std::path::Path,
+		) -> aghub_git::Result<()> {
+			Err(aghub_git::GitError::CloneFailed("boom".into()))
+		}
+	}
+
+	fn unknown_agent_install_request(
+		source: &str,
+		project: &std::path::Path,
+	) -> InstallSkillRequest {
+		InstallSkillRequest {
+			source: source.to_string(),
+			agents: vec!["claude".to_string(), "nope".to_string()],
+			skills: vec!["s".to_string()],
+			scope: "project".to_string(),
+			project_path: Some(project.display().to_string()),
+			install_all: Some(false),
+		}
+	}
+
+	fn assert_unknown_agent_rows(resp: &InstallSkillResponse) {
+		assert!(!resp.success);
+		let rows: Vec<_> = resp
+			.agents
+			.iter()
+			.map(|a| {
+				(
+					a.name.as_str(),
+					a.agent.as_str(),
+					a.success,
+					a.error.as_deref(),
+				)
+			})
+			.collect();
+		assert_eq!(
+			rows,
+			vec![
+				(
+					"",
+					"claude",
+					false,
+					Some("Another requested agent is invalid; nothing was written"),
+				),
+				("", "nope", false, Some("Unknown agent 'nope'")),
+			]
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn install_skill_unknown_agent_rows_precede_any_fetch() {
+		with_isolated_env(|home, _state| {
+			let _keyring =
+				crate::credentials::test_hooks::MockKeyringBackend::new();
+			let project = home.join("project");
+			std::fs::create_dir_all(&project).unwrap();
+			let repo = std::sync::Arc::new(
+				skill_update::SkillRepository::with_backends(
+					None,
+					std::sync::Arc::new(PanicBackend),
+				),
+			);
+			let resp = block_on(install_skill_with_repo(
+				unknown_agent_install_request(
+					"https://github.com/o/r",
+					&project,
+				),
+				repo,
+				None,
+			))
+			.ok()
+			.expect("handler ok")
+			.into_inner();
+			assert_unknown_agent_rows(&resp);
+			assert!(!project.join(".aghub").exists());
+		});
+	}
+
+	#[test]
+	fn install_skill_unknown_agent_outranks_an_invalid_source() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("project");
+			std::fs::create_dir_all(&project).unwrap();
+			// An explicit relative path is not a GitHub shorthand, so
+			// `resolve_remote_source` rejects it (400 on its own).
+			assert!(aghub_git::resolve_remote_source(
+				"./vercel-labs/agent-skills"
+			)
+			.is_err());
+			let repo =
+				std::sync::Arc::new(skill_update::SkillRepository::new());
+			let resp = block_on(install_skill_with_repo(
+				unknown_agent_install_request(
+					"./vercel-labs/agent-skills",
+					&project,
+				),
+				repo,
+				None,
+			))
+			.ok()
+			.expect("unknown agent rows win over INVALID_SKILL_SOURCE")
+			.into_inner();
+			assert_unknown_agent_rows(&resp);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn git_install_unknown_agent_rows_are_skill_major_and_consume_session() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("project");
+			std::fs::create_dir_all(&project).unwrap();
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("sessions state");
+			let fixture = tempdir().unwrap();
+			for name in ["a", "b"] {
+				let dir = fixture.path().join(name);
+				std::fs::create_dir_all(&dir).unwrap();
+				std::fs::write(
+					dir.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: d\n---\n"),
+				)
+				.unwrap();
+			}
+			sessions.insert(
+				"unknown-agent-session".to_string(),
+				session_from_fixture(
+					fixture.path(),
+					"https://github.com/o/r",
+					"main",
+				),
+			);
+			let body = serde_json::json!({
+				"session_id": "unknown-agent-session",
+				"skill_paths": ["a", "b"],
+				"agents": ["nope", "claude"],
+				"scope": "project",
+				"project_root": project.display().to_string()
+			});
+
+			let response = client
+				.post("/api/v1/skills/git/install")
+				.json(&body)
+				.dispatch();
+			assert_eq!(response.status(), rocket::http::Status::Ok);
+			let json: serde_json::Value = serde_json::from_str(
+				&response.into_string().expect("response body"),
+			)
+			.expect("json response");
+			let invalid_other =
+				"Another requested agent is invalid; nothing was written";
+			let rows: Vec<(String, String, bool, String)> = json["results"]
+				.as_array()
+				.unwrap()
+				.iter()
+				.map(|r| {
+					(
+						r["name"].as_str().unwrap().to_string(),
+						r["agent"].as_str().unwrap().to_string(),
+						r["success"].as_bool().unwrap(),
+						r["error"].as_str().unwrap().to_string(),
+					)
+				})
+				.collect();
+			let expected: Vec<(String, String, bool, String)> = [
+				("a", "nope", "Unknown agent 'nope'"),
+				("a", "claude", invalid_other),
+				("b", "nope", "Unknown agent 'nope'"),
+				("b", "claude", invalid_other),
+			]
+			.into_iter()
+			.map(|(n, a, e)| (n.into(), a.into(), false, e.into()))
+			.collect();
+			assert_eq!(rows, expected);
+			assert!(!project.join(".aghub").exists());
+			assert!(!project.join(".claude/skills").exists());
+
+			// The rejected batch still consumed the session.
+			let again = client
+				.post("/api/v1/skills/git/install")
+				.json(&body)
+				.dispatch();
+			assert_eq!(again.status(), rocket::http::Status::NotFound);
+			let again_json: serde_json::Value = serde_json::from_str(
+				&again.into_string().expect("response body"),
+			)
+			.expect("json response");
+			assert_eq!(again_json["code"], "SESSION_NOT_FOUND");
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn git_install_fetch_failure_outranks_unknown_agent() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("project");
+			std::fs::create_dir_all(&project).unwrap();
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("sessions state");
+			sessions.insert(
+				"fetch-fails-session".to_string(),
+				session_with_backend(
+					std::sync::Arc::new(MaterializeFailsBackend),
+					"https://github.com/o/r",
+					"main",
+				),
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/install")
+				.json(&serde_json::json!({
+					"session_id": "fetch-fails-session",
+					"skill_paths": ["a"],
+					"agents": ["nope"],
+					"scope": "project",
+					"project_root": project.display().to_string()
+				}))
+				.dispatch();
+
+			// The agent check runs AFTER the fetch on this route, so the fetch
+			// error wins over the unknown-agent rows.
+			assert_eq!(response.status(), rocket::http::Status::BadRequest);
+			let json: serde_json::Value = serde_json::from_str(
+				&response.into_string().expect("response body"),
+			)
+			.expect("json response");
+			assert_eq!(json["code"], "CLONE_FAILED");
+		});
+	}
+
 	/// A one-skill git repo at `work`, built with gix (no `git` subprocess).
 	#[cfg(unix)]
 	fn write_single_skill_git_fixture(work: &std::path::Path) {
