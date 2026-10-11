@@ -1,5 +1,6 @@
 [build]
-# Enable sccache for faster rebuilds after clean
+# Enable sccache for faster rebuilds after clean. Runners do not install it:
+# ci.yml and release.yml override this with RUSTC_WRAPPER="".
 rustc-wrapper = "sccache"
 
 [profile.dev]

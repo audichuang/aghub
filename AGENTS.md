@@ -167,11 +167,10 @@ The two rules that span crates stay here:
   network and a `gh` login, so it is deliberately outside preflight. Run it
   after editing `crates/desktop/src/data/featured-skills.json` — the catalog
   points at other people's repos and rots on their schedule
-- `just test` and preflight run **cargo-nextest** (a process per test), not
-  `cargo test`: libtest serializes every env-lock test in one process (the api
-  lib binary alone took 48s vs 8s). Doc tests are not nextest's — they stay
-  `cargo test --workspace --doc`. The env-mutex rule still binds: plain
-  `cargo test` must stay correct
+- `just test` and preflight run **cargo-nextest** (one process per test), not
+  `cargo test`; doc tests stay `cargo test --workspace --doc`. Plain
+  `cargo test` must still pass, so the env-mutex rule still binds. Why:
+  [`docs/history/tooling.md`](docs/history/tooling.md#cargo-test-serialized-on-the-env-mutex)
 - Prefer file-scoped over the full suite:
   `cargo test -p aghub-core <full::module::path::name> -- --exact`
 - Desktop frontend commands run from `crates/desktop` via `bun run …`
