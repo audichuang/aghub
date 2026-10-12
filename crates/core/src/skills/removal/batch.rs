@@ -548,6 +548,138 @@ impl SkillRemovalResponse {
 	}
 }
 
+/// One scope of a cross-scope delete intent: the agents to remove the skill from there.
+#[derive(Debug, Clone)]
+pub struct ScopeRemovalTarget {
+	pub scope: WriteScope,
+	pub agents: Vec<AgentType>,
+}
+
+/// One attempted scope. `outcome: None` means the scope's request failed (`error` says why).
+#[derive(Debug, Clone)]
+pub struct ScopeRemovalRow {
+	pub scope: WriteScope,
+	pub outcome: Option<crate::dto::RemovalKind>,
+	pub error: Option<String>,
+}
+
+/// Folded result of a cross-scope delete intent.
+#[derive(Debug, Clone)]
+pub struct CrossScopeRemoval {
+	pub outcome: crate::dto::RemovalKind,
+	pub scopes: Vec<ScopeRemovalRow>,
+	pub holders: SkillHoldersView,
+}
+
+fn push_unique(into: &mut Vec<String>, values: Vec<String>) {
+	for value in values {
+		if !into.contains(&value) {
+			into.push(value);
+		}
+	}
+}
+
+/// ONE delete intent across scopes (the desktop delete dialog). Each scope runs
+/// through `remove_skill_batch` in order, taking and releasing its own mutation
+/// lock. The first scope that does not finish (`Kept`, `Partial`, or an error)
+/// stops the run. A refusal before anything was written returns that error
+/// unchanged; after a write it becomes a `Partial` row.
+pub fn remove_skill_across_scopes(
+	name: &str,
+	targets: Vec<ScopeRemovalTarget>,
+	dry_run: bool,
+) -> Result<CrossScopeRemoval> {
+	use crate::dto::RemovalKind;
+
+	if targets.is_empty() || targets.iter().any(|t| t.agents.is_empty()) {
+		return Err(ConfigError::InvalidConfig(
+			"No valid agent was provided".to_string(),
+		));
+	}
+
+	let plugin_roots = PluginRoots::current();
+	let mut rows: Vec<ScopeRemovalRow> = Vec::new();
+	let mut wrote = false;
+	let mut all: Vec<String> = Vec::new();
+	let mut managed: Vec<String> = Vec::new();
+	let mut unmanaged: Vec<String> = Vec::new();
+	let mut stop: Option<RemovalKind> = None;
+
+	for target in targets {
+		let scope = target.scope.clone();
+		let req = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName(name.to_string()),
+			scope: target.scope,
+			agents: target.agents,
+			dry_run,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let view = match remove_skill_batch_with(&req, &plugin_roots)
+			.and_then(|r| r.to_single_view(dry_run))
+		{
+			Ok(view) => view,
+			Err(e) => {
+				if !wrote {
+					return Err(e);
+				}
+				rows.push(ScopeRemovalRow {
+					scope,
+					outcome: None,
+					error: Some(e.to_string()),
+				});
+				stop = Some(RemovalKind::Partial);
+				break;
+			}
+		};
+
+		push_unique(&mut all, view.holders.all);
+		push_unique(&mut managed, view.holders.managed);
+		push_unique(&mut unmanaged, view.holders.unmanaged);
+
+		let kind = view.removal_view.outcome;
+		rows.push(ScopeRemovalRow {
+			scope,
+			outcome: Some(kind),
+			error: None,
+		});
+		match kind {
+			RemovalKind::Kept | RemovalKind::Partial => {
+				stop = Some(if kind == RemovalKind::Partial || wrote {
+					RemovalKind::Partial
+				} else {
+					RemovalKind::Kept
+				});
+				break;
+			}
+			RemovalKind::Removed => wrote = true,
+			_ => {}
+		}
+	}
+
+	let outcome = stop.unwrap_or_else(|| {
+		let any = |k: RemovalKind| rows.iter().any(|r| r.outcome == Some(k));
+		if any(RemovalKind::Removed) {
+			RemovalKind::Removed
+		} else if any(RemovalKind::Preview) {
+			RemovalKind::Preview
+		} else {
+			RemovalKind::Absent
+		}
+	});
+
+	Ok(CrossScopeRemoval {
+		outcome,
+		scopes: rows,
+		holders: SkillHoldersView {
+			all,
+			managed,
+			unmanaged,
+		},
+	})
+}
+
 fn scope_to_word(scope: ResourceScope) -> &'static str {
 	match scope {
 		ResourceScope::GlobalOnly => "global",

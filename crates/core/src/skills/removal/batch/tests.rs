@@ -2360,3 +2360,208 @@ fn test_by_name_multi_agent_removed_and_kept_folds_to_partial() {
 		"Master must survive while shared Referrer exists"
 	);
 }
+
+/// A real-directory Claude copy under `root`, with a lock entry for it.
+#[cfg(unix)]
+fn write_claude_copy(root: &Path, name: &str) {
+	let copy = root.join(".claude/skills").join(name);
+	fs::create_dir_all(&copy).unwrap();
+	fs::write(
+		copy.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+	fs::write(
+		root.join("skills-lock.json"),
+		format!(
+			r#"{{"version":1,"skills":{{"{name}":{{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}}}}"#
+		),
+	)
+	.unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_across_scopes_removes_each_scope_and_folds_to_removed() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+
+	let targets = |a: &Path, b: &Path| {
+		vec![
+			ScopeRemovalTarget {
+				scope: WriteScope::project(a),
+				agents: vec![AgentType::Claude],
+			},
+			ScopeRemovalTarget {
+				scope: WriteScope::project(b),
+				agents: vec![AgentType::Claude],
+			},
+		]
+	};
+
+	let (da, db) = (temp.path().join("dry/a"), temp.path().join("dry/b"));
+	write_claude_copy(&da, "x");
+	write_claude_copy(&db, "x");
+	let preview = remove_skill_across_scopes("x", targets(&da, &db), true)
+		.expect("dry run across scopes");
+	assert_eq!(preview.outcome, crate::dto::RemovalKind::Preview);
+	assert!(da.join(".claude/skills/x/SKILL.md").exists());
+	assert!(db.join(".claude/skills/x/SKILL.md").exists());
+
+	let (a, b) = (temp.path().join("a"), temp.path().join("b"));
+	write_claude_copy(&a, "x");
+	write_claude_copy(&b, "x");
+	let res = remove_skill_across_scopes("x", targets(&a, &b), false)
+		.expect("commit across scopes");
+	assert_eq!(res.outcome, crate::dto::RemovalKind::Removed);
+	assert_eq!(res.scopes.len(), 2);
+	assert!(res.scopes.iter().all(|r| {
+		r.outcome == Some(crate::dto::RemovalKind::Removed) && r.error.is_none()
+	}));
+	assert!(!a.join(".claude/skills/x").exists());
+	assert!(!b.join(".claude/skills/x").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_across_scopes_stops_at_first_partial_scope() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let a = temp.path().join("a");
+	let b = temp.path().join("b");
+
+	let name = "shared-skill";
+	setup_master_and_referrers(&a, name, &["claude"]);
+	let slot = a.join(".agents/skills").join(name);
+	fs::create_dir_all(slot.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(a.join(".aghub").join(name), &slot).unwrap();
+	write_claude_copy(&b, name);
+
+	let res = remove_skill_across_scopes(
+		name,
+		vec![
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&a),
+				agents: vec![AgentType::Claude, AgentType::Cursor],
+			},
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&b),
+				agents: vec![AgentType::Claude],
+			},
+		],
+		false,
+	)
+	.expect("partial scope must fold, not error");
+
+	assert_eq!(res.outcome, crate::dto::RemovalKind::Partial);
+	assert_eq!(
+		res.scopes.len(),
+		1,
+		"run must stop at the first partial scope"
+	);
+	assert_eq!(
+		res.scopes[0].outcome,
+		Some(crate::dto::RemovalKind::Partial)
+	);
+	assert!(
+		b.join(".claude/skills")
+			.join(name)
+			.join("SKILL.md")
+			.exists(),
+		"scope b must not be touched after scope a stopped the run"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_across_scopes_refusal_before_any_write_returns_the_error() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let a = temp.path().join("a");
+	let b = temp.path().join("b");
+	fs::create_dir_all(&a).unwrap();
+	fs::create_dir_all(&b).unwrap();
+
+	assert!(
+		!crate::registry::get(AgentType::Zed)
+			.supports_skill_scope(ResourceScope::ProjectOnly),
+		"fixture: Zed must not support project skill scope"
+	);
+	let err = remove_skill_across_scopes(
+		"x",
+		vec![
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&a),
+				agents: vec![AgentType::Claude],
+			},
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&b),
+				agents: vec![AgentType::Zed],
+			},
+		],
+		false,
+	)
+	.expect_err("refusal before any write must return the error");
+
+	assert_eq!(crate::error_codes::wire_code(&err), "UNSUPPORTED_OPERATION");
+	assert!(err.rejected_targets().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_across_scopes_refusal_after_a_write_folds_to_partial() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let a = temp.path().join("a");
+	let b = temp.path().join("b");
+	write_claude_copy(&a, "x");
+	fs::create_dir_all(&b).unwrap();
+
+	let res = remove_skill_across_scopes(
+		"x",
+		vec![
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&a),
+				agents: vec![AgentType::Claude],
+			},
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&b),
+				agents: vec![AgentType::Zed],
+			},
+		],
+		false,
+	)
+	.expect("a refusal after a write must fold into a Partial row");
+
+	assert_eq!(res.outcome, crate::dto::RemovalKind::Partial);
+	assert_eq!(
+		res.scopes[0].outcome,
+		Some(crate::dto::RemovalKind::Removed)
+	);
+	assert_eq!(res.scopes[1].outcome, None);
+	assert!(res.scopes[1].error.is_some());
+	assert!(!a.join(".claude/skills/x").exists());
+}
+
+#[test]
+fn test_across_scopes_rejects_empty_agents() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let a = temp.path().join("a");
+
+	let err = remove_skill_across_scopes(
+		"x",
+		vec![ScopeRemovalTarget {
+			scope: WriteScope::project(&a),
+			agents: vec![],
+		}],
+		false,
+	)
+	.expect_err("an empty agent set must be rejected");
+	assert_eq!(crate::error_codes::wire_code(&err), "INVALID_CONFIG");
+}
