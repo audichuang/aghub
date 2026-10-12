@@ -1863,6 +1863,7 @@ pub async fn git_sync_skill(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[cfg(unix)]
 	use crate::dto::skill::DeleteSkillScopeTarget;
 	#[cfg(unix)]
 	use crate::routes::skills_test_git::{test_git, test_has_git};

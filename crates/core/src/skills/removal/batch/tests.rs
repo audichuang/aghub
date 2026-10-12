@@ -2678,6 +2678,63 @@ fn test_across_scopes_lock_only_prune_then_refusal_is_partial() {
 	assert!(res.scopes[1].error.is_some());
 }
 
+#[cfg(unix)]
+#[test]
+fn test_across_scopes_preview_stops_at_scope_the_commit_would_refuse() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let a = temp.path().join("a");
+	let b = temp.path().join("b");
+	let name = "notebooklm";
+	setup_shared_fixture(&a, name);
+	write_claude_copy(&b, name);
+
+	let res = remove_skill_across_scopes(
+		name,
+		vec![
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&b),
+				agents: vec![AgentType::Claude],
+			},
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&a),
+				agents: vec![AgentType::Claude, AgentType::OpenCode],
+			},
+		],
+		true,
+	)
+	.expect("dry run across scopes");
+
+	assert_eq!(
+		res.outcome,
+		crate::dto::RemovalKind::Partial,
+		"the preview must stop where the commit would refuse, not fold to Preview"
+	);
+	assert_eq!(
+		res.scopes.len(),
+		2,
+		"the refusing scope must still get a row"
+	);
+	assert_eq!(
+		res.scopes[0].outcome,
+		Some(crate::dto::RemovalKind::Preview)
+	);
+	assert!(res.scopes[1].error.is_none());
+	assert!(
+		b.join(".claude/skills")
+			.join(name)
+			.join("SKILL.md")
+			.exists(),
+		"a dry run must not touch scope b"
+	);
+	assert!(
+		a.join(".aghub").join(name).exists(),
+		"a dry run must not touch scope a's Master"
+	);
+	assert!(a.join(".agents/skills").join(name).exists());
+}
+
 #[test]
 fn test_across_scopes_rejects_empty_agents() {
 	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());

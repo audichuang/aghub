@@ -454,6 +454,35 @@ test("cross-scope deleteSkill reports partial when global was written and projec
 	);
 });
 
+test("cross-scope deleteSkill takes the partial verdict from core's outcome", async () => {
+	const result = await deleteSkill({
+		api: byNameApi(() => ({
+			success: false,
+			outcome: "partial",
+			scopes: [
+				scopeRow("global", null, "absent"),
+				scopeRow("project", "/p", "failed", "x"),
+			],
+			still_read_by_managed: [],
+			still_read_by_unmanaged: [],
+		})),
+		skillName: "cross-skill",
+		scopes: [
+			{ scope: "global", projectRoot: null, agents: ["claude"] },
+			{ scope: "project", projectRoot: "/p", agents: ["codex"] },
+		],
+		intent: { kind: "all-agents" },
+		t,
+	});
+
+	assert.equal(result.verdict, "partial");
+	assert.equal(result.success, false);
+	assert.equal(
+		result.message,
+		"deleteSkillCrossScopePartial|scopeGlobal|scopeProject|x",
+	);
+});
+
 test("cross-scope deleteSkill maps a whole-batch 422 to refused", async () => {
 	const result = await deleteSkill({
 		api: byNameApi(() => {

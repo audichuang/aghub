@@ -694,9 +694,8 @@ export async function deleteSkill(
 					: t
 						? t("failedToDeleteSkill")
 						: "Failed to delete skill");
-		const written = res.scopes.filter(
-			(s) => s.outcome === "removed" || s.outcome === "partial",
-		);
+		// Every row before the stopping row was already run by core.
+		const written = res.scopes.slice(0, -1);
 		const message =
 			written.length > 0
 				? t
@@ -710,7 +709,7 @@ export async function deleteSkill(
 					: `${written.map((s) => label(s.scope)).join(", ")} scope deleted, but ${label(failed?.scope ?? "global")} scope failed: ${reason}`
 				: reason;
 		return {
-			verdict: written.length > 0 ? "partial" : "refused",
+			verdict: res.outcome === "partial" ? "partial" : "refused",
 			success: false,
 			message,
 			unmanagedKept,

@@ -597,7 +597,8 @@ fn push_unique(into: &mut Vec<String>, values: Vec<String>) {
 /// stops the run. A refusal before anything was written returns that error
 /// unchanged; after a write it becomes a `Partial` row. A scope counts as
 /// written when it executed a removal or pruned a lock entry, even with an
-/// `absent` outcome (a lock-only prune).
+/// `absent` outcome (a lock-only prune). A dry run stops at the first scope the
+/// commit would refuse, so its preview never promises more than the commit does.
 pub fn remove_skill_across_scopes(
 	name: &str,
 	targets: Vec<ScopeRemovalTarget>,
@@ -618,6 +619,8 @@ pub fn remove_skill_across_scopes(
 	let mut managed: Vec<String> = Vec::new();
 	let mut unmanaged: Vec<String> = Vec::new();
 	let mut stop: Option<RemovalKind> = None;
+	// Dry run only: an earlier scope previewed a removal the commit would perform.
+	let mut previewed = false;
 
 	for target in targets {
 		let scope = target.scope.clone();
@@ -660,6 +663,16 @@ pub fn remove_skill_across_scopes(
 			outcome: Some(kind),
 			error: None,
 		});
+		// The commit refuses this scope and stops the run here; the dry run must too.
+		if dry_run && view.code.is_some() {
+			stop = Some(if previewed {
+				RemovalKind::Partial
+			} else {
+				RemovalKind::Kept
+			});
+			break;
+		}
+		previewed |= dry_run && kind == RemovalKind::Preview;
 		match kind {
 			RemovalKind::Kept | RemovalKind::Partial => {
 				stop = Some(if kind == RemovalKind::Partial || wrote {
