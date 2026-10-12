@@ -8,6 +8,7 @@ pub mod install_local;
 pub mod linker;
 pub mod lock;
 pub(crate) mod path_identity;
+pub mod plugin_roots;
 pub mod prune;
 pub mod removal;
 pub mod rename;

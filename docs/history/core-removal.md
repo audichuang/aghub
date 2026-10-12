@@ -495,3 +495,16 @@ the very entry being swept.
 
 Tests: `manager::skill::tests::deleting_a_link_another_reader_chains_through_keeps_it`,
 `manager::skill::tests::all_agents_delete_keeps_an_entry_an_aliased_dir_reads`.
+
+## Reconcile removal skipped the plugin guard
+
+`transfer::reconcile_skill` and its preview passed an empty `plugin_roots` to
+both the dry-run plan and the commit removal, so `reconcile skill --remove`
+deleted a skill a Claude Code plugin owns, while `delete` refused the same path.
+The fix is one provider each surface installs once at startup
+(`core::skills::plugin_roots`). Reconcile reads the roots before it takes the
+mutation lock, because reading them spawns `claude`.
+
+Tests: `transfer::tests::reconcile_skill_refuses_plugin_owned_removal_and_writes_nothing`,
+`routes::skills::tests::reconcile_route_refuses_plugin_owned_removal_with_managed_resource`,
+`cli_tests::reconcile_skill_remove_refuses_plugin_owned_skill_with_managed_resource`.

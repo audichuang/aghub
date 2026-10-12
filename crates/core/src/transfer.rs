@@ -1803,6 +1803,7 @@ fn plan_reconcile_skill(
 	source: &ResourceLocator,
 	added: &[AgentType],
 	removed: &[AgentType],
+	plugin_roots: &crate::skills::plugin_roots::PluginRoots,
 ) -> Result<ReconcileSkillPlan> {
 	let skill = load_reconcile_skill(source, added, removed)?;
 	let source_root = resolve_skill_root(&skill)?;
@@ -1824,7 +1825,7 @@ fn plan_reconcile_skill(
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: !added.is_empty(),
-			plugin_roots: Vec::new(),
+			plugin_roots: plugin_roots.as_slice().to_vec(),
 		};
 		let resp = crate::skills::removal::remove_skill_batch(&req)?;
 		let keepers: Vec<&'static str> = resp
@@ -2087,7 +2088,11 @@ pub fn reconcile_skill_preview(
 	removed: &[AgentType],
 ) -> Result<()> {
 	ensure_disjoint(added, removed)?;
-	let plan = plan_reconcile_skill(source, added, removed)?;
+	// Read before any lock is taken here: it may spawn `claude`.
+	let plugin_roots = crate::skills::plugin_roots::PluginRoots::current_if(
+		!removed.is_empty(),
+	);
+	let plan = plan_reconcile_skill(source, added, removed, &plugin_roots)?;
 	let rows: Vec<OperationPlan> = plan
 		.copies
 		.iter()
@@ -2113,6 +2118,11 @@ pub fn reconcile_skill(
 	confirm: bool,
 ) -> Result<OperationBatchResult> {
 	ensure_reconcilable(&added, &removed, confirm)?;
+	// Read the plugin roots BEFORE the guard below: reading them may spawn
+	// `claude`, which must not run while the mutation lock is held.
+	let plugin_roots = crate::skills::plugin_roots::PluginRoots::current_if(
+		!removed.is_empty(),
+	);
 	// ONE guard for the whole reconcile, taken before the holder scan and
 	// preflight dry-runs — the state reads that decide the mutation. Reentrant,
 	// so inner `guard_and_reload`s are free. It serializes aghub against aghub
@@ -2124,7 +2134,7 @@ pub fn reconcile_skill(
 		source.scope.project_root(),
 	)
 	.map_err(ConfigError::Io)?;
-	let plan = plan_reconcile_skill(&source, &added, &removed)?;
+	let plan = plan_reconcile_skill(&source, &added, &removed, &plugin_roots)?;
 	info!(
 		"reconciling skill '{}' with {} added and {} removed agent(s)",
 		plan.skill.name,
@@ -2289,7 +2299,7 @@ pub fn reconcile_skill(
 				all_agents: false,
 				prior_removed_paths: Vec::new(),
 				keeps_master: !added.is_empty(),
-				plugin_roots: Vec::new(),
+				plugin_roots: plugin_roots.as_slice().to_vec(),
 			},
 		)
 	});
@@ -3296,6 +3306,66 @@ mod tests {
 		);
 		manager.load().unwrap();
 		assert!(manager.get_skill("repo-helper").is_none());
+	}
+
+	#[test]
+	fn reconcile_skill_refuses_plugin_owned_removal_and_writes_nothing() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		manager.load().unwrap();
+		manager.add_skill(Skill::new("repo-helper")).unwrap();
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		manager.load().unwrap();
+		let owned = crate::skills::removal::skill_root(
+			manager.get_skill("repo-helper").unwrap(),
+		)
+		.unwrap();
+		let lock_before = fs::read(root.join("skills-lock.json")).ok();
+
+		// The surface's injected provider is what reconcile reads; the test
+		// override stands in for it on this thread.
+		let _roots = crate::skills::plugin_roots::test_override::set(vec![(
+			"test-plugin".into(),
+			owned.clone(),
+		)]);
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: WriteScope::project(root.clone()),
+			name: "repo-helper".to_string(),
+		};
+
+		let err = reconcile_skill(
+			source.clone(),
+			vec![],
+			vec![AgentType::Claude],
+			true,
+		)
+		.expect_err("a plugin-owned removal must be refused");
+		assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+
+		let preview_err =
+			reconcile_skill_preview(&source, &[], &[AgentType::Claude])
+				.expect_err("the preview must refuse the same removal");
+		assert_eq!(
+			crate::error_codes::wire_code(&preview_err),
+			"MANAGED_RESOURCE"
+		);
+
+		assert!(owned.exists(), "the plugin-owned skill must survive");
+		assert_eq!(fs::read(root.join("skills-lock.json")).ok(), lock_before);
 	}
 
 	// Removing an agent that never held the skill FAILS THAT ROW and rejects

@@ -215,8 +215,9 @@ branch.
   folder it cannot read keeps its entry, and a skills dir it cannot list aborts
   the whole prune with the lock unchanged.
 - A skill whose files sit under an installed Claude Code plugin is the
-  plugin's, not aghub's: `delete`, `update`, `enable` and `disable` refuse it
-  with `MANAGED_RESOURCE` (exit 1, nothing written) — the same code the HTTP
+  plugin's, not aghub's: `delete`, `update`, `enable`, `disable` and
+  `reconcile skill --remove` (preview and commit alike) refuse it with
+  `MANAGED_RESOURCE` (exit 1, nothing written) — the same code the HTTP
   API returns. For `enable`/`disable` this replaces the `UNSUPPORTED_OPERATION`
   they answer otherwise: the refusal order is not-found, then plugin-managed,
   then unsupported. Manage it with `aghub-cli plugin`. When the plugin list

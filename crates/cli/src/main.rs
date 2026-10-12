@@ -721,6 +721,9 @@ impl log::Log for StderrLogger {
 static STDERR_LOGGER: StderrLogger = StderrLogger;
 
 fn main() -> std::process::ExitCode {
+	aghub_core::skills::plugin_roots::install_provider(
+		aghub_cc_plugins::claude::ClaudePluginManager::owned_roots_blocking,
+	);
 	// clap handles its OWN usage errors (exit 2) inside `parse()`; everything
 	// below is a runtime failure, which is exit 1.
 	let cli = Cli::parse();

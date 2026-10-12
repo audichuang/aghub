@@ -184,12 +184,21 @@ pub(crate) fn build_rocket_with_inference_credentials(
 	)
 }
 
+/// Install the Claude Code plugin-ownership provider core reads before every
+/// skill mutation. Idempotent: core keeps the first provider it is given.
+pub(crate) fn install_plugin_ownership() {
+	aghub_core::skills::plugin_roots::install_provider(
+		aghub_cc_plugins::claude::ClaudePluginManager::owned_roots_blocking,
+	);
+}
+
 fn build_rocket_with_state_factories(
 	config: rocket::Config,
 	app_data_dir: PathBuf,
 	skill_repositories: crate::state::SkillRepositoryFactory,
 	credentials: Arc<dyn aghub_inference::CredentialStore + Send + Sync>,
 ) -> rocket::Rocket<rocket::Build> {
+	install_plugin_ownership();
 	// Only the desktop webview is a legitimate browser origin, so a
 	// cross-origin JSON POST fails CORS preflight: `tauri://localhost`
 	// (macOS/Linux), `http(s)://tauri.localhost` (Windows), `localhost:1420`

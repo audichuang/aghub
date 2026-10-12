@@ -58,6 +58,21 @@ impl ClaudePluginManager {
 			.collect()
 	}
 
+	/// Blocking `owned_roots` for core's injected provider. Runs on its own
+	/// thread with its own runtime, so it is safe from any caller, including
+	/// code already inside a tokio runtime. Fails open.
+	pub fn owned_roots_blocking() -> Vec<(String, PathBuf)> {
+		std::thread::spawn(|| {
+			tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.map(|runtime| runtime.block_on(Self::owned_roots()))
+				.unwrap_or_default()
+		})
+		.join()
+		.unwrap_or_default()
+	}
+
 	pub fn is_enabled(&self, id: &PluginId) -> bool {
 		self.installed
 			.iter()

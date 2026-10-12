@@ -114,7 +114,9 @@ list, or `all`), `-g`/`-p`, `--all`.
   (`already_present: true`) — for an MCP/sub-agent only when the existing value
   is EQUIVALENT. Removing a skill refuses an end state that cannot exist (the
   agent would read it from the same set of places afterwards), and
-  `reconcile skill` refuses BEFORE the first write so the disk is untouched.
+  `reconcile skill` refuses BEFORE the first write so the disk is untouched;
+  `reconcile skill --remove` refuses a plugin-owned skill with `MANAGED_RESOURCE`
+  like `delete`, in preview and commit alike.
   The preview is a plan echo (`{dry_run, add, remove}`, no per-row results) and
   does NOT check that a `--remove` target ever held the thing: a typo previews as
   "would remove" and exits 0, then fails that row on commit and exits 1.

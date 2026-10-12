@@ -2653,6 +2653,96 @@ mod tests {
 		});
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_route_refuses_plugin_owned_removal_with_managed_resource() {
+		with_isolated_env(|home, _state| {
+			use std::os::unix::fs::PermissionsExt;
+			let bin_dir = home.join(".local/bin");
+			std::fs::create_dir_all(&bin_dir).unwrap();
+			let mock_claude = bin_dir.join("claude");
+
+			let skill_dir = home.join(".claude/skills/my-plugin-skill");
+			std::fs::create_dir_all(&skill_dir).unwrap();
+			let skill_md = skill_dir.join("SKILL.md");
+			std::fs::write(
+				&skill_md,
+				"---\nname: my-plugin-skill\ndescription: plugin skill\n---\n",
+			)
+			.unwrap();
+			let original = std::fs::read(&skill_md).unwrap();
+
+			let claude_dir = home.join(".claude");
+			std::fs::create_dir_all(&claude_dir).unwrap();
+			std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
+
+			let script = format!(
+				"#!/bin/sh\n\
+				if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"list\" ]; then\n\
+					echo '[{{\"id\":\"test-plugin@official\",\"version\":\"1.0.0\",\"scope\":\"user\",\"enabled\":true,\"installPath\":\"{}\",\"installedAt\":\"2026-01-01\",\"lastUpdated\":\"2026-01-01\"}}]'\n\
+					exit 0\n\
+				fi\n\
+				exit 0\n",
+				skill_dir.display()
+			);
+			std::fs::write(&mock_claude, script).unwrap();
+			let mut perms =
+				std::fs::metadata(&mock_claude).unwrap().permissions();
+			perms.set_mode(0o755);
+			std::fs::set_permissions(&mock_claude, perms).unwrap();
+
+			// Prepend bin_dir to PATH for ClaudeCli discovery
+			let old_path = std::env::var_os("PATH");
+			let new_path = match &old_path {
+				Some(p) => {
+					let mut v = bin_dir.clone().into_os_string();
+					v.push(":");
+					v.push(p);
+					v
+				}
+				None => bin_dir.into_os_string(),
+			};
+			std::env::set_var("PATH", &new_path);
+			struct PathRestore(Option<std::ffi::OsString>);
+			impl Drop for PathRestore {
+				fn drop(&mut self) {
+					match self.0.take() {
+						Some(p) => std::env::set_var("PATH", p),
+						None => std::env::remove_var("PATH"),
+					}
+				}
+			}
+			let _restore = PathRestore(old_path);
+
+			// The surface installs the plugin provider once; the route must
+			// read it before the reconcile takes the mutation lock.
+			crate::install_plugin_ownership();
+
+			let err = block_on(reconcile_skill_route(
+				crate::extractors::TrustedLocalOrigin,
+				rocket::serde::json::Json(ReconcileRequest {
+					source: crate::dto::transfer::ResourceLocatorDto {
+						agent: "claude".to_string(),
+						scope: crate::dto::transfer::InstallScopeDto::Global,
+						project_root: None,
+						name: "my-plugin-skill".to_string(),
+					},
+					added: None,
+					removed: Some(vec!["claude".to_string()]),
+					confirm: Some(true),
+				}),
+			))
+			.expect_err("a plugin-owned removal must be refused");
+
+			assert_eq!(err.body.code, "MANAGED_RESOURCE");
+			assert_eq!(
+				std::fs::read(&skill_md).unwrap(),
+				original,
+				"the refused reconcile must leave SKILL.md untouched"
+			);
+		});
+	}
+
 	/// Caller must hold `test_env_lock`; this helper does not reacquire the
 	/// binary's non-reentrant environment mutex.
 	fn with_pinned_data_dir<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {

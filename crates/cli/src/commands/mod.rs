@@ -26,15 +26,7 @@ use std::path::PathBuf;
 /// nothing) when the plugin list cannot be read. See
 /// `ClaudePluginManager::owned_roots`.
 pub(crate) fn plugin_roots() -> Vec<(String, std::path::PathBuf)> {
-	tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.map(|runtime| {
-			runtime.block_on(
-				aghub_cc_plugins::claude::ClaudePluginManager::owned_roots(),
-			)
-		})
-		.unwrap_or_default()
+	aghub_cc_plugins::claude::ClaudePluginManager::owned_roots_blocking()
 }
 
 /// Print a JSON value as an aligned `key  value` block, or as pretty JSON when
