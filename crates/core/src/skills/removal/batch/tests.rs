@@ -2565,3 +2565,50 @@ fn test_across_scopes_rejects_empty_agents() {
 	.expect_err("an empty agent set must be rejected");
 	assert_eq!(crate::error_codes::wire_code(&err), "INVALID_CONFIG");
 }
+
+#[cfg(unix)]
+#[test]
+fn test_by_name_refuses_plugin_owned_skill_reached_through_symlinked_skills_root(
+) {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let plugin = temp.path().join("plugin");
+	let plugin_skill = plugin.join("skills/foo");
+	fs::create_dir_all(&plugin_skill).unwrap();
+	fs::write(
+		plugin_skill.join("SKILL.md"),
+		"---\nname: foo\ndescription: Plugin\n---\n\n# foo\n",
+	)
+	.unwrap();
+	// Claude's project skills dir is an alias for the plugin's skills dir.
+	fs::create_dir_all(root.join(".claude")).unwrap();
+	std::os::unix::fs::symlink(
+		plugin.join("skills"),
+		root.join(".claude/skills"),
+	)
+	.unwrap();
+
+	let _roots = crate::skills::plugin_roots::test_override::set(vec![(
+		"p".to_string(),
+		plugin.clone(),
+	)]);
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName("foo".to_string()),
+		scope: WriteScope::project(&root),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+	let err = remove_skill_batch(&req).expect_err(
+		"a plugin-owned skill reached through a symlinked skills root must be refused",
+	);
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+	assert!(
+		plugin_skill.join("SKILL.md").exists(),
+		"the plugin's own SKILL.md must survive a refused delete"
+	);
+}

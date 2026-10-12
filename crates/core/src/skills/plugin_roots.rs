@@ -57,7 +57,17 @@ impl PluginRoots {
 		skill: &str,
 		action: &str,
 	) -> crate::errors::Result<()> {
-		match self.0.iter().find(|(_, root)| path.starts_with(root)) {
+		// Compare path identity as well as the spelling: a skills dir reached
+		// through a symlinked ancestor is the plugin's directory. The leaf stays
+		// unresolved, so a Referrer symlink whose target is plugin-owned is not
+		// refused (unlinking it deletes no plugin file). The one identity rule
+		// lives in `crate::skills::path_identity`.
+		let identity = crate::skills::path_identity::entry_identity(path);
+		let found = self.0.iter().find(|(_, root)| {
+			path.starts_with(root)
+				|| identity.starts_with(::skill::lock::resolve_existing(root))
+		});
+		match found {
 			Some((plugin, _)) => {
 				Err(crate::errors::ConfigError::ManagedResource(format!(
 					"Cannot {action} skill '{skill}' managed by plugin '{plugin}'"
@@ -98,5 +108,44 @@ pub(crate) mod test_override {
 		fn drop(&mut self) {
 			ROOTS.with(|slot| *slot.borrow_mut() = None);
 		}
+	}
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn refuse_matches_owned_dir_reached_through_symlinked_ancestor() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		let plugin = root.join("plugin");
+		std::fs::create_dir_all(plugin.join("skills/foo")).unwrap();
+		std::fs::write(plugin.join("skills/foo/SKILL.md"), "# foo\n").unwrap();
+		// An agent skills dir that is a symlink into the plugin.
+		std::os::unix::fs::symlink(
+			plugin.join("skills"),
+			root.join("agent_skills"),
+		)
+		.unwrap();
+		// A Referrer-like leaf link whose target is plugin-owned, in a real parent.
+		std::fs::create_dir_all(root.join("other_skills")).unwrap();
+		std::os::unix::fs::symlink(
+			plugin.join("skills/foo"),
+			root.join("other_skills/bar"),
+		)
+		.unwrap();
+		let roots = PluginRoots(vec![("p".to_string(), plugin.clone())]);
+
+		let err = roots
+			.refuse(&root.join("agent_skills/foo"), "foo", "delete")
+			.expect_err("a plugin-owned dir reached through a symlinked ancestor must be refused");
+		assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+		assert!(
+			roots
+				.refuse(&root.join("other_skills/bar"), "bar", "delete")
+				.is_ok(),
+			"a leaf symlink into a plugin unlinks no plugin file and must not be refused"
+		);
 	}
 }

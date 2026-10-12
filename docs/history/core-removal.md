@@ -521,3 +521,9 @@ the preflight never saw. Both checks refuse the whole batch.
 
 Tests: `removal::batch::tests::test_all_agents_sweep_refuses_plugin_owned_copy_of_unnamed_agent`,
 `removal::batch::tests::test_in_lock_plugin_recheck_refuses_owned_copy_appearing_after_preflight`.
+
+Ownership now compares path identity (`path_identity::entry_identity`), so a
+skills dir symlinked into a plugin no longer hides the plugin's skill; a leaf
+Referrer symlink into a plugin is still not refused.
+Tests: `removal::batch::tests::test_by_name_refuses_plugin_owned_skill_reached_through_symlinked_skills_root`,
+`plugin_roots::tests::refuse_matches_owned_dir_reached_through_symlinked_ancestor`.
