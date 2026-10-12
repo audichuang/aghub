@@ -309,6 +309,74 @@ pub struct DeleteSkillByPathRequest {
 	pub confirm: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteSkillScopeTarget {
+	pub scope: String,
+	pub project_root: Option<String>,
+	pub agents: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteSkillByNameRequest {
+	pub name: String,
+	pub scopes: Vec<DeleteSkillScopeTarget>,
+	/// Must be `true` to delete; absent/false → dry-run.
+	#[serde(default)]
+	#[ts(optional)]
+	pub confirm: Option<bool>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct DeleteSkillScopeResult {
+	pub scope: String,
+	pub project_root: Option<String>,
+	pub outcome: RemovalOutcomeKind,
+	pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct DeleteSkillByNameResponse {
+	pub success: bool,
+	pub outcome: RemovalOutcomeKind,
+	pub scopes: Vec<DeleteSkillScopeResult>,
+	pub still_read_by_managed: Vec<String>,
+	pub still_read_by_unmanaged: Vec<String>,
+}
+
+impl From<aghub_core::skills::removal::CrossScopeRemoval>
+	for DeleteSkillByNameResponse
+{
+	fn from(r: aghub_core::skills::removal::CrossScopeRemoval) -> Self {
+		let outcome: aghub_core::dto::RemovalKind = r.outcome;
+		Self {
+			success: outcome != aghub_core::dto::RemovalKind::Partial,
+			outcome: outcome.into(),
+			scopes: r
+				.scopes
+				.into_iter()
+				.map(|row| DeleteSkillScopeResult {
+					scope: row.scope.label().to_string(),
+					project_root: row
+						.scope
+						.project_root()
+						.map(|p| p.display().to_string()),
+					outcome: row
+						.outcome
+						.map(Into::into)
+						.unwrap_or(RemovalOutcomeKind::Failed),
+					error: row.error,
+				})
+				.collect(),
+			still_read_by_managed: r.holders.managed,
+			still_read_by_unmanaged: r.holders.unmanaged,
+		}
+	}
+}
+
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct ValidationError {

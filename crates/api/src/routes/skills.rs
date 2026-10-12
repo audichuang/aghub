@@ -24,7 +24,8 @@ use crate::{
 		CodeEditorType, EditSkillFolderRequest, OpenSkillFolderRequest,
 	},
 	dto::skill::{
-		CreateSkillRequest, DeleteSkillByPathRequest,
+		CreateSkillRequest, DeleteSkillByNameRequest,
+		DeleteSkillByNameResponse, DeleteSkillByPathRequest,
 		DeleteSkillByPathResponse, GitCredentialStatus,
 		GitCredentialStatusQuery, GitCredentialStatusResponse,
 		GitInstallRequest, GitInstallResponse, GitInstallResultEntry,
@@ -263,6 +264,42 @@ pub async fn delete_skill_by_path(
 			.and_then(|r| r.error.clone());
 
 		Ok(Json(single_view_response(single, error)))
+	})
+	.await
+}
+
+/// One delete intent across scopes (desktop delete dialog). Orchestration and
+/// the cross-scope fold live in core (`remove_skill_across_scopes`).
+#[delete("/skills/by-name", data = "<body>")]
+pub async fn delete_skill_by_name(
+	_origin: TrustedLocalOrigin,
+	body: Json<DeleteSkillByNameRequest>,
+) -> ApiResult<DeleteSkillByNameResponse> {
+	let req = body.into_inner();
+
+	let targets = req
+		.scopes
+		.iter()
+		.map(|t| -> Result<_, ApiError> {
+			Ok(aghub_core::skills::removal::ScopeRemovalTarget {
+				scope: crate::extractors::resolve_write_scope(
+					&t.scope,
+					t.project_root.as_deref(),
+				)?,
+				agents: crate::extractors::resolve_agent_strings(&t.agents)?,
+			})
+		})
+		.collect::<Result<Vec<_>, ApiError>>()?;
+
+	let dry_run = !req.confirm.unwrap_or(false);
+	let name = req.name;
+
+	in_mutation_pool(move || {
+		let removal = aghub_core::skills::removal::remove_skill_across_scopes(
+			&name, targets, dry_run,
+		)
+		.map_err(ApiError::from)?;
+		Ok(Json(DeleteSkillByNameResponse::from(removal)))
 	})
 	.await
 }
@@ -1826,6 +1863,7 @@ pub async fn git_sync_skill(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::dto::skill::DeleteSkillScopeTarget;
 	#[cfg(unix)]
 	use crate::routes::skills_test_git::{test_git, test_has_git};
 	use aghub_core::transfer::{reconcile_skill, ResourceLocator};
@@ -10247,6 +10285,175 @@ mod tests {
 					reason.contains("location shared with other agents"),
 					"reason must contain refusal detail, got: {reason}"
 				);
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	fn project_scope_target(
+		root: &std::path::Path,
+		agents: &[&str],
+	) -> DeleteSkillScopeTarget {
+		DeleteSkillScopeTarget {
+			scope: "project".to_string(),
+			project_root: Some(root.display().to_string()),
+			agents: agents.iter().map(|a| a.to_string()).collect(),
+		}
+	}
+
+	#[cfg(unix)]
+	fn by_name_req(
+		scopes: Vec<DeleteSkillScopeTarget>,
+		confirm: Option<bool>,
+	) -> DeleteSkillByNameRequest {
+		DeleteSkillByNameRequest {
+			name: "x".to_string(),
+			scopes,
+			confirm,
+		}
+	}
+
+	/// A by-name request that answers `200`, with the response body.
+	#[cfg(unix)]
+	fn by_name_answered(
+		req: DeleteSkillByNameRequest,
+	) -> DeleteSkillByNameResponse {
+		match block_on(delete_skill_by_name(TrustedLocalOrigin, Json(req))) {
+			Ok(resp) => resp.into_inner(),
+			Err(error) => panic!(
+				"by-name delete must answer, got {:?} {}",
+				error.status, error.body.code
+			),
+		}
+	}
+
+	/// Two project roots under `home`, each with a real `.claude/skills/x`.
+	#[cfg(unix)]
+	fn two_project_roots(
+		home: &std::path::Path,
+	) -> (std::path::PathBuf, std::path::PathBuf) {
+		let a = home.join("a");
+		let b = home.join("b");
+		write_claude_skill(&a, "x");
+		write_claude_skill(&b, "x");
+		(a, b)
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_skill_by_name_removes_each_scope_and_reports_rows() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|_data| {
+				let (a, b) = two_project_roots(home);
+				let resp = by_name_answered(by_name_req(
+					vec![
+						project_scope_target(&a, &["claude"]),
+						project_scope_target(&b, &["claude"]),
+					],
+					Some(true),
+				));
+
+				assert!(resp.success);
+				assert_eq!(
+					resp.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Removed
+				);
+				assert_eq!(resp.scopes.len(), 2);
+				for (row, root) in resp.scopes.iter().zip([&a, &b]) {
+					assert_eq!(row.scope, "project");
+					assert_eq!(
+						row.project_root,
+						Some(root.display().to_string())
+					);
+					assert_eq!(
+						row.outcome,
+						crate::dto::skill::RemovalOutcomeKind::Removed
+					);
+				}
+				assert!(!a.join(".claude/skills/x").exists());
+				assert!(!b.join(".claude/skills/x").exists());
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_skill_by_name_defaults_to_preview() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|_data| {
+				let (a, b) = two_project_roots(home);
+				let resp = by_name_answered(by_name_req(
+					vec![
+						project_scope_target(&a, &["claude"]),
+						project_scope_target(&b, &["claude"]),
+					],
+					None,
+				));
+
+				assert_eq!(
+					resp.outcome,
+					crate::dto::skill::RemovalOutcomeKind::Preview
+				);
+				assert!(a.join(".claude/skills/x").exists());
+				assert!(b.join(".claude/skills/x").exists());
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_skill_by_name_refusal_before_write_is_structured() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|_data| {
+				let (a, _b) = two_project_roots(home);
+				// An agent with no skill support is refused before anything is written.
+				let err = match block_on(delete_skill_by_name(
+					TrustedLocalOrigin,
+					Json(by_name_req(
+						vec![project_scope_target(&a, &["zed"])],
+						Some(true),
+					)),
+				)) {
+					Ok(_) => panic!("unsupported agent must be refused"),
+					Err(error) => error,
+				};
+
+				assert_eq!(err.body.code, "UNSUPPORTED_OPERATION");
+				assert!(
+					err.body
+						.rejected_targets
+						.as_ref()
+						.is_some_and(|t| !t.is_empty()),
+					"refusal must carry rejected_targets"
+				);
+				assert!(a.join(".claude/skills/x").exists());
+			});
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_skill_by_name_rejects_invalid_scope() {
+		with_isolated_env(|home, _state| {
+			with_pinned_data_dir(|_data| {
+				let (a, _b) = two_project_roots(home);
+				let err = match block_on(delete_skill_by_name(
+					TrustedLocalOrigin,
+					Json(by_name_req(
+						vec![DeleteSkillScopeTarget {
+							scope: "all".to_string(),
+							project_root: Some(a.display().to_string()),
+							agents: vec!["claude".to_string()],
+						}],
+						Some(true),
+					)),
+				)) {
+					Ok(_) => panic!("scope `all` must be refused"),
+					Err(error) => error,
+				};
+
+				assert_eq!(err.body.code, "INVALID_SCOPE");
+				assert!(a.join(".claude/skills/x").exists());
 			});
 		});
 	}

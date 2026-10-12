@@ -62,19 +62,21 @@ use aghub_api::dto::{
 		AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
 		ApplySkillUpdateResponse, ApplySkillUpdatesRequest,
 		ApplySkillUpdatesResponse, CheckSkillUpdatesResponse,
-		CreateSkillRequest, DeleteSkillByPathRequest,
-		DeleteSkillByPathResponse, GitCredentialStatus,
-		GitCredentialStatusQuery, GitCredentialStatusResponse,
-		GitInstallRequest, GitInstallResponse, GitInstallResultEntry,
-		GitScanRequest, GitScanResponse, GitScanSkillEntry, GitSyncRequest,
-		GitSyncResponse, GlobalSkillLockResponse, ImportSkillRequest,
-		InstallSkillRequest, InstallSkillResponse, LocalSkillLockEntryResponse,
-		ProjectLockQuery, ProjectSkillLockResponse, PruneLockRequest,
-		PruneLockResponse, RemovalOutcomeKind, SkillContentQuery,
-		SkillHealErrorResponse, SkillHoldersResponse, SkillLockEntryResponse,
-		SkillResponse, SkillTreeNodeKind, SkillTreeNodeResponse,
-		SkillTreeQuery, SkillUpdateResponse, SkillUpdateStatusResponse,
-		SkillUsageResponse, UpdateSkillRequest, ValidationError,
+		CreateSkillRequest, DeleteSkillByNameRequest,
+		DeleteSkillByNameResponse, DeleteSkillByPathRequest,
+		DeleteSkillByPathResponse, DeleteSkillScopeResult,
+		DeleteSkillScopeTarget, GitCredentialStatus, GitCredentialStatusQuery,
+		GitCredentialStatusResponse, GitInstallRequest, GitInstallResponse,
+		GitInstallResultEntry, GitScanRequest, GitScanResponse,
+		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
+		GlobalSkillLockResponse, ImportSkillRequest, InstallSkillRequest,
+		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
+		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
+		RemovalOutcomeKind, SkillContentQuery, SkillHealErrorResponse,
+		SkillHoldersResponse, SkillLockEntryResponse, SkillResponse,
+		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
+		SkillUpdateResponse, SkillUpdateStatusResponse, SkillUsageResponse,
+		UpdateSkillRequest, ValidationError,
 	},
 	sources::{
 		CredentialStatus, SourceDiffResponse, SourceSkillDiff,
@@ -242,6 +244,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<LocalSkillLockEntryResponse>(&cfg)?;
 	export_type::<ProjectSkillLockResponse>(&cfg)?;
 	export_type::<DeleteSkillByPathRequest>(&cfg)?;
+	export_type::<DeleteSkillScopeTarget>(&cfg)?;
+	export_type::<DeleteSkillByNameRequest>(&cfg)?;
+	export_type::<DeleteSkillScopeResult>(&cfg)?;
+	export_type::<DeleteSkillByNameResponse>(&cfg)?;
 	export_type::<SkillUpdateStatusResponse>(&cfg)?;
 	export_type::<SkillUpdateResponse>(&cfg)?;
 	export_type::<CheckSkillUpdatesResponse>(&cfg)?;
