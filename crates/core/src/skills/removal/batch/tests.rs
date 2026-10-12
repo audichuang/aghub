@@ -2167,6 +2167,91 @@ fn test_in_lock_plugin_recheck_refuses_owned_copy_appearing_after_preflight() {
 	);
 }
 
+#[cfg(unix)]
+#[test]
+fn test_by_path_in_lock_plugin_recheck_refuses_when_resolution_moves_into_plugin(
+) {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let skills = root.join(".claude/skills");
+	fs::create_dir_all(skills.join("foo")).unwrap();
+	fs::write(skills.join("foo/SKILL.md"), "---\nname: foo\n---\n").unwrap();
+	let plugin = temp.path().join("plugin");
+	let plugin_skills = plugin.join("skills");
+	fs::create_dir_all(plugin_skills.join("foo")).unwrap();
+	fs::write(plugin_skills.join("foo/SKILL.md"), "---\nname: foo\n---\n")
+		.unwrap();
+
+	let (hook_tx, hook_rx) = std::sync::mpsc::channel();
+	*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = Some(hook_tx);
+
+	struct HookReset;
+	impl Drop for HookReset {
+		fn drop(&mut self) {
+			*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = None;
+		}
+	}
+	let _hook_reset = HookReset;
+
+	// Test thread holds the mutation lock so the by-path commit blocks on it.
+	let test_lock = crate::skills::lock::mutation_guard(
+		"test competing lock",
+		ResourceScope::ProjectOnly,
+		Some(&root),
+	)
+	.expect("test thread acquires mutation lock");
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(skills.join("foo/SKILL.md")),
+		scope: WriteScope::project(&root),
+		agents: vec![AgentType::Claude],
+		dry_run: false,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+
+	let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+	let plugin_for_thread = plugin.clone();
+	let commit_thread = std::thread::spawn(move || {
+		// The override is thread-local, so it is set on the thread that removes.
+		let _roots = crate::skills::plugin_roots::test_override::set(vec![(
+			"p".to_string(),
+			plugin_for_thread,
+		)]);
+		let res = remove_skill_batch(&req);
+		let _ = commit_tx.send(res);
+	});
+
+	// Pre-lock ownership check has passed and the commit waits on the lock.
+	hook_rx
+		.recv_timeout(std::time::Duration::from_secs(5))
+		.expect("commit thread must signal hook after unlocked preflight");
+
+	// The agent skills dir is replaced by a symlink into the plugin's install
+	// while the commit waits: containment still passes under the lock, so only
+	// the in-lock ownership recheck can refuse it.
+	fs::rename(&skills, root.join(".claude/skills.moved")).unwrap();
+	std::os::unix::fs::symlink(&plugin_skills, &skills).unwrap();
+
+	drop(test_lock);
+
+	let res = commit_rx
+		.recv_timeout(std::time::Duration::from_secs(5))
+		.expect("commit thread should complete after lock release");
+	commit_thread.join().unwrap();
+	let err = res.expect_err(
+		"the in-lock recheck must refuse the by-path delete into the plugin",
+	);
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+	assert!(
+		plugin_skills.join("foo/SKILL.md").exists(),
+		"plugin-owned SKILL.md must survive"
+	);
+}
+
 #[test]
 fn test_by_name_shared_refusal_excludes_all_requested_agents_from_readers() {
 	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -2545,6 +2630,52 @@ fn test_across_scopes_refusal_after_a_write_folds_to_partial() {
 	assert_eq!(res.scopes[1].outcome, None);
 	assert!(res.scopes[1].error.is_some());
 	assert!(!a.join(".claude/skills/x").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_across_scopes_lock_only_prune_then_refusal_is_partial() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let a = temp.path().join("a");
+	let b = temp.path().join("b");
+	// Scope A: a lock entry for `foo` and no skill on disk for any target agent.
+	fs::create_dir_all(&a).unwrap();
+	fs::write(
+		a.join("skills-lock.json"),
+		r#"{"version":1,"skills":{"foo":{"source":"test","sourceType":"node_modules","computedHash":"abc123"}}}"#,
+	)
+	.unwrap();
+	fs::create_dir_all(&b).unwrap();
+
+	let res = remove_skill_across_scopes(
+		"foo",
+		vec![
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&a),
+				agents: vec![AgentType::Claude],
+			},
+			ScopeRemovalTarget {
+				scope: WriteScope::project(&b),
+				agents: vec![AgentType::Zed],
+			},
+		],
+		false,
+	)
+	.expect(
+		"a lock-only prune is a write, so the refusal must fold into Partial",
+	);
+
+	let lock_after = fs::read_to_string(a.join("skills-lock.json")).unwrap();
+	assert!(
+		!lock_after.contains("\"foo\""),
+		"scope A's lock entry must be pruned by the commit: {lock_after}"
+	);
+	assert_eq!(res.outcome, crate::dto::RemovalKind::Partial);
+	assert_eq!(res.scopes[0].outcome, Some(crate::dto::RemovalKind::Absent));
+	assert_eq!(res.scopes[1].outcome, None);
+	assert!(res.scopes[1].error.is_some());
 }
 
 #[test]

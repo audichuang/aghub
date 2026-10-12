@@ -292,6 +292,18 @@ pub struct SkillRemovalResponse {
 }
 
 impl SkillRemovalResponse {
+	/// Whether this committed run changed disk or the lock: a row executed a
+	/// removal, or the lock prune dropped keys. Read from the receipt, because a
+	/// lock-only prune reports the `absent` outcome word.
+	fn wrote_anything(&self) -> bool {
+		self.rows.iter().any(|r| r.executed)
+			|| match &self.prune {
+				PruneStatus::Pruned(keys) => !keys.is_empty(),
+				PruneStatus::Failed { pruned, .. } => !pruned.is_empty(),
+				PruneStatus::NotRun | PruneStatus::WouldPrune(_) => false,
+			}
+	}
+
 	/// Holders of the skill that keep the master, split into managed vs unmanaged.
 	pub fn holders_view(&self) -> SkillHoldersView {
 		SkillHoldersView::from_agents(self.keepers.iter().copied())
@@ -583,7 +595,9 @@ fn push_unique(into: &mut Vec<String>, values: Vec<String>) {
 /// through `remove_skill_batch` in order, taking and releasing its own mutation
 /// lock. The first scope that does not finish (`Kept`, `Partial`, or an error)
 /// stops the run. A refusal before anything was written returns that error
-/// unchanged; after a write it becomes a `Partial` row.
+/// unchanged; after a write it becomes a `Partial` row. A scope counts as
+/// written when it executed a removal or pruned a lock entry, even with an
+/// `absent` outcome (a lock-only prune).
 pub fn remove_skill_across_scopes(
 	name: &str,
 	targets: Vec<ScopeRemovalTarget>,
@@ -616,9 +630,11 @@ pub fn remove_skill_across_scopes(
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
 		};
-		let view = match remove_skill_batch_with(&req, &plugin_roots)
-			.and_then(|r| r.to_single_view(dry_run))
-		{
+		let result = remove_skill_batch_with(&req, &plugin_roots);
+		if let Ok(resp) = &result {
+			wrote |= resp.wrote_anything();
+		}
+		let view = match result.and_then(|r| r.to_single_view(dry_run)) {
 			Ok(view) => view,
 			Err(e) => {
 				if !wrote {
@@ -1125,6 +1141,11 @@ fn remove_skill_by_path(
 		}
 	}
 
+	#[cfg(test)]
+	if let Some(ref tx) = *COMMIT_PREFLIGHT_HOOK.lock().unwrap() {
+		let _ = tx.send(());
+	}
+
 	let _mutation_guard = if !request.dry_run {
 		Some(
 			crate::skills::lock::mutation_guard(
@@ -1145,6 +1166,10 @@ fn remove_skill_by_path(
 				.to_string(),
 		));
 	}
+
+	// Ownership too: the resolution of `skill_path` may have changed while this
+	// call waited for the lock (#67), so the pre-lock refusal is not enough.
+	refuse_plugin()?;
 
 	let skill_name = by_path_skill_name(&skill_dir)
 		.map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
