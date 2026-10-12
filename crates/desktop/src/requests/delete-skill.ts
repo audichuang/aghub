@@ -1,8 +1,8 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { isHTTPError } from "ky";
 import type {
+	DeleteSkillByNameResponse,
 	DeleteSkillByPathResponse,
-	OperationBatchResponse,
 	RemovalOutcomeKind,
 } from "../generated/dto";
 import {
@@ -500,13 +500,6 @@ export function formatDeleteMessage(
 	}
 }
 
-export interface ScopeDeleteResult {
-	scope: "global" | "project";
-	verdict: DeleteSkillVerdict;
-	success: boolean;
-	error?: string;
-}
-
 export interface DeleteSkillResult {
 	verdict: DeleteSkillVerdict;
 	success: boolean;
@@ -635,202 +628,93 @@ export async function deleteSkill(
 		}
 	}
 
-	// 2. Cross-scope or multi-scope deletion
+	// 2. Cross-scope or multi-scope deletion: one core-owned call; this block
+	// only projects the response into dialog verdicts.
 	if (options.scopes && options.scopes.length > 0) {
-		const scopeResults: ScopeDeleteResult[] = [];
-		const allStillReadByUnmanaged: string[] = [];
+		const label = (scope: string) =>
+			t
+				? t(scope === "project" ? "scopeProject" : "scopeGlobal")
+				: scope === "project"
+					? "Project"
+					: "Global";
 
-		for (let i = 0; i < options.scopes.length; i++) {
-			const target = options.scopes[i];
-			const isProject = target.scope === "project";
-			const projectRoot = isProject ? (target.projectRoot ?? null) : null;
-			const agents = target.agents ? [...target.agents] : [];
-			const agent = agents[0] ?? options.agent;
-			if (!agent) {
-				throw new Error("agent is required for skill deletion");
-			}
-
-			try {
-				const reconcileRes: OperationBatchResponse =
-					await api.skills.reconcile({
-						source: {
-							agent,
-							scope: target.scope,
-							project_root: projectRoot,
-							name,
-						},
-						added: null,
-						removed: agents,
-						confirm: true,
-					});
-
-				const deleteRows = reconcileRes.results.filter(
-					(r) => r.action === "delete",
-				);
-				for (const r of deleteRows) {
-					if (r.still_read_by_unmanaged) {
-						allStillReadByUnmanaged.push(
-							...r.still_read_by_unmanaged,
-						);
-					}
-				}
-
-				const rowVerdicts = deleteRows.map((r) =>
-					interpretRemovalVerdict(r.outcome, intent.kind),
-				);
-
-				const allAbsent =
-					rowVerdicts.length > 0 &&
-					rowVerdicts.every((v) => v === "absent");
-				const allRemovedOrAbsent =
-					rowVerdicts.length > 0 &&
-					rowVerdicts.every((v) => v === "removed" || v === "absent");
-				const anyRemoved = rowVerdicts.some((v) => v === "removed");
-				const hasKept = rowVerdicts.some((v) => v === "kept");
-				const hasPartial = rowVerdicts.some((v) => v === "partial");
-				const anyFailed =
-					reconcileRes.failed_count > 0 ||
-					deleteRows.some(
-						(r) => !r.success || r.outcome === "failed",
-					);
-
-				let scopeVerdict: DeleteSkillVerdict;
-				let scopeSuccess = false;
-				let scopeError: string | undefined;
-
-				if (allAbsent && reconcileRes.failed_count === 0) {
-					scopeVerdict = "absent";
-					scopeSuccess = true;
-				} else if (
-					allRemovedOrAbsent &&
-					anyRemoved &&
-					reconcileRes.failed_count === 0
-				) {
-					scopeVerdict = "removed";
-					scopeSuccess = true;
-				} else if (
-					hasPartial ||
-					(anyRemoved && (hasKept || anyFailed))
-				) {
-					scopeVerdict = "partial";
-					scopeSuccess = false;
-					const failedReasons = deleteRows
-						.filter(
-							(r) =>
-								!r.success ||
-								r.outcome === "partial" ||
-								r.outcome === "kept" ||
-								r.outcome === "failed",
-						)
-						.map((r) =>
-							r.error
-								? `${r.agent}: ${r.error}`
-								: `${r.agent}: ${r.outcome}`,
-						)
-						.join("; ");
-					scopeError =
-						failedReasons ||
-						(t ? t("deleteSkillPartial", { name }) : "partial");
-				} else if (hasKept) {
-					scopeVerdict = "kept";
-					scopeSuccess = false;
-					scopeError = t
-						? t("deleteSkillKeptSharedMaster", { name })
-						: "kept";
-				} else {
-					scopeVerdict = "refused";
-					scopeSuccess = false;
-					const fallbackError = t
-						? t("failedToDeleteSkill")
-						: "Failed to delete skill";
-					scopeError =
-						deleteRows
-							.map((r) => r.error)
-							.filter(Boolean)
-							.join("; ") || fallbackError;
-				}
-
-				scopeResults.push({
-					scope: target.scope,
-					verdict: scopeVerdict,
-					success: scopeSuccess,
-					error: scopeError,
-				});
-
-				if (!scopeSuccess) {
-					break;
-				}
-			} catch (error) {
-				const refusal = interpretRefusal(error, {
-					intent,
-					skillName: name,
-					t,
-				});
-
-				scopeResults.push({
-					scope: target.scope,
-					verdict: "refused",
-					success: false,
-					error: refusal.message,
-				});
-
-				break;
-			}
+		let res: DeleteSkillByNameResponse;
+		try {
+			res = await api.skills.deleteByName({
+				name,
+				scopes: options.scopes.map((s) => ({
+					scope: s.scope,
+					project_root:
+						s.scope === "project" ? (s.projectRoot ?? null) : null,
+					agents: [...(s.agents ?? [])],
+				})),
+				confirm: true,
+			});
+		} catch (error) {
+			await invalidate();
+			const refusal = interpretRefusal(error, {
+				intent,
+				skillName: name,
+				t,
+			});
+			return {
+				verdict: "refused",
+				success: false,
+				message: refusal.message,
+				retryWithUnmanaged: refusal.retryWithUnmanaged,
+			};
 		}
 
 		await invalidate();
 
-		const writtenScopes = scopeResults.filter(
-			(s) => s.verdict === "removed" || s.verdict === "partial",
-		);
-		const anyWritten = writtenScopes.length > 0;
-		const failedScope = scopeResults.find((s) => !s.success);
+		const stillReadByUnmanaged = res.still_read_by_unmanaged;
+		const unmanagedKept = stillReadByUnmanaged.length > 0;
 
-		if (failedScope) {
-			const fallbackError = t
-				? t("failedToDeleteSkill")
-				: "Failed to delete skill";
-			const projectError = failedScope.error ?? fallbackError;
-			const formatScopeLabel = (scope: "global" | "project"): string => {
-				if (t) {
-					return scope === "project"
-						? t("scopeProject")
-						: t("scopeGlobal");
-				}
-				return scope === "project" ? "Project" : "Global";
-			};
-			const writtenScopeName = writtenScopes
-				.map((s) => formatScopeLabel(s.scope))
-				.join(", ");
-			const failedScopeName = formatScopeLabel(failedScope.scope);
-			const msg = anyWritten
-				? t
-					? t("deleteSkillCrossScopePartial", {
-							writtenScope: writtenScopeName,
-							failedScope: failedScopeName,
-							reason: projectError,
-						})
-					: `${writtenScopeName} scope deleted, but ${failedScopeName} scope failed: ${projectError}`
-				: projectError;
-
+		if (res.outcome === "removed" || res.outcome === "absent") {
 			return {
-				verdict: anyWritten ? "partial" : "refused",
-				success: false,
-				message: msg,
-				unmanagedKept: allStillReadByUnmanaged.length > 0,
-				stillReadByUnmanaged: allStillReadByUnmanaged,
+				verdict: res.outcome,
+				success: true,
+				unmanagedKept,
+				stillReadByUnmanaged,
 			};
 		}
 
-		const allScopesAbsent =
-			scopeResults.length > 0 &&
-			scopeResults.every((s) => s.verdict === "absent");
-
+		// The last row is the scope the core stopped at.
+		const failed = res.scopes[res.scopes.length - 1];
+		const reason =
+			failed?.error ??
+			(failed?.outcome === "kept"
+				? t
+					? t("deleteSkillKeptSharedMaster", { name })
+					: "kept"
+				: failed?.outcome === "partial"
+					? t
+						? t("deleteSkillPartial", { name })
+						: "partial"
+					: t
+						? t("failedToDeleteSkill")
+						: "Failed to delete skill");
+		const written = res.scopes.filter(
+			(s) => s.outcome === "removed" || s.outcome === "partial",
+		);
+		const message =
+			written.length > 0
+				? t
+					? t("deleteSkillCrossScopePartial", {
+							writtenScope: written
+								.map((s) => label(s.scope))
+								.join(", "),
+							failedScope: label(failed?.scope ?? "global"),
+							reason,
+						})
+					: `${written.map((s) => label(s.scope)).join(", ")} scope deleted, but ${label(failed?.scope ?? "global")} scope failed: ${reason}`
+				: reason;
 		return {
-			verdict: allScopesAbsent ? "absent" : "removed",
-			success: true,
-			unmanagedKept: allStillReadByUnmanaged.length > 0,
-			stillReadByUnmanaged: allStillReadByUnmanaged,
+			verdict: written.length > 0 ? "partial" : "refused",
+			success: false,
+			message,
+			unmanagedKept,
+			stillReadByUnmanaged,
 		};
 	}
 

@@ -187,3 +187,20 @@ with localized text (`bulkDeleteKept` / `bulkDeletePartial`, never the English
 `result.error`), and carries each failure's reason into the toast
 (`BulkFailedItem.error`). Verified by typecheck and the `bulk-errors` label
 tests only; the dialog wiring has no component test.
+
+## Cross-scope delete fold moved into core
+
+`DeleteSkillDialog` deleted a skill across scopes by looping
+`POST /skills/reconcile` once per scope and folding the verdicts in TypeScript.
+That path never received plugin roots, so the bulk delete refused a
+plugin-owned skill (#67 item 2) while the detail page deleted the same skill.
+The fold also lived in the frontend, where a fix to the core's first-failure
+rule would not reach it.
+
+The fold now lives in core: `remove_skill_across_scopes` runs the scopes in
+order behind `DELETE /skills/by-name`, and the dialog only maps the response to
+verdicts and localized messages. A whole-batch refusal still arrives as a
+thrown 422 and goes through `interpretRefusal`.
+
+Tests: `requests/delete-skill.test.ts` (the cross-scope cases, which mock
+`api.skills.deleteByName` and fail if `api.skills.reconcile` is called).

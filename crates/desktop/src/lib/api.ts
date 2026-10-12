@@ -29,6 +29,8 @@ import type {
 	CreateSkillRequest,
 	CreateSubAgentRequest,
 	CredentialResponse,
+	DeleteSkillByNameRequest,
+	DeleteSkillByNameResponse,
 	DeleteSkillByPathRequest,
 	DeleteSkillByPathResponse,
 	GitCredentialStatusResponse,
@@ -449,6 +451,11 @@ export function createApi(baseUrl: string) {
 				body: DeleteSkillByPathRequest,
 			): Promise<DeleteSkillByPathResponse> {
 				return client.delete("skills/by-path", { json: body }).json();
+			},
+			deleteByName(
+				body: DeleteSkillByNameRequest,
+			): Promise<DeleteSkillByNameResponse> {
+				return client.delete("skills/by-name", { json: body }).json();
 			},
 			pruneLock(body: PruneLockRequest): Promise<PruneLockResponse> {
 				return client.post("skills/prune-lock", { json: body }).json();
