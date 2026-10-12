@@ -4781,6 +4781,8 @@ mod tests {
 			skill_dir.join("SKILL.md").exists(),
 			"source skill dir must survive a reconcile whose only copy failed"
 		);
+		assert_eq!(copy_row.outcome, None);
+		assert_eq!(delete_row.outcome, None);
 	}
 
 	#[cfg(unix)]
@@ -6488,5 +6490,211 @@ mod tests {
 			}
 			other => panic!("expected ConfigError::Json, got {other:?}"),
 		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_delete_rows_carry_outcome_and_surviving_holders() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let master = root.join(".aghub/test-skill");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: test-skill\ndescription: Test\n---\n\n# Test\n",
+		)
+		.unwrap();
+
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		std::os::unix::fs::symlink(&master, codex_dir.join("test-skill"))
+			.unwrap();
+
+		let opencode_dir = private_slot_for(AgentType::OpenCode, &root);
+		fs::create_dir_all(&opencode_dir).unwrap();
+		std::os::unix::fs::symlink(&master, opencode_dir.join("test-skill"))
+			.unwrap();
+
+		let claude_dir = private_slot_for(AgentType::Claude, &root);
+		assert!(!claude_dir.exists(), "Claude dir must start absent");
+
+		let source = ResourceLocator {
+			agent: AgentType::Codex,
+			scope: WriteScope::project(root.clone()),
+			name: "test-skill".to_string(),
+		};
+
+		reconcile_skill_preview(
+			&source,
+			&[AgentType::Claude],
+			&[AgentType::OpenCode, AgentType::Windsurf],
+		)
+		.expect("preview passes a never-holder row");
+
+		let batch = reconcile_skill(
+			source,
+			vec![AgentType::Claude],
+			vec![AgentType::OpenCode, AgentType::Windsurf],
+			true,
+		)
+		.expect("Ok(batch)");
+
+		let order: Vec<(OperationAction, AgentType)> = batch
+			.results
+			.iter()
+			.map(|r| (r.action, r.target.agent))
+			.collect();
+		assert_eq!(
+			order,
+			vec![
+				(OperationAction::Copy, AgentType::Claude),
+				(OperationAction::Delete, AgentType::OpenCode),
+				(OperationAction::Delete, AgentType::Windsurf),
+			]
+		);
+
+		let copy_row = &batch.results[0];
+		assert!(copy_row.success);
+		assert_eq!(copy_row.outcome, None);
+		assert_eq!(copy_row.still_read_by, None);
+
+		let opencode_row = &batch.results[1];
+		assert!(
+			opencode_row.success,
+			"OpenCode row: {:?}",
+			opencode_row.error
+		);
+		assert_eq!(opencode_row.error, None);
+		assert_eq!(
+			opencode_row.outcome,
+			Some(crate::dto::RemovalKind::Removed)
+		);
+		let holders = opencode_row
+			.still_read_by
+			.clone()
+			.expect("OpenCode row must name the surviving holders");
+		assert!(holders.iter().any(|h| h.contains("codex")), "{holders:?}");
+		assert!(holders.iter().any(|h| h.contains("claude")), "{holders:?}");
+		assert!(
+			!holders.iter().any(|h| h.contains("opencode")),
+			"{holders:?}"
+		);
+
+		let windsurf_row = &batch.results[2];
+		assert!(!windsurf_row.success);
+		assert!(
+			windsurf_row
+				.error
+				.as_deref()
+				.unwrap_or("")
+				.contains("not found"),
+			"Windsurf error: {:?}",
+			windsurf_row.error
+		);
+		assert_eq!(windsurf_row.outcome, Some(crate::dto::RemovalKind::Absent));
+
+		assert!(fs::symlink_metadata(opencode_dir.join("test-skill")).is_err());
+		assert!(codex_dir.join("test-skill").exists());
+		assert!(claude_dir.join("test-skill").exists());
+		assert!(master.join("SKILL.md").exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_first_delete_row_spared_out_still_removes_the_rest() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let master = root.join(".aghub/test-skill");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: test-skill\ndescription: Test\n---\n\n# Test\n",
+		)
+		.unwrap();
+
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		std::os::unix::fs::symlink(&master, codex_dir.join("test-skill"))
+			.unwrap();
+
+		// Claude is the copy target: .claude/skills does NOT exist initially.
+		let claude_dir = private_slot_for(AgentType::Claude, &root);
+		assert!(!claude_dir.exists(), "Claude dir must start absent");
+
+		// OpenCode is a delete target that must still be removed.
+		let opencode_dir = private_slot_for(AgentType::OpenCode, &root);
+		fs::create_dir_all(&opencode_dir).unwrap();
+		std::os::unix::fs::symlink(&master, opencode_dir.join("test-skill"))
+			.unwrap();
+
+		// Windsurf is delete target 1 and comes FIRST: its skills dir is a
+		// symlink to Claude's not-yet-created skills dir, so the spared check
+		// fails for it before any removal runs.
+		let windsurf_dir = private_slot_for(AgentType::Windsurf, &root);
+		fs::create_dir_all(windsurf_dir.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&claude_dir, &windsurf_dir).unwrap();
+
+		let source = ResourceLocator {
+			agent: AgentType::Codex,
+			scope: WriteScope::project(root.clone()),
+			name: "test-skill".to_string(),
+		};
+
+		let batch = reconcile_skill(
+			source,
+			vec![AgentType::Claude],
+			vec![AgentType::Windsurf, AgentType::OpenCode],
+			true,
+		)
+		.expect("reconcile_skill returns Ok(batch) with per-row outcomes");
+
+		let order: Vec<(OperationAction, AgentType)> = batch
+			.results
+			.iter()
+			.map(|r| (r.action, r.target.agent))
+			.collect();
+		assert_eq!(
+			order,
+			vec![
+				(OperationAction::Copy, AgentType::Claude),
+				(OperationAction::Delete, AgentType::Windsurf),
+				(OperationAction::Delete, AgentType::OpenCode),
+			]
+		);
+
+		let windsurf_row = &batch.results[1];
+		assert!(!windsurf_row.success, "Windsurf delete must be spared");
+		assert!(
+			windsurf_row
+				.error
+				.as_deref()
+				.unwrap_or("")
+				.contains("resolve to the same place on disk"),
+			"Windsurf error: {:?}",
+			windsurf_row.error
+		);
+		assert_eq!(windsurf_row.outcome, None);
+
+		let opencode_row = &batch.results[2];
+		assert!(
+			opencode_row.success,
+			"OpenCode row: {:?}",
+			opencode_row.error
+		);
+		assert_eq!(
+			opencode_row.outcome,
+			Some(crate::dto::RemovalKind::Removed)
+		);
+
+		assert!(claude_dir.join("test-skill").exists());
+		assert!(fs::symlink_metadata(opencode_dir.join("test-skill")).is_err());
+		assert!(codex_dir.join("test-skill").exists());
+		assert!(master.join("SKILL.md").exists());
 	}
 }
