@@ -307,3 +307,22 @@ Tests: `reconcile_skill_removes_remaining_holders_when_source_referrer_is_gone`,
 `reconcile_skill_missing_source_with_adds_refuses_and_names_holders`,
 `reconcile_skill_preview_allows_removal_when_source_is_gone`,
 `reconcile_skill_stale_source_in_removed_fails_only_its_own_row`.
+
+## Reconcile delete rows mapped the verdict twice
+
+The delete half of `reconcile_skill` used to answer the verdict in two places:
+`preflight_delete` and the commit's Delete arm. The commit's removal was a lazy
+memo filled by whichever delete row ran first. That row re-ran the post-copy
+spare check for every row in order to choose the batch's agent list, and the
+two mappings disagreed on a missing row. The commit arm's `_ => Ok(false)` also
+hid which verdicts counted as success.
+
+Rule: the runner's Delete arm only re-checks spares. `remove_skill_batch` runs
+once, after the runner, for the cleared rows, and every row is attributed in
+place through `delete_row_result`. A `Partial` verdict with no error still
+counts as success; that is an open decision, because `to_batch_view` reports it
+as `ok=false`.
+
+Tests: `reconcile_skill_delete_rows_carry_outcome_and_surviving_holders`,
+`reconcile_skill_first_delete_row_spared_out_still_removes_the_rest`,
+`delete_row_result_maps_each_verdict`.

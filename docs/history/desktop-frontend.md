@@ -172,7 +172,7 @@ headless against a real api:
   it. The dialog now re-reads the list and says "kept" only if an unmanaged
   agent still holds the skill.
 
-Test: `lib/skill-reconcile-errors.test.ts` (`isWholeBatchRefusal`); the dialog
+Test: `requests/delete-skill.test.ts` (`isWholeBatchRefusal`); the dialog
 wiring is verified headless only (no component test harness).
 
 ## Bulk delete counted kept as deleted
