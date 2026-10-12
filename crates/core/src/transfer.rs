@@ -1866,47 +1866,76 @@ impl ReconcileSkillPlan {
 		}
 	}
 
+	/// The ONE verdict→result mapping for a delete row, read from either
+	/// response: the plan's dry run (via [`Self::preflight_delete`]) and the
+	/// commit's single `remove_skill_batch`. `Ok(false)`: a Delete row never
+	/// reports `already_present`.
+	fn delete_row_result(
+		&self,
+		row: Option<&crate::skills::removal::SkillRemovalRow>,
+	) -> Result<bool> {
+		use crate::skills::removal::Verdict;
+		let not_found =
+			|| ConfigError::resource_not_found("skill", &self.skill.name);
+		let Some(row) = row else {
+			return Err(not_found());
+		};
+		if let Some(ref err) = row.typed_error {
+			return Err(crate::skills::removal::batch::clone_config_error(err));
+		}
+		if let Some(ref err) = row.error {
+			return Err(ConfigError::InvalidConfig(err.clone()));
+		}
+		match &row.verdict {
+			Verdict::Absent => Err(not_found()),
+			Verdict::Refused { reason, .. } => {
+				Err(if row.still_read_from.is_empty() {
+					ConfigError::unsupported_operation(
+						"remove for this agent alone",
+						reason,
+						row.agent.as_str(),
+					)
+				} else {
+					self.refuse_shared_master(row.agent, &row.still_read_from)
+				})
+			}
+			// `Partial` here carries no error (the executor skipped a path,
+			// none failed); it stays a success for now — open decision.
+			Verdict::Removed
+			| Verdict::Kept { .. }
+			| Verdict::Partial
+			| Verdict::LockOnly => Ok(false),
+		}
+	}
+
 	/// Refuse an unreachable END STATE before the first write, so copies never
 	/// land ahead of a delete row that then fails. Same planner, same
 	/// `exhaustive`, just earlier; runs for every delete row, with or without
 	/// copies.
 	fn preflight_delete(&self, target: &InstallTarget) -> Result<()> {
-		let response = match &self.dry_run_delete_response {
-			Some(resp) => resp,
-			None => return Ok(()),
+		let Some(response) = &self.dry_run_delete_response else {
+			return Ok(());
 		};
-
 		let row = response.rows.iter().find(|r| r.agent == target.agent);
-		let verdict = row
-			.map(|r| &r.verdict)
-			.unwrap_or(&crate::skills::removal::Verdict::Absent);
-
-		let still_read_from =
-			row.map(|r| r.still_read_from.as_slice()).unwrap_or(&[]);
-
-		if verdict.shared_master_kept() || self.a_copy_restores_it(target) {
+		if row.is_some_and(|r| r.verdict.shared_master_kept())
+			|| self.a_copy_restores_it(target)
+		{
+			let still_read_from =
+				row.map_or(&[][..], |r| r.still_read_from.as_slice());
 			return Err(
 				self.refuse_shared_master(target.agent, still_read_from)
 			);
 		}
-
-		if let Some(r) = row {
-			// Fail open on a config this row cannot load: the mutate arm fails it
-			// anyway, and escalating would abort unrelated copies in the batch.
-			// Only unsupported scope and planner errors pre-refuse before write.
-			if !r.is_load_error {
-				if let Some(ref err) = r.typed_error {
-					return Err(
-						crate::skills::removal::batch::clone_config_error(err),
-					);
-				}
-				if let Some(ref err_str) = r.error {
-					return Err(ConfigError::InvalidConfig(err_str.clone()));
-				}
-			}
+		// Fail open on a config this row cannot load: the commit fails that row
+		// anyway, and escalating would abort unrelated copies in the batch.
+		if row.is_some_and(|r| r.is_load_error) {
+			return Ok(());
 		}
-
-		Ok(())
+		match self.delete_row_result(row) {
+			// A never-holder fails its OWN row at commit, never the batch.
+			Err(ConfigError::ResourceNotFound { .. }) => Ok(()),
+			other => other.map(drop),
+		}
 	}
 
 	/// Will one of THIS reconcile's own copies leave the skill in a directory
@@ -2260,59 +2289,9 @@ pub fn reconcile_skill(
 							),
 						),
 					};
-					if let Some(r) =
-						resp.rows.iter().find(|r| r.agent == row.target.agent)
-					{
-						if let Some(ref err) = r.typed_error {
-							return Err(
-								crate::skills::removal::batch::clone_config_error(
-									err,
-								),
-							);
-						}
-						if let Some(ref err) = r.error {
-							return Err(ConfigError::InvalidConfig(
-								err.clone(),
-							));
-						}
-						match &r.verdict {
-							crate::skills::removal::Verdict::Removed => {
-								Ok(false)
-							}
-							crate::skills::removal::Verdict::Absent => {
-								Err(ConfigError::resource_not_found(
-									"skill",
-									&plan.skill.name,
-								))
-							}
-							crate::skills::removal::Verdict::Kept {
-								..
-							} => Ok(false),
-							crate::skills::removal::Verdict::Refused {
-								reason,
-								..
-							} => {
-								if !r.still_read_from.is_empty() {
-									Err(plan.refuse_shared_master(
-										row.target.agent,
-										&r.still_read_from,
-									))
-								} else {
-									Err(ConfigError::unsupported_operation(
-										"remove for this agent alone",
-										reason,
-										row.target.agent.as_str(),
-									))
-								}
-							}
-							_ => Ok(false),
-						}
-					} else {
-						Err(ConfigError::resource_not_found(
-							"skill",
-							&plan.skill.name,
-						))
-					}
+					plan.delete_row_result(
+						resp.rows.iter().find(|r| r.agent == row.target.agent),
+					)
 				})(),
 			};
 			log_operation_outcome(
@@ -5773,6 +5752,68 @@ mod tests {
 			dry_run_delete_response: None,
 			scope: WriteScope::Global,
 		}
+	}
+
+	/// Pins the verdict→result mapping shared by the preflight and the commit.
+	#[test]
+	fn delete_row_result_maps_each_verdict() {
+		use crate::dto::RemovalKind;
+		use crate::skills::removal::{SkillRemovalRow, Verdict};
+		// Reads HOME/XDG through `refuse_shared_master`; see core AGENTS.md Testing.
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let plan = plan_copying_to(&[]);
+		let a = AgentType::Cursor;
+
+		for row in [
+			SkillRemovalRow::noop(a, Verdict::Removed, RemovalKind::Removed),
+			SkillRemovalRow::noop(
+				a,
+				Verdict::Kept {
+					still_read_from: vec![],
+				},
+				RemovalKind::Kept,
+			),
+			// pinned: open decision
+			SkillRemovalRow::noop(a, Verdict::Partial, RemovalKind::Removed),
+			SkillRemovalRow::noop(a, Verdict::LockOnly, RemovalKind::Absent),
+		] {
+			assert!(
+				matches!(plan.delete_row_result(Some(&row)), Ok(false)),
+				"{:?} must map to Ok(false)",
+				row.verdict
+			);
+		}
+
+		assert!(matches!(
+			plan.delete_row_result(Some(&SkillRemovalRow::absent(a))),
+			Err(ConfigError::ResourceNotFound { .. })
+		));
+		assert!(matches!(
+			plan.delete_row_result(None),
+			Err(ConfigError::ResourceNotFound { .. })
+		));
+
+		let boom = SkillRemovalRow::error_row(
+			a,
+			ConfigError::InvalidConfig("boom".into()),
+			false,
+		);
+		let err = plan.delete_row_result(Some(&boom)).unwrap_err();
+		assert!(err.to_string().contains("boom"), "got: {err}");
+
+		let refused = SkillRemovalRow::noop(
+			a,
+			Verdict::Refused {
+				reason: "r".into(),
+				kind: "shared".into(),
+				path: None,
+			},
+			RemovalKind::Kept,
+		);
+		assert!(matches!(
+			plan.delete_row_result(Some(&refused)),
+			Err(ConfigError::UnsupportedOperation { .. })
+		));
 	}
 
 	/// "Will one of this reconcile's own copies leave the skill where the
