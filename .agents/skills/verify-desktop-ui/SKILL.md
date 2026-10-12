@@ -1,25 +1,16 @@
 ---
 name: verify-desktop-ui
-description: Verify aghub's desktop UI by launching the real frontend in headless Chromium (Playwright) against a real aghub-api — run it, screenshot it, and assert on the rendered DOM and on the URL after a click. Use when a change under crates/desktop needs checking beyond typecheck/lint/unit tests, when reviewing a desktop diff, when a claim like "clicking X opens Y" needs settling, or when a desktop UI bug cannot be reproduced by reading code; also on 跑一下桌面版 / 截圖看看 / 這頁點下去會怎樣 / 驗證桌面 UI. Not for aghub's CLI or its skill-install chain — that is the `verify` skill.
+description: Runs aghub's real desktop frontend in headless Chromium (Playwright) against a real aghub-api to screenshot it and assert on the DOM and post-click URL. Use when a crates/desktop change needs checking beyond typecheck/tests or a desktop bug must be reproduced (跑一下桌面版 / 截圖看看 / 這頁點下去會怎樣 / 驗證桌面 UI); not for the CLI or skill-install chain (verify).
 ---
 
 # Verifying the desktop UI without opening a window
 
-`typecheck`, `lint` and the unit tests all pass on a page that renders an empty
-list; they never look at what is drawn. `tauri dev` does, but it needs a
-display, throws a window onto the user's desktop, and cannot be scripted.
-
-This runs the real frontend in headless Chromium against a real `aghub-api`, so
-you can screenshot it and assert on the DOM.
-
-## Why a shim is needed
-
-Every byte the frontend renders arrives over Tauri IPC: `invoke("start_server")`
-returns a port, and everything else is `http://localhost:<port>/api/v1`. The
-store, event, menu and updater plugins are IPC too. Open the vite dev server in
-a plain browser and the app hangs on connection. Inject
-`window.__TAURI_INTERNALS__` before the page's first script and it believes it
-is inside Tauri — that is all `scripts/run-scenarios.mjs` does.
+`typecheck`, `lint` and unit tests pass on a page that renders an empty list;
+`tauri dev` needs a display and cannot be scripted. The frontend gets its port
+from `invoke("start_server")` and its store/event/menu/updater over Tauri IPC,
+so a plain browser hangs on connection. `scripts/run-scenarios.mjs` injects a
+`window.__TAURI_INTERNALS__` shim before the first script, then drives
+Chromium.
 
 ## Before you start
 
@@ -27,7 +18,7 @@ is inside Tauri — that is all `scripts/run-scenarios.mjs` does.
   locations and exits 2 with instructions if it finds none; you can point it
   with `PLAYWRIGHT_PATH`, or install with
   `npx playwright@1.58.2 install chromium`.
-- `crates/desktop/node_modules` populated (`bun install`). Bun only.
+- `crates/desktop/node_modules` populated (`bun install`).
 - **Ports 1420 and 8899 free.** This matters more than it sounds: vite uses
   `strictPort`, so a busy 1420 kills it with the error buried in its log — and
   the harness then happily drives whatever else is serving 1420. Another aghub
@@ -105,7 +96,7 @@ produces a green scenario that did nothing.
 | Page blank, `rows: 0`, no obvious error    | `plugin:store\|get` returned a bare value instead of `[value, exists]` — the plugin destructures it and throws `is not iterable` during store init, killing the whole app |
 | `object null is not iterable` on startup   | `plugin:menu\|*` must return `[rid, id]`                                                                                                                                  |
 | Clicks fail but `eval` assertions all pass | A welcome overlay: `onboardingProgress` was not seeded complete. Pure-`eval` scenarios stay green through this, so it hides well                                          |
-| Clicked the wrong element                  | aria-labels repeat — `在來源中檢視` appears 8 times on the skills page. Use `clickLast` for the detail panel, or scope the selector                                       |
+| Clicked the wrong element                  | aria-labels repeat — `在來源中檢視` is on every source-group header and the detail panel. Use `clickLast` for the detail panel, or scope the selector                     |
 | A click times out at 8s on a visible thing | Something invisible is over it, usually a popover left open by the previous step. Close it, or click through a different affordance                                       |
 | Update badges / rollups all read absent    | The online check is real network and takes about a minute. Raise `settle` until the badge appears; ~45s was not always enough                                             |
 | Your own shell dies, exit 144              | A `pkill -f` or `pgrep -f` pattern that also matches the shell command string containing it. See Cleaning up                                                              |

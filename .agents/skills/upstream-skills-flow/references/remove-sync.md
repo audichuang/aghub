@@ -2,54 +2,56 @@
 
 ## Remove — reference-counted Master deletion
 
-Both tools must never delete a Master that another installed agent still references.
+Neither tool may delete a Master another agent still references.
 
-**Upstream `removeCommand` (`remove.ts`):** for each selected skill, for each target
-agent, remove the agent's dir/symlink (and the agent's native dir, to catch stale
-symlinks) — but **defer** the canonical Master. Then check the _remaining_ (non-target)
-agents: if any still has an install path for that skill, the Master `isStillUsed` and is
-kept; only when no agent references it does `rm(canonicalPath)` run. Global removal also
-drops the lock entry via `removeSkillFromLock`.
+**Upstream `removeCommand` (`remove.ts`):** per selected skill, per target agent,
+remove the agent's dir/symlink (and its native dir, to catch stale links) but **defer**
+the Master. Then if any non-target agent still has an install path for it,
+`isStillUsed` keeps the Master; otherwise `rm(canonicalPath)`. Global removal also
+calls `removeSkillFromLock`; project removal leaves `skills-lock.json` alone.
 
-**aghub:** `ConfigManager::remove_skill` / `remove_skill_planned`
-(`crates/core/src/manager/skill.rs`) + `crates/core/src/skills/removal.rs`.
+**aghub:** `ConfigManager::remove_skill_planned` / `remove_skill_planned_for_agents`
+(`crates/core/src/manager/skill.rs`) + `crates/core/src/skills/removal.rs`
+(`removal/{verdict,batch}.rs`).
 
-- Copy layout → delete `<agent_dir>/<safe_name>/` (or `.md`).
-- Universal layout → remove the Referrer symlink; keep the Master unless unreferenced.
-- `remove_skill_planned` builds a removal _plan_ (symlink scan + containment check +
-  canonical-retention) and executes atomically, rolling back on failure.
-- Removal does **not** touch the lock — pruning is a separate, explicit step (below).
+- Builds a `RemovalPlan` (symlink sweep + containment + canonical-keep), default
+  dry-run; deletes only when not dry-run AND (non-destructive OR `confirm`), re-checking
+  each path's type and containment at delete time.
+- A Referrer goes; the `.aghub` Master is reclaimed only when nothing still reads it.
+  "Did that removal take anything away?" has one home, `removal::read_effect_after`.
+- On execution the per-scope lock is **pruned** (`RemovalOutcome.prune` →
+  `PruneStatus::Pruned`; a preview reports `WouldPrune`). A prune failure is non-fatal.
+
+Semantics and why: knowledge page `技能移除與 Master 回收`; CLI surface rules in
+`crates/cli/AGENTS.md`.
 
 ## Prune — drop orphaned lock entries (aghub-only)
 
 Upstream has no standalone prune. aghub: `crates/core/src/skills/prune.rs`
-(`prune_lock_scanning`) + `crates/cli/src/commands/prune.rs`.
+(`prune_lock_scanning`, `preview_prune`) + `aghub-cli prune-lock`
+(`crates/cli/src/commands/prune.rs`).
 
 ```
-prune_lock_scanning(scope, project_root):
-  union all agents' skills dirs → scan disk → disk_names (BTreeSet<String>)
-  prune_lock(scope, disk_names, …):
-    global  → skill::retain_locked_skills(disk_names)
-    project → skill::retain_local_locked_skills(disk_names, root)
+prune_lock_scanning(scope):
+  union every agent's skills dirs → scan disk → disk_names
+  global  → skill::retain_locked_skills(disk_names)
+  project → skill::retain_local_locked_skills(disk_names, root)
 ```
 
-Lock entries with no on-disk skill are removed. **Scan-abort safety:** if any directory
-scan errors, prune aborts and the lock is left **unmodified** — never partially wiped.
-Default is dry-run; `--yes` actually writes (atomic temp+rename).
+**Scan-abort safety:** any directory scan error aborts and the lock is left
+**unmodified**. `prune-lock` previews by default; `--yes` writes (`--dry-run` forces a
+preview even with `--yes`).
 
 ## Sync — node_modules skills (upstream `runSync`, `sync.ts`)
 
-`skills sync` (a.k.a. `experimental_sync`) discovers skills shipped inside installed npm
-packages and links them into the project. Always **project-scope** and always
-**symlink** mode.
+`skills experimental_sync` links skills shipped inside installed npm packages into the
+project. Always **project scope**, always **symlink** mode. Discovery under
+`node_modules/<pkg>` (and `@<scope>/<pkg>`): root `SKILL.md`, else `*/SKILL.md`,
+`skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`.
 
-Discovery locations under `node_modules/<pkg>` (and `@<scope>/<pkg>`):
-`SKILL.md` at root, `skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`.
+Per skill: `computeSkillFolderHash` vs the project lock's `computedHash` — unchanged →
+up to date; changed/new → `installSkillForAgent(…, {global:false, mode:'symlink'})` then
+`addSkillToLocalLock(name, {source: pkg, sourceType: 'node_modules', computedHash})`.
 
-Per discovered skill: `computeSkillFolderHash` vs the project lock's `computedHash` —
-unchanged → up-to-date; changed/new → `installSkillForAgent(..., {global:false,
-mode:'symlink'})` then `addSkillToLocalLock(name, {source: pkg, sourceType:
-'node_modules', computedHash})`.
-
-aghub interoperates by reading/writing the same project lock (v1) with the same
-`computedHash`; the `node_modules` `sourceType` round-trips as an opaque string.
+aghub has no node_modules sync; it only round-trips such entries in the v1 project lock
+(same `computedHash`, `sourceType` kept as an opaque string).

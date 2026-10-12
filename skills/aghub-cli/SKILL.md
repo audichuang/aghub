@@ -1,6 +1,6 @@
 ---
 name: aghub-cli
-description: "Installs, relinks, updates and diagnoses skills managed by the `aghub-cli` binary — keeping a skill's Master content and its per-agent links in sync across coding agents (Claude Code, Codex, Cursor, and others). Use when a skill is installed but one agent cannot see or run it, when a skill needs linking or syncing to every agent, when publishing an authored edit to its git source so all agents pick it up, or when `doctor` / `.skill-lock.json` / `.agents/skills` state needs reading. Not for making a plugin loadable by a second engine (dual-host-plugin)."
+description: "Installs, links, updates and diagnoses skills across coding agents (Claude Code, Codex, Cursor and others) via the `aghub-cli` binary. Use when an agent cannot see or run a skill, a skill needs syncing to every agent or publishing from its git source, or `doctor` / `.skill-lock.json` / `.agents/skills` state needs reading; not for dual-engine plugins (dual-host-plugin)."
 ---
 
 # Manage skills with `aghub-cli`
@@ -13,9 +13,16 @@ Exact syntax belongs to `aghub-cli <command> --help` — it is unusually complet
 including the destructive-default and token rules. This file carries what the
 help cannot: the storage model, which branch to take, and the traps.
 
-For the commands this file does not route — MCP servers, sub-agents, Claude Code
-plugins, inference providers, skill-usage — see
-[other commands](references/other-commands.md).
+Where to read next:
+
+- JSON shapes, every state value, the adoption guard, misleading command names →
+  [state semantics](references/state-semantics.md)
+- Grant, publish an edit, update, adopt / replace provenance →
+  [install and update](references/install-update.md)
+- Revoke, delete, clean up leftovers, accept a rename →
+  [delete and rename](references/delete-rename.md)
+- MCP servers, sub-agents, plugins, inference, `skill-usage`, `agents` →
+  [other commands](references/other-commands.md)
 
 ## The storage model
 
@@ -24,114 +31,76 @@ project). **No agent reads that directory.** Every grant is a separate Referrer
 symlink in an agent's own skills dir, so a healthy, current Master reaches
 nobody by itself. Content state and coverage are independent axes.
 
-Which dir an agent uses — and whether that dir is SHARED — differs per agent
-**and per scope**. Ask, never hard-code:
+Which dir an agent uses — and whether it is SHARED — differs per agent **and per
+scope**. Ask, never hard-code:
 
 ```bash
 aghub-cli <SCOPE> coverage    # REFERRER DIR + SHARES WITH, per agent (-a is ignored)
 ```
 
-The sharing is the footgun: granting to one agent on a shared dir grants to
-every agent that READS that dir, and a shared Referrer cannot be revoked for one
-agent alone. Ask the matrix, do not remember it — but read it correctly:
-`SHARES WITH` lists the agents that WRITE the same dir, not everyone who reads
-it. At project scope only amp writes `<root>/.agents/skills` (`SHARES WITH` is
-`-`), yet well over a dozen agents read it; globally cline and warp write
-`~/.agents/skills` and roughly eleven agents read it. So one grant there reaches
-all of those readers, and `doctor` reports each of them `linked` at that shared
-dir. `withheld` means the agent reads the skill nowhere. The
-JSON form carries no directory (use the table for paths). `coverage` is static:
-it names no skills; per-skill state comes from `doctor --verify-links`.
+Granting to one agent on a shared dir grants to every agent that READS it, and a
+shared Referrer cannot be revoked for one agent alone. Read the matrix correctly:
 
-Its `REFERRER DIR` column is where aghub WRITES. Several agents READ more places
-than that — cursor and opencode also read `~/.agents/skills` for npx interop —
-which is why `repair` can hand a Referrer to an agent `coverage` never paired
-with that directory.
+- `SHARES WITH` lists agents that WRITE the same dir, not everyone who reads it.
+  At project scope only amp writes `<root>/.agents/skills` (`SHARES WITH` is
+  `-`), yet well over a dozen agents read it. Globally cline and warp share
+  `~/.agents/skills` (read by roughly eleven agents), and kimi and amp share
+  `~/.config/agents/skills`.
+- `REFERRER DIR` is where aghub WRITES. Agents READ more dirs than that (cursor
+  and opencode also read `~/.agents/skills` for npx interop). `doctor` counts
+  every read dir — a Referrer found in a compat dir is `linked`, with the row's
+  `path` naming where — and `repair` grants only to agents that can already
+  READ the skill, which is why it may link an agent `coverage` never paired
+  with that dir.
+- The JSON form carries no directory (use the table). `coverage` is static: per-
+  skill state comes from `doctor --verify-links`.
 
-### `withheld` is not coverage
-
-`doctor --verify-links` gives one state per agent. The one that misleads is
-**`withheld`**: the Master is healthy and this agent holds no Referrer in any
-dir it reads. That is a legitimate resting state ("installed, deliberately
-not granted"), and `--fail-on-issues` correctly ignores it — but it is a PASS
-only for an agent nobody asked for. **For a requested agent, `linked` is the
-only pass.** Reading `withheld` as "fine" reports success for an agent that
-cannot see the skill.
-
-An agent reads more dirs than it writes, and the audit counts all of them. When
-the write slot is empty, `doctor` looks in the agent's other read dirs — the
-same compat dirs `repair`'s sweep visits, the shared `.agents/skills` included —
-and a Referrer found there is `linked`; the row's `path` names the dir it was
-found in, which may not be the write slot. That is how an install made before an
-agent moved its write slot stays covered instead of auditing as a `withheld` the
-user cannot act on. Getting out of a read-only compat dir is `repair`'s job, and
-it works because repair's grant roster asks READ paths while its candidate slots
-come from WRITE dirs.
+**`withheld` is not coverage.** It means the Master is healthy and this agent
+holds no Referrer in any dir it reads — a legitimate "installed, not granted"
+state that `--fail-on-issues` ignores. It is a pass only for an agent nobody
+asked for. **For a requested agent, `linked` is the only pass.**
 
 ## 1. Establish the matrix
 
 ```bash
-aghub-cli --version    # this file describes >= 2.18.0
+aghub-cli --version
 ```
 
-Below 2.18.0 the Master lived in `.agents/skills` and agents could read it
+This file is written against the 2.40 line; on an older build trust `--help`
+over it. Below 2.18.0 the Master lived in `.agents/skills` and agents read it
 without a Referrer — none of the model above applies. Upgrade before mutating.
-`X.Y.Z-N-gSHA` is a clean source build N commits past the tag, and a `-dev`
-suffix is a dirty one.
+`X.Y.Z-N-gSHA` is a clean source build N commits past the tag; a `-dev` suffix
+means a dirty build, not a broken install.
 
-Fix four values before continuing:
+Fix four values:
 
 - **scope** — exactly one of `-g` / `-p`. Project scope needs an agent marker or
   `skills-lock.json` at or above the cwd; `.git` alone is not one. The walk-up
-  stops at the FIRST marker, and `~/.claude/` is one — so from a directory under
-  `$HOME` with no closer marker the project root IS `$HOME`, and project scope's
-  `<root>/.aghub` is the global store: default-scope `doctor` lists every global
-  skill a second time as project `untracked`, and a `-p` install writes
-  `~/skills-lock.json`. Do not adopt or clean those rows. Before any `-p`
-  command read `-p coverage`'s REFERRER DIR: if it sits directly under `$HOME`
-  you are not in a project — use `-g`, or run from the real project root.
-- **roster** — one id or a comma list. `-a all` only when the user asks for it.
+  stops at the FIRST marker, and `~/.claude/` is one — so under `$HOME` with no
+  closer marker the project root IS `$HOME`, `<root>/.aghub` is the global
+  store, default-scope `doctor` lists every global skill again as project
+  `untracked`, and a `-p` install writes `~/skills-lock.json`. Do not adopt or
+  clean those rows. Before any `-p` command, if `-p coverage`'s REFERRER DIR
+  sits directly under `$HOME`, you are not in a project — use `-g` or `cd` to
+  the real root.
+- **roster** — one id or a comma list. `-a all` only when the user asks for it,
+  and it (like every fan-out: repair, update, rename, delete-from-all) expands
+  only to agents ENABLED in `aghub-cli agents list`; a disabled agent is silently
+  left out.
 - **skill name(s)** — the `name:` in the skill's SKILL.md frontmatter, which is
-  what install matches. A folder name that disagrees will not be found.
+  what install matches. A folder name that disagrees is not found.
+- **source string** — what you pass to `source sync`. `doctor` does not print it
+  verbatim (`owner/repo` for GitHub, `type:source` elsewhere, `local`, or `—`
+  with no lock entry). Take it from `source list --json`.
 
-A source repo is scanned for `SKILL.md` well below its root — up to folder
-depth 10, and installed locks really do hold source paths five segments deep,
-inside `plugins/` and `.agents/`. Two files sharing one frontmatter name are
-deduped **first-seen wins**, so the later one is silently invisible rather than
-overwriting anything, and the dedup is case-SENSITIVE (`Foo` and `foo` are two
-skills). Before publishing a source, check for collisions on the frontmatter
-name rather than the directory name, and ask git rather than the filesystem
-because discovery walks the git tree. Strip the quotes before comparing —
-aghub compares PARSED values, so `name: foo` and `name: "foo"` collide while a
-raw grep shows two different strings:
-
-```bash
-git ls-files '*SKILL.md' | xargs -r grep -h '^name:' \
-  | sed 's/^name:[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//' | sort | uniq -d
-```
-
-- **source string** — what you will pass to `source sync`. `doctor` does not
-  print it verbatim (`owner/repo` for GitHub, `type:source` for other hosts,
-  `—` when there is no lock entry). Take it from `source list --json`.
-
-For a private **HTTPS** source, you normally do nothing. aghub resolves a
-credential in this order: `GIT_PASSWORD` (any host), `GITHUB_TOKEN` (github.com
-only), then the user's own git credential helpers (`gh auth login`, the OS
-keychain, Git Credential Manager) asked non-interactively for that host. So if
-`git clone` of the repo works unattended on this machine, aghub can read it —
-do NOT fetch a token yourself and inject it. Only when no helper is configured
-(headless CI, a fresh box) export a token by hand. An `ssh://` or `git@host:`
-source discards tokens entirely and reports `uncheckable` with `reason: "ssh"` —
-re-pin it to its HTTPS URL instead of hunting for a credential.
-
-`GIT_PASSWORD` wins over everything, even on github.com. When a github.com fetch
-fails with `auth` although you are logged in, look for a stale `GIT_PASSWORD`
-or `GITHUB_TOKEN` in the environment first — an env value shadows the helper.
-
-```bash
-gh auth login                              # once; aghub then reads it via git
-export GITHUB_TOKEN=...                    # only where no git helper exists
-```
+**Private HTTPS sources need nothing from you** when `git clone` works
+unattended: aghub tries `GIT_PASSWORD` (any host), then `GITHUB_TOKEN`
+(github.com), then the user's git credential helpers non-interactively. Do NOT
+fetch and inject a token yourself; export one only where no helper exists
+(headless CI). An env value shadows the helper, so a github.com `auth` failure
+while logged in usually means a stale `GIT_PASSWORD`/`GITHUB_TOKEN`. An `ssh://`
+or `git@host:` source discards tokens and reports `uncheckable` `reason: "ssh"`
+— re-pin it to its HTTPS URL.
 
 ## 2. Read the current state
 
@@ -141,451 +110,162 @@ aghub-cli <SCOPE> source list --json
 aghub-cli <SCOPE> source diff <SOURCE> --json     # git sources only; always fetches
 ```
 
-Their JSON shapes differ, and a `jq` filter aimed at the wrong level silently
-returns nothing: `doctor` emits a FLAT array of skill rows (`.[] | select(...)`),
-while `source diff` nests skills under a per-scope wrapper (`.[].skills[]`).
-Shapes, full value domains and per-skill filters are in
-[state semantics](references/state-semantics.md).
+`doctor` emits a FLAT array (`.[] | select(...)`); `source diff` nests skills
+under a per-scope wrapper (`.[].skills[]`). A filter aimed at the wrong level
+silently returns nothing.
 
-Mixed pins — one source whose entries sit on different refs — are the normal
-residue of installs made at different times, and the two commands treat them
-OPPOSITELY. **`source sync` refuses** until `--ref` names one. **`source diff`
-does not**: it splits the entries into per-ref cohorts and reports each row
-against its own ref. So do not carry `--ref` into `diff` out of habit — it
-collapses the cohorts onto one tree and manufactures `installedOutdated` rows
-for skills that are legitimately pinned elsewhere. `source list` reads the lock
-only and is unaffected.
-
-`sync`'s refusal prints the pin set. `(default branch)` in that list is how a
-lock entry with NO recorded ref displays — not a value you can pass back; use
-the repo's real default branch name. An install records the ref it resolved:
-`--ref`, else the source's existing lock ref in that scope (a recorded none
-stays none), else — for a source new to the scope — the repo's real
-default-branch name, and nothing when the remote does not advertise one,
-while `--update` re-stamps only hash and `refCommit`. So the
-pin set does not converge on its own: a source stays mixed until every entry has
-been reinstalled.
+**Mixed pins** (one source, entries on different refs) are normal residue, and
+the commands treat them OPPOSITELY: `source sync` refuses until `--ref` names
+one; `source diff` splits entries into per-ref cohorts. Do not carry `--ref` into
+`diff` — it collapses the cohorts and manufactures `installedOutdated` rows.
+`(default branch)` in sync's refusal is how an entry with NO recorded ref
+displays, not a value to pass back; use the repo's real default branch. Pins do
+not converge on their own: `--update` re-stamps only hash and `refCommit`, so a
+source stays mixed until every entry is reinstalled with one `--ref`.
 
 ## 3. Take one branch
 
-Every mutating flow first takes one interprocess lock per scope, named
-`.aghub-mutation.lock`. Globally it sits beside the global lock file, so its
-directory follows `XDG_STATE_HOME`; for a project it is `<root>/.agents/`,
-deliberately NOT beside `skills-lock.json`. Do not hard-code either. Another
-aghub holding it — a second CLI, or the desktop app — blocks yours. **Do not
-delete that file to get past it.** Find the other process instead: two syncs
-writing one Master at the same time is precisely what it prevents. Read paths
-are unlocked, so a `doctor` or `diff` never waits.
+**Mutation lock.** Every mutating flow takes one interprocess lock per scope,
+`.aghub-mutation.lock` (globally beside the global lock file, so it follows
+`XDG_STATE_HOME`; for a project in `<root>/.agents/`). Another aghub holding it —
+a second CLI or the desktop app — makes yours wait up to 10 s and then fail with
+"another aghub mutation is still in progress, so '<op>' timed out waiting for
+the skill mutation lock; retry once it finishes". **Do not delete the file** —
+find the other process. Reads are unlocked.
 
-A `doctor` row is not one state. It carries `health`, `master`, and a `state`
-per agent, and the verb depends on that COMBINATION plus what is actually on
-disk plus whether you want the skill restored or the record dropped. What
-follows routes the cases that have one answer. It deliberately does not route
-every combination — some have no single-verb fix and one has no fix at all. When
-nothing here matches cleanly, read
-[state semantics](references/state-semantics.md) and look at the disk instead of
-forcing a verb.
+A `doctor` row carries `health`, `master`, and a `state` per agent; the verb
+depends on that COMBINATION plus what is on disk plus whether you want the skill
+restored or the record dropped. What follows routes the cases with one answer.
+When nothing matches cleanly, read [state semantics](references/state-semantics.md)
+and look at the disk instead of forcing a verb.
 
 **Ask first: is there something to point at?** A Master at `.aghub/<name>`, or a
 lock-named copy in the SHARED slot that repair can adopt. Content in an agent's
 private directory does not count — repair leaves that alone.
 
 - Something to point at, slot OCCUPIED BY THE WRONG THING (`dangling`,
-  `foreignLink`, `realPathConflict`) → [Repair](#repair-the-layout). A squatting
-  real directory is compared against the Master and quarantined only when the
-  bytes match. **Do not assume the Master is the correct side**: that directory
-  may belong to a different installer, so look for an ownership record (a plugin
-  manifest, an `installed.json`) before you let anything move it. Content the
-  Master LACKS belongs in the git source — take it there through the authoring
-  branch. Hand-editing the Master to absorb it is the same materialized-copy
-  mistake `--update` later discards.
-- Something to point at, slot EMPTY → that is `withheld`, not damage. Repair
-  leaves it alone; granting it is [Grant](#grant-an-agent).
-- Nothing to point at → repair refuses or reports `conformant` (exit 0) and
-  writes nothing. Only a name that nothing holds at all — unlocked, no Master, no
-  copy anywhere — is refused outright. A LOCKED name with nothing on disk, or an
-  unlocked name whose only copy sits in an agent's private dir or the shared slot,
-  reports `conformant`. [Grant](#grant-an-agent) is the branch, because it
-  fetches.
+  `foreignLink`, `realPathConflict`, `chain`) → [Repair](#repair-the-layout).
+  **Do not assume the Master is the correct side**: a squatting directory may
+  belong to another installer — look for an ownership record (a plugin manifest,
+  an `installed.json`) first. Content the Master LACKS belongs in the git source
+  (the publish branch), never hand-edited into the Master.
+- Something to point at, slot EMPTY → `withheld`, not damage. Grant it.
+- Nothing to point at → repair writes nothing: a locked name, or one whose only
+  copy sits where repair leaves it, reports `conformant` (exit 0); only a named,
+  unlocked name nothing holds anywhere is refused. Grant is the branch, because
+  it fetches.
 
-| What step 2 showed                                                                                  | Branch                                                                                                                                                      |
-| --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A REQUESTED agent is `withheld`, or the skill is `notInstalled`                                     | [Grant an agent](#grant-an-agent)                                                                                                                           |
-| You changed the skill's content yourself                                                            | [Publish an edit](#publish-an-edit-to-a-skill-you-author)                                                                                                   |
-| `installedOutdated` in `source diff`, `updateAvailable` in `check --online`, or "update everything" | [Update content](#update-git-sourced-content)                                                                                                               |
-| `renamed`                                                                                           | [Accept a rename](#accept-an-upstream-rename)                                                                                                               |
-| `health: untracked` — a Master with no lock entry                                                   | [Adopt or replace](#adopt-an-untracked-master-or-replace-provenance). An exact-byte match is adopted in place; that is the same branch, not a different one |
-| `unsupported` for an agent you asked about                                                          | Nothing to run — that agent cannot hold skills in this scope. Drop it from the matrix or change scope                                                       |
+| What step 2 showed                                                                                  | Branch                                                                                                                              |
+| --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| A REQUESTED agent is `withheld`, or the skill is `notInstalled`                                     | [Grant](references/install-update.md#grant-an-agent)                                                                                |
+| You changed the skill's content yourself                                                            | [Publish an edit](references/install-update.md#publish-an-edit-to-a-skill-you-author)                                               |
+| `installedOutdated` in `source diff`, `updateAvailable` in `check --online`, or "update everything" | [Update](references/install-update.md#update-git-sourced-content)                                                                   |
+| `renamed`                                                                                           | [Accept a rename](references/delete-rename.md#accept-an-upstream-rename)                                                            |
+| `health: untracked` — a Master with no lock entry                                                   | [Adopt or replace](references/install-update.md#adopt-an-untracked-master-or-replace-provenance) (exact-byte match adopts in place) |
+| Revoke for one agent, remove a skill, or an `orphanMaster` leftover                                 | [Delete and clean up](references/delete-rename.md)                                                                                  |
+| `unsupported` for an agent you asked about                                                          | Nothing to run — that agent cannot hold skills in this scope. Drop it or change scope                                               |
 
-**Dead ends. These are disclosed, not routed — do not pick a verb for them:**
+**Dead ends — disclosed, not routed; do not pick a verb for them:**
 
-- An `orphan-lock` with NOTHING on disk restores with `source sync <source>
+- An `orphan-lock` with NOTHING on disk restores with `source sync <SOURCE>
 --skill <NAME> --install-missing --yes` while `source diff` calls it
-  `uncheckable` (`local`) — the lock hash still matches upstream. If upstream
-  moved, the row is `installedOutdated`: `--install-missing` skips it and
-  `--update` refuses because there is no installed copy to resync; a `renamed`
-  row refuses for the same reason. Drop the stale entry with `prune-lock` and
-  install it fresh, or accept that the entry is stale and just prune it.
-- `orphanMaster` — a Master with no lock entry and no slot for this agent — has
-  no source to relink from. Wanting it tracked again is the adopt branch, and
-  adoption only succeeds on an exact byte match. Not wanting it is
-  [Clean up](#clean-up-leftovers).
-- A `realPathConflict` with NO Master anywhere — the content exists only as that
-  private directory — is the one repair cannot resolve: it has nothing to
-  compare the fork against, so it cannot quarantine it. `source sync` will
-  materialise the Master but still refuses to take over the occupied slot,
-  reporting `installed: false` with "a real directory or a foreign link already
-  occupies this skill slot". Compare that directory against the fetched skill
-  yourself, move it aside, then grant. (With a Master present this is NOT a dead
-  end — that is the repair case above.)
+  `uncheckable` (`local`). If upstream moved (`installedOutdated`),
+  `--install-missing` skips it and `--update` refuses (no installed copy), and
+  `renamed` refuses likewise: `prune-lock` and install fresh, or just prune.
+- `orphanMaster` has no source to relink from. Tracked again = the adopt branch
+  (exact byte match only); not wanted = delete with `--all-agents`.
+- A `realPathConflict` with NO Master anywhere: repair has nothing to compare
+  against. `source sync` builds the Master but refuses the occupied slot
+  (`installed: false`, "a real directory or a foreign link already occupies this
+  skill slot"). Compare the directory with the fetched skill yourself, move it
+  aside, then grant.
 - `health: master-is-symlink`, `invalid-skill`, `inaccessible`, and the
-  `removed` / `deprecated` / `uncheckable` diff rows are inspect-first —
-  [state semantics](references/state-semantics.md). Never reinstall over
+  `removed` / `deprecated` / `uncheckable` diff rows are inspect-first
+  ([state semantics](references/state-semantics.md)). Never reinstall over
   `master-is-symlink`.
 
 ### Repair the layout
 
 `repair` is one verb for every non-conformant on-disk shape — un-migrated copy,
 symlink chain, Referrer pointing elsewhere, npx-clobbered fork. Layout only: it
-never fetches. Naming a skill repairs it whether or not the lock knows it, so
-you can point it at something you cannot otherwise diagnose; a bulk run (no
-NAME) only walks the names the lock holds. The lock gates ADOPTION, not
-attention.
+never fetches. A named skill is repaired whether or not the lock knows it; a
+bulk run (no NAME) walks only lock names and suppresses `conformant` rows.
 
 ```bash
-aghub-cli <SCOPE> repair [NAME]           # preview; omit NAME for every locked skill
-aghub-cli <SCOPE> repair [NAME] --yes
+aghub-cli <SCOPE> repair [NAME] --json        # preview
+aghub-cli <SCOPE> repair [NAME] --yes --json
 ```
 
-It is built to be read by an agent: `--json` carries the shape it found, every
-path it touched, and for a refusal a `fix` hint. Exit 1 means something was
-refused or failed. Read the preview's `referrers[]` before `--yes` — that list,
-not this file, is the authority on what the run will write.
+- **Read the whole preview before `--yes`**: `referrers[]` (links created or
+  repointed), `unlinked[]` (stale Referrers it will DELETE from read-only compat
+  dirs), `quarantined`, and `fused[]` (agents left sharing one dir). That preview,
+  not this file, is the authority; do not predict the outcome from the state you
+  observed. Exit 1 means something was refused or failed.
+- **`-a` is not a narrowing knob.** A scalar `-a` is ignored; a comma list or
+  `-a all` is rejected. Repair plans against every ENABLED agent's slot
+  (disabled agents are neither linked, unlinked nor listed), so a preview naming
+  more agents than expected is usually right: once the Master leaves a shared
+  slot, its readers need Referrers of their own.
+- A squatting real directory is quarantined only when its bytes match the
+  Master. A **`failed`** row deliberately names no paths (the write may have
+  landed partly): read `reason`, fix it, re-run, and do not read the empty paths
+  as "nothing was written".
+- `conformant` is not proof of health: with no Master, a slot repair would leave
+  alone stays unreachable yet reports `conformant`, and a bulk run hides the
+  row. Name the skill and confirm with `doctor --verify-links`.
 
-A **`failed`** row is the exception, deliberately: it carries no `shape`, an
-empty `master`, no `referrers` and no `quarantined`, because the write may have
-landed partly and naming a path would claim it landed. So do not read that row's
-empty paths as "nothing was written" — read its `reason`, fix what it names, then
-re-run. Repair is idempotent and picks the skill up in whatever state it now
-holds, but a re-run alone is not guaranteed to clear a `failed` row.
+## Completion criterion for every branch
 
-- **`-a` is not a narrowing knob here.** A scalar `-a` is ignored; a comma
-  roster or `-a all` is REJECTED outright. Repair plans against every supported
-  agent's slot, and an agent with no slot is granted one only when it can
-  already READ the skill (read paths, not write dirs — see the `coverage` note
-  above). So a preview naming more agents than you expected is usually correct:
-  once the Master leaves a shared slot, the agents that were reading it there
-  need Referrers of their own or they lose the skill silently.
-- **What repair can and cannot adopt.** It adopts a real copy into the Master
-  only from the recognised SHARED slot, and only for a skill the lock names.
-  The same content sitting in an agent's PRIVATE directory is left alone, so
-  repair can legitimately do nothing about an `orphan-lock` whose content is
-  visibly on disk. With no Master and nothing adoptable it refuses — that is the
-  grant branch below, not a repair. (`dangling` reaching here at all surprises
-  people; [state semantics](references/state-semantics.md) says why.)
+Exit zero is not enough. Read the verb's own verdict:
 
-Do not predict the outcome from the state you observed; the same state reaches
-different outcomes depending on what else is on disk. Run the preview and read
-what it says it will do.
-
-And `conformant` is not proof the layout is healthy. A NAME that
-exists nowhere is refused; a locked skill with no Master, or one whose only copy
-repair leaves alone, can still report conformant. When there is no Master, only
-the slots repair had planned to CREATE or RELINK turn into refusals — a
-slot it was going to leave alone stays left alone, so a plan that touches
-nothing reports `conformant` while the skill is still unreachable. A bulk run
-(no NAME) then suppresses that row entirely. Name the skill, and confirm with
-`doctor --verify-links` rather than with repair's own verdict.
-
-### Grant an agent
-
-Granting is an install action, so it goes through `source sync`, not `repair`:
-
-```bash
-aghub-cli <SCOPE> -a <ROSTER> source sync <SOURCE> --skill <NAMES> --install-missing --json
-aghub-cli <SCOPE> -a <ROSTER> source sync <SOURCE> --skill <NAMES> --install-missing --yes --json
-```
-
-Preview first and read `targetAgents`; check `coverage` before committing if the
-roster touches a shared dir. An install row's `error` in the PREVIEW is a
-predicted refusal (exit 1), so it is not something to push through with `--yes`.
-The converse does not hold: only the install rows' adoption guard is predicted.
-An update row's `SKILL_UPDATE_CONFLICT`, a per-agent slot refusal
-(`installed: false`) and an unreadable lock still surface only on `--yes`, so
-read the committed row too. Naming a skill that is already installed is
-idempotent, which makes this the branch for a Referrer that should exist and
-does not.
-
-**The trap: `--install-missing` plans only `notInstalled` rows, plus explicitly
-named `installedCurrent` and `uncheckable` (`local`) ones.** An `installedOutdated` skill is filtered out,
-so granting an agent a skill that has an upstream update produces an EMPTY plan
-— exit 0, nothing written, the agent still `withheld`.
-
-**Adding `--update` to the same command does not rescue it.** The outdated row
-goes to the update branch instead, and an update resyncs the Master and the
-Referrers that already exist — it links no new agent, and its row carries no
-`agents` key at all (the field is dropped when empty, so `.agents` reads `null`,
-not `[]`). So check the row's state in `source diff` first, and when it is
-outdated run TWO commands: update it to `installedCurrent`, then grant.
-
-The same silence hides a wrong name: an unknown `--skill` value — a folder name
-that is not the frontmatter `name` — is also an empty plan with exit 0, and the
-"has no skill named" warning goes to stderr only.
-
-In the committed run each `actions[].agents[]` entry is
-`{agent, installed, error?}`. An agent whose slot was ALREADY correctly linked
-reports `installed: true` — it can read the skill, which is what the field
-means — so every `installed: false` you see carries an `error`. Do not treat a
-false-with-no-error row as idempotent success; it is a false pass. The preview
-omits `agents` entirely.
-
-To revoke for ONE agent, delete that agent's Referrer (`delete skills <NAME>
--a <AGENT>`, or `reconcile --remove`) — but only when that agent has a PRIVATE
-dir. aghub will not revoke a shared Referrer on an agent's behalf: the
-single-agent delete previews `outcome: "kept"` (exit 0, nothing to remove) and
-the `--yes` run then fails `UNSUPPORTED_OPERATION` (exit 1). A shared slot goes
-only when EVERY agent that reads it is in the `-a` list, and `coverage` does not
-list those readers (see above). To remove the skill everywhere use `delete
-skills <NAME> --all-agents`.
-
-An agent that already holds a linked copy is a cheaper grant source: for a skill
-linked to at least one agent — including a local `add --from` skill, which
-`source sync` cannot grant — `transfer skill --from-agent <LINKED_AGENT> --name
-<NAME> --to <AGENT>` (repeat `--to`) links the EXISTING Master offline. It
-writes at once — no preview, no `--yes`. It never fetches, so the
-`installedOutdated` trap above does not apply, and for the same reason it grants
-the Master as-is, stale content included.
-
-### Publish an edit to a skill you author
-
-The Master is a materialized copy. Editing it in place is overwritten by the
-next `--update`, and the changed hash makes the adoption guard in the INSTALL
-path refuse to adopt it later (`refusing to adopt it` — that is `source sync`,
-not `repair`). Edit the git source instead:
-
-```bash
-# in the source repo checkout
-git add <skill-dir> && git commit && git push
-# then, per scope
-aghub-cli <SCOPE> source sync <SOURCE> --skill <NAME> --update --json
-aghub-cli <SCOPE> source sync <SOURCE> --skill <NAME> --update --yes --json
-```
-
-`source diff` fetches the remote, so an unchanged diff right after an edit means
-the ref it fetched does not carry your change — usually an unpushed commit, but
-check which ref the entry is pinned to before assuming that. If a Master was already edited in place,
-`--update --yes` restores it from upstream and the local edit is lost — which is
-why the edit belongs in the source.
-
-### Update git-sourced content
-
-For ONE source, the same two commands as above, selecting the
-`installedOutdated` rows from `source diff`. `--update` is scope-wide for the
-Master and existing Referrers; `-a` narrows only install/relink actions. Follow
-with the grant branch if the roster should also grow.
-
-For EVERY outdated skill across all sources — "update everything", the desktop's
-update-all button — there is one verb:
-
-```bash
-aghub-cli <SCOPE> apply-update skills --outdated --json         # preview
-aghub-cli <SCOPE> apply-update skills --outdated --yes --json
-```
-
-It runs `check --online` for that one scope and resyncs every `updateAvailable`
-row in one batch, so its target list IS the online check's, not `source diff`'s
-(the two disagree legitimately — section 4). Three things the command will not
-tell you unless you read the preview:
-
-- **"Update available" includes a local edit.** An edited Master is on the list
-  and `--yes` restores it from upstream. Compare the preview's `skills[]` with
-  what the user edited on purpose; that edit belongs in the authoring branch.
-- **One scope per run.** `--all` is refused; run `-g` and `-p` separately.
-- **`renamed` rows are skipped**, listed under `renamed[]` — that is the
-  accept-rename branch. `uncheckable` rows are not targets either; they are listed
-  under `uncheckable[]` with a `reason`, so an empty `skills[]` beside a
-  non-empty `uncheckable[]` is not proof everything is current.
-
-Judge the committed run by `results[].success` per row; exit 1 means at least
-one row failed and the others still ran. Each failed row in `results[]` carries
-`error`, machine-readable `code`, and a `retryable` boolean (`true` when `code`
-is `SKILL_MUTATION_LOCK_BUSY` due to concurrent mutation lock contention; other
-failures report `retryable: false`). Missing from `apply-update --help` on
-an older build: fall back to one `source sync <SOURCE> --update --yes` per row
-of `source list --json`.
-
-### Adopt an untracked Master or replace provenance
-
-Back up outside aghub-managed directories first, then preview the normal
-`--install-missing` branch. Adoption succeeds only under narrow conditions
-(exact hash match, no symlink in the tree, no conflicting lock owner) —
-[state semantics](references/state-semantics.md) has them, and when the guard
-refuses, that refusal is the answer. The preview runs the same guard: a refusal
-shows up as that row's `error` ("refusing to adopt it" / "already owned by
-source" / "contains a link") and the preview exits 1; `--yes` would refuse
-identically before writing anything.
-
-Local content that must survive belongs in the git source first (the authoring
-branch). For a deliberate source swap: preview `delete skills <NAME>
---all-agents`, read every path in the preview — it includes the Master — and
-read `would_prune_lock_entries` too: a committed skill delete also drops the lock
-entries of OTHER skills that have no Master on disk, including an `orphan-lock`
-you could still have restored with a grant (restore or prune those first).
-`--yes` it, then install from the new source with an explicit `-a` roster.
-
-If that delete refuses with "Read only by disabled agent(s)", those agents were
-disabled after being granted the skill. aghub never sweeps a disabled agent's
-dirs unless that agent is NAMED in the request — the `-a` target or list, or a
-`reconcile --remove` row; `-a` defaults to `claude`, so a disabled claude IS swept
-when you omit `-a` — and an unnamed one's link keeps the Master alive. Run `aghub-cli agents list` to see which agents
-are unmanaged and `aghub-cli agents enable <id>` to turn one back on (note that
-`-a all` and `source sync -a all` skip unmanaged agents), or unlink exactly the
-entries the message lists, then retry — do not widen the roster to `-a all`.
-To remove the skill everywhere in one step, name the disabled holders too
-(`reconcile --remove <each holder>` — repeat the flag or pass a comma list, or the desktop's delete dialog with "also
-remove these agents' links" ticked): naming a disabled agent is the consent.
-
-If a single-agent delete refuses with "Also read there by agents not in this
-request", the skill lives in a shared slot still read by other agents. Only
-ENABLED agents are named (disabled agents never block a single-agent delete).
-Include the named agents in the same `-a` request, or delete for every agent
-(`--all-agents`, which also unlinks it for them).
-The same rule applies when the shared-slot entry is a real directory (not a
-link): it is deleted once every ENABLED agent reading that slot is in the `-a`
-list (disabled agents never count), and refused, naming the readers left out,
-otherwise. It also applies outside a shared slot: if a private real directory is
-co-read because another agent's skills root is a dotfiles-style symlink to it,
-that enabled reader must be in the same `-a` list. A symlink to it from an agent
-NOT in the `-a` list also blocks it: the
-delete exits 1 and lists the paths that stay readable, including that link (for
-example `.claude/skills/<name>` when claude was left out of the request); the
-message gives paths, not agent names, and a link from a DISABLED agent's own
-directory blocks the same way. A symlink from
-an agent that IS in the `-a` list does not block it; that agent's own row
-unlinks it, and the verdict is the same in whatever order `-a` lists the agents
-(preview and `--yes` agree). You do not need to order shared-slot writers first
-or run the command again; core evaluates shared slots first and applies prior-row
-credit in a single pass. If whole-batch preflight rejects the request, the command
-exits 1, states that nothing was written, and names each refused target with its
-reason; disk and lock remain byte-identical.
-In `--json`, a whole-batch preflight rejection appears in the top-level `error.code` envelope (`UNSUPPORTED_OPERATION`, `INVALID_CONFIG` or `MANAGED_RESOURCE` lives there, not in `results[].code`). Each row in `results` carries the unified `outcome`
-(`preview` | `removed` | `absent` | `partial` | `kept`), wire `code` that appears only on a row-level failure (`partial` or a config load error, null on success; missing skills report no-op success with `outcome: "absent"` and exit 0 without an error code, whether absent or retaining an in-scope lock entry),
-`still_read_from` (surviving paths when kept/refused), batch-level `still_read_by` (agents still holding the skill after the removal, copied onto every row, alongside `still_read_by_managed` and `still_read_by_unmanaged`),
-and `master_reclaimed` (on commit, whether Master was removed on disk; in preview `master_reclaimed: false` and, if exhaustive and Master exists, `would_reclaim_master: true`). Prune status is reported
-independently (`pruned_lock_entries` / `would_prune_lock_entries` / `prune_error`).
-Rows are returned in the exact request order of `-a`. A real directory inside `.aghub` is never deleted by
-a single-agent delete, and neither is a real directory in a shared slot that git tracks (exit 1;
-untrack it with `git rm -r --cached <path>` first, or keep authoring it there;
-if git cannot answer — missing, an unusable repository, `dubious ownership`, or a probe that
-exceeds its 10 s limit — the delete is refused as well and says so). The refusal itself
-includes that exact command and path. `--all-agents` applies the same guard and
-refuses such a directory too (exit 1, nothing deleted), so it is not a bypass—untrack
-deliberately first. `reconcile --remove` and the desktop's manage-agents /
-bulk dialogs apply this same rule to their removal list. A real directory has no
-`.aghub` Master behind it, so deleting it deletes the content and the lock entry
-is pruned too. Local edits are gone for good; if the skill originally came from a
-source, `source sync <repo>` can install a fresh copy of the source's version.
-If no other Referrer remains, the Master content is deleted too (the removed
-paths include `.aghub/<name>`), so re-enabling a disabled agent later does not bring
-the skill back; it has to be reinstalled.
-
-An `add --from` install writes a local lock entry (`source_type: local`) and
-refuses if another owner's lock entry already holds the name. It has no
-upstream-update branch; refresh it through the same backed-up delete plus a
-re-`add` with an explicit comma roster.
-
-### Accept an upstream rename
-
-Confirm `source diff` reports `renamed`, preview `source accept-rename`, then
-repeat with `--yes`. Both arguments come from that row (`--help` names which
-field is which). The transaction resolves the new frontmatter name even when the
-repo directory moved. The preview names no paths and no agents. The commit grants
-the new name to every MANAGED agent that could READ the old one — shared-slot
-readers get their own Referrer, a disabled agent gets nothing — and the committed
-`paths` can list a shared slot more than once, so dedupe before counting. The commit removes the old name everywhere, its `.aghub/<old>`
-Master included. The one exception is an agent you disabled (`agents list`) that
-still holds a Referrer to it: the old Master is kept for that agent and shows up
-untracked in `doctor` (enable the agent or unlink that entry, then `delete skills
-<OLD> --all-agents`). The preview refuses, without fetching, a degenerate rename,
-an old name that is not in the lock, and a new name that already exists in the
-scope (a lock entry or an on-disk dir; code `RENAME_TARGET_EXISTS`), so those exit 1
-before `--yes`. Under `--json` a rename failure carries the same `error.code` as the
-desktop/API route. A locked old name with no installed copy (`NoInstalledCopy`)
-still previews as success (exit 0) and fails only on `--yes` (exit 1). Run `doctor --verify-links` afterwards as the completion check.
-
-### Clean up leftovers
-
-An `orphanMaster` is typically what an earlier `delete` left when it spared a
-Master another agent still read. Plain `delete skills <NAME>` cannot clear it:
-it discovers a skill through the AGENT CONFIGS, so with no Referrer left anywhere
-it reports a successful `absent` while the Master stays on disk. `delete skills
-<NAME> --all-agents` does reach it: the preview lists `.aghub/<name>` in `paths`,
-and `--yes` removes it (`outcome: "removed"`). Do not `rm` the directory by hand.
-
-Check the other agents' rows first — an untracked Master can still have a live
-`linked` Referrer, and removing it would dangle that link. A stale LOCK entry is
-a separate job: `prune-lock`.
-
-**Completion criterion for every branch**: exit zero is not enough. Read the
-verb's own verdict — `outcome` for `delete`, `outcome` per row for `repair`, and
-for `source sync` the row's own `error` FIRST — an install that fails outright
-emits no `agents` at all, so a caller that only walks `agents[]` sees an empty
-list and calls it success — then, for an install/grant row, each agent's
-`installed`/`error`. An update row never carries `agents`; judge it by
-`applied`/`error`. Treat `preview`, `kept`,
-`refused` and any partial result as open work rather than as done. `absent` is
-the one that depends on what you asked: from `delete` it means the skill was
-already gone and retrying will not help, but on an orphan Master a plain `delete`
-(without `--all-agents`) reports it because deletion never found the thing you
-were trying to remove.
+- `delete` → `outcome` (per `results[]` row for an `-a` list); `repair` →
+  `outcome` per row.
+- `source sync` → the row's own `error` FIRST (a failed install emits no
+  `agents`), then each `agents[]` entry's `installed`/`error`; an update row has
+  no `agents` and is judged by `applied`/`error`.
+- `preview`, `kept`, `refused` and any partial result are open work. `absent`
+  from `delete` means already gone — except that a plain `delete` on an orphan
+  Master also says `absent` because it never found the Master.
 
 ## 4. Prove the matrix
 
 ```bash
-aghub-cli <SCOPE> -a <ROSTER> doctor --verify-links --json
+aghub-cli <SCOPE> -a <ROSTER> doctor --verify-links --fail-on-issues --json
 aghub-cli <SCOPE> source diff <SOURCE> --json
 aghub-cli <SCOPE> check skills --online --json
 ```
 
-For a git install require `health: "ok"`, `updatable: true`, the expected
-source, `installedCurrent` in the diff, `status: "upToDate"` in the online
-check — and **`linked` for every agent in the requested roster**. For a local
-install `untracked` and `updatable: false` are expected, but the roster bar is
+`--fail-on-issues` makes the exit code count every bad link state plus health
+`orphan-lock` / `invalid-skill` / `master-is-symlink`, but not `withheld`, so it
+does not replace the roster bar. For a git install require `health: "ok"`,
+`updatable: true`, the expected source, `installedCurrent` in the diff,
+`status: "upToDate"` online — and **`linked` for every requested agent**. For a
+local install `untracked` and `updatable: false` are expected; the roster bar is
 the same.
 
-`updatable` is a conjunction — fetchable source type AND a recorded `skillPath`
-AND a valid Master — so `health: "ok"` with `updatable: false` is real, usually
-a lock entry with no `skillPath`. Provenance is intact; in-place update is not
-available.
+`updatable` is a conjunction (fetchable source type AND a recorded `skillPath`
+AND a valid Master), so `ok` with `updatable: false` is real — usually a lock
+entry with no `skillPath`.
 
-Two results to read rather than retry:
+Read rather than retry:
 
-- `uncheckable` is never a pass. `checked` is copied straight from whether you
-  passed `--online`, so `checked: true` says the run was allowed to go online,
-  NOT that this row's fetch was attempted — local, ssh and unsupported-scheme
-  sources end in the precheck, and a credential-backend failure stops the row
-  later but still before any fetch. Read
-  `reason`: `auth` is a missing or rejected credential (log in with git or export the
-  token, then re-run; do not reinstall), `ssh`/`local` are permanent for that source, as are
-  `unsupportedScheme` and `noPath` (the lock has no `skillPath`). `network` with
-  `checked: false` means you omitted `--online`; `network`/`timeout` online are
-  transient — retry.
-  `updateAvailable` / `renamed` route back to section 3.
-- The two commands share one verdict, so on the same scope they agree row for
-  row: diff `installedCurrent` ⇔ check `upToDate`, diff `installedOutdated` ⇔
-  check `updateAvailable`, and `uncheckable` (`local`) in both. A disagreement
-  means the disk changed between the two runs — re-run both.
-    - diff `installedOutdated` on an edited Master: `apply-update` would overwrite
-      that edit, so look before running it. If the edit is wanted, take the
-      authoring branch instead.
-    - When the enabled agents' copies disagree (e.g. a forked private copy next to
-      the Master's Referrer), the row is `uncheckable` (`local`) in both commands,
-      not outdated. `source sync --update --yes` still refuses that conflict
-      (`errorCode: "SKILL_UPDATE_CONFLICT"`); move the fork aside. A lone private
-      copy with no other managed copy IS the baseline and compares normally.
-    - A `source sync --update --yes` row with `errorCode: "SKILL_SOURCE_CHANGED_DURING_FETCH"`
-      (the lock entry appeared or moved while fetching) or `"SKILL_SOURCE_MISMATCH"` (the fetched
-      source/path is not what the entry is locked to) wrote nothing; re-run `source diff`, then retry.
+- `uncheckable` is never a pass, and `checked: true` only says the run was
+  allowed online, not that this row was fetched. By `reason`: `auth` = missing
+  or rejected credential (fix it, do not reinstall); `ssh`, `local`,
+  `unsupportedScheme`, `noPath` = permanent for that source; `network` with
+  `checked: false` = you omitted `--online`; `network`/`timeout` online =
+  transient, retry.
+- `source diff` and `check --online` share one verdict and agree row for row on
+  the same scope (equivalences in [state semantics](references/state-semantics.md#source-diff---json));
+  a disagreement means the disk changed between runs — re-run both.
+- When the enabled agents' copies disagree (a forked private copy beside the
+  Master's Referrer), there is no local baseline: the row is `uncheckable`
+  (`local`) while the lock hash still matches upstream, but `installedOutdated` /
+  `updateAvailable` once upstream moved — and then `--update` /
+  `apply-update` refuses it with `SKILL_UPDATE_CONFLICT`. Move the fork aside.
+  A lone private copy with no other managed copy IS the baseline.
+- A `source sync --update --yes` row with `SKILL_SOURCE_CHANGED_DURING_FETCH` or
+  `SKILL_SOURCE_MISMATCH` wrote nothing; re-run `source diff`, then retry.
 
 If the user needs proof of runtime invocation rather than file discovery, run a
 smoke prompt inside each requested agent — no aghub command can show that.

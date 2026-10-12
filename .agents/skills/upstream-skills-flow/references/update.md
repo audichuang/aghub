@@ -1,70 +1,78 @@
 # Update / check flow (upstream ↔ aghub)
 
-The biggest behavior divergence between the two tools lives here — so be deliberate
-about which model you're matching.
+The biggest divergence between the two tools — be deliberate about which model you match.
 
 ## Upstream `updateGlobalSkills` / `updateProjectSkills` (`update.ts`)
 
-Always online. Per source:
+Always online. Global, per source:
 
-1. **GitHub source** → `fetchRepoTree(source, ref, getGitHubToken)` pulls the whole repo
-   tree in one API call; `findSkillMdPaths(tree)` lists discovered SKILL.md paths.
-2. **Non-GitHub source** → `cloneRepo(sourceUrl, ref)` then `discoverSkills(tempDir)`.
-3. **Deletion detection** → `checkAndPromptForDeletions(...)`: any locked skill whose
-   `skillPath` is no longer in `discoveredPaths` is offered for removal.
-4. **Update detection** (the diff):
-    ```
-    latestHash = getSkillFolderHashFromTree(tree, entry.skillPath)
-    if (latestHash && latestHash !== entry.skillFolderHash) → mark for update
-    ```
-    i.e. compare the GitHub tree SHA in the lock against the live tree SHA.
-5. **Apply** → upstream does NOT write files in `update.ts`. It builds an install URL
-   (`buildUpdateInstallSource`) and **re-runs `add`** (`spawnSync(..., 'add', url, '-g',
-'-y')`), so the lock is updated through the normal `runAdd` path. Failures skip that
-   skill and continue.
+1. Entries without `skillFolderHash` or `skillPath` are **skipped** (`getSkipReason`) —
+   so every aghub-written entry (empty `skillFolderHash`) is invisible to `npx skills update`.
+2. **GitHub source** → `fetchRepoTree(source, ref, getGitHubToken)` (one API call) +
+   `findSkillMdPaths`; **other git** → `cloneRepo` + `discoverSkills`.
+3. **Deletion detection** → `checkAndPromptForDeletions`: a locked skill whose
+   `skillPath` is no longer discovered is offered for removal.
+4. **Diff** → `getSkillFolderHashFromTree(tree, skillPath) !== entry.skillFolderHash`
+   (tree SHA vs tree SHA) marks it for update.
+5. **Apply** → `update.ts` writes no files: `buildUpdateInstallSource` + `spawnSync(…,
+'add', url, '-g', '-y')`, so the lock updates through `runAdd`. Failures skip and continue.
 
-So upstream "update" = detect-by-hash, then re-install via `add`. There is **no rename
-guard** — if the skill's frontmatter `name` changed upstream, the re-`add` installs it
-under the new name and can leave the old Master/Referrers dangling.
+Project (`skills-lock.json`): clone + deletion check, then re-`add` **every remaining
+skill** (`buildLocalUpdateSource`, `add … --skill <name> -y`) — no hash diff.
+
+There is **no rename guard**: if the frontmatter `name` changed upstream, the re-`add`
+installs under the new name and can leave the old Master/Referrers dangling.
 
 ## aghub: `check` then `apply-update` (two explicit commands)
 
 aghub splits detection from application and is offline-by-default.
 
-### `aghub check skills [--online]` (`crates/cli/src/commands/check.rs`)
+### `aghub-cli check skills [--online]` (`crates/cli/src/commands/check.rs`)
 
-- **Offline (default)** — reads the lock and reports each entry as `Uncheckable` with a
-  reason (it does not hit the network). This is the main behavior difference from npx.
-- **`--online`** — runs the shared orchestrator (`skill_update::check_updates`):
-    1. precheck source (local / SSH / unsupported → `Uncheckable`),
-    2. cheap ls-refs preflight: if the branch tip OID is unchanged **and** a local hash is
-       known → `UpToDate` (skips even a fetch),
+Scope defaults to global + current project. Both modes run the one orchestrator,
+`skill_update::run_update_check` (`crates/skill-update/src/lib.rs`, also behind API
+`GET /skills/check-updates`), and are read-only on both locks.
+
+- **Offline (default)** — remote sources report `uncheckable`/`network` with
+  `checked: false`; no network. The main difference from npx.
+- **`--online`** (alias `--check-remote`):
+    1. precheck source (local / no `skillPath` / unsupported → `Uncheckable`),
+    2. tip preflight that downloads no objects: tip unchanged **and** a local hash
+       known → `UpToDate`, no fetch,
     3. else treeless fetch → compare hash,
-    4. if the parsed frontmatter `name` ≠ the locked name → `Renamed`.
+    4. parsed frontmatter `name` ≠ locked name (`detect_rename`) → `Renamed`.
 
-### `aghub apply-update <name> --yes` (`crates/cli/src/commands/apply_update.rs`)
+### `aghub-cli apply-update skills <name> --yes` (`crates/cli/src/commands/apply_update.rs`)
+
+Without `--yes` a single-name apply refuses; `--outdated` updates every
+`update-available` row (preview without `--yes`) and skips renamed ones. The caller
+fetches and sanitizes (`sanitize_skill_path`); the transaction is the shared
+`resync_installed_skill` (`crates/core/src/skills/resync.rs`), also used by
+`source sync` and the API apply-update / git-sync routes:
 
 ```
-read lock (source_url, ref, skillPath)
-  → fetch_source (gix clone → materialize tree)
-  → sanitize_skill_path                 # traversal guard
-  → ensure_source_not_renamed           # RENAME GUARD (see below)
-  → stage_and_swap_dir                   # atomic: temp dir → backup old → rename → rollback on fail
-  → update_lock_hash                     # record new hash + refCommit
+mutation lock (held to the end)
+  → resync_targets_in            # installed targets; none → NotInstalled
+  → expected.ensure_unchanged    # compare-after-fetch: lock entry still the one fetched
+  → detect_rename                # RENAME GUARD → ResyncError::Renamed
+  → compute_skill_folder_hash
+  → refuse_conflicting_copy      # differing real copy beside a Master → refuse
+  → assert_targets_strictly_contained
+  → DirSwapTransaction prepare → commit_all   # stage every target, then swap
+  → update_lock_hash             # failure rolls every swapped target back
 ```
 
-`stage_and_swap_dir` (`crates/core/src/skills/update.rs`) copies into a staging dir
-(skipping symlinks, tolerating broken ones), backs up the old dir, renames staging into
-place, and rolls back from the backup on any failure. This atomicity is an aghub
-addition — upstream just re-copies.
+Upstream just re-copies via `add`; staging every target, keeping backups until the
+lock commits, and rolling back is aghub's addition.
 
-### The rename guard (aghub-only safety)
+### The rename guard (aghub-only)
 
-`detect_rename(parsed_name, expected)` (`crates/core/src/skills/update.rs`) returns the
-new name if the source's frontmatter `name` no longer matches the locked name. Apply-update
-**refuses** rather than silently renaming (which would break every Referrer symlink):
+If the source's frontmatter `name` no longer matches the locked name, the resync
+**refuses** rather than renaming in place (which would break every Referrer):
 
-- CLI: "Delete the old skill and install '{newName}' instead".
-- API: error code `SKILL_RENAMED_IN_SOURCE`.
+- CLI: `skill_renamed_message` — "Delete the old skill and install '{new}' instead";
+  `--outdated` points at `aghub-cli source accept-rename <old> <new>` (the transactional
+  rename).
+- API: error code `SKILL_RENAMED_IN_SOURCE` (`SKILL_RENAMED_CODE`).
 
-This is the deliberate fix for the upstream gap in step 5 above.
+This closes the upstream gap in step 5 above.

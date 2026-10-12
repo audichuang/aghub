@@ -120,8 +120,8 @@ list, or `all`), `-g`/`-p`, `--all`.
   "would remove" and exits 0, then fails that row on commit and exits 1.
   `reconcile mcp` / `reconcile sub-agent` protect the whole ROSTER, not just the
   agents you named, so `reconcile mcp --remove claude -p` is always refused —
-  the message names copilot (both resolve `<root>/.mcp.json`; repeat `--remove`,
-  it takes no comma list). Following that remedy exits 0. A `--remove` naming an
+  the message names copilot (both resolve `<root>/.mcp.json`; repeat `--remove`
+  or pass a comma list). Following that remedy exits 0. A `--remove` naming an
   agent whose backing no row emptied FAILS that row. That refusal is
   `INVALID_CONFIG` / HTTP 400; the SKILL removal refusal is the other code —
   `delete` and `reconcile skill` both report `UNSUPPORTED_OPERATION` / HTTP 422.

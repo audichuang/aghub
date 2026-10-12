@@ -1,14 +1,12 @@
 ---
 name: testing-fs-failures
-description: Forces filesystem operations to fail deterministically in tests so error, rollback, and cleanup paths get covered without adding fault-injection seams. Use when writing a test that must make an fs op fail (permission denied, ENOTDIR, not-a-symlink), when verifying rollback or partial-failure handling, when a permission-based test must stay safe under root/CI, or for unix-gated tests that must trigger an fs failure in Rust.
+description: Makes Rust filesystem ops fail deterministically in tests (ENOTDIR via a file ancestor, or a read-only dir with a root probe) to cover error, rollback and cleanup paths without fault-injection seams. Use when a test must force an fs failure (permission denied, ENOTDIR) to reach a rollback or partial-failure path, or stay safe running as root in CI.
 ---
 
 # Testing filesystem-failure paths
 
-Error/rollback/cleanup code that only runs when an `fs` call fails is usually
-untested. You can exercise it with real filesystem state — no `trait`-based
-fault-injection seam needed. Pick the technique by what the failing path must
-already be.
+Drive the failure with real filesystem state — no `trait`-based fault-injection
+seam. Pick the technique by what the failing path must already be.
 
 ## Pick a technique
 
@@ -30,10 +28,10 @@ assert!(std::fs::read_dir(&inaccessible).is_err()); // ENOTDIR, even as root
 ```
 
 It stands in deterministically for the real-world `EACCES` of an unreadable
-parent or a dropped mount. A scanner that **propagates** this error aborts
-(e.g. prune's `collect_disk_dir_names`); one that guards with `exists()` /
-`is_dir()` silently skips instead (e.g. `scan_skills`) — assert whichever your
-code actually does.
+parent or a dropped mount. A scanner that checks `try_exists()` sees `Err` and
+aborts (prune's `collect_disk_dir_names`); one that guards with `exists()` /
+`is_dir()` gets `false` and silently skips (`scan_skills`) — assert whichever
+your code actually does.
 
 ## Read-only dir + root probe
 
@@ -80,9 +78,12 @@ already exists (e.g. a symlink-creator that reports `Conflict` instead of
 clobbering). Pre-creating a file there will **not** trip the error path. Read the
 API first; only a real `Err` reaches your rollback code.
 
-In this repo: the prune scanner uses the ENOTDIR trick
+In this repo: the scanner tests use the ENOTDIR trick
 (`crates/skill/src/scan.rs`, `crates/core/src/skills/prune.rs`); the
 universal-rename rollback tests use the read-only-dir technique
-(`crates/core/src/manager/skill.rs`). For which item must fail in a multi-step
+(`crates/core/src/manager/skill/tests.rs`). There is no shared `perms_enforced`
+helper — each test file keeps its own copy (also `removal/verdict/tests.rs`,
+`repair.rs`, `core/tests/sub_agent_tests.rs`, `cli/tests/cli_tests.rs`,
+`api/src/routes/skills.rs`); copy one. For which item must fail in a multi-step
 rename and what the rename transaction covers, see the **aghub-skills** skill and
 `docs/adr/0001`.

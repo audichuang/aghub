@@ -1,65 +1,62 @@
 ---
 name: aghub-skills
-description: Domain knowledge and invariants for aghub's skill-management subsystem — npx-compatible lock files, universal vs copy install layout, transactional filesystem mutations, and cross-crate wiring. Use when modifying skill install, update, remove, prune, rename, lock files, or skill discovery anywhere in the aghub repo (crates/skill, crates/core skills/manager, the skills routes in crates/api, or the apply-update CLI).
+description: Invariants for aghub's own skill-subsystem code — lock hash fields, universal vs copy layout, the two rename transactions, and where skill code lives across crates. Use when changing skill install, update, remove, prune, rename or discovery in crates/skill, crates/core or the api skills routes; not for npx lock/hash interop (npx-skills-contract).
 ---
 
 # Working on aghub's skill subsystem
 
-Hard-won, non-obvious rules for the skill code. Terms (Source hash, Master,
-Referrer, Relink, …) are defined in [CONTEXT.md](../../../CONTEXT.md) — use them.
+Terms (Source hash, Master, Referrer, Relink, …) are defined in
+[CONTEXT.md](../../../CONTEXT.md) — use them.
 
 ## Lock files: two formats, one Source hash
 
-- **Global** lock (`~/.agents/.skill-lock.json`, v3, npx-compatible) and
-  **project** lock (`<proj>/skills-lock.json`, v1, intentionally timestamp-free).
-- The v3 entry holds a **mutual-exclusion invariant**: a Source hash lives in
-  `contentHash` and `skillFolderHash` is kept **empty** — never both populated.
-  The project lock (v1) stores the same Source hash under `computedHash` and has
-  no folder-hash field.
-- **Never mutate these fields by hand.** Use `SkillLockEntry::apply_content_hash`
+- **Global** lock (`.skill-lock.json`, v3; path rules in `crates/skill/AGENTS.md`)
+  and **project** lock (`<proj>/skills-lock.json`, v1, timestamp-free).
+- v3 mutual exclusion: the Source hash lives in `contentHash`;
+  `skillFolderHash` stays **empty** — never both populated. v1 stores it as
+  `computedHash` (no folder-hash field).
+- **Never set these fields by hand.** Use `SkillLockEntry::apply_content_hash`
   / `LocalSkillLockEntry::apply_computed_hash` (idempotent; the global one also
-  bumps `updatedAt`). They are the one home for the invariant.
-- **npx compatibility is load-bearing**: never bump the lock versions; keep
-  `skillFolderHash` empty; hash parity is fixture-pinned
-  (`crates/skill/tests/hash_parity_golden.rs`). See `crates/skill/CLAUDE.md` and
-  the [npx-skills-contract](../npx-skills-contract/SKILL.md) skill for the full
-  round-trip contract + known divergences.
+  bumps `updatedAt`) — the one home for the invariant.
+- Never bump lock versions; hash parity is pinned by
+  `crates/skill/tests/hash_parity_golden.rs`. Full round-trip contract:
+  [npx-skills-contract](../npx-skills-contract/SKILL.md).
 
 ## Install layout: universal vs copy
 
-- **Universal**: one Master at `.agents/skills/<name>` + per-agent symlink
-  Referrers. **Copy**: an isolated per-agent copy, no Master.
-- A skill is universal iff `canonical_path.is_some()`.
-- **Renaming or removing a Master must account for every Referrer.** Discover
-  referrers _before_ the rename (canonicalize resolves through the live Master),
-  then re-point them.
-- Rename is **transactional**: `rename_skill_master` rolls back on relink failure
-  so a partial rename never leaves dangling Referrers. Boundary = rename + relink
-  only — see [docs/adr/0001](../../../docs/adr/0001-transactional-universal-skill-rename.md).
-  Don't "fix" the SKILL.md write into the transaction; that's deliberate.
+- **Universal**: one Master at `.aghub/<sanitized-name>` + per-agent symlink
+  Referrers. **Copy** (isolated): a real per-agent directory, no Master.
+- `canonical_path.is_some()` selects the universal rules (`plan_removal`
+  dispatches on it alone); it is set only for a link — except the
+  `--all-agents` store fallback, which synthesizes it (see `crates/core/AGENTS.md`).
+- Renaming or removing a Master must account for every Referrer. Record
+  referrers **before** the rename (`canonicalize` resolves through the live
+  Master), then re-point them.
 
-## Where things live (don't guess)
+## Two rename transactions
 
-- Agent descriptors/models/format → `crates/agents` (NOT `crates/core`).
-- All config mutation goes through **`ConfigManager`** (`crates/core/src/manager/`);
-  never bypass it. Disk-discovered skills (Claude) barely use `save_current`.
-- Adding/removing an agent touches **6 places**: the descriptor, ONE
-  `agent_roster!` row in `crates/agents/src/agents/mod.rs` (it emits
-  `AgentType`, `ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and
-  `ALL_DESCRIPTORS`, so `models.rs` needs no edit either), and four test
-  contracts (three `crates/core/tests/mcp_dialect_*`, plus every table in
-  `crates/agents/tests/descriptor_regression.rs`). `crates/core/src/registry`
-  needs NO edit — `ALL_AGENTS` IS `aghub_agents::agents::ALL_DESCRIPTORS`.
-  See the root `AGENTS.md` "Adding / Removing an Agent" checklist.
-- Removal/prune logic clusters in `crates/core/src/skills/`; the transactional
-  Master **rename** (`rename_skill_master`) lives in
-  `crates/core/src/manager/skill.rs`; the lock store is `crates/skill/src/lock/`.
+- `update_skill` → `rename_skill_master` (`crates/core/src/manager/skill.rs`):
+  rolls back on Relink failure. Boundary = rename + relink only
+  ([ADR-0001](../../../docs/adr/0001-transactional-universal-skill-rename.md));
+  don't pull the later SKILL.md write into it — deliberate.
+- Lock-managed rename (reinstall from the fetched source under the new name)
+  → `accept_rename` (`crates/core/src/skills/rename.rs`): install new + remove
+  old + both lock entries as ONE transaction under the mutation lock, with a
+  snapshot rollback. The git fetch stays out (adapter hands in `FetchedRename`).
+
+## Where things live
+
+- Removal/prune/repair/shape: `crates/core/src/skills/` (file map in
+  `crates/core/AGENTS.md`); lock store: `crates/skill/src/lock/`.
+- Skill mutations persist to disk and the lock, **not** via `save_current()` —
+  `save()` serializes MCPs only and rewriting them drops fields aghub does not
+  model ([history](../../../docs/history/core-manager.md#skill-mutations-rewrote-mcp-config)).
+- Adding an agent: root `AGENTS.md` "Adding / Removing an Agent".
 
 ## Testing
 
-- Isolate per-agent paths with `set_skills_path_override` (thread-local) /
-  `TestConfig` (`crates/core/src/testing.rs`).
-- Skills/project precedence: dedupe by name, **project beats global**.
-- Forcing fs failures (rollback, prune-abort, permission paths) → use the
-  **testing-fs-failures** skill; gate permission tests to `#[cfg(unix)]` with a
-  root probe.
+- Path overrides, `TestConfig`, `$HOME` isolation and the one-env-mutex rule:
+  `crates/core/AGENTS.md` Testing. Lock tests: `TestLockGuard::new()`
+  (`crates/skill/AGENTS.md`).
+- Forcing fs failures (rollback, prune-abort, permission paths) → the
+  **testing-fs-failures** skill.

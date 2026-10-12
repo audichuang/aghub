@@ -25,14 +25,17 @@ is accepted by `get` only.
 
 `add mcps` takes `-c/--command` (stdio) or `-u/--url` (HTTP/SSE), plus
 `-t/--transport` (`streamable-http` default, or `sse`), `--header KEY:VALUE`,
-`-e/--env KEY=VALUE` and `--timeout SECONDS`.
+`-e/--env KEY=VALUE` and `--timeout SECONDS`. An agent whose dialect cannot hold
+a field refuses the add instead of dropping it (claude refuses `--timeout`:
+`UNSUPPORTED_OPERATION`, "Cannot add without losing fields", nothing written).
 
 - `update mcps` is a patch, and `get mcps --json` has a fixed shape: see
   [state-semantics](state-semantics.md#commands-whose-names-mislead) and
   [`get mcps --json`](state-semantics.md#get-mcps---json).
 - `delete mcps` judges sharing against the WHOLE `-a` list.
   `delete mcps X -a claude -p` refuses because copilot reads the same
-  `<root>/.mcp.json`; `-a claude,copilot` removes it.
+  `<root>/.mcp.json` (`INVALID_CONFIG`, top-level `error.code` under `--json`;
+  the message names the fix); `-a claude,copilot` removes it.
 - Multi-agent MCP mutations (`-a a,b`) preflight scope, toggle, and transport
   capabilities before writing; preflight rejection exits 1 with top-level
   `error.code: "UNSUPPORTED_OPERATION"` under `--json` (nothing written).
@@ -52,12 +55,16 @@ Both copy normalized resources between agents; neither manages git provenance.
   writes at once (no preview); one that removes previews unless `--yes`.
 - An already-present equivalent target is an idempotent success
   (`already_present: true`).
-- The preview is a plan echo (`{dry_run, add, remove}`) and does NOT check that
-  a `--remove` target ever held the resource: a typo previews as "would remove"
-  with exit 0, then fails that row on commit (exit 1).
+- `--add` / `--remove` take a comma list or repeats.
+- The preview refuses what the commit would (a missing source resource →
+  `RESOURCE_NOT_FOUND`, an agent in both sets, a removal that takes the
+  resource from the source or a copy target), then echoes the plan
+  (`{dry_run, name, add, remove}`). It does NOT check that a `--remove` target
+  ever held the resource: a typo previews as "would remove" with exit 0, then
+  fails that row on commit (exit 1).
 - `reconcile mcp --remove claude -p` is always refused: copilot shares
-  `<root>/.mcp.json`, and the whole roster is protected. Repeat `--remove` for
-  each sharing agent (it takes no comma list).
+  `<root>/.mcp.json`, and the whole roster is protected. Remove every sharing
+  agent together (`--remove claude,copilot`).
 
 ## `plugin`
 

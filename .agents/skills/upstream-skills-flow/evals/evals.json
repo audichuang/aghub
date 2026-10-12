@@ -12,14 +12,14 @@
 			"id": 1,
 			"name": "install-universal-vs-copy",
 			"prompt": "When aghub installs a skill in universal mode, I want to know how it lines up with what `npx skills add` actually does for a single (skill, agent) pair. Walk me through the upstream install step by step and tell me which aghub function mirrors each step. Also: how does upstream decide whether to make a symlink vs a copy?",
-			"expected_output": "Walks upstream installSkillForAgent (installer.ts): sanitize+path-safety, copy mode vs symlink mode, materialize Master to canonicalDir, skip symlink for universal agents and for absent project agent dirs, createSymlink with copy-on-failure fallback. Maps to aghub add_skill (copy) / add_skill_universal -> install_universal -> link_agents_to_canonical / copy_dir_recursive, relative vs absolute links, and notes aghub default is copy while upstream default is symlink.",
+			"expected_output": "Walks upstream installSkillForAgent (installer.ts): sanitize+path-safety, copy mode vs symlink mode, materialize Master to ~/.agents/skills canonicalDir, skip symlink for global universal agents and for absent project agent dirs, createSymlink with copy-on-failure fallback. Maps to aghub install_universal -> copy_dir_recursive + link_agents_to_canonical (crates/core/src/skills/linker/mod.rs), relative (project) vs absolute (global) links, and notes aghub is symlink-only: the Master lives in .aghub (read by no agent), every agent gets a Referrer, there is no copy mode or copy fallback (a failed link lands in UniversalInstallReport.failed), and add_skill / --universal just delegate to the universal path.",
 			"files": []
 		},
 		{
 			"id": 2,
 			"name": "update-rename-guard",
 			"prompt": "A teammate asked why aghub's `apply-update` refuses to update a skill that was renamed in its source, while `npx skills update` seems to just go ahead. Trace both update flows and explain the difference.",
-			"expected_output": "Explains upstream update.ts (updateGlobalSkills): fetch tree, hash-diff against skillFolderHash, then re-runs `add` via spawnSync — no rename guard, so a renamed skill can orphan the old Master/Referrers. Explains aghub: check (offline default / online orchestrator) + apply-update with detect_rename / ensure_source_not_renamed refusing the update (CLI message / API SKILL_RENAMED_IN_SOURCE) and stage_and_swap_dir atomic swap. Identifies the rename guard as the deliberate aghub safety addition.",
+			"expected_output": "Explains upstream update.ts (updateGlobalSkills): fetch tree, hash-diff against skillFolderHash, then re-runs `add` via spawnSync — no rename guard, so a renamed skill can orphan the old Master/Referrers. Explains aghub: check (offline default / --online via run_update_check, reporting Renamed) + apply-update through resync_installed_skill, whose detect_rename guard refuses the update (CLI skill_renamed_message / `source accept-rename` hint, API SKILL_RENAMED_IN_SOURCE) before the staged DirSwapTransaction swap and lock re-stamp with rollback. Identifies the rename guard as the deliberate aghub safety addition.",
 			"files": []
 		}
 	]

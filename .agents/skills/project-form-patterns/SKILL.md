@@ -1,41 +1,29 @@
 ---
 name: project-form-patterns
-description: Form implementation guidance for the aghub desktop app. Use when building or refactoring forms in `crates/desktop/src`, especially HeroUI v3 + React forms, RHF integration, validation, custom editors, and error presentation. Triggers: MCP forms, settings dialogs, create/edit panels, `TextField`, `FieldError`, `Select`, `react-hook-form`, key-value editors, validation behavior.
+description: House rules for forms in aghub's desktop app (crates/desktop/src) — HeroUI v3 fields under react-hook-form, validationBehavior, FieldError vs ErrorMessage, key/value and other custom editors. Use when building or refactoring MCP forms, settings dialogs or create/edit panels, not for general HeroUI component APIs (heroui-react).
 ---
 
 # AGHub Form Patterns
 
-Follow these rules when building forms in this project.
+## Source of truth
 
-## Source of Truth
+When a HeroUI form API is in question, check the official v3 docs, not memory:
+`https://v3.heroui.com/docs/react/components/{form,text-field,field-error,select}`.
+Never assume a prop exists — `TextField` has no `errorMessage` prop (the
+`errorMessage` props in this repo belong to our own components).
 
-- Check the official docs first, not memory and not bundled/local docs, when form behavior is in question.
-- For HeroUI, prefer the official site:
-    - `https://v3.heroui.com/docs/react/components/form`
-    - `https://v3.heroui.com/docs/react/components/text-field`
-    - `https://v3.heroui.com/docs/react/components/field-error`
-    - `https://v3.heroui.com/docs/react/components/select`
-- Use local skill docs only as a convenience after confirming the official API.
+## Stack
 
-## Default Stack
+- `react-hook-form` owns state, rules and submit blocking. One form state: no
+  parallel `validationErrors` state for the same fields.
+- `Controller` for HeroUI `Select` and every custom widget (`AgentSelector`,
+  `EnvEditor`, `HttpHeaderEditor`, `KeyPairEditor`).
+- Every HeroUI field under RHF gets `validationBehavior="aria"`. The native
+  default steals focus and the submit flow and bypasses the RHF error UI.
 
-- Prefer `react-hook-form` for non-trivial forms.
-- Use `Controller` for HeroUI `Select` and any custom controlled widgets.
-- Keep one form state. Do not create a second derived validation state unless there is a concrete need the form library cannot express.
+## Errors
 
-## Validation Behavior
-
-- When RHF controls validation, set HeroUI form fields to `validationBehavior="aria"`.
-- Do not rely on HeroUI/native validation defaults together with RHF. Native validation can steal focus and submission flow while bypassing the error UI you expect from RHF.
-- Let RHF own validation rules and submission blocking.
-
-## Error Rendering
-
-- For HeroUI text fields, use:
-    - `isInvalid={Boolean(fieldState.error)}`
-    - Conditionally render `<FieldError>{fieldState.error.message}</FieldError>` inside the same `TextField`.
-- Do not invent unsupported props. In particular, do not assume `TextField` supports an `errorMessage` prop.
-- Keep the official anatomy:
+Field anatomy:
 
 ```tsx
 <TextField isInvalid={Boolean(fieldState.error)} validationBehavior="aria">
@@ -45,36 +33,25 @@ Follow these rules when building forms in this project.
 </TextField>
 ```
 
-- For non-form or custom composite controls, prefer HeroUI `ErrorMessage` instead of hand-rolled error text.
-- Use `ErrorMessage` for collection-style or custom editors that are not true form fields, including key/value editors, tag selectors, and similar composite controls.
+**`FieldError` renders nothing outside an invalid field.** It reads the field's
+`FieldErrorContext` (provided by TextField, Select, ComboBox, NumberField,
+Checkbox, RadioGroup, Switch, date fields…) and returns `null` without it —
+`TagGroup` and a plain `<div>` provide none. So composite/custom editors
+(key/value editors, tag selectors) must use HeroUI `ErrorMessage`, as
+`key-pair-editor.tsx` does. Note `agent-selector.tsx` currently renders a
+`FieldError` outside any field — that message cannot appear.
 
-## Custom Editors
+## Custom and key/value editors
 
-- Custom widgets like `AgentSelector`, `EnvEditor`, `HttpHeaderEditor`, and `KeyPairEditor` should still be registered in RHF through `Controller`.
-- For custom editors that manage arrays or compound values, compute validation from the current field value and surface one aggregated error below the editor when possible.
-- For that aggregated error, prefer HeroUI `ErrorMessage`.
-- Do not inject per-row error UI into tight horizontal layouts unless the design explicitly calls for it.
+- Validate from the current field value and show ONE aggregated `ErrorMessage`
+  below the whole editor, not a hand-rolled `<p>`.
+- Key/value rows stay two inputs + one delete button, no extra wrappers that
+  change flex behaviour. Do not push per-row errors into that single-line row;
+  if row-level errors are needed, redesign the layout first.
 
-## Key/Value Editors
+## Practical
 
-- Keep row layout simple:
-    - two inputs
-    - one delete button
-    - no extra wrappers that change flex behavior unless necessary
-- Prefer aggregate error text below the whole editor over inline row errors. This avoids breaking spacing and alignment.
-- Implement that aggregate error with HeroUI `ErrorMessage`, not a custom `<p>` block.
-- If you must show row-level issues, redesign the layout first; do not bolt error blocks into a row that was designed as a single-line control.
-
-## Practical Rules
-
-- Prefer `onPress` for HeroUI buttons.
-- Use `type="button"` for non-submit buttons inside forms.
-- Preserve existing visual patterns in this repo; do not restyle forms while adding validation.
-- After form changes, run `bun run build` in `crates/desktop` when possible and separate unrelated existing build failures from the changes you made.
-
-## Anti-Patterns
-
-- Do not mix RHF validation with a parallel `validationErrors` state for the same fields.
-- Do not depend on HeroUI default native validation when you expect RHF errors to drive the UI.
-- Do not push validation messages into each key/value row unless you intentionally redesign that editor.
-- Do not trust remembered HeroUI APIs for forms without checking the official site first.
+- HeroUI buttons: `onPress`; non-submit buttons inside a form: `type="button"`.
+- Do not restyle a form while adding validation.
+- Verify with `bun run typecheck` in `crates/desktop` (`bun run build` for a
+  full tsc + vite pass); separate pre-existing failures from yours.

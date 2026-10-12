@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Runtime-verify aghub's skill fetch/install/update/migrate chain end-to-end — build the CLI + API binaries, run them under an isolated HOME + XDG + per-agent-override environment, install from a real GitHub repo and from a local git daemon (gix shallow path), stage the pre-2.18 layout to exercise `repair`, and observe lock/symlink/disk state. Use when verifying changes to skill install, source sync, check, apply-update, or repair.
+description: Runtime-verifies aghub's skill install/update/migrate chain end-to-end with the CLI + API binaries in a sandboxed HOME/XDG env — GitHub and local git-daemon installs, a staged pre-2.18 layout for `repair`, lock/symlink/disk reads. Use when verifying changes to skill install, source sync, check, apply-update or repair; not for the desktop UI (verify-desktop-ui).
 ---
 
 # Verifying aghub skill fetch/install end-to-end
@@ -9,32 +9,26 @@ description: Runtime-verify aghub's skill fetch/install/update/migrate chain end
 
 ```bash
 cargo build -p aghub-cli -p aghub-api --bin aghub-cli --bin aghub-api
+export PATH=$PWD/target/debug:$PATH   # else bare aghub-cli is the installed (brew) release
 
 # Grab real-credential material BEFORE isolating — afterwards gh/git can no
 # longer see their real config (XDG_CONFIG_HOME points into the sandbox):
 export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
 
-# NEVER run against the real environment. HOME alone is NOT enough: the global
-# lock prefers $XDG_STATE_HOME (crates/skill/src/lock/io.rs) and universal-skill
-# agents read $XDG_CONFIG_HOME/agents/skills. Clear the whole XDG class (HOME
-# fallback then lands every persistent dirs:: path this recipe touches in the
-# sandbox), then pin the two this recipe references:
+# NEVER run against the real environment — HOME alone is NOT enough. The global
+# lock prefers $XDG_STATE_HOME, universal skills read $XDG_CONFIG_HOME/agents/skills,
+# and per-agent overrides (CODEX_HOME, OPENCODE_CONFIG_DIR — Orca exports that one
+# into every shell — …) outrank both. Unset the ONE list from its source of truth
+# (run from the repo root; never hand-copy it — docs/history/agents.md
+# #hand-copied-env-override-lists-leaked-into-real-configs), clear XDG, then pin:
 export VHOME=$(mktemp -d)
-unset "${!XDG_@}"
-export HOME=$VHOME XDG_STATE_HOME=$VHOME/state XDG_CONFIG_HOME=$VHOME/config
+unset $(sed -n 's/^\t"\([A-Z_]*\)",$/\1/p' crates/agents/src/env_overrides.rs) "${!XDG_@}"
+export HOME=$VHOME XDG_STATE_HOME=$VHOME/state XDG_CONFIG_HOME=$VHOME/config \
+  AGHUB_DATA_DIR=$VHOME/data
 
-# AND the per-agent overrides, which outrank both. Several descriptors read their
-# own variable BEFORE $XDG_CONFIG_HOME/$HOME — opencode's `config_dir()` is the
-# one that bites here, because Orca exports OPENCODE_CONFIG_DIR into every shell
-# on this machine, so a `repair --yes` or `source sync --yes` writes referrers
-# into the REAL ~/.config/orca/... while everything else looks sandboxed. (Two
-# dead symlinks sat in that real directory for a day before anyone noticed.)
-export OPENCODE_CONFIG_DIR=$VHOME/config/opencode
-
-# Do not trust the exports — PROVE containment before any --yes. Every REFERRER
-# DIR must be under $VHOME; a single line outside it means another descriptor has
-# an override this recipe has not pinned:
-aghub-cli -g -a all coverage | grep -v "$VHOME" | grep '/' && \
+# PROVE containment before any --yes: every REFERRER DIR must be under $VHOME;
+# a line outside it means a descriptor reads an override missing from that list.
+aghub-cli -g coverage | grep -v "$VHOME" | grep '/' && \
   { echo "LEAK: a referrer dir escapes the sandbox" >&2; exit 1; }
 
 # --port 0 + the liftoff port line: readiness comes from OUR child's stdout, so a
@@ -59,8 +53,9 @@ state that precondition in your report instead of assuming anonymous.
 Token model — know which surface reads what:
 
 - **API `/skills/install` does NOT read `GITHUB_TOKEN` env.** Its tokens come from the
-  keyring credential store or the forwarded `X-Aghub-Git-Tokens` header only. With an
-  empty keyring, a curl against a public github repo goes ANONYMOUS.
+  keyring credential store or the forwarded `X-Aghub-Git-Tokens` header (a gix clone
+  can still fall back to `GIT_USERNAME`/`GIT_PASSWORD` env — unset them in the API's env).
+  With an empty keyring, a curl against a public github repo goes ANONYMOUS.
 - **CLI** (`source diff/sync`, `check --online`, `apply-update`) DOES read
   `GIT_PASSWORD`/`GITHUB_TOKEN` env — `export` them first (see gotcha below).
 
@@ -69,7 +64,6 @@ Gotchas:
 - bash prefix assignments apply left-to-right: in `HOME=$VHOME GITHUB_TOKEN=$(gh auth token) cmd`
   the `gh` call runs with the isolated HOME and returns an EMPTY token — which is why
   the launch block above exports the token BEFORE isolating.
-- Global CLI flags go BEFORE the subcommand: `aghub-cli -g check skills`, not `check skills -g`.
 - CWD matters: project-scope commands read the lock of the repo you're standing in (real data).
   Stick to `-g` (global = isolated env) or cd to a temp dir.
 
@@ -157,16 +151,11 @@ can READ the skill today, which is wider than the one you installed for.
 - `check skills` is **offline by default** → remote sources report `uncheckable/network`.
   Pass `--online` for a real answer.
 - `check --online` on a `git://` source → `uncheckable/unsupportedScheme` (https-only path, by spec).
-- Re-installing an already-installed skill now reports SUCCESS on both surfaces —
-  re-verified against 2.18.2 on 2026-09-06, and the opposite of what this file used to say:
-  the CLI row is `applied:true` with `agents:[{installed:true}]`, and the API answers
-  `{"success":true,"agents":[{...,"success":true,"error":null}]}`. An already-correct slot
-  folds into the installed set on purpose (`install_fetched.rs` `present_dirs`), because
-  eight agents sharing one `.agents/skills` slot would otherwise report one `installed:true`
-  and seven bare `installed:false`. Do NOT assert the old `success:false`.
-  (Shape note: a FIRST install answered `{"success":true,"results":[]}` — `results` empty,
-  no `agents` key — while the re-install carried `agents`. Observed, not spec'd; read the
-  response you get rather than assuming one shape.)
+- Re-installing an already-installed skill reports SUCCESS on both surfaces (CLI
+  `applied:true`, `agents:[{installed:true}]`; API `success:true` with per-agent
+  `success:true`) — an already-correct slot folds into the installed set on purpose
+  (`install_fetched.rs` `present_dirs`). Do NOT assert `success:false`. Response shape
+  differs between first install (`results:[]`, no `agents`) and re-install; read what you get.
 - Observed without a token on a PUBLIC github source: `source diff` says "needs a
   credential… GIT_PASSWORD/GITHUB_TOKEN". (A private source may classify as
   `uncheckable/auth` instead — `check.rs` supports both reasons; verify before asserting.)

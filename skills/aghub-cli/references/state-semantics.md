@@ -1,8 +1,8 @@
 # `aghub-cli` state semantics
 
 JSON shapes, the full value domains, the adoption guard, and the flags whose
-names mislead. Applies to `aghub-cli >= 2.18.0`. The call sites in `SKILL.md`
-say when to come here.
+names mislead. Written against the 2.40 line. The call sites in `SKILL.md` say
+when to come here.
 
 ## Contents
 
@@ -11,8 +11,9 @@ say when to come here.
 - [`repair --json`](#repair---json) — shapes found vs actions taken
 - [Git source versus local content](#git-source-versus-local-content) — the adoption guard
 - [Commands whose names mislead](#commands-whose-names-mislead)
+- [`get mcps --json`](#get-mcps---json)
 - [Sub-agents](#sub-agents) — single-agent mutations, `outcome` vocabulary
-- [Rename and interoperability edges](#rename-and-interoperability-edges)
+- [Interoperability](#interoperability)
 
 ## `doctor --json`
 
@@ -21,8 +22,9 @@ different fields — always read the field name. `missing` in `master` is "no
 Master directory"; `missing` in `linkAudit.agents[].state` is "no Referrer AND
 no Master to point at".
 
-Lock rows map to `.aghub/<sanitized lock key>`; store rows are named by the
-frontmatter `name`.
+Lock rows map to `.aghub/<sanitized lock key>`. An untracked store row is named
+by its frontmatter `name` when valid, else by its directory name (health
+`invalid-skill` or `master-is-symlink`).
 
 Link states only carry values when `--verify-links` is passed.
 
@@ -56,8 +58,8 @@ stat the path yourself before acting on that pair.
 | `agents[].state`  | `unsupported`              | Agent cannot hold skills in this scope                                                                                  | Drop it from the matrix, or change scope                                                                                                                                                                                                                                                                                                                                                                   |
 
 `linked`, `withheld` and `unsupported` are the three states that are not
-issues; `--fail-on-issues` counts every other link state (plus `orphan-lock` and
-`invalid-skill` on the health axis) and exits non-zero, which is the way to gate
+issues; `--fail-on-issues` counts every other link state (plus `orphan-lock`,
+`invalid-skill` and `master-is-symlink` on the health axis) and exits non-zero, which is the way to gate
 a script. Not an issue is not the same as covered — for a REQUESTED agent only
 `linked` passes.
 
@@ -97,7 +99,8 @@ Two of those are weaker than they read:
 --install-missing` re-points the lock's `skillPath` to the new location.
 - `uncheckable` with `reason: "local"` means there is no local evidence: no
   readable installed copy (folder gone, nothing a managed agent reads and no
-  Master), or the enabled agents' copies disagree with each other, or the
+  Master) or the enabled agents' copies disagree, AND the lock hash still
+  equals upstream (once upstream moved the row is `installedOutdated`); or the
   fetched source folder could not be hashed. It is the same verdict
   `check --online` reports as `uncheckable` `local`.
 
@@ -191,7 +194,7 @@ branch.
 ## Commands whose names mislead
 
 - `update skills <name>` edits metadata: absent flags keep; `--tools ''` clears
-  allowed-tools; the API PUT uses the same core SkillPatch. It does not pull
+  allowed-tools. It does not pull
   upstream content — that is `source sync --update` or `apply-update`. It
   rewrites the SHARED Master's frontmatter in place, so every agent sees the
   change, not just `-a`. On a git-sourced skill that is the in-place edit the
@@ -203,10 +206,6 @@ branch.
   `--header`/`--env` replace the whole map, `-t` switches the remote kind, and
   `-t` or `--header` on a stdio server needs `-u` (otherwise it is refused,
   `VALIDATION_FAILED`, nothing written).
-- `repair` does not take a roster: a scalar `-a` is ignored, a comma list or
-  `-a all` is rejected outright. It plans against every supported agent's slot
-  and grants a new Referrer only to an agent that can already READ the skill.
-  Granting a NEW agent is `source sync --install-missing`.
 - `--all` is read-only everywhere EXCEPT `prune-lock`, where it writes — both
   locks when a project root exists, global only (project silently skipped,
   still exit 0) when there is none. It stays lock-only: never deletes skill
@@ -222,69 +221,26 @@ branch.
   they answer otherwise: the refusal order is not-found, then plugin-managed,
   then unsupported. Manage it with `aghub-cli plugin`. When the plugin list
   cannot be read (no `claude` CLI), the check is skipped and the command
-  proceeds.
-- Plain `delete` discovers a skill through the AGENT CONFIGS and never looks up
-  `.aghub/<name>` directly, so a Master with no Referrer left anywhere is
-  reported `absent` and stays on disk. `delete --all-agents` DOES reach it: the
-  preview lists the Master in `paths` and `--yes` removes it (`removed`). A
-  committed skill delete also reconciles the whole scope lock against disk —
-  read `would_prune_lock_entries` in the preview.
-- `outcome: "kept"` in a PREVIEW means the commit will not remove it. For a
-  single agent whose directory is shared, the preview is `kept` (`success: true`,
-  exit 0, the entity is still there) and the `--yes` run then FAILS
-  `UNSUPPORTED_OPERATION` (exit 1) instead of returning `kept`. When a
-  single-agent `--yes` delete is refused with `UNSUPPORTED_OPERATION`, the
-  refusal names enabled readers of the same directory that are not in `-a`,
-  including a private real directory reached through another agent's
-  dotfiles-style symlinked skills root
-  (disabled agents are not named; a refusal caused by npx-era or compat
-  leftovers does not name readers); fix is to list them in the same `-a`
-  request. A shared-root real directory that git TRACKS is refused the same way
-  (exit 1, and the refusal itself includes its path): keep authoring it there,
-  or untrack it with `git rm -r --cached <path>` and delete again. `--all-agents`
-  applies the same guard and refuses it too, so it is not a bypass. The same
-  refusal covers a directory git cannot be asked about (git missing, unusable
-  repository, `dubious ownership`, or a probe over its 10 s limit). This is not what `--all-agents` does with a survivor
-  — that asserts "gone everywhere", so a survivor makes the confirmed run ERROR
-  instead. And `removed` does not prove the bytes are gone: a private Referrer
-  can be removed while another copy survives, listed in `skipped`.
-- Read `outcome` (`preview` | `removed` | `absent` | `partial` | `kept`), never
-  `dry_run` / `executed` — and for `preview` and `kept`, exit zero is not
-  completion. A `-a` list's text tally counts `kept` rows apart
-  (`N ok, M kept (nothing removed), K failed`). In a multi-agent skill delete
-  (`delete skills <NAME> -a a,b,c`), `-a` order does not affect the verdict: core
-  plans shared slots first and attributes prior-row credit so private readers
-  listed before shared-slot writers succeed without ordering shared slots first
-  or re-running. Whole-batch preflight rejection exits 1, states that nothing was
-  written, and lists every refused target; under `--json`, the whole-batch failure
-  appears in the top-level `error.code` envelope (`UNSUPPORTED_OPERATION`, `INVALID_CONFIG` or `MANAGED_RESOURCE`
-  lives there, not in `results[].code`). In `--json`, every row in `results[]`
-  carries `outcome`, a row-level `code` appearing only on row failure (`partial` or config load error,
-  null on success; missing skills report no-op success with `outcome: "absent"` and exit 0 without an error code,
-  whether completely absent or retaining an in-scope lock entry),
-  `still_read_from` (paths still reading the
-  skill if kept), batch-level `still_read_by` (agents still holding the skill after the removal, copied onto every row, alongside `still_read_by_managed` and `still_read_by_unmanaged`),
-  `master_reclaimed` (on commit, whether Master was removed on disk; in preview `master_reclaimed: false` and, if exhaustive and Master exists, `would_reclaim_master: true`),
-  and independent lock prune fields (`pruned_lock_entries`, `would_prune_lock_entries`,
-  `prune_error`). Rows preserve the caller's request order. A Master listed under
-  `kept (shared with other agents)` is still read by another agent: never `rm`
-  it; name every holder in one `-a` list or use `--all-agents`.
+  proceeds. An `--all-agents` (or exhaustive) `delete` refuses with
+  `MANAGED_RESOURCE` when ANY copy it would sweep, not only the named agents'
+  copies, sits under a plugin, and writes nothing.
+- `delete`: plain `delete` never looks up `.aghub/<name>` directly (an orphan
+  Master reports `absent`), a single-agent preview can say `kept` and then
+  fail on `--yes`, and the JSON row fields live under `results[].output` —
+  all in [delete and rename](delete-rename.md).
 - `check` is offline unless `--online`, and its scope spans global + project
   unless narrowed (as do `doctor`, `source list` and `source diff`). Most
   mutating commands default to global, but `source sync` is not one of them —
   it requires an explicit `-g` or `-p`.
-- `check --online` measures only copies held by enabled agents, plus a Master no enabled agent links. A copy only a disabled agent reads neither counts as the installed copy nor makes the row `uncheckable`.
+- `check --online` measures only copies held by enabled agents, plus a Master
+  no enabled agent links: a copy only a disabled agent reads neither counts as
+  the installed copy nor makes the row `uncheckable`.
 - `apply-update <NAME>` applies one locked update and refuses outright without
   `--yes` — it has no preview. `apply-update --outdated` (every
   `updateAvailable` row in one scope) DOES preview without `--yes`. Use
   `source sync` when a subset of one source is useful.
-- `transfer` and `reconcile` copy normalized resources between agents; they do
-  not manage git provenance. A `reconcile` that REMOVES previews unless `--yes`.
-- `enable` / `disable` take MCP servers only — passing `skills` is a parse error
-  listing the valid values. To stop one agent seeing a skill, remove that
-  agent's Referrer (`delete skills <NAME> -a <AGENT>`, or `reconcile --remove`),
-  and check `coverage` first: on a shared directory that removes it for every
-  agent sharing it.
+- `enable` / `disable` take MCP servers only (`skills` is a parse error). To
+  hide a skill from one agent, see [delete and rename](delete-rename.md#revoke-for-one-agent).
 - `agents list|enable|disable` configures which agents aghub manages (the
   selection `-a all`, `source sync -a all`, repair, rename, and delete-from-all
   read). `enable` / `disable` is a reversible toggle (no preview needed). The
@@ -296,9 +252,12 @@ branch.
 
 ## `get mcps --json`
 
-Each row carries `transport{type,url|command,args,env|headers,timeout}` and, on
-the all-agents paths (`-a all`, `-a a,b`), `source` and `agent`. The legacy
-top-level `type` is kept. The table shows only type and target (url or command),
+Each row carries `enabled` and `transport{type,url|command,args,env|headers,timeout}`
+(stdio rows may carry `env: null`) and, on the all-agents paths (`-a all`,
+`-a a,b`), `source` and `agent`. The legacy top-level `type` is kept, spelled
+differently: `transport.type` is snake_case (`streamable_http`, `stdio`, `sse`),
+the top-level `type` kebab (`streamable-http`) — a `jq` filter for one misses
+the other. The table shows only type and target (url or command),
 never headers or env values, which may hold tokens.
 
 ## Sub-agents
@@ -312,17 +271,8 @@ extra frontmatter is preserved); `delete` previews unless `--yes` and reports
 `-a all` are refused before any write; an agent without sub-agent support fails
 with `UNSUPPORTED_OPERATION`. `get -a all` / `-a a,b` work.
 
-## Rename and interoperability edges
+## Interoperability
 
-`source accept-rename` is transactional across the old and new Master,
-Referrers, and lock. The old Master is removed in the same transaction (covered by the same
-rollback) unless a disabled agent's Referrer still points at it; then it is kept,
-silently, and shows up untracked in `doctor`. Its rollback is BEST-EFFORT, though — `--help` says "rolls
-back on any failure", but the restore path discards its own errors, so a failure
-that also fails to unwind leaves a half-state with no signal. After any failed
-rename, inspect with `doctor --verify-links` rather than assuming the disk is
-back where it started. Current builds scan the fetched catalog for the new
-frontmatter name, so a directory move upstream is supported.
-
-The lock format is npx-compatible. Exotic Unicode filenames can hash differently
-across implementations; verify hashes before mixing tools for such skills.
+The lock format is npx-compatible, but exotic Unicode filenames can hash
+differently across implementations; verify hashes before mixing tools for such
+skills.

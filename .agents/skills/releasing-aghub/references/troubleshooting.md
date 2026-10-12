@@ -1,0 +1,37 @@
+# Release troubleshooting
+
+A failed run leaves a **draft** — nothing shipped. The usual fix is
+`gh run rerun <run-id> --repo audichuang/aghub --failed`, then resume with
+`just release X.Y.Z --yes`.
+
+| Symptom                                                                                                      | Cause                                                                                                    | Fix                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS `failed codesign … security import: failed to import keychain certificate`                             | Unset `APPLE_*` secrets resolve to **empty strings**, so Tauri imports an empty cert                     | Never add `APPLE_*` secrets to `release.yml` until real Apple certs exist; ad-hoc signing (`APPLE_SIGNING_IDENTITY: "-"`) works. Switch-over: `docs/history/release.md#macos-ad-hoc-codesign`.                                                                                                      |
+| Any cargo step: ``could not execute process `sccache …rustc -vV` (never executed)``                          | Tracked `.cargo/config.toml` sets `rustc-wrapper = "sccache"`; CI/release runners don't install it       | The job `env` needs `RUSTC_WRAPPER: ""` (both release build jobs and `ci.yml` set it). Release keeps no compile cache by design, so a `--failed` rerun compiles cold. Why: `docs/history/tooling.md#release-build-speed`.                                                                           |
+| `publish-homebrew` fails pushing to the tap                                                                  | Missing/expired `HOMEBREW_TAP_TOKEN`                                                                     | Reset the PAT secret and rerun the job; the rest of the release is unaffected.                                                                                                                                                                                                                      |
+| `publish-homebrew`: `no usable sha256 for release asset …`                                                   | An expected asset is missing or has no digest (it used to ship the empty-file sha `e3b0c442…`, v2.3.0)   | Check the asset list; rerun once the asset exists. Never hand-write a checksum.                                                                                                                                                                                                                     |
+| One `Build Desktop (<target>)` fails at `Uploading latest.json...` with `Not Found — update-a-release-asset` | The 4 desktop jobs read-modify-write the same `latest.json` (`includeUpdaterJson`) and one lost the race | `gh run rerun <run-id> --failed`, then `just release X.Y.Z --yes`.                                                                                                                                                                                                                                  |
+| `publish`: `latest.json has no signed '<platform>' entry`, every build green                                 | Same race, silent: a lost update dropped that platform's key                                             | Rerun that platform's `Build Desktop` job (`gh run rerun <run-id> --job <job-id>`), then rerun `publish`. Applies to hand-pushed tags and pre-releases too.                                                                                                                                         |
+| `just release`: `timed out waiting for ci.yml to go green on HEAD`                                           | The 3-OS cold compile outran the 40-min wait                                                             | Re-run `just release X.Y.Z --yes` once CI is green — HEAD is already pushed, so it tags at once.                                                                                                                                                                                                    |
+| `ci.yml` `test` on main fails on a test that passes locally / under `-p`, blocking `verify-ci`               | A test reading `dirs::home_dir()` raced a HOME/XDG-mutating test in the same process                     | Hold the shared lock (`test_env_lock` in api, `env_lock` in core) in BOTH tests; `#[cfg(unix)]`-gate unix-only tests; canonicalize both sides for macOS `/var`→`/private`. Reproduce with plain `cargo test --workspace` (CI's nextest is one process per test, so the race only shows in-process). |
+| `just preflight` fails first: `'/…/.git' exists above the test temp dir`                                     | A stray `.git` in an ancestor of `$TMPDIR` (an empty `/tmp/.git`, 2026-09-26)                            | Remove it if stray (`rmdir` when empty), or `TMPDIR=/var/tmp just preflight` — TMPDIR must be OUTSIDE `/tmp`.                                                                                                                                                                                       |
+
+## Re-release a botched tag
+
+Delete and retag only when the tagged commit itself must change. First confirm
+nobody has it — a release can be minutes old and already pulled:
+
+```bash
+gh release view vX.Y.Z --repo audichuang/aghub \
+  --json assets --jq '[.assets[].downloadCount] | add'   # 0 → deleting is safe
+```
+
+Non-zero, or already public: ship a new patch tag instead. Otherwise:
+
+```bash
+gh run cancel <run-id> --repo audichuang/aghub
+gh release delete vX.Y.Z --repo audichuang/aghub --yes --cleanup-tag   # Release + remote tag
+git tag -d vX.Y.Z
+# commit the fix, push main, wait for green CI, then:
+git tag vX.Y.Z && git push fork vX.Y.Z
+```

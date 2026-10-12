@@ -1,119 +1,88 @@
 ---
 name: upstream-skills-flow
 description: >-
-    End-to-end map of how the upstream vercel-labs `skills` CLI (the `npx skills` /
-    `add-skill` package) actually performs each skill lifecycle operation — add,
-    install, update/check, remove, sync — plus the exact aghub function that mirrors
-    each step. Consult this WHENEVER you are working on aghub's skill install/update/
-    remove/sync/lock/hash code and need to know "what does upstream do here?", trace
-    or compare against the upstream flow, decide whether an aghub change still matches
-    vercel behavior, or onboard onto how the two implementations line up. Use it even
-    if the task only mentions one phase (e.g. "how does install pick universal vs
-    copy", "where does the folder hash get computed", "why does update re-run add") —
-    the upstream source is the ground truth and this skill points you straight at it.
-    For the *frozen* round-trip contract (what must never change) use npx-skills-contract;
-    for aghub-side invariants use aghub-skills; this skill is the upstream *behavior* reference.
+    Maps how the upstream vercel-labs `npx skills` CLI performs each skill lifecycle step (install, lock, folder hash, update, remove, sync) to the aghub function that mirrors it. Use when asking what upstream does in a step, or tracing aghub's skill install/update/remove/lock/hash code against it — not for the frozen contract (npx-skills-contract) or aghub-side invariants (aghub-skills).
 ---
 
 # Upstream `skills` flow — reference map
 
-The upstream tool is **`vercel-labs/skills`** (npm package `skills`, bins `skills`
-and `add-skill`, e.g. `npx skills add vercel-labs/agent-skills`). Its TypeScript
-source is the **ground truth** for what aghub must round-trip with. It lives at:
+Upstream is **`vercel-labs/skills`** (npm `skills`, bins `skills` / `add-skill`).
+Its TypeScript source, the ground truth, is at:
 
 ```
-/home/audichuang/research/skills/src
+/home/audichuang/research/vercel_npx_skill/src
 ```
 
-aghub is a Rust re-implementation of the same on-disk behavior, not a fork. This
-skill is the side-by-side **behavior** map so you can answer "what does upstream
-actually do in step X, and which aghub function mirrors it?" without re-reading
-both trees each time.
+(NOT `/home/audichuang/research/skills` — that is a skills-content repo with no CLI.)
+aghub is a Rust re-implementation, not a fork. This map cites files + function
+names, not line numbers; grep the live source before quoting one.
 
-> **Three sibling skills, three jobs — don't confuse them:**
->
-> - **this skill** — upstream _behavior_, end to end (what the TS does, step by step).
-> - [`npx-skills-contract`](../npx-skills-contract/SKILL.md) — the _frozen_ points
->   that must stay byte/semantically identical for round-trip (lock versions, Master
->   name, hash algorithm). Read it before changing anything those points cover.
-> - [`aghub-skills`](../aghub-skills/SKILL.md) — aghub-side invariants (transactional
->   rename, lock mutual-exclusion, where things live in the Rust tree).
+Siblings: [`npx-skills-contract`](../npx-skills-contract/SKILL.md) owns what is
+_frozen_ (lock versions, hash algorithm, lock path); [`aghub-skills`](../aghub-skills/SKILL.md)
+owns aghub-side invariants. This skill is upstream _behavior_ and the side-by-side map.
+If a change could make an aghub-written artifact unreadable by `npx skills` (or the
+reverse), stop and read `npx-skills-contract` first.
 
-## The golden rule
-
-Everything below exists to keep **one shared on-disk world** readable by both tools:
-the same two lock files, the same `.agents/skills` Master + per-agent symlink layout,
-and the same folder-content hash. If a change you make would make an aghub-written
-artifact unreadable by `npx skills` (or vice-versa), stop and check
-`npx-skills-contract`. Verify symbol names against the live source before quoting them
-— upstream line numbers drift, so this skill references **files + function names**, not
-line numbers (except where called out).
-
-## Shared on-disk layout (the thing every phase manipulates)
+## The layouts differ — know which one you are matching
 
 ```
-Master (one physical copy):
-  global   ~/.agents/skills/<sanitized-name>/
-  project  <project-root>/.agents/skills/<sanitized-name>/
+upstream (npx):
+  Master    ~/.agents/skills/<name>/   |  <root>/.agents/skills/<name>/
+  Referrer  per-agent symlink -> Master (global absolute, project relative)
+  universal agent (reads .agents/skills): global install makes NO symlink
+  project install: agents whose root dir (.windsurf/, .kiro/ …) is absent are
+    skipped (claude-code exempt); symlink failure falls back to a COPY
 
-Referrer (per-agent symlink → Master):
-  ~/.claude/skills/<name>  ->  ~/.agents/skills/<name>   (global: ABSOLUTE link)
-  .opencode/skills/<name>  ->  ../../.agents/skills/<name> (project: RELATIVE link)
-
-Universal agent: its skills dir already *is*/reads .agents/skills, so it gets
-  NO symlink — it sees the Master directly (no double-listing).
+aghub (symlink-only, since v2.18):
+  Master    ~/.aghub/<sanitized-name>/  |  <root>/.aghub/<sanitized-name>/
+            (a dir NO agent reads — storing is not granting)
+  Referrer  EVERY agent gets a symlink, .agents/skills included (it is just a
+            shared Referrer slot); project links relative, global absolute
+  no copy install path, no copy fallback: a failed link is a per-agent
+    `failed` entry in UniversalInstallReport
 ```
 
-- **`sanitize_name`** — upstream `sanitizeName` lives in `installer.ts` (NOT
-  `sanitize.ts`). aghub ports it; it's a frozen-contract point.
-- **Universal vs copy** is the central fork. Upstream defaults toward symlink/shared;
-  **aghub defaults to copy/isolation** and only goes universal on `--universal`. A
-  skill is universal in aghub iff `canonical_path.is_some()`.
+`--universal` is a deprecated no-op; `add_skill` / `add_skill_from_path`
+delegate to their `_universal` forms. Layout rules: AGENTS.md "Master store vs
+Referrer" and knowledge page `技能連結形狀與 repair 鏈`.
 
-## Lifecycle map: upstream symbol → aghub symbol
+## Lifecycle map
 
-| Phase                     | Upstream (`/home/audichuang/research/skills/src`)                                                                     | aghub                                                                                                                                                                                 |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Parse source              | `source-parser.ts` → `parseSource`, `getOwnerRepo`, `getLockSource`, `SOURCE_ALIASES`                                 | `aghub-git::resolve_remote_source` (`crates/git/src/source.rs`) + `crates/api` install routes                                                                                         |
-| Add (orchestrate)         | `add.ts` → `runAdd`                                                                                                   | `ConfigManager::add_skill_from_path[_universal]` (`crates/core/src/manager/skill.rs`); API `POST /skills/...`                                                                         |
-| Install one (skill,agent) | `installer.ts` → `installSkillForAgent`, `getCanonicalSkillsDir`, `getAgentBaseDir`, `createSymlink`, `copyDirectory` | copy: `ConfigManager::add_skill`; universal: `add_skill_universal` → `install_universal`/`link_agents_to_canonical`/`copy_dir_recursive` (`crates/core/src/skills/install_layout.rs`) |
-| Global lock (v3)          | `skill-lock.ts` → `readSkillLock`/`writeSkillLock`/`addSkillToLock` (`CURRENT_VERSION = 3`)                           | `crates/skill/src/lock/{types.rs,global.rs}`; `apply_content_hash`                                                                                                                    |
-| Project lock (v1)         | `local-lock.ts` → `readLocalLock`/`writeLocalLock`/`addSkillToLocalLock`                                              | `crates/skill/src/lock/local.rs`; `apply_computed_hash`                                                                                                                               |
-| Folder hash               | `local-lock.ts` → `computeSkillFolderHash`                                                                            | `crates/skill/src/hash.rs` → `compute_skill_folder_hash` (feruca, `shifting=false`)                                                                                                   |
-| Update / check            | `update.ts` → `updateGlobalSkills`, `updateProjectSkills`, `checkAndPromptForDeletions`                               | `crates/cli/src/commands/{check.rs,apply_update.rs}`; `crates/core/src/skills/update.rs` → `detect_rename`, `stage_and_swap_dir`                                                      |
-| Remove                    | `remove.ts` → `removeCommand` (reference-counted)                                                                     | `ConfigManager::remove_skill` / `remove_skill_planned`; `crates/core/src/skills/removal.rs`                                                                                           |
-| Prune lock                | (no upstream equivalent)                                                                                              | `crates/core/src/skills/prune.rs` → `prune_lock_scanning`; `crates/cli/src/commands/prune.rs`                                                                                         |
-| Sync (node_modules)       | `sync.ts` → `runSync`                                                                                                 | (project-scope discovery; see `references/remove-sync.md`)                                                                                                                            |
+| Phase                      | Upstream (`src/`)                                                                                | aghub                                                                                                                                                                                |
+| -------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Parse source               | `source-parser.ts` `parseSource`, `getOwnerRepo`; `add.ts` `getLockSource`                       | `aghub_git::resolve_remote_source` (`crates/git/src/source.rs`)                                                                                                                      |
+| Add (orchestrate)          | `add.ts` `runAdd` (`blob.ts` `tryBlobInstall` fast path, else `git.ts` `cloneRepo`)              | local path: `ConfigManager::add_skill_from_path_universal` (`crates/core/src/manager/skill.rs`); git: `install_fetched_skill_and_lock` (`crates/core/src/skills/install_fetched.rs`) |
+| Install one (skill, agent) | `installer.ts` `installSkillForAgent`, `getCanonicalSkillsDir`, `createSymlink`, `copyDirectory` | `install_universal` → `copy_dir_recursive` + `link_agents_to_canonical` (`crates/core/src/skills/linker/mod.rs`); Master path `master_store_dir`                                     |
+| Sanitize                   | `installer.ts` `sanitizeName` (not `sanitize.ts`)                                                | `crates/skill/src/sanitize.rs` `sanitize_name`                                                                                                                                       |
+| Global lock (v3)           | `skill-lock.ts` `readSkillLock` / `writeSkillLock` / `addSkillToLock`                            | `crates/skill/src/lock/{types.rs,global.rs}`; `apply_content_hash`                                                                                                                   |
+| Project lock (v1)          | `local-lock.ts` `readLocalLock` / `writeLocalLock` / `addSkillToLocalLock`                       | `crates/skill/src/lock/local.rs`; `apply_computed_hash`                                                                                                                              |
+| Folder hash                | `local-lock.ts` `computeSkillFolderHash`                                                         | `crates/skill/src/hash.rs` `compute_skill_folder_hash`                                                                                                                               |
+| Check                      | `update.ts` `updateGlobalSkills` / `updateProjectSkills` (detect half)                           | `aghub-cli check skills [--online]` → `skill_update::run_update_check` (`crates/skill-update/src/lib.rs`)                                                                            |
+| Update (apply)             | same functions → re-run `add` via `spawnSync`                                                    | `aghub-cli apply-update skills <name> --yes` / `source sync` → `resync_installed_skill` (`crates/core/src/skills/resync.rs`)                                                         |
+| Remove                     | `remove.ts` `removeCommand` (reference-counted)                                                  | `ConfigManager::remove_skill_planned[_for_agents]`; `crates/core/src/skills/removal.rs`                                                                                              |
+| Prune lock                 | (none)                                                                                           | `aghub-cli prune-lock` → `crates/core/src/skills/prune.rs` `prune_lock_scanning`                                                                                                     |
+| Sync (node_modules)        | `sync.ts` `runSync`                                                                              | no aghub equivalent; it only round-trips the project lock                                                                                                                            |
 
-## When to open which reference
+## Which reference to open (one, not all)
 
-Each reference is a step-by-step walkthrough of one phase with the gotchas that bite.
-Read the one matching your task — don't read all four.
+- [`references/install.md`](references/install.md) — `runAdd` → `installSkillForAgent`,
+  the `createSymlink` defenses, `copyDirectory` exclusions, and where aghub diverges.
+- [`references/lock-and-hash.md`](references/lock-and-hash.md) — both lock schemas, the
+  `skillFolderHash`⊕`contentHash` exclusion, `skillPath`, the folder-hash algorithm and
+  feruca collation.
+- [`references/update.md`](references/update.md) — upstream detect-then-re-`add` vs
+  aghub's offline `check` + transactional resync with the rename guard.
+- [`references/remove-sync.md`](references/remove-sync.md) — reference-counted removal,
+  aghub prune, upstream node_modules sync.
 
-- **`references/install.md`** — `add` → `install`: source parse, blob-vs-clone,
-  universal/copy fork, symlink creation + copy-on-failure fallback, the `createSymlink`
-  realpath/ELOOP defenses, and aghub's extra conflict-not-clobber behavior.
-- **`references/lock-and-hash.md`** — both lock schemas (v3 global, v1 project), the
-  `skillFolderHash`⊕`contentHash` mutual-exclusion, `skillPath`, and the folder-hash
-  algorithm + the feruca `shifting=false` collation that makes it match JS `localeCompare`.
-- **`references/update.md`** — `check` (aghub offline-by-default vs upstream always-online),
-  hash-diff detection, why upstream update re-runs `add`, aghub's atomic stage-and-swap,
-  and the rename guard that upstream lacks.
-- **`references/remove-sync.md`** — reference-counted Master removal, aghub's planned
-  removal + scan-safe prune, and node_modules sync.
+## Gotchas true in every phase
 
-## Load-bearing gotchas (true regardless of phase)
-
-1. **Never bump a lock version.** Upstream `readSkillLock` wipes the lock to empty if
-   it sees a version below `CURRENT_VERSION` — bumping silently destroys cross-tool state.
-2. **Folder hash must be byte-identical.** Same file walk (skip `.git`/`node_modules`,
-   `lstat`-skip symlinks), same `relativePath`+bytes stream with no delimiters, same
-   sort. aghub's `shifting=false` feruca collation is what reproduces JS `localeCompare`;
-   it's golden-pinned in `crates/skill/tests/hash_parity_golden.rs`.
-3. **`skillFolderHash` and `contentHash` are mutually exclusive.** npx writes the GitHub
-   tree SHA into `skillFolderHash`; aghub writes its real Source hash into `contentHash`
-   and leaves `skillFolderHash` empty. Use `apply_content_hash`/`apply_computed_hash` —
-   never hand-edit.
-4. **aghub adds safety upstream lacks** — transactional rename, atomic stage-and-swap on
-   apply-update, the rename guard, conflict-not-clobber on install, scan-abort prune. These
-   are additive and round-trip-safe; don't "simplify" them away to match upstream.
+1. **Never bump a lock version** — upstream `readSkillLock` returns an empty lock for
+   `version < CURRENT_VERSION` (3), wiping cross-tool state. Details: `npx-skills-contract`.
+2. **The folder hash must stay byte-identical** — golden-pinned in
+   `crates/skill/tests/hash_parity_golden.rs`; see `references/lock-and-hash.md`.
+3. **`skillFolderHash` and `contentHash` are mutually exclusive** — only
+   `apply_content_hash` / `apply_computed_hash` may set them.
+4. **aghub's extra safety is deliberate** — interprocess mutation lock, conflict-not-clobber
+   linking, rename guard, staged swap with rollback, scan-abort prune. Do not "simplify"
+   them away to match upstream.
