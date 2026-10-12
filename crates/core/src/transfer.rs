@@ -2152,16 +2152,13 @@ pub fn reconcile_skill(
 		source.agent,
 		skill_backing_dir,
 	)?;
-	let mut delete_batch_result: Option<
-		Result<crate::skills::removal::SkillRemovalResponse>,
-	> = None;
-	let report = crate::batch::run_staged_multi_target_mutation(
+	let mut report = crate::batch::run_staged_multi_target_mutation(
 		&plan.copies,
 		&plan.deletes,
 		|row| plan.preflight(row),
-		|row| {
-			let outcome = match row.action {
-				OperationAction::Copy => (|| -> Result<bool> {
+		|row| match row.action {
+			OperationAction::Copy => {
+				let outcome = (|| -> Result<bool> {
 					let target_scope = row.target.scope.resource_scope();
 					// ONE guard across check → write → rollback; the manager's
 					// own guard ends when `add_skill_from_path` returns.
@@ -2237,71 +2234,27 @@ pub fn reconcile_skill(
 						}
 					}
 					Ok(added.already_installed)
-				})(),
-				// Use the planned-removal seam — never blind-delete a shared
-				// universal master discovered through an agent's read dirs.
-				OperationAction::Delete => (|| -> Result<bool> {
-					// Re-check now that every copy has run: a copy can create
-					// the very directory this target resolves through.
-					ensure_removals_spare(
-						&protect,
-						std::slice::from_ref(&row.target),
-						source.agent,
-						skill_backing_dir,
-					)?;
-					if delete_batch_result.is_none() {
-						let delete_agents: Vec<AgentType> = plan
-							.deletes
-							.iter()
-							.filter(|r| {
-								ensure_removals_spare(
-									&protect,
-									std::slice::from_ref(&r.target),
-									source.agent,
-									skill_backing_dir,
-								)
-								.is_ok()
-							})
-							.map(|r| r.target.agent)
-							.collect();
-						let scope = row.target.scope.clone();
-						let req = crate::skills::removal::SkillRemovalRequest {
-							target: crate::skills::removal::SkillRemovalTarget::ByName(
-								plan.skill.name.clone(),
-							),
-							scope,
-							agents: delete_agents,
-							dry_run: false,
-							all_agents: false,
-							prior_removed_paths: Vec::new(),
-							keeps_master: !added.is_empty(),
-							plugin_roots: Vec::new(),
-						};
-						delete_batch_result = Some(
-							crate::skills::removal::remove_skill_batch(&req),
-						);
-					}
-					let resp = match delete_batch_result.as_ref().unwrap() {
-						Ok(resp) => resp,
-						Err(err) => return Err(
-							crate::skills::removal::batch::clone_config_error(
-								err,
-							),
-						),
-					};
-					plan.delete_row_result(
-						resp.rows.iter().find(|r| r.agent == row.target.agent),
-					)
-				})(),
-			};
-			log_operation_outcome(
-				"skill",
-				&plan.skill.name,
-				row.action,
-				&row.target,
-				&outcome,
-			);
-			outcome
+				})();
+				log_operation_outcome(
+					"skill",
+					&plan.skill.name,
+					row.action,
+					&row.target,
+					&outcome,
+				);
+				outcome
+			}
+			// Re-check now that every copy has run: a copy can create the very
+			// directory this target resolves through. PROVISIONAL `Ok`: rows
+			// that pass are removed together, once, below — this value is
+			// always replaced before it reaches the report.
+			OperationAction::Delete => ensure_removals_spare(
+				&protect,
+				std::slice::from_ref(&row.target),
+				source.agent,
+				skill_backing_dir,
+			)
+			.map(|()| false),
 		},
 		|row| {
 			ConfigError::InvalidConfig(format!(
@@ -2313,8 +2266,64 @@ pub fn reconcile_skill(
 		},
 	)
 	.map_err(|error| batch_preflight_error("skill reconcile", error))?;
+	// ONE removal for every delete row the re-check cleared. None is cleared
+	// when a copy failed (the runner skipped every delete) or every target was
+	// spared out — then nothing is removed and no row is attributed.
+	let cleared: Vec<AgentType> = report
+		.results
+		.iter()
+		.filter(|r| {
+			r.target.action == OperationAction::Delete && r.result.is_ok()
+		})
+		.map(|r| r.target.target.agent)
+		.collect();
+	let removal = (!cleared.is_empty()).then(|| {
+		crate::skills::removal::remove_skill_batch(
+			&crate::skills::removal::SkillRemovalRequest {
+				target: crate::skills::removal::SkillRemovalTarget::ByName(
+					plan.skill.name.clone(),
+				),
+				scope: plan.scope.clone(),
+				agents: cleared,
+				dry_run: false,
+				all_agents: false,
+				prior_removed_paths: Vec::new(),
+				keeps_master: !added.is_empty(),
+				plugin_roots: Vec::new(),
+			},
+		)
+	});
+	if let Some(removal) = &removal {
+		for row in report.results.iter_mut().filter(|r| {
+			r.target.action == OperationAction::Delete && r.result.is_ok()
+		}) {
+			row.result = match removal {
+				Ok(resp) => plan.delete_row_result(
+					resp.rows
+						.iter()
+						.find(|r| r.agent == row.target.target.agent),
+				),
+				Err(err) => {
+					Err(crate::skills::removal::batch::clone_config_error(err))
+				}
+			};
+		}
+	}
+	for row in report
+		.results
+		.iter()
+		.filter(|r| r.target.action == OperationAction::Delete)
+	{
+		log_operation_outcome(
+			"skill",
+			&plan.skill.name,
+			row.target.action,
+			&row.target.target,
+			&row.result,
+		);
+	}
 	let mut batch_res = operation_batch(report);
-	if let Some(Ok(ref resp)) = delete_batch_result {
+	if let Some(Ok(resp)) = &removal {
 		let (still_read_by, still_read_by_managed, still_read_by_unmanaged) =
 			resp.holders_view().to_options();
 		for r in &mut batch_res.results {
