@@ -805,6 +805,54 @@ fn check_unreadable_exhaustive(
 	Ok(())
 }
 
+/// Refuse when anything this by-name removal would delete is plugin-owned: each
+/// target's own skill root AND every path its plan deletes. An `all_agents` /
+/// exhaustive plan sweeps other agents' copies, which the targets alone never
+/// show (#67). Skipped when no plugin is known (fail-open, spec #24 decision 7).
+fn refuse_plugin_owned_plan(
+	request: &SkillRemovalRequest,
+	name: &str,
+	target_agents: &[AgentType],
+	holders: &[AgentType],
+	is_exhaustive: bool,
+	plugin_roots: &PluginRoots,
+) -> Result<()> {
+	if plugin_roots.is_empty() {
+		return Ok(());
+	}
+	let scope = request.scope.resource_scope();
+	let project_root = request.scope.project_root();
+	for &agent in target_agents {
+		if !registry::get(agent).supports_skill_scope(scope) {
+			continue;
+		}
+		let mut manager = create_manager(agent, scope, project_root);
+		// A load failure is reported per row by the batch.
+		if manager.load().is_err() {
+			continue;
+		}
+		if let Some(path) = manager.get_skill(name).and_then(super::skill_root)
+		{
+			plugin_roots.refuse(&path, name, "delete")?;
+		}
+		let sweeps =
+			(is_exhaustive && holders.contains(&agent)) || request.all_agents;
+		if let Ok(outcome) = manager.remove_skill_planned_for_agents(
+			name,
+			sweeps,
+			true, // dry_run
+			true, // confirm
+			target_agents,
+			&[],
+		) {
+			for path in &outcome.plan.paths {
+				plugin_roots.refuse(path, name, "delete")?;
+			}
+		}
+	}
+	Ok(())
+}
+
 /// Single core entry point for skill deletion across multiple agents.
 ///
 /// The plugin list is read here, before any lock is taken.
@@ -1130,24 +1178,14 @@ fn remove_skill_by_name(
 		resolve_name_targets(request, name);
 
 	// Refused before any plan, preview included (the API always did this).
-	// Skipped when no plugin is known, so plugin-free runs load nothing extra.
-	if !plugin_roots.is_empty() {
-		for &agent in &target_agents {
-			if !registry::get(agent).supports_skill_scope(scope) {
-				continue;
-			}
-			let mut manager = create_manager(agent, scope, project_root);
-			// A load failure is reported per row by the batch below.
-			if manager.load().is_err() {
-				continue;
-			}
-			if let Some(path) =
-				manager.get_skill(name).and_then(super::skill_root)
-			{
-				plugin_roots.refuse(&path, name, "delete")?;
-			}
-		}
-	}
+	refuse_plugin_owned_plan(
+		request,
+		name,
+		&target_agents,
+		&holders,
+		is_exhaustive,
+		plugin_roots,
+	)?;
 
 	check_unreadable_exhaustive(
 		name,
@@ -1426,6 +1464,16 @@ fn remove_skill_by_name(
 
 	let (holders, unreadable, in_lock_target_agents, is_exhaustive) =
 		resolve_name_targets(request, name);
+	// Re-checked under the lock, before any write: the in-lock replan may sweep a
+	// copy the preflight never saw.
+	refuse_plugin_owned_plan(
+		request,
+		name,
+		&in_lock_target_agents,
+		&holders,
+		is_exhaustive,
+		plugin_roots,
+	)?;
 
 	let execution_order =
 		shared_first_order(&in_lock_target_agents, scope, project_root);

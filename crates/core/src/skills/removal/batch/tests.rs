@@ -2037,6 +2037,136 @@ fn test_by_name_refuses_plugin_owned_skill_leaving_disk_and_lock_unchanged() {
 	);
 }
 
+#[cfg(unix)]
+#[test]
+fn test_all_agents_sweep_refuses_plugin_owned_copy_of_unnamed_agent() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+	crate::testing::master_with_claude_referrer(&root, "swept");
+	let claude_copy = root.join(".claude/skills/swept");
+
+	// Only Claude's Referrer is plugin-owned; the request names Cursor alone,
+	// and Cursor's all-agents sweep reaches Claude's link.
+	let _roots = crate::skills::plugin_roots::test_override::set(vec![(
+		"p".to_string(),
+		claude_copy.clone(),
+	)]);
+	for dry_run in [true, false] {
+		let req = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("swept".to_string()),
+			scope: WriteScope::project(&root),
+			agents: vec![AgentType::Cursor],
+			dry_run,
+			all_agents: true,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let err = remove_skill_batch(&req).expect_err(
+			"an all-agents sweep reaching a plugin-owned copy must be refused",
+		);
+		assert_eq!(
+			crate::error_codes::wire_code(&err),
+			"MANAGED_RESOURCE",
+			"dry_run={dry_run}"
+		);
+	}
+	assert!(
+		claude_copy.join("SKILL.md").exists(),
+		"plugin-owned copy must survive"
+	);
+	assert!(
+		root.join(".agents/skills/swept/SKILL.md").exists(),
+		"named agent's copy must survive a refused sweep"
+	);
+	assert!(root.join(".aghub/swept/SKILL.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_in_lock_plugin_recheck_refuses_owned_copy_appearing_after_preflight() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+	crate::testing::master_with_claude_referrer(&root, "swept");
+	// Only Cursor's Referrer and the Master exist before the preflight.
+	let claude_copy = root.join(".claude/skills/swept");
+	fs::remove_file(&claude_copy).unwrap();
+
+	let (hook_tx, hook_rx) = std::sync::mpsc::channel();
+	*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = Some(hook_tx);
+
+	struct HookReset;
+	impl Drop for HookReset {
+		fn drop(&mut self) {
+			*COMMIT_PREFLIGHT_HOOK.lock().unwrap() = None;
+		}
+	}
+	let _hook_reset = HookReset;
+
+	// Test thread acquires the mutation write lock first.
+	let test_lock = crate::skills::lock::mutation_guard(
+		"test competing lock",
+		ResourceScope::ProjectOnly,
+		Some(&root),
+	)
+	.expect("test thread acquires mutation lock");
+
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByName("swept".to_string()),
+		scope: WriteScope::project(&root),
+		agents: vec![AgentType::Cursor],
+		dry_run: false,
+		all_agents: true,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+
+	let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+	let claude_copy_for_thread = claude_copy.clone();
+	let commit_thread = std::thread::spawn(move || {
+		// The override is thread-local, so it is set on the thread that removes.
+		let _roots = crate::skills::plugin_roots::test_override::set(vec![(
+			"p".to_string(),
+			claude_copy_for_thread,
+		)]);
+		let res = remove_skill_batch(&req);
+		let _ = commit_tx.send(res);
+	});
+
+	// Preflight has run and the commit thread is blocked on the mutation lock.
+	hook_rx
+		.recv_timeout(std::time::Duration::from_secs(5))
+		.expect("commit thread must signal hook after unlocked preflight");
+
+	// Claude's Referrer appears only after the preflight looked.
+	std::os::unix::fs::symlink(root.join(".aghub/swept"), &claude_copy)
+		.unwrap();
+
+	drop(test_lock);
+
+	let res = commit_rx
+		.recv_timeout(std::time::Duration::from_secs(5))
+		.expect("commit thread should complete after lock release");
+	commit_thread.join().unwrap();
+	let err = res.expect_err(
+		"the in-lock recheck must refuse the sweep reaching the plugin copy",
+	);
+	assert_eq!(crate::error_codes::wire_code(&err), "MANAGED_RESOURCE");
+	assert!(
+		claude_copy.join("SKILL.md").exists(),
+		"plugin-owned copy must survive"
+	);
+	assert!(
+		root.join(".agents/skills/swept/SKILL.md").exists(),
+		"Cursor's copy must survive: nothing may be written before the refusal"
+	);
+}
+
 #[test]
 fn test_by_name_shared_refusal_excludes_all_requested_agents_from_readers() {
 	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());

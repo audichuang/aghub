@@ -508,3 +508,16 @@ mutation lock, because reading them spawns `claude`.
 Tests: `transfer::tests::reconcile_skill_refuses_plugin_owned_removal_and_writes_nothing`,
 `routes::skills::tests::reconcile_route_refuses_plugin_owned_removal_with_managed_resource`,
 `cli_tests::reconcile_skill_remove_refuses_plugin_owned_skill_with_managed_resource`.
+
+## An all-agents sweep deleted a plugin's copy
+
+`delete --all-agents` checked plugin ownership only on the roots of the agents
+the request named. The sweep also removes copies held by agents the request did
+not name, so a Claude Code plugin's copy in an unnamed agent's dir was deleted
+while the named agent's copy was not plugin-owned. The fix checks every path the
+plan deletes (`refuse_plugin_owned_plan`): once before any plan, and again inside
+the mutation lock before any write, because the in-lock replan can sweep a copy
+the preflight never saw. Both checks refuse the whole batch.
+
+Tests: `removal::batch::tests::test_all_agents_sweep_refuses_plugin_owned_copy_of_unnamed_agent`,
+`removal::batch::tests::test_in_lock_plugin_recheck_refuses_owned_copy_appearing_after_preflight`.
