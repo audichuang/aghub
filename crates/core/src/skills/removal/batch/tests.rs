@@ -2612,3 +2612,85 @@ fn test_by_name_refuses_plugin_owned_skill_reached_through_symlinked_skills_root
 		"the plugin's own SKILL.md must survive a refused delete"
 	);
 }
+
+#[cfg(unix)]
+#[test]
+fn test_by_path_leaf_symlink_into_plugin_never_deletes_plugin_files() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	let plugin = temp.path().join("plugin");
+	let plugin_skill = plugin.join("skills/foo");
+	fs::create_dir_all(&plugin_skill).unwrap();
+	let plugin_md = plugin_skill.join("SKILL.md");
+	fs::write(
+		&plugin_md,
+		"---\nname: foo\ndescription: Plugin\n---\n\n# foo\n",
+	)
+	.unwrap();
+	// Claude's project skills dir is a real dir holding a LEAF symlink into
+	// the plugin's skill dir. That link is the only Referrer of the plugin.
+	let skills = root.join(".claude/skills");
+	fs::create_dir_all(&skills).unwrap();
+	let leaf = skills.join("foo");
+	std::os::unix::fs::symlink(&plugin_skill, &leaf).unwrap();
+
+	let _roots = crate::skills::plugin_roots::test_override::set(vec![(
+		"p".to_string(),
+		plugin.clone(),
+	)]);
+	let mut req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(leaf.clone()),
+		scope: WriteScope::project(&root),
+		agents: vec![AgentType::Claude],
+		dry_run: true,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+
+	// Preview first, then commit. Whatever each returns, the plugin's own
+	// SKILL.md must survive, and no planned path may reach into the plugin.
+	fn check_plugin_safe(
+		res: std::result::Result<SkillRemovalResponse, ConfigError>,
+		plugin: &Path,
+	) {
+		match res {
+			Ok(resp) => {
+				for row in &resp.rows {
+					for p in &row.paths {
+						assert!(
+							!p.starts_with(plugin),
+							"planned path must not reach into the plugin: {}",
+							p.display()
+						);
+					}
+				}
+			}
+			Err(err) => {
+				let code = crate::error_codes::wire_code(&err);
+				assert!(
+					code == "MANAGED_RESOURCE"
+						|| matches!(err, ConfigError::InvalidConfig(_)),
+					"unexpected refusal: {code} / {err:?}"
+				);
+			}
+		}
+	}
+
+	let preview = remove_skill_batch(&req);
+	check_plugin_safe(preview, &plugin);
+	assert!(
+		plugin_md.exists(),
+		"preview must not delete the plugin SKILL.md"
+	);
+
+	req.dry_run = false;
+	let commit = remove_skill_batch(&req);
+	check_plugin_safe(commit, &plugin);
+	assert!(
+		plugin_md.exists(),
+		"commit must never delete the plugin's own SKILL.md through a leaf symlink"
+	);
+}
