@@ -6,7 +6,7 @@
 //! provider, or an unreadable plugin list, yields an empty list, which refuses
 //! nothing (spec #24 decision 7).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// `(plugin name, install root)` for every installed Claude Code plugin.
@@ -48,8 +48,27 @@ impl PluginRoots {
 		}
 	}
 
-	pub(crate) fn as_slice(&self) -> &[(String, PathBuf)] {
-		&self.0
+	/// Refuse to `action` a skill that a Claude Code plugin owns. The roots are
+	/// `(plugin name, install root)` pairs; an empty list refuses nothing, which
+	/// is the fail-open answer when the plugin list could not be read.
+	pub(crate) fn refuse(
+		&self,
+		path: &Path,
+		skill: &str,
+		action: &str,
+	) -> crate::errors::Result<()> {
+		match self.0.iter().find(|(_, root)| path.starts_with(root)) {
+			Some((plugin, _)) => {
+				Err(crate::errors::ConfigError::ManagedResource(format!(
+					"Cannot {action} skill '{skill}' managed by plugin '{plugin}'"
+				)))
+			}
+			None => Ok(()),
+		}
+	}
+
+	pub(crate) fn is_empty(&self) -> bool {
+		self.0.is_empty()
 	}
 }
 

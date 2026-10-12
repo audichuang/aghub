@@ -230,7 +230,6 @@ pub async fn delete_skill_by_path(
 		crate::extractors::resolve_agent_strings(&req.agents)?;
 
 	let raw_path = std::path::PathBuf::from(&req.source_path);
-	let plugin_roots = ClaudePluginManager::owned_roots().await;
 
 	let confirm = req.confirm.unwrap_or(false);
 	let dry_run = !confirm;
@@ -246,7 +245,6 @@ pub async fn delete_skill_by_path(
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
-			plugin_roots,
 		};
 		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
 			.map_err(ApiError::from)?;
@@ -705,12 +703,11 @@ pub async fn update_skill(
 	let updated = SkillPatch::from(body.into_inner()).apply_to(existing);
 	let response = SkillResponse::from(&updated);
 	let name = name.to_string();
-	let plugin_roots = ClaudePluginManager::owned_roots().await;
 	// `update_skill` takes the mutation lock (a rename is a Master move plus a
 	// relink of every Referrer).
 	in_mutation_pool(move || {
 		manager
-			.update_skill(&name, updated, &plugin_roots)
+			.update_skill(&name, updated)
 			.map_err(ApiError::from)?;
 		Ok(Json(response))
 	})
@@ -741,7 +738,6 @@ pub async fn delete_skill(
 	let dry_run = !confirm;
 	let name = name.to_string();
 	let all_agents = params.all_agents.unwrap_or(false);
-	let plugin_roots = ClaudePluginManager::owned_roots().await;
 
 	in_mutation_pool(move || {
 		// Shared batch removal entry; projects outcome and managed/unmanaged holders.
@@ -756,7 +752,6 @@ pub async fn delete_skill(
 			all_agents,
 			prior_removed_paths: Vec::new(),
 			keeps_master: false,
-			plugin_roots,
 		};
 		let resp = aghub_core::skills::removal::remove_skill_batch(&request)
 			.map_err(ApiError::from)?;
@@ -784,14 +779,17 @@ pub async fn enable_skill(
 		&write_scope.clone().into(),
 	)?;
 	manager.load().map_err(ApiError::from)?;
-	let plugin_roots = ClaudePluginManager::owned_roots().await;
-	manager
-		.enable_skill(name, &plugin_roots)
-		.map_err(ApiError::from)?;
-	// `enable_skill` always refuses (nothing persists the flag); the refusal
-	// order (not-found, plugin-managed, unsupported) lives in core.
-	let skill = manager.get_skill(name).expect("skill present after enable");
-	Ok(Json(SkillResponse::from(skill)))
+	// Core resolves plugin ownership by spawning `claude` before its lock, so
+	// this call must not run on an async worker.
+	in_mutation_pool(move || {
+		manager.enable_skill(name).map_err(ApiError::from)?;
+		// `enable_skill` always refuses (nothing persists the flag); the refusal
+		// order (not-found, plugin-managed, unsupported) lives in core.
+		let skill =
+			manager.get_skill(name).expect("skill present after enable");
+		Ok(Json(SkillResponse::from(skill)))
+	})
+	.await
 }
 
 #[post("/agents/<agent>/skills/<name>/disable?<scope..>")]
@@ -810,16 +808,18 @@ pub async fn disable_skill(
 		&write_scope.clone().into(),
 	)?;
 	manager.load().map_err(ApiError::from)?;
-	let plugin_roots = ClaudePluginManager::owned_roots().await;
-	manager
-		.disable_skill(name, &plugin_roots)
-		.map_err(ApiError::from)?;
-	// Unreachable today — the refusal order (not-found, plugin-managed,
-	// unsupported) lives in core; see `enable_skill` above.
-	let skill = manager
-		.get_skill(name)
-		.expect("skill present after disable");
-	Ok(Json(SkillResponse::from(skill)))
+	// Core resolves plugin ownership by spawning `claude` before its lock, so
+	// this call must not run on an async worker.
+	in_mutation_pool(move || {
+		manager.disable_skill(name).map_err(ApiError::from)?;
+		// Unreachable today — the refusal order (not-found, plugin-managed,
+		// unsupported) lives in core; see `enable_skill` above.
+		let skill = manager
+			.get_skill(name)
+			.expect("skill present after disable");
+		Ok(Json(SkillResponse::from(skill)))
+	})
+	.await
 }
 
 fn is_plugin_managed_skill(
@@ -2582,6 +2582,7 @@ mod tests {
 	#[test]
 	fn test_by_path_plugin_refusal_is_managed_resource() {
 		with_isolated_env(|home, _state| {
+			crate::install_plugin_ownership();
 			use std::os::unix::fs::PermissionsExt;
 			let bin_dir = home.join(".local/bin");
 			std::fs::create_dir_all(&bin_dir).unwrap();
@@ -2638,7 +2639,7 @@ mod tests {
 			let _restore = PathRestore(old_path);
 
 			// By-path delete on plugin-owned skill refuses with BadRequest + MANAGED_RESOURCE,
-			// matching the by-name delete refusal (core `refuse_plugin_owned`).
+			// matching the by-name delete refusal (core's plugin-ownership refusal).
 			let by_path_err = by_path_refused(DeleteSkillByPathRequest {
 				source_path: skill_dir.join("SKILL.md").display().to_string(),
 				agents: vec!["claude".to_string()],

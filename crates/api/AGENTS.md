@@ -129,8 +129,10 @@ line** — don't reword it). Pass `--port N` to pin one.
   count, so enough contended mutations park every worker and the server stops
   answering **everything**, unlocked read routes included (measured: 25 concurrent
   deletes against a held lock took `GET /agents` from 0.00s to a 30s timeout).
-  There is no compile-time guard; the awaits (git fetch, plugin detection) stay
+  There is no compile-time guard; the awaits (git fetch) stay
   OUTSIDE the closure, which is also where they belong relative to the lock.
+  Plugin ownership is injected once in `build_rocket` and read inside core,
+  so no route passes it in.
 - NEVER orchestrate two or more core mutation steps within a handler to form a
   single action — orchestration belongs in core behind one entry point.
 - NEVER write an error-code string literal in API route code — error codes come

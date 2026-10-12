@@ -17,6 +17,7 @@ use crate::errors::{ConfigError, Result};
 use crate::models::{AgentType, ResourceScope};
 use crate::registry;
 use crate::scope::WriteScope;
+use crate::skills::plugin_roots::PluginRoots;
 use crate::ConfigManager;
 
 /// Target for a batch skill removal.
@@ -42,10 +43,6 @@ pub struct SkillRemovalRequest {
 	/// A copy in this batch keeps the Master alive; skips the exhaustiveness
 	/// preflight holder scan (surviving holders are still computed for outcome rows).
 	pub keeps_master: bool,
-	/// `(plugin name, install root)` of every installed Claude Code plugin; a
-	/// target under one is refused with `MANAGED_RESOURCE`. Empty = unknown,
-	/// refuses nothing. See `removal::refuse_plugin_owned`.
-	pub plugin_roots: Vec<(String, PathBuf)>,
 }
 
 /// Outcome row for a single agent in a batch skill removal.
@@ -809,20 +806,34 @@ fn check_unreadable_exhaustive(
 }
 
 /// Single core entry point for skill deletion across multiple agents.
+///
+/// The plugin list is read here, before any lock is taken.
 pub fn remove_skill_batch(
 	request: &SkillRemovalRequest,
 ) -> Result<SkillRemovalResponse> {
+	remove_skill_batch_with(request, &PluginRoots::current())
+}
+
+/// [`remove_skill_batch`] with the plugin roots already read by the caller. A
+/// caller that holds the mutation lock reads them before taking it.
+pub(crate) fn remove_skill_batch_with(
+	request: &SkillRemovalRequest,
+	plugin_roots: &PluginRoots,
+) -> Result<SkillRemovalResponse> {
 	match &request.target {
 		SkillRemovalTarget::ByPath(raw_path) => {
-			remove_skill_by_path(request, raw_path)
+			remove_skill_by_path(request, raw_path, plugin_roots)
 		}
-		SkillRemovalTarget::ByName(name) => remove_skill_by_name(request, name),
+		SkillRemovalTarget::ByName(name) => {
+			remove_skill_by_name(request, name, plugin_roots)
+		}
 	}
 }
 
 fn remove_skill_by_path(
 	request: &SkillRemovalRequest,
 	raw_path: &Path,
+	plugin_roots: &PluginRoots,
 ) -> Result<SkillRemovalResponse> {
 	if request.agents.is_empty() {
 		return Err(ConfigError::InvalidConfig(
@@ -846,7 +857,7 @@ fn remove_skill_by_path(
 	// A plugin-owned path answers MANAGED_RESOURCE for every refusal below;
 	// only the idempotent absent no-op stays Ok.
 	let refuse_plugin = || {
-		super::refuse_plugin_owned(
+		plugin_roots.refuse(
 			&skill_path,
 			&by_path_skill_dir(&skill_path)
 				.map(|dir| {
@@ -855,7 +866,6 @@ fn remove_skill_by_path(
 				})
 				.unwrap_or_else(|_| skill_path.display().to_string()),
 			"delete",
-			&request.plugin_roots,
 		)
 	};
 
@@ -1111,6 +1121,7 @@ fn remove_skill_by_path(
 fn remove_skill_by_name(
 	request: &SkillRemovalRequest,
 	name: &str,
+	plugin_roots: &PluginRoots,
 ) -> Result<SkillRemovalResponse> {
 	let scope = request.scope.resource_scope();
 	let project_root = request.scope.project_root();
@@ -1120,7 +1131,7 @@ fn remove_skill_by_name(
 
 	// Refused before any plan, preview included (the API always did this).
 	// Skipped when no plugin is known, so plugin-free runs load nothing extra.
-	if !request.plugin_roots.is_empty() {
+	if !plugin_roots.is_empty() {
 		for &agent in &target_agents {
 			if !registry::get(agent).supports_skill_scope(scope) {
 				continue;
@@ -1133,12 +1144,7 @@ fn remove_skill_by_name(
 			if let Some(path) =
 				manager.get_skill(name).and_then(super::skill_root)
 			{
-				super::refuse_plugin_owned(
-					&path,
-					name,
-					"delete",
-					&request.plugin_roots,
-				)?;
+				plugin_roots.refuse(&path, name, "delete")?;
 			}
 		}
 	}

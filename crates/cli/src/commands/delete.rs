@@ -52,7 +52,6 @@ pub fn execute(
 				all_agents: options.all_agents,
 				prior_removed_paths: Vec::new(),
 				keeps_master: false,
-				plugin_roots: super::plugin_roots(),
 			};
 			let resp = removal::remove_skill_batch(&request)
 				.map_err(anyhow::Error::from)?;

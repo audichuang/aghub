@@ -1825,9 +1825,11 @@ fn plan_reconcile_skill(
 			all_agents: false,
 			prior_removed_paths: Vec::new(),
 			keeps_master: !added.is_empty(),
-			plugin_roots: plugin_roots.as_slice().to_vec(),
 		};
-		let resp = crate::skills::removal::remove_skill_batch(&req)?;
+		let resp = crate::skills::removal::remove_skill_batch_with(
+			&req,
+			plugin_roots,
+		)?;
 		let keepers: Vec<&'static str> = resp
 			.keepers
 			.iter()
@@ -2288,7 +2290,7 @@ pub fn reconcile_skill(
 		.map(|r| r.target.target.agent)
 		.collect();
 	let removal = (!cleared.is_empty()).then(|| {
-		crate::skills::removal::remove_skill_batch(
+		crate::skills::removal::remove_skill_batch_with(
 			&crate::skills::removal::SkillRemovalRequest {
 				target: crate::skills::removal::SkillRemovalTarget::ByName(
 					plan.skill.name.clone(),
@@ -2299,8 +2301,8 @@ pub fn reconcile_skill(
 				all_agents: false,
 				prior_removed_paths: Vec::new(),
 				keeps_master: !added.is_empty(),
-				plugin_roots: plugin_roots.as_slice().to_vec(),
 			},
+			&plugin_roots,
 		)
 	});
 	if let Some(removal) = &removal {

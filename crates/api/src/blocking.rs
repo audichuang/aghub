@@ -18,8 +18,9 @@ use crate::error::ApiError;
 /// `aghub-core`; read-only handlers need nothing. Generic over the whole `Ok`
 /// type so it fits `ApiResult<T>`, `ApiCreated<T>` and `ApiNoContent`.
 ///
-/// No `.await` inside `f`: do the git fetch / plugin detection first and pass
-/// the results in. A panic in `f` propagates as a 500, deliberately not mapped
+/// No `.await` inside `f`: do the git fetch first and pass the result in. Plugin
+/// ownership is not an input: core reads it itself, before its lock, through the
+/// provider `install_plugin_ownership` installs. A panic in `f` propagates as a 500, deliberately not mapped
 /// to an error — a lock error is retryable, a panic is not.
 pub async fn in_mutation_pool<R, F>(f: F) -> Result<R, ApiError>
 where

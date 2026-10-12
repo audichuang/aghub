@@ -22,13 +22,6 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Plugin-ownership list for core's skill mutation entries; empty (refuses
-/// nothing) when the plugin list cannot be read. See
-/// `ClaudePluginManager::owned_roots`.
-pub(crate) fn plugin_roots() -> Vec<(String, std::path::PathBuf)> {
-	aghub_cc_plugins::claude::ClaudePluginManager::owned_roots_blocking()
-}
-
 /// Print a JSON value as an aligned `key  value` block, or as pretty JSON when
 /// `json` is set.
 ///
