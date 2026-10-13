@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useMemo } from "react";
 import type { GitForwardHeaders } from "../lib/api";
+import type { CheckSkillUpdatesParams } from "../requests/skills";
 import {
-	boundSourceTokenMap,
+	checkForwardSources,
 	gitTokensHeader,
 	resolveForwardedTokens,
 	shouldForwardGitTokens,
 } from "../lib/git-token-forwarding";
+import { useApi } from "./use-api";
 import { useConnection } from "./use-connection";
 
 /**
@@ -25,6 +27,7 @@ import { useConnection } from "./use-connection";
  */
 export function useGitForwarding() {
 	const { activeId, supportsCredentialForwarding } = useConnection();
+	const api = useApi();
 
 	const enabled = useMemo(
 		() =>
@@ -46,17 +49,39 @@ export function useGitForwarding() {
 	);
 
 	/**
-	 * Build the forward header for `check-updates`: enumerate bound sources and
-	 * resolve a token per source. Returns undefined when disabled or nothing is
-	 * bound.
+	 * Build the forward header for `check-updates`: resolve a token for every
+	 * lock source in the checked scope. Undefined when disabled, when nothing
+	 * resolves, or when the source list cannot be read (the check then runs
+	 * unforwarded, as before).
 	 */
-	const forBoundSources = useCallback(async (): Promise<
-		GitForwardHeaders | undefined
-	> => {
-		if (!enabled) return undefined;
-		const map = await boundSourceTokenMap(invoke);
-		return gitTokensHeader(map);
-	}, [enabled]);
+	const forCheck = useCallback(
+		async (
+			params?: CheckSkillUpdatesParams,
+		): Promise<GitForwardHeaders | undefined> => {
+			if (!enabled) return undefined;
+			let sources: string[];
+			try {
+				const { sources: rows } = await api.skills.getSources(
+					params?.scope ?? "global",
+					params?.projectRoot,
+				);
+				sources = checkForwardSources(rows);
+			} catch (error) {
+				// Unforwarded, a private source reads `auth` again — leave a trace.
+				console.warn(
+					"check forwarding: source list unavailable",
+					error,
+				);
+				return undefined;
+			}
+			// ponytail: one resolve_git_token IPC (two keyring reads) per source,
+			// serially; batch into one command if large scopes make checks slow.
+			return gitTokensHeader(
+				await resolveForwardedTokens(sources, invoke),
+			);
+		},
+		[enabled, api],
+	);
 
-	return { enabled, forSource, forBoundSources };
+	return { enabled, forSource, forCheck };
 }

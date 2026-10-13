@@ -1,5 +1,6 @@
 import type { SkillUpdateResponse } from "../generated/dto";
 import type { SourceUpdateBatch } from "../hooks/use-apply-all-skill-updates";
+import { sourceCoordinate } from "./source-coordinate.ts";
 
 /**
  * The lock fields this grouping needs, structurally — the GLOBAL lock
@@ -71,7 +72,7 @@ export function groupUpdatesBySource(
 		if (status.status !== "updateAvailable") continue;
 
 		const entry = bySkillName.get(status.name);
-		const source = entry?.sourceUrl || entry?.source;
+		const source = entry ? sourceCoordinate(entry) : undefined;
 		if (!source) {
 			unresolved.push(status.name);
 			continue;

@@ -59,6 +59,7 @@ import {
 import { LocationRow, SkillTree } from "./skill-detail-views";
 import { SyncGithubSkillDialog } from "./sync-github-skill-dialog";
 import { TransferDialog } from "./transfer-dialog";
+import { sourceCoordinate } from "../lib/source-coordinate";
 
 interface SkillDetailProps {
 	group: SkillGroup;
@@ -100,10 +101,8 @@ export function SkillDetail({
 	const [, setLocation] = useLocation();
 	const { allAgents, availableAgents } = useAgentAvailability();
 	const api = useApi();
-	const {
-		forBoundSources: forwardForBoundSources,
-		forSource: forwardForSource,
-	} = useGitForwarding();
+	const { forCheck: forwardForCheck, forSource: forwardForSource } =
+		useGitForwarding();
 	const queryClient = useQueryClient();
 
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -164,7 +163,7 @@ export function SkillDetail({
 		checkSkillUpdatesMutationOptions({
 			api,
 			queryClient,
-			forwardForBoundSources,
+			forwardForCheck,
 			onError: () => toast.danger(t("skillUpdateCheckError")),
 		}),
 	);
@@ -189,7 +188,7 @@ export function SkillDetail({
 	const { data: cachedUpdateChecks } = useQuery({
 		queryKey: checkSkillUpdatesQueryKey(updateCheckParams),
 		queryFn: async () => {
-			const headers = await forwardForBoundSources();
+			const headers = await forwardForCheck(updateCheckParams);
 			return api.skills.checkUpdates(updateCheckParams, headers);
 		},
 		enabled: false,
@@ -698,14 +697,10 @@ export function SkillDetail({
 																"viewSkillSource",
 															)}
 															onPress={() => {
-																// `||`, not `??`: a global lock entry with
-																// no recorded URL (a local source) carries
-																// sourceUrl as the EMPTY STRING sentinel,
-																// not null — `??` would let that empty
-																// string through as the param value.
 																const sourceValue =
-																	currentSkillSource.sourceUrl ||
-																	currentSkillSource.source;
+																	sourceCoordinate(
+																		currentSkillSource,
+																	);
 																// Same-route caller: it owns the query
 																// string, so hand it the value instead of
 																// pushing history nuqs will not observe.

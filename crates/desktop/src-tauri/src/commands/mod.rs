@@ -5,7 +5,7 @@ pub mod server;
 pub mod skill_check;
 pub mod window;
 
-pub use credentials::{list_bound_sources, resolve_git_token};
+pub use credentials::resolve_git_token;
 pub use logging::{
 	clear_log_files, export_diagnostic_logs, get_log_dir_path, get_log_entries,
 	get_log_stats,

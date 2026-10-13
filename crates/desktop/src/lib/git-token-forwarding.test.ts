@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 // enforces vitest over node:test, which does not apply here.
 import { test } from "node:test";
 import {
-	boundSourceTokenMap,
+	checkForwardSources,
 	encodeGitTokensHeader,
 	type ForwardedTokenMap,
 	GIT_TOKENS_HEADER,
@@ -224,57 +224,59 @@ test("resolveForwardedTokens on no sources yields an empty map", async () => {
 	assert.deepEqual(await resolveForwardedTokens([], invoke), {});
 });
 
-// ─── boundSourceTokenMap (check-updates assembly) ───────────────────────────
+// ─── checkForwardSources (check-updates assembly) ───────────────────────────
 
-test("boundSourceTokenMap enumerates bound sources then resolves each", async () => {
-	const calls: string[] = [];
-	const invoke = (async (cmd: string, args?: Record<string, unknown>) => {
-		if (cmd === "list_bound_sources") {
-			return ["bound-a", "bound-b", "bound-c"];
-		}
-		if (cmd === "resolve_git_token") {
-			const source = String(args?.source);
-			calls.push(source);
-			const table: Record<string, ResolvedToken | null> = {
-				"bound-a": { token: "A", origin: null },
-				"bound-b": null, // bound but no token now -> skipped
-				"bound-c": { token: "C", origin: null },
-			};
-			return table[source] ?? null;
-		}
-		throw new Error(`unexpected invoke: ${cmd}`);
-	}) as InvokeFn;
+test("checkForwardSources keys every non-local lock source by clone URL, bound or not", () => {
+	// A private repo covered only by a HOST credential has no explicit binding.
+	// It must still be forwarded, or check-updates reads `auth` while the
+	// source diff (which resolves the same URL) succeeds.
+	const keys = checkForwardSources([
+		{
+			source: "audichuang/Agent-Reach",
+			sourceUrl: "https://github.com/audichuang/Agent-Reach.git",
+			sourceType: "github",
+		},
+		{ source: "acme/skills", sourceUrl: "", sourceType: "github" },
+		{ source: "/opt/skills/a", sourceUrl: "", sourceType: "local" },
+		// Same repo in another scope: one entry.
+		{
+			source: "audichuang/Agent-Reach",
+			sourceUrl: "https://github.com/audichuang/Agent-Reach.git",
+			sourceType: "github",
+		},
+	]);
+	assert.deepEqual(keys, [
+		"https://github.com/audichuang/Agent-Reach.git",
+		"acme/skills",
+	]);
+});
 
-	const map = await boundSourceTokenMap(invoke);
-
+test("check forwarding resolves an unbound source through the controller", async () => {
+	const invoke = mockResolveInvoke(
+		{
+			"https://github.com/audichuang/Agent-Reach.git": {
+				token: "HOST",
+				origin: null,
+			},
+		},
+		[],
+	);
+	const map = await resolveForwardedTokens(
+		checkForwardSources([
+			{
+				source: "audichuang/Agent-Reach",
+				sourceUrl: "https://github.com/audichuang/Agent-Reach.git",
+				sourceType: "github",
+			},
+		]),
+		invoke,
+	);
 	assert.deepEqual(map, {
-		"bound-a": { token: "A", origin: null },
-		"bound-c": { token: "C", origin: null },
+		"https://github.com/audichuang/Agent-Reach.git": {
+			token: "HOST",
+			origin: null,
+		},
 	});
-	assert.deepEqual(calls, ["bound-a", "bound-b", "bound-c"]);
-});
-
-test("boundSourceTokenMap returns an empty map when nothing is bound", async () => {
-	const invoke = (async (cmd: string) => {
-		if (cmd === "list_bound_sources") return [];
-		throw new Error(`unexpected invoke: ${cmd}`);
-	}) as InvokeFn;
-
-	const map = await boundSourceTokenMap(invoke);
-	assert.deepEqual(map, {});
-});
-
-test("boundSourceTokenMap header is omitted (undefined) when no bound tokens resolve", async () => {
-	const invoke = (async (cmd: string) => {
-		if (cmd === "list_bound_sources") return ["bound-a"];
-		if (cmd === "resolve_git_token") return null;
-		throw new Error(`unexpected invoke: ${cmd}`);
-	}) as InvokeFn;
-
-	const map = await boundSourceTokenMap(invoke);
-	assert.deepEqual(map, {});
-	// And the header builder turns an empty map into "no header".
-	assert.equal(gitTokensHeader(map), undefined);
 });
 
 // ─── apply-update / install-sync forward composition ────────────────────────
@@ -374,7 +376,7 @@ test("install/sync have no forward-header builder (P3 contract)", () => {
 		encodeGitTokensHeader,
 		gitTokensHeader,
 		resolveForwardedTokens,
-		boundSourceTokenMap,
+		checkForwardSources,
 		shouldForwardGitTokens,
 	});
 	assert.ok(

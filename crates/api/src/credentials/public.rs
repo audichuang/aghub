@@ -66,23 +66,6 @@ fn origin_of_source(source: &str) -> Option<ResolvedOrigin> {
 	origin_of(&resolved.clone_url)
 }
 
-/// List the source keys that have an explicit credential binding.
-///
-/// Reads the binding store from the keyring; returns an empty list when the
-/// store cannot be read (degrade rather than error). Used by the desktop to
-/// enumerate sources for remote `check-updates`.
-pub fn list_bound_sources() -> Vec<String> {
-	load_source_bindings()
-		.map(bound_source_keys)
-		.unwrap_or_default()
-}
-
-/// Pure projection of a [`SourceBindings`] to its source keys. Separated out so
-/// it can be unit-tested without touching the keyring.
-pub(crate) fn bound_source_keys(bindings: SourceBindings) -> Vec<String> {
-	bindings.0.into_keys().collect()
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -164,21 +147,5 @@ mod tests {
 		let origin = resolved.origin.expect("origin");
 		assert_eq!(origin.host, "git.internal");
 		assert_eq!(origin.port, Some(8443));
-	}
-
-	#[test]
-	fn bound_source_keys_returns_bound_keys() {
-		let mut b = SourceBindings::default();
-		b.0.insert("b/source".into(), "c2".into());
-		b.0.insert("a/source".into(), "c1".into());
-
-		let keys = bound_source_keys(b);
-		// BTreeMap iteration is sorted, so the order is deterministic.
-		assert_eq!(keys, vec!["a/source".to_string(), "b/source".to_string()]);
-	}
-
-	#[test]
-	fn bound_source_keys_empty_when_no_bindings() {
-		assert!(bound_source_keys(SourceBindings::default()).is_empty());
 	}
 }

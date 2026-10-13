@@ -9,7 +9,7 @@
 Role map (not a full tree):
 
 - `src/` — React frontend (`pages/`, `components/`, `lib/`, generated DTOs under `src/generated/`)
-- `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI), commands under `commands/`. Embeds `aghub-api` on localhost and uses `aghub-remote` for SSH; it depends on **neither** `aghub-core` nor `aghub-inference` — the app data root reaches it through the api re-export (root AGENTS.md "Where to Look"). It never opens the inference db: the provider list comes over HTTP from the embedded API. The credential wrappers it imports (`resolve_git_token_for_source` / `list_bound_sources`) DO read the OS keyring in-process.
+- `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI), commands under `commands/`. Embeds `aghub-api` on localhost and uses `aghub-remote` for SSH; it depends on **neither** `aghub-core` nor `aghub-inference` — the app data root reaches it through the api re-export (root AGENTS.md "Where to Look"). It never opens the inference db: the provider list comes over HTTP from the embedded API. The credential wrapper it imports (`resolve_git_token_for_source`) DOES read the OS keyring in-process.
 - `src-tauri/capabilities/` — permission manifests (read `default.json`; don't restate the list here)
 
 Page-level frontend notes: `src/AGENTS.md`.

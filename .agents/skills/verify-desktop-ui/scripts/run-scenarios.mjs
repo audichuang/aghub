@@ -118,7 +118,6 @@ const SHIM = `(() => {
       case "local_api_version": return "0.0.0-harness";
       case "get_last_skill_check": return null;
       case "get_skill_check_schedule": return { enabled: false };
-      case "list_bound_sources": return [];
       case "plugin:deep-link|get_current": return null;
       case "plugin:autostart|is_enabled": return false;
       case "plugin:updater|check": return null;

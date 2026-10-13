@@ -15,6 +15,8 @@
  * an error object.
  */
 
+import { sourceCoordinate } from "./source-coordinate.ts";
+
 /** The forward header name (matches the remote API + CORS allowlist). */
 export const GIT_TOKENS_HEADER = "X-Aghub-Git-Tokens";
 
@@ -147,19 +149,20 @@ export async function resolveForwardedTokens(
 }
 
 /**
- * Build the bound-source forward map for `check-updates`: enumerate the
- * explicitly-bound sources via `list_bound_sources`, then resolve a token per
- * bound source (skipping nulls). Returns an empty map when nothing is bound or
- * enumeration fails — forwarding then simply does not engage (graceful).
+ * The sources a `check-updates` request must forward tokens for: every
+ * non-local lock source in the checked scope, keyed by clone URL (the same key
+ * the source diff forwards under). Resolving each one through
+ * `resolve_git_token` applies the SAME binding-then-host-fallback rule the
+ * diff uses — enumerating only explicitly bound sources made a private repo
+ * covered by a host credential read `auth` in the list while its diff passed.
  */
-export async function boundSourceTokenMap(
-	invokeFn: InvokeFn,
-): Promise<ForwardedTokenMap> {
-	const bound = await invokeFn<string[]>("list_bound_sources");
-	if (!bound || bound.length === 0) {
-		return {};
-	}
-	return resolveForwardedTokens(bound, invokeFn);
+export function checkForwardSources(
+	rows: readonly { source: string; sourceUrl: string; sourceType: string }[],
+): string[] {
+	const keys = rows
+		.filter((row) => row.sourceType.toLowerCase() !== "local")
+		.map(sourceCoordinate);
+	return [...new Set(keys)];
 }
 
 /**

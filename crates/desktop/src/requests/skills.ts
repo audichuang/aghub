@@ -39,12 +39,13 @@ export type ForwardForSource = (
 ) => Promise<GitForwardHeaders | undefined>;
 
 /**
- * Resolve the per-request forward header for `check-updates` (bound sources),
- * or undefined when forwarding is not engaged. Supplied by `useGitForwarding`.
+ * Resolve the per-request forward header for `check-updates` (every lock source
+ * in the checked scope), or undefined when forwarding is not engaged. Supplied
+ * by `useGitForwarding`.
  */
-export type ForwardForBoundSources = () => Promise<
-	GitForwardHeaders | undefined
->;
+export type ForwardForCheck = (
+	params?: CheckSkillUpdatesParams,
+) => Promise<GitForwardHeaders | undefined>;
 
 interface SkillListQueryParams {
 	api: ApiClient;
@@ -441,11 +442,11 @@ interface CheckSkillUpdatesMutationParams {
 	onSuccess?: (data: SkillUpdateResponse[]) => void | Promise<void>;
 	onError?: (error: Error) => void;
 	/**
-	 * Resolver for the bound-source forward header (remote mode). `check-updates`
-	 * spans many sources, so the FE enumerates explicitly-bound sources and
-	 * forwards a token per bound source. Omitted in Local mode.
+	 * Resolver for the check forward header (remote mode). `check-updates` spans
+	 * many sources, so the FE forwards a token per lock source in the checked
+	 * scope. Omitted in Local mode.
 	 */
-	forwardForBoundSources?: ForwardForBoundSources;
+	forwardForCheck?: ForwardForCheck;
 }
 
 export interface CheckSkillUpdatesParams {
@@ -469,11 +470,11 @@ export function checkSkillUpdatesMutationOptions({
 	queryClient,
 	onSuccess,
 	onError,
-	forwardForBoundSources,
+	forwardForCheck,
 }: CheckSkillUpdatesMutationParams) {
 	return mutationOptions({
 		mutationFn: async (params?: CheckSkillUpdatesParams) => {
-			const headers = await forwardForBoundSources?.();
+			const headers = await forwardForCheck?.(params);
 			return api.skills.checkUpdates(params, headers);
 		},
 		onSuccess: async (data, variables) => {
@@ -492,8 +493,8 @@ interface CheckSkillUpdatesQueryParams {
 	/** When false the query does not fire (use to suppress when offline). */
 	enabled?: boolean;
 	params?: CheckSkillUpdatesParams;
-	/** Bound-source forward-header resolver (remote mode). Omitted locally. */
-	forwardForBoundSources?: ForwardForBoundSources;
+	/** Check forward-header resolver (remote mode). Omitted locally. */
+	forwardForCheck?: ForwardForCheck;
 	/**
 	 * Throttle threshold in ms. Default 10 minutes — matches the spec's
 	 * "staleTime = throttle" pattern so React Query skips a re-fetch if the
@@ -521,12 +522,12 @@ export function checkSkillUpdatesQueryOptions({
 	enabled = true,
 	params,
 	staleTime = 600_000, // 10 minutes
-	forwardForBoundSources,
+	forwardForCheck,
 }: CheckSkillUpdatesQueryParams) {
 	return queryOptions({
 		queryKey: checkSkillUpdatesQueryKey(params),
 		queryFn: async () => {
-			const headers = await forwardForBoundSources?.();
+			const headers = await forwardForCheck?.(params);
 			return api.skills.checkUpdates(params, headers);
 		},
 		enabled,

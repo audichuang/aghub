@@ -27,7 +27,7 @@ pub mod state;
 // crate-private; only these wrappers + their origin types are public.
 pub use crate::credentials::origin::ResolvedOrigin;
 pub use crate::credentials::public::{
-	list_bound_sources, resolve_git_token_for_source, ResolvedToken,
+	resolve_git_token_for_source, ResolvedToken,
 };
 
 /// Version of the `aghub-api` binary/library, shared with the desktop remote

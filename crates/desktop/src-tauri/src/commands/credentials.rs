@@ -75,17 +75,6 @@ pub async fn resolve_git_token(source: String) -> Option<ResolvedTokenDto> {
 	.unwrap_or(None)
 }
 
-/// List the source keys that have an explicit credential binding, in-process.
-///
-/// Used by the desktop to enumerate sources for remote `check-updates`. Returns
-/// an empty list when the binding store cannot be read.
-#[tauri::command]
-pub async fn list_bound_sources() -> Vec<String> {
-	tauri::async_runtime::spawn_blocking(aghub_api::list_bound_sources)
-		.await
-		.unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;

@@ -2,11 +2,10 @@ use crate::commands::{
 	cleanup_all_remotes, clear_log_files, connect_remote, disconnect_remote,
 	export_diagnostic_logs, force_redeploy_remote, get_last_skill_check,
 	get_log_dir_path, get_log_entries, get_log_stats, get_skill_check_schedule,
-	list_bound_sources, list_remote_directories, list_ssh_config_hosts,
-	local_api_version, minimize_to_tray, reinstall_remote_api,
-	remote_install_source_available, remote_status, resolve_aghub_cli,
-	resolve_git_token, set_skill_check_schedule, start_server, test_connection,
-	RemoteState,
+	list_remote_directories, list_ssh_config_hosts, local_api_version,
+	minimize_to_tray, reinstall_remote_api, remote_install_source_available,
+	remote_status, resolve_aghub_cli, resolve_git_token,
+	set_skill_check_schedule, start_server, test_connection, RemoteState,
 };
 use log::info;
 use tauri::{Manager, WebviewWindow};
@@ -329,7 +328,6 @@ pub fn run() {
 			remote_status,
 			minimize_to_tray,
 			resolve_git_token,
-			list_bound_sources,
 			resolve_aghub_cli,
 			get_skill_check_schedule,
 			set_skill_check_schedule,

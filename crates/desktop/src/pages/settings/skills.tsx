@@ -75,6 +75,7 @@ import {
 import { sourcesListQueryOptions } from "../../requests/sources";
 import { createSkillSearch } from "../../lib/skill-search";
 import { queryKeys } from "../../requests/keys";
+import { sourceCoordinate } from "../../lib/source-coordinate";
 
 // ─── Main page ───────────────────────────────────────────────────────────────
 
@@ -82,7 +83,7 @@ export default function SkillsPage() {
 	const { t, i18n } = useTranslation();
 	const [, setLocation] = useLocation();
 	const api = useApi();
-	const { forBoundSources: forwardForBoundSources } = useGitForwarding();
+	const { forCheck: forwardForCheck } = useGitForwarding();
 	const queryClient = useQueryClient();
 
 	// ── Scope: the page's single data root (see lib/skills-page-url.ts) ──
@@ -155,7 +156,7 @@ export default function SkillsPage() {
 			api,
 			params: updateCheckParams,
 			enabled: navigator.onLine && projectIsReady,
-			forwardForBoundSources,
+			forwardForCheck,
 		}),
 	);
 
@@ -177,7 +178,7 @@ export default function SkillsPage() {
 		checkSkillUpdatesMutationOptions({
 			api,
 			queryClient,
-			forwardForBoundSources,
+			forwardForCheck,
 			onSuccess: (data) => {
 				const updateCount = data.filter(
 					(s) =>
@@ -576,7 +577,7 @@ export default function SkillsPage() {
 		// set SOMETHING when the row can't be found in this scope's list, so
 		// the right panel can say so instead of silently doing nothing.
 		const row = resolveSourceRow(sourceRows, source);
-		const nextValue = row ? row.sourceUrl || row.source : source;
+		const nextValue = row ? sourceCoordinate(row) : source;
 		const next = selectSourceParams(nextValue);
 		void setSelectedSkillName(next.skill);
 		void setSelectedSourceParam(next.source);
@@ -879,10 +880,7 @@ export default function SkillsPage() {
 									// Keyed so per-source state (a running "Update
 									// all") cannot leak into another source's panel
 									// and disable its buttons.
-									key={
-										resolvedSourceRow.sourceUrl ||
-										resolvedSourceRow.source
-									}
+									key={sourceCoordinate(resolvedSourceRow)}
 									row={resolvedSourceRow}
 									onImport={() => setSourceImporting(true)}
 								/>

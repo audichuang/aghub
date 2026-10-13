@@ -42,6 +42,7 @@ import { useSkillCoverage } from "../requests/agents";
 import { queryKeys } from "../requests/keys";
 import { applySkillUpdateMutationOptions } from "../requests/skills";
 import { sourceDiffQueryOptions } from "../requests/sources";
+import { sourceCoordinate } from "../lib/source-coordinate";
 
 const SKILL_FILE_SUFFIX_RE = /\/SKILL\.md$/;
 const EMPTY_DIFFS: SourceSkillDiff[] = [];
@@ -358,7 +359,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	// this list is keyed on, and resolvable back to a clone URL, but not itself a
 	// fetch coordinate. Prefer the recorded URL; fall back for entries that have
 	// none (e.g. local sources).
-	const diffSource = row.sourceUrl || row.source;
+	const diffSource = sourceCoordinate(row);
 
 	const { data, isLoading, isFetching, isError } = useQuery(
 		sourceDiffQueryOptions({
@@ -872,7 +873,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const SourceIcon = row.sourceType === "local" ? FolderIcon : GlobeAltIcon;
 
 	// The dialog needs sourceUrl (not the display name) so host resolution works
-	const credentialBindingSource = row.sourceUrl || row.source;
+	const credentialBindingSource = sourceCoordinate(row);
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
