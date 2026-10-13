@@ -52,8 +52,17 @@ The first fix, `has_unhashed_entries`, stopped recursing at a private depth of
 `32`, so trees 33-64 deep that the hash accepts were refused with a false
 "contains symlinks" reason.
 
-Rule: anything the hash cannot see answers `Unprovable`, never `Landed`; the
-walker uses the hash's own `skill::hash::MAX_DEPTH`.
+The depth-bound fix then stopped at `depth >= MAX_DEPTH`, while the hash
+refuses only `depth > MAX_DEPTH` — it still lists the directory AT the bound
+and skips its symlinks silently. A symlink there was again certified `Landed`
+and removed. The private walker had drifted from the hash twice, so it was
+deleted: `skill::hash::compute_skill_folder_hash_covering_all` reports every
+skip from the SAME walk that computes the digest (`HashError::Uncovered`).
+Pinned by `round_five_delta_fixes_stay_closed` case (2) at `MAX_DEPTH`.
+
+Rule: anything the hash cannot see answers `Unprovable`, never `Landed`, and
+"what the hash cannot see" is answered by the hash's own traversal — never a
+second walker.
 
 Commits: 8267b920 (symlink), e84f4967 (depth bound).
 

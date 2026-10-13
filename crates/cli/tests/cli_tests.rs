@@ -14032,23 +14032,24 @@ fn round_five_delta_fixes_stay_closed() {
 	//
 	// `skill::hash` skips symlinks by design (npx compatibility), so two trees
 	// differing ONLY in a symlink hash EQUAL — and the removal that equality
-	// authorised then destroyed the difference.
-	{
+	// authorised then destroyed the difference. Also at the hash's own depth
+	// bound: it still lists the directory AT `MAX_DEPTH`, so the proof must too.
+	for depth in [0, skill::hash::MAX_DEPTH] {
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
 		let private = home.path().join(".claude/skills/foo");
-		std::fs::create_dir_all(&private).unwrap();
-		std::fs::create_dir_all(home.path().join(".aghub/foo")).unwrap();
-		std::fs::create_dir_all(home.path().join("ext")).unwrap();
+		let deep: std::path::PathBuf =
+			std::iter::repeat_n("d", depth).collect();
 		let body = "---\nname: foo\ndescription: d\n---\n\nSAME\n";
-		std::fs::write(private.join("SKILL.md"), body).unwrap();
-		std::fs::write(home.path().join(".aghub/foo/SKILL.md"), body).unwrap();
+		for root in [&private, &home.path().join(".aghub/foo")] {
+			std::fs::create_dir_all(root.join(&deep)).unwrap();
+			std::fs::write(root.join("SKILL.md"), body).unwrap();
+		}
+		std::fs::create_dir_all(home.path().join("ext")).unwrap();
 		std::fs::write(home.path().join("ext/real.txt"), "payload").unwrap();
-		std::os::unix::fs::symlink(
-			home.path().join("ext/real.txt"),
-			private.join("extra"),
-		)
-		.unwrap();
+		let link = private.join(&deep).join("extra");
+		std::os::unix::fs::symlink(home.path().join("ext/real.txt"), &link)
+			.unwrap();
 
 		let out = isolated_cli(home.path(), state.path())
 			.args([
@@ -14069,8 +14070,9 @@ fn round_five_delta_fixes_stay_closed() {
 			.output()
 			.unwrap();
 		assert!(
-			private.join("extra").exists(),
-			"the source's symlink must survive a proof that cannot see it"
+			std::fs::symlink_metadata(&link).is_ok(),
+			"depth {depth}: the source's symlink must survive a proof that \
+			 cannot see it"
 		);
 		assert!(!out.status.success());
 		// And the refusal must say it could not PROVE, not that content differs

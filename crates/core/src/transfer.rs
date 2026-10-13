@@ -339,42 +339,6 @@ enum ContentProof {
 	Unprovable(String),
 }
 
-/// Does this tree hold anything the folder hash cannot see? Two trees differing
-/// only there hash EQUAL.
-/// See docs/history/core-transfer.md#folder-hash-blind-spots-authorised-a-removal
-fn has_unhashed_entries(dir: &Path, depth: usize) -> bool {
-	// The hash's OWN depth bound, not a private guess; past it the hash refuses
-	// the tree itself with the accurate "could not be hashed" answer.
-	if depth >= skill::hash::MAX_DEPTH {
-		return false;
-	}
-	let Ok(entries) = std::fs::read_dir(dir) else {
-		return true;
-	};
-	for entry in entries.flatten() {
-		let path = entry.path();
-		let Ok(meta) = std::fs::symlink_metadata(&path) else {
-			return true;
-		};
-		let ft = meta.file_type();
-		if ft.is_symlink() {
-			return true;
-		}
-		if ft.is_dir() {
-			let name = entry.file_name();
-			// The hash skips these two by name; content inside them is
-			// invisible to it, so it cannot authorise a removal either.
-			if name == ".git" || name == "node_modules" {
-				return true;
-			}
-			if has_unhashed_entries(&path, depth + 1) {
-				return true;
-			}
-		}
-	}
-	false
-}
-
 fn prove_content_landed(
 	source_root: &Path,
 	target: &InstallTarget,
@@ -399,21 +363,24 @@ fn prove_content_landed(
 	let Some(installed_dir) = installed_dir.parent() else {
 		return unprovable("the target's recorded path has no directory");
 	};
-	if has_unhashed_entries(source_root, 0)
-		|| has_unhashed_entries(installed_dir, 0)
-	{
-		return unprovable(
-			"the skill folder contains symbolic links or a .git/node_modules \
-			 directory, which the npx-compatible folder hash deliberately does \
-			 not cover — so two folders differing only there compare EQUAL",
-		);
-	}
+	// The strict hash refuses a tree its digest cannot fully see, from the
+	// same walk that computes it — equality of what it skips proves nothing.
+	// See docs/history/core-transfer.md#folder-hash-blind-spots-authorised-a-removal
+	use skill::hash::{compute_skill_folder_hash_covering_all, HashError};
 	match (
-		skill::hash::compute_skill_folder_hash(source_root),
-		skill::hash::compute_skill_folder_hash(installed_dir),
+		compute_skill_folder_hash_covering_all(source_root),
+		compute_skill_folder_hash_covering_all(installed_dir),
 	) {
 		(Ok(a), Ok(b)) if a == b => ContentProof::Landed,
 		(Ok(_), Ok(_)) => ContentProof::Differs,
+		(Err(HashError::Uncovered), _) | (_, Err(HashError::Uncovered)) => {
+			unprovable(
+				"the skill folder contains symbolic links, special files or a \
+				 .git/node_modules directory, which the npx-compatible folder \
+				 hash deliberately does not cover — so two folders differing \
+				 only there compare EQUAL",
+			)
+		}
 		_ => unprovable(
 			"the folder could not be hashed (it may exceed the file or size \
 			 bounds the lock format allows)",

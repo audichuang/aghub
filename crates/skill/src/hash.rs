@@ -24,6 +24,11 @@ pub enum HashError {
 	Io(#[from] io::Error),
 	#[error("skill folder exceeds bounds: {0}")]
 	Bounds(String),
+	/// Only from [`compute_skill_folder_hash_covering_all`]: the walk skipped
+	/// an entry (symlink, `.git`, `node_modules`, non-regular file), so two
+	/// trees differing only there would hash EQUAL.
+	#[error("skill folder holds entries the folder hash does not cover")]
+	Uncovered,
 }
 
 /// True if `hash` is the empty-input placeholder (treat as "unknown" → recompute).
@@ -41,6 +46,23 @@ pub fn is_placeholder_digest(hash: &str) -> bool {
 /// with no delimiter.
 pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 	hash_files(collect_skill_files(dir)?)
+}
+
+/// [`compute_skill_folder_hash`], but [`HashError::Uncovered`] when the walk
+/// skipped anything — for callers that treat digest equality as proof the
+/// trees are identical. The SAME traversal reports the skips, so what the
+/// digest cannot see and what this refuses can never disagree.
+pub fn compute_skill_folder_hash_covering_all(
+	dir: &Path,
+) -> Result<String, HashError> {
+	let mut files = Vec::new();
+	let mut total_bytes = 0;
+	let mut skipped = false;
+	collect(dir, dir, 0, &mut files, &mut total_bytes, &mut skipped)?;
+	if skipped {
+		return Err(HashError::Uncovered);
+	}
+	hash_files(files)
 }
 
 /// Raw and comparison digests from ONE traversal and ONE read of each file, so
@@ -183,7 +205,7 @@ pub fn collect_skill_files(
 ) -> Result<Vec<(String, std::path::PathBuf)>, HashError> {
 	let mut files = Vec::new();
 	let mut total_bytes = 0;
-	collect(dir, dir, 0, &mut files, &mut total_bytes)?;
+	collect(dir, dir, 0, &mut files, &mut total_bytes, &mut false)?;
 	Ok(files)
 }
 
@@ -222,6 +244,7 @@ fn collect(
 	depth: usize,
 	out: &mut Vec<(String, std::path::PathBuf)>,
 	total_bytes: &mut u64,
+	skipped: &mut bool,
 ) -> Result<(), HashError> {
 	if depth > MAX_DEPTH {
 		return Err(HashError::Bounds(format!(
@@ -235,14 +258,16 @@ fn collect(
 		let meta = std::fs::symlink_metadata(&path)?;
 		let ft = meta.file_type();
 		if ft.is_symlink() {
+			*skipped = true;
 			continue; // skip symlinks; never descend into symlinked dirs
 		}
 		if ft.is_dir() {
 			let name = entry.file_name();
 			if name == ".git" || name == "node_modules" {
+				*skipped = true;
 				continue;
 			}
-			collect(root, &path, depth + 1, out, total_bytes)?;
+			collect(root, &path, depth + 1, out, total_bytes, skipped)?;
 		} else if ft.is_file() {
 			if out.len() + 1 > MAX_FILES {
 				return Err(HashError::Bounds(format!(
@@ -261,6 +286,8 @@ fn collect(
 				.to_string_lossy()
 				.replace('\\', "/");
 			out.push((rel, path));
+		} else {
+			*skipped = true; // FIFO, socket, device: not hashed either
 		}
 	}
 	Ok(())
@@ -593,6 +620,37 @@ mod tests {
 			compute_skill_folder_hash(dir.path()).unwrap(),
 			lower_hex(&e.finalize())
 		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn covering_all_refuses_exactly_what_the_hash_skips() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("a.txt"), b"a").unwrap();
+		assert_eq!(
+			compute_skill_folder_hash_covering_all(dir.path()).unwrap(),
+			compute_skill_folder_hash(dir.path()).unwrap()
+		);
+		for skipped in ["link", ".git", "node_modules"] {
+			let dir = tempdir().unwrap();
+			fs::write(dir.path().join("a.txt"), b"a").unwrap();
+			let p = dir.path().join("sub").join(skipped);
+			fs::create_dir_all(p.parent().unwrap()).unwrap();
+			if skipped == "link" {
+				std::os::unix::fs::symlink(dir.path().join("a.txt"), &p)
+					.unwrap();
+			} else {
+				fs::create_dir(&p).unwrap();
+			}
+			assert!(compute_skill_folder_hash(dir.path()).is_ok());
+			assert!(
+				matches!(
+					compute_skill_folder_hash_covering_all(dir.path()),
+					Err(HashError::Uncovered)
+				),
+				"{skipped}"
+			);
+		}
 	}
 
 	#[test]
