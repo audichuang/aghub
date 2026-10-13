@@ -188,10 +188,15 @@ export function BulkDeleteDialog({
 			}
 			return { deleted: promises.length };
 		},
-		onSuccess: async () => {
+		// A partial failure throws, but the requests that succeeded still
+		// changed MCP config — refresh on every outcome, not only success.
+		// (Skill deletes refresh inside `deleteSkill` itself.)
+		onSettled: async () => {
 			if (resourceType === "mcp" || resourceType === "mixed") {
 				await invalidateMcpQueries(queryClient);
 			}
+		},
+		onSuccess: () => {
 			setIncludeUnmanaged(false);
 			onSuccess();
 			onClose();
