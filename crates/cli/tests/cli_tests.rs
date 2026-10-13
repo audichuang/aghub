@@ -14074,6 +14074,12 @@ fn round_five_delta_fixes_stay_closed() {
 			"depth {depth}: the source's symlink must survive a proof that \
 			 cannot see it"
 		);
+		assert!(
+			std::fs::symlink_metadata(home.path().join(".cursor/skills/foo"))
+				.is_err(),
+			"depth {depth}: the refused reconcile must roll back the Referrer \
+			 it created"
+		);
 		assert!(!out.status.success());
 		// And the refusal must say it could not PROVE, not that content differs
 		// — sending someone to reconcile a difference that may not exist is its

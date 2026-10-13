@@ -7,6 +7,7 @@ use crate::{
 	registry, WriteScope,
 };
 use log::{info, warn};
+use skill::hash::{compute_skill_folder_hash_covering_all, HashError};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -366,7 +367,6 @@ fn prove_content_landed(
 	// The strict hash refuses a tree its digest cannot fully see, from the
 	// same walk that computes it — equality of what it skips proves nothing.
 	// See docs/history/core-transfer.md#folder-hash-blind-spots-authorised-a-removal
-	use skill::hash::{compute_skill_folder_hash_covering_all, HashError};
 	match (
 		compute_skill_folder_hash_covering_all(source_root),
 		compute_skill_folder_hash_covering_all(installed_dir),

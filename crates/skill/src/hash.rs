@@ -631,7 +631,7 @@ mod tests {
 			compute_skill_folder_hash_covering_all(dir.path()).unwrap(),
 			compute_skill_folder_hash(dir.path()).unwrap()
 		);
-		for skipped in ["link", ".git", "node_modules"] {
+		for skipped in ["link", ".git", "node_modules", "socket"] {
 			let dir = tempdir().unwrap();
 			fs::write(dir.path().join("a.txt"), b"a").unwrap();
 			let p = dir.path().join("sub").join(skipped);
@@ -639,6 +639,8 @@ mod tests {
 			if skipped == "link" {
 				std::os::unix::fs::symlink(dir.path().join("a.txt"), &p)
 					.unwrap();
+			} else if skipped == "socket" {
+				std::os::unix::net::UnixListener::bind(&p).unwrap();
 			} else {
 				fs::create_dir(&p).unwrap();
 			}

@@ -64,7 +64,7 @@ Rule: anything the hash cannot see answers `Unprovable`, never `Landed`, and
 "what the hash cannot see" is answered by the hash's own traversal — never a
 second walker.
 
-Commits: 8267b920 (symlink), e84f4967 (depth bound).
+Commits: 8267b920 (symlink), e84f4967 (depth bound), fae2ec88 (one walk).
 
 ## Shared backing destroyed a resource
 
