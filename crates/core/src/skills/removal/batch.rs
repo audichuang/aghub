@@ -424,6 +424,14 @@ impl SkillRemovalResponse {
 		}
 	}
 
+	/// Some row's verdict is `Refused`: a commit would reject this scope, so a
+	/// dry run must report the same stop.
+	pub(crate) fn has_refused_row(&self) -> bool {
+		self.rows
+			.iter()
+			.any(|r| matches!(r.verdict, Verdict::Refused { .. }))
+	}
+
 	/// Project this batch removal response into an aggregate single-skill removal view.
 	///
 	/// Yields the aggregate outcome, success, paths, and any fatal error across ALL rows.
@@ -538,17 +546,11 @@ impl SkillRemovalResponse {
 			outcome,
 		};
 
-		let code = self.rows.iter().find_map(|r| {
-			if dry_run && matches!(r.verdict, Verdict::Refused { .. }) {
-				Some(crate::error_codes::wire_code(
-					&ConfigError::UnsupportedOperation {
-						message: String::new(),
-						rejected_targets: None,
-					},
-				))
-			} else {
-				None
-			}
+		let code = (dry_run && self.has_refused_row()).then(|| {
+			crate::error_codes::wire_code(&ConfigError::UnsupportedOperation {
+				message: String::new(),
+				rejected_targets: None,
+			})
 		});
 
 		Ok(SingleSkillRemovalView {
@@ -634,8 +636,10 @@ pub fn remove_skill_across_scopes(
 			keeps_master: false,
 		};
 		let result = remove_skill_batch_with(&req, &plugin_roots);
+		let mut would_stop = false;
 		if let Ok(resp) = &result {
 			wrote |= resp.wrote_anything();
+			would_stop = dry_run && resp.has_refused_row();
 		}
 		let view = match result.and_then(|r| r.to_single_view(dry_run)) {
 			Ok(view) => view,
@@ -664,7 +668,7 @@ pub fn remove_skill_across_scopes(
 			error: None,
 		});
 		// The commit refuses this scope and stops the run here; the dry run must too.
-		if dry_run && view.code.is_some() {
+		if would_stop {
 			stop = Some(if previewed {
 				RemovalKind::Partial
 			} else {
