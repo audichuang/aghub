@@ -63,7 +63,8 @@ Pinned by: `delete_by_path_keeps_shared_slot_read_by_other_agents`,
 `dotfiles_shared_private_dir_is_kept_by_name_and_by_path_for_either_reader`
 (`crates/api/src/routes/skills.rs` tests).
 
-`delete_by_path_rejects_aghub_store_path_before_the_keep_rule` pins the earlier
+`delete_by_path_rejects_aghub_store_path_before_the_keep_rule`
+(`crates/core/src/skills/removal/batch/tests.rs`) pins the earlier
 per-agent path validation only; it deliberately does not claim to reach or pin
 the core keep rule.
 
@@ -148,10 +149,11 @@ Cost: a skill whose `SKILL.md` no longer parses, or whose folder differs from
 its name, can no longer be deleted by path.
 
 Pinned by: `delete_by_path_refuses_category_folder_and_keeps_every_skill_under_it`,
-`delete_by_path_refuses_skill_subdirectory_and_stray_file`,
 `delete_by_path_symlink_loop_refuses_without_leaking_paths`,
 `delete_by_path_needs_confirm_matches_core_plan_for_shared_slot`
 (`crates/api/src/routes/skills.rs`);
+`delete_by_path_refuses_skill_subdirectory_and_stray_file`
+(`crates/core/src/skills/removal/batch/tests.rs`);
 `by_path_skill_dir_accepts_dir_and_skill_md_refuses_other_files`,
 `by_path_skill_dir_refuses_a_symlink_loop_as_unresolvable`,
 `by_path_skill_name_needs_its_own_parsable_skill_md`
@@ -247,7 +249,8 @@ Pinned by: `delete_by_path_rejects_trailing_dotdot_project_agents_slot`,
 `delete_by_path_rejects_child_then_dotdot`,
 `delete_by_path_rejects_dotdot_into_aghub_store`,
 `delete_by_path_rejects_cross_slot_dotdot`,
-`delete_by_path_accepts_dotdot_in_project_root` (`crates/api/src/routes/skills.rs`);
+`delete_by_path_accepts_dotdot_in_project_root`
+(`crates/core/src/skills/removal/batch/tests.rs`);
 `assert_strictly_contained_rejects_inner_root_nested_in_another_root`
 (`crates/core/src/skills/removal.rs`).
 
