@@ -3981,7 +3981,7 @@ mod tests {
 
 	/// The by-path preview reports the SAME `needs_confirm` core's by-name plan
 	/// does: releasing a real directory from a shared Referrer root needs it, a
-	/// private copy does not. The route used to hand-build `false` for both.
+	/// private copy does not.
 	#[cfg(unix)]
 	#[test]
 	fn delete_by_path_needs_confirm_matches_core_plan_for_shared_slot() {

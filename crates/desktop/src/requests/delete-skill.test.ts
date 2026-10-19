@@ -14,6 +14,7 @@ import {
 	type BackendHolders,
 	type DeleteSkillIntent,
 	type DeleteSkillVerdict,
+	scopeTargetsFor,
 } from "./delete-skill.ts";
 
 const t = (
@@ -940,4 +941,21 @@ test("fetchBulkHolders returns empty managed and byGroup when no skill groups pr
 
 	assert.deepEqual(result.managed, []);
 	assert.deepEqual(result.byGroup, {});
+});
+
+test("scopeTargetsFor orders global before project and treats a missing source as global", () => {
+	const scopes = scopeTargetsFor(
+		[
+			{ agent: "codex", source: "project" },
+			{ agent: "claude", source: null },
+			{ agent: "cursor", source: "global" },
+			{ agent: "claude", source: "global" },
+			{ agent: null, source: "global" },
+		],
+		"/p",
+	);
+	assert.deepEqual(scopes, [
+		{ scope: "global", projectRoot: null, agents: ["claude", "cursor"] },
+		{ scope: "project", projectRoot: "/p", agents: ["codex"] },
+	]);
 });

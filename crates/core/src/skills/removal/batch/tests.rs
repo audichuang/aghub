@@ -2947,18 +2947,17 @@ fn by_path(
 	source_path: String,
 	scope: WriteScope,
 	agents: Vec<AgentType>,
-	confirm: bool,
 ) -> Result<SingleSkillRemovalView> {
 	let req = SkillRemovalRequest {
 		target: SkillRemovalTarget::ByPath(PathBuf::from(source_path)),
 		scope,
 		agents,
-		dry_run: !confirm,
+		dry_run: false,
 		all_agents: false,
 		prior_removed_paths: Vec::new(),
 		keeps_master: false,
 	};
-	remove_skill_batch(&req).and_then(|r| r.to_single_view(!confirm))
+	remove_skill_batch(&req).and_then(|r| r.to_single_view(false))
 }
 
 /// The refusal message of a by-path request that must be rejected as an
@@ -2968,9 +2967,8 @@ fn by_path_refused(
 	source_path: String,
 	scope: WriteScope,
 	agents: Vec<AgentType>,
-	confirm: bool,
 ) -> String {
-	match by_path(source_path, scope, agents, confirm) {
+	match by_path(source_path, scope, agents) {
 		Ok(view) => panic!("by-path must be refused, got {view:?}"),
 		Err(ConfigError::InvalidConfig(msg)) => msg,
 		Err(other) => panic!("expected InvalidConfig, got {other:?}"),
@@ -3002,7 +3000,6 @@ fn delete_by_path_rejects_trailing_dotdot_project_agents_slot() {
 			ResourceScope::ProjectOnly,
 			Some(&proj),
 		)),
-		true,
 	);
 
 	assert!(slot.exists(), "slot dir must survive");
@@ -3037,7 +3034,6 @@ fn delete_by_path_rejects_trailing_dotdot_project_cursor_slot() {
 			ResourceScope::ProjectOnly,
 			Some(&proj),
 		)),
-		true,
 	);
 
 	assert!(slot.exists(), "cursor slot dir must survive");
@@ -3067,7 +3063,6 @@ fn delete_by_path_rejects_trailing_dotdot_global_agents_slot() {
 		format!("{}/..", y.display()),
 		WriteScope::Global,
 		agent_list(&slot_reader_ids(&slot, ResourceScope::GlobalOnly, None)),
-		true,
 	);
 
 	assert!(slot.exists(), "global slot dir must survive");
@@ -3102,7 +3097,6 @@ fn delete_by_path_rejects_dotdot_in_middle_of_path() {
 			ResourceScope::ProjectOnly,
 			Some(&proj),
 		)),
-		true,
 	);
 
 	assert!(slot.exists(), "slot dir must survive");
@@ -3143,7 +3137,6 @@ fn delete_by_path_rejects_dotdot_before_skills_root_with_no_strippable_prefix()
 			ResourceScope::ProjectOnly,
 			Some(&proj),
 		)),
-		true,
 	);
 
 	assert!(slot.exists(), "slot dir must survive");
@@ -3187,7 +3180,6 @@ fn delete_by_path_rejects_dotdot_before_skills_root_without_trailing_dotdot() {
 			ResourceScope::ProjectOnly,
 			Some(&proj),
 		)),
-		true,
 	);
 
 	assert!(slot.exists(), "slot dir must survive");
@@ -3233,7 +3225,6 @@ fn delete_by_path_accepts_dotdot_in_project_root() {
 			ResourceScope::ProjectOnly,
 			Some(&unnormalized_proj),
 		)),
-		true,
 	)
 	.expect("by-path delete must succeed");
 
@@ -3280,7 +3271,6 @@ fn delete_by_path_rejects_cross_slot_dotdot() {
 		format!("{}/.cursor/skills/../../.agents/skills/y", proj.display()),
 		WriteScope::project(proj.clone()),
 		agent_list(&ids),
-		true,
 	);
 	let err = msg.as_str();
 	assert!(err.contains("'..'"), "error must mention '..': {err}");
@@ -3314,7 +3304,6 @@ fn delete_by_path_rejects_skills_root_itself() {
 		slot.display().to_string(),
 		WriteScope::project(proj.clone()),
 		agent_list(&readers),
-		true,
 	);
 
 	assert!(slot.exists(), "slot dir must survive");
@@ -3333,7 +3322,6 @@ fn delete_by_path_rejects_skills_root_itself() {
 		slot.join("SKILL.md").display().to_string(),
 		WriteScope::project(proj.clone()),
 		agent_list(&readers),
-		true,
 	);
 
 	assert!(slot.exists(), "slot dir must survive");
@@ -3364,7 +3352,6 @@ fn delete_by_path_rejects_skills_root_itself() {
 		global_slot.display().to_string(),
 		WriteScope::Global,
 		agent_list(&global_readers),
-		true,
 	);
 
 	assert!(global_slot.exists(), "global slot dir must survive");
@@ -3410,7 +3397,6 @@ fn delete_by_path_rejects_skill_md_directly_under_the_skills_root() {
 		slot.join("SKILL.md").display().to_string(),
 		WriteScope::project(proj.clone()),
 		agent_list(&readers),
-		true,
 	);
 
 	assert!(slot.exists(), "slot dir must survive");
@@ -3445,7 +3431,6 @@ fn delete_by_path_rejects_child_then_dotdot() {
 		format!("{}/{}", y.display(), ".."),
 		WriteScope::project(proj.clone()),
 		agent_list(&readers),
-		true,
 	);
 
 	assert!(y.join("SKILL.md").exists(), "skill y must survive");
@@ -3478,7 +3463,6 @@ fn delete_by_path_refuses_skill_subdirectory_and_stray_file() {
 			target.display().to_string(),
 			WriteScope::Global,
 			vec![AgentType::Claude],
-			true,
 		);
 		assert!(z.join("SKILL.md").exists(), "the skill must survive");
 		assert!(z.join("scripts/run.sh").exists());
@@ -3516,7 +3500,6 @@ fn delete_by_path_rejects_aghub_store_path_before_the_keep_rule() {
 		master.join("SKILL.md").display().to_string(),
 		WriteScope::project(proj.clone()),
 		vec![AgentType::Cursor],
-		true,
 	);
 
 	assert!(
@@ -3565,7 +3548,6 @@ fn delete_by_path_rejects_dotdot_into_aghub_store() {
 		dotdot_path,
 		WriteScope::project(proj.clone()),
 		vec![AgentType::Cursor],
-		true,
 	);
 
 	assert!(

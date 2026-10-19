@@ -1558,6 +1558,42 @@ pub enum PruneStatus {
 	WouldPrune(Vec<String>),
 }
 
+/// The error for a `Verdict::Refused`: one producer for the commit tail and the
+/// by-name preflight rows, so the wording and rejected-target rows cannot drift.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refused_error(
+	reason: &str,
+	kind: &str,
+	path: Option<&Path>,
+	all_agents: bool,
+	agent_name: &str,
+	rejected: &[AgentType],
+	requested_agents: &[AgentType],
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> crate::errors::ConfigError {
+	let operation = if all_agents {
+		"remove from every agent"
+	} else {
+		"remove for this agent alone"
+	};
+	let rejected_targets = batch::build_rejected_targets(
+		rejected,
+		reason,
+		Some(kind),
+		path,
+		scope,
+		project_root,
+		requested_agents,
+	);
+	crate::errors::ConfigError::unsupported_operation_with_targets(
+		operation,
+		reason,
+		agent_name,
+		Some(rejected_targets),
+	)
+}
+
 /// The shared tail of a planned removal: verdict -> refuse / preview / commit.
 /// One producer for the manager and the by-path copy layout, so the refusal
 /// wording and the rejected-target rows cannot drift between them.
@@ -1581,28 +1617,17 @@ pub(crate) fn settle_removal(
 			ref path,
 		} = verdict
 		{
-			let operation = if all_agents {
-				"remove from every agent"
-			} else {
-				"remove for this agent alone"
-			};
-			let rejected_targets = batch::build_rejected_targets(
-				requested_agents,
+			return Err(refused_error(
 				reason,
-				Some(kind),
+				kind,
 				path.as_deref(),
+				all_agents,
+				agent_name,
+				requested_agents,
+				requested_agents,
 				scope,
 				project_root,
-				requested_agents,
-			);
-			return Err(
-				crate::errors::ConfigError::unsupported_operation_with_targets(
-					operation,
-					reason,
-					agent_name,
-					Some(rejected_targets),
-				),
-			);
+			));
 		}
 	}
 

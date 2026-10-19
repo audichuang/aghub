@@ -20,6 +20,7 @@ import { useApi } from "../hooks/use-api";
 import {
 	deleteSkill,
 	fetchSkillHoldersForGroup,
+	scopeTargetsFor,
 	splitDeleteTargets,
 } from "../requests/delete-skill";
 import type { LocationGroup, SkillGroup } from "./skill-detail-helpers";
@@ -231,28 +232,7 @@ export function DeleteSkillDialog({
 					!!item.agent,
 			);
 
-			const globalItems = itemsWithAgent.filter(
-				(item) => item.source === "global",
-			);
-			const projectItems = itemsWithAgent.filter(
-				(item) => item.source === "project",
-			);
-
-			const scopes = [];
-			if (globalItems.length > 0) {
-				scopes.push({
-					scope: "global" as const,
-					projectRoot: null,
-					agents: globalItems.map((item) => item.agent),
-				});
-			}
-			if (projectItems.length > 0) {
-				scopes.push({
-					scope: "project" as const,
-					projectRoot: projectPath ?? null,
-					agents: projectItems.map((item) => item.agent),
-				});
-			}
+			const scopes = scopeTargetsFor(itemsWithAgent, projectPath);
 
 			const res = await deleteSkill({
 				api,

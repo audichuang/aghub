@@ -98,9 +98,7 @@ export interface BulkDeleteGroup {
 }
 
 export interface BulkDeleteRequest {
-	resourceType: "mcp";
 	name: string;
-	groupKey: string;
 	agent: string;
 	scope: "global" | "project";
 	projectRoot?: string;
@@ -112,6 +110,38 @@ export interface BulkSkillDelete {
 	name: string;
 	scopes: ScopeTarget[];
 	agents: string[];
+}
+
+// Anything not marked project is global: one rule for every delete path.
+const scopeOf = (item: DeleteTargetItem): "global" | "project" =>
+	item.source === "project" ? "project" : "global";
+
+/**
+ * A skill's named items as by-name scope targets, global first then project:
+ * core stops at the first scope that does not finish, so the order decides
+ * which scopes may already be written. One spelling for every delete dialog.
+ */
+export function scopeTargetsFor(
+	items: readonly DeleteTargetItem[],
+	projectPath?: string | null,
+): ScopeTarget[] {
+	const scopes: ScopeTarget[] = [];
+	for (const scope of ["global", "project"] as const) {
+		const agents = [
+			...new Set(
+				items.flatMap((i) =>
+					i.agent && scopeOf(i) === scope ? [i.agent] : [],
+				),
+			),
+		];
+		if (agents.length > 0)
+			scopes.push({
+				scope,
+				projectRoot: scope === "project" ? (projectPath ?? null) : null,
+				agents,
+			});
+	}
+	return scopes;
 }
 
 export interface BuildBulkDeleteRequestsOptions {
@@ -140,9 +170,6 @@ export function buildBulkDeleteRequests({
 	const skippedGroupKeys: string[] = [];
 	const seen = new Set<string>();
 
-	const scopeOf = (item: DeleteTargetItem): "global" | "project" =>
-		item.source === "project" ? "project" : "global";
-
 	for (const group of groups) {
 		const groupResourceType = group.resourceType ?? resourceType;
 		const isSkill = groupResourceType === "skill";
@@ -166,24 +193,7 @@ export function buildBulkDeleteRequests({
 		}
 
 		if (isSkill) {
-			// Global first, then project: same order as the single-skill dialog.
-			const scopes: ScopeTarget[] = [];
-			for (const scope of ["global", "project"] as const) {
-				const agents = [
-					...new Set(
-						validCandidateItems
-							.filter((i) => scopeOf(i) === scope)
-							.map((i) => i.agent as string),
-					),
-				];
-				if (agents.length > 0)
-					scopes.push({
-						scope,
-						projectRoot:
-							scope === "project" ? (projectPath ?? null) : null,
-						agents,
-					});
-			}
+			const scopes = scopeTargetsFor(validCandidateItems, projectPath);
 			skillDeletes.push({
 				name: group.key,
 				scopes,
@@ -201,15 +211,13 @@ export function buildBulkDeleteRequests({
 				.filter((other) => scopeOf(other) === scope)
 				.flatMap((other) => (other.agent ? [other.agent] : []));
 
-			const dedupKey = `mcp:${agent}:${item.name}:${scope}`;
+			const dedupKey = `${agent}:${item.name}:${scope}`;
 
 			if (seen.has(dedupKey)) continue;
 			seen.add(dedupKey);
 
 			requests.push({
-				resourceType: "mcp",
 				name: item.name,
-				groupKey: group.key,
 				agent,
 				scope,
 				projectRoot,
@@ -277,7 +285,7 @@ export async function fetchSkillHoldersForGroup(
 ): Promise<BackendHolders> {
 	const scopes = new Set<"global" | "project">();
 	for (const item of items) {
-		scopes.add(item.source === "project" ? "project" : "global");
+		scopes.add(scopeOf(item));
 	}
 	if (scopes.size === 0) scopes.add("global");
 

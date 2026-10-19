@@ -992,14 +992,14 @@ struct PlannedRows {
 fn caller_needs_confirm(
 	manager: &mut ConfigManager,
 	name: &str,
-	all_agents: bool,
 	targets: &[AgentType],
 	prior: &[PathBuf],
 ) -> Option<bool> {
 	manager
 		.remove_skill_planned_for_agents(
-			name, all_agents, true, // dry_run
-			true, // confirm
+			name, false, // all_agents
+			true,  // dry_run
+			true,  // confirm
 			targets, prior,
 		)
 		.map(|o| o.plan.needs_confirm)
@@ -1078,7 +1078,6 @@ fn plan_rows(
 					caller_needs_confirm(
 						&mut manager,
 						name,
-						request.all_agents,
 						target_agents,
 						&accumulated_deletions,
 					)
@@ -1099,31 +1098,19 @@ fn plan_rows(
 					ref path,
 				} = outcome.verdict
 				{
-					let op = if request.all_agents {
-						"remove from every agent"
-					} else {
-						"remove for this agent alone"
-					};
-					let rejected_target = build_rejected_targets(
-						&[agent],
-						reason,
-						Some(kind),
-						path.as_deref(),
-						scope,
-						project_root,
-						&request.agents,
-					)
-					.remove(0);
 					rows.failures.push((
 						agent,
-						Arc::new(
-							ConfigError::unsupported_operation_with_targets(
-								op,
-								reason,
-								agent.as_str(),
-								Some(vec![rejected_target]),
-							),
-						),
+						Arc::new(super::refused_error(
+							reason,
+							kind,
+							path.as_deref(),
+							request.all_agents,
+							agent.as_str(),
+							&[agent],
+							&request.agents,
+							scope,
+							project_root,
+						)),
 					));
 				} else if can_credit_prior {
 					accumulated_deletions
@@ -1507,7 +1494,7 @@ fn remove_skill_by_name(
 		true,
 	);
 
-	// Refused before any write, preview included (the API always did this).
+	// Refused before any write, preview included.
 	refuse_plugin_owned_plan(name, &target_agents, &probes, plugin_roots)?;
 
 	check_unreadable_exhaustive(
@@ -1724,7 +1711,6 @@ fn remove_skill_by_name(
 			caller_needs_confirm(
 				&mut manager,
 				name,
-				request.all_agents,
 				&in_lock_target_agents,
 				&[],
 			)

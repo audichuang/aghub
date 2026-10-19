@@ -545,7 +545,6 @@ fn ensure_reconcile_spares<F>(
 	source: &ResourceLocator,
 	added: &[AgentType],
 	removed: &[AgentType],
-	roster: bool,
 	backing: F,
 ) -> Result<()>
 where
@@ -560,7 +559,7 @@ where
 		source,
 		removed.contains(&source.agent),
 		&removing,
-		roster,
+		true, // roster
 	);
 	ensure_removals_spare(&protect, &removing, source.agent, backing)
 }
@@ -593,7 +592,7 @@ pub fn ensure_mcp_reconcile_spares(
 	added: &[AgentType],
 	removed: &[AgentType],
 ) -> Result<()> {
-	ensure_reconcile_spares(source, added, removed, true, mcp_backing_path)
+	ensure_reconcile_spares(source, added, removed, mcp_backing_path)
 }
 
 /// [`ensure_reconcile_spares`] for a sub-agent — the preview seam.
@@ -602,7 +601,7 @@ pub fn ensure_sub_agent_reconcile_spares(
 	added: &[AgentType],
 	removed: &[AgentType],
 ) -> Result<()> {
-	ensure_reconcile_spares(source, added, removed, true, |target| {
+	ensure_reconcile_spares(source, added, removed, |target| {
 		sub_agent_backing_path(target, &source.name)
 	})
 }
@@ -6463,20 +6462,8 @@ mod tests {
 	fn reconcile_skill_preview_and_commit_refuse_a_shared_skills_dir_alike() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
-		let root = temp.path().join("project");
-		fs::create_dir_all(&root).unwrap();
-
-		let master = root.join(".aghub/test-skill");
-		fs::create_dir_all(&master).unwrap();
-		fs::write(
-			master.join("SKILL.md"),
-			"---\nname: test-skill\ndescription: Test\n---\n\n# Test\n",
-		)
-		.unwrap();
-		let codex_dir = private_slot_for(AgentType::Codex, &root);
-		fs::create_dir_all(&codex_dir).unwrap();
-		std::os::unix::fs::symlink(&master, codex_dir.join("test-skill"))
-			.unwrap();
+		let (root, _master, slots) =
+			linked_master_fixture(temp.path(), &[AgentType::Codex]);
 
 		// Claude's dir EXISTS up front, so the inodes match before any copy.
 		let claude_dir = private_slot_for(AgentType::Claude, &root);
@@ -6488,7 +6475,7 @@ mod tests {
 		let source = ResourceLocator {
 			agent: AgentType::Codex,
 			scope: WriteScope::project(root.clone()),
-			name: "test-skill".to_string(),
+			name: "gone-src".to_string(),
 		};
 		let preview = reconcile_skill_preview(
 			&source,
@@ -6513,8 +6500,8 @@ mod tests {
 				.contains("resolve to the same place on disk"),
 			"{preview}"
 		);
-		assert!(!claude_dir.join("test-skill").exists(), "nothing copied");
-		assert!(codex_dir.join("test-skill").exists());
+		assert!(!claude_dir.join("gone-src").exists(), "nothing copied");
+		assert!(slots[0].exists());
 	}
 
 	#[test]
