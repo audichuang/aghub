@@ -98,14 +98,20 @@ export interface BulkDeleteGroup {
 }
 
 export interface BulkDeleteRequest {
-	resourceType: "mcp" | "skill";
+	resourceType: "mcp";
 	name: string;
 	groupKey: string;
 	agent: string;
 	scope: "global" | "project";
 	projectRoot?: string;
 	agents: string[];
-	sourcePath?: string | null;
+}
+
+/** One by-name delete intent per skill, covering every scope it is named in. */
+export interface BulkSkillDelete {
+	name: string;
+	scopes: ScopeTarget[];
+	agents: string[];
 }
 
 export interface BuildBulkDeleteRequestsOptions {
@@ -118,6 +124,7 @@ export interface BuildBulkDeleteRequestsOptions {
 
 export interface BuildBulkDeleteRequestsResult {
 	requests: BulkDeleteRequest[];
+	skillDeletes: BulkSkillDelete[];
 	skippedGroupKeys: string[];
 }
 
@@ -129,6 +136,7 @@ export function buildBulkDeleteRequests({
 	projectPath,
 }: BuildBulkDeleteRequestsOptions): BuildBulkDeleteRequestsResult {
 	const requests: BulkDeleteRequest[] = [];
+	const skillDeletes: BulkSkillDelete[] = [];
 	const skippedGroupKeys: string[] = [];
 	const seen = new Set<string>();
 
@@ -157,6 +165,33 @@ export function buildBulkDeleteRequests({
 			continue;
 		}
 
+		if (isSkill) {
+			// Global first, then project: same order as the single-skill dialog.
+			const scopes: ScopeTarget[] = [];
+			for (const scope of ["global", "project"] as const) {
+				const agents = [
+					...new Set(
+						validCandidateItems
+							.filter((i) => scopeOf(i) === scope)
+							.map((i) => i.agent as string),
+					),
+				];
+				if (agents.length > 0)
+					scopes.push({
+						scope,
+						projectRoot:
+							scope === "project" ? (projectPath ?? null) : null,
+						agents,
+					});
+			}
+			skillDeletes.push({
+				name: group.key,
+				scopes,
+				agents: [...new Set(scopes.flatMap((s) => s.agents ?? []))],
+			});
+			continue;
+		}
+
 		for (const item of validCandidateItems) {
 			const agent = item.agent as string;
 			const scope = scopeOf(item);
@@ -166,30 +201,24 @@ export function buildBulkDeleteRequests({
 				.filter((other) => scopeOf(other) === scope)
 				.flatMap((other) => (other.agent ? [other.agent] : []));
 
-			const dedupKey =
-				groupResourceType === "skill" && item.source_path
-					? `skill:${item.source_path}:${scope}`
-					: groupResourceType === "skill"
-						? `skill:${agent}:${group.key}:${scope}`
-						: `${groupResourceType}:${agent}:${item.name}:${scope}`;
+			const dedupKey = `mcp:${agent}:${item.name}:${scope}`;
 
 			if (seen.has(dedupKey)) continue;
 			seen.add(dedupKey);
 
 			requests.push({
-				resourceType: groupResourceType === "mcp" ? "mcp" : "skill",
+				resourceType: "mcp",
 				name: item.name,
 				groupKey: group.key,
 				agent,
 				scope,
 				projectRoot,
 				agents: [...new Set(scopeAgents)],
-				sourcePath: item.source_path ?? null,
 			});
 		}
 	}
 
-	return { requests, skippedGroupKeys };
+	return { requests, skillDeletes, skippedGroupKeys };
 }
 
 export function collectUnmanagedDeleteTargets(
@@ -685,11 +714,19 @@ export async function deleteSkill(
 			failed?.error ??
 			(failed?.outcome === "kept"
 				? t
-					? t("deleteSkillKeptSharedMaster", { name })
+					? formatDeleteMessage("kept", {
+							name,
+							t,
+							context: options.context,
+						})
 					: "kept"
 				: failed?.outcome === "partial"
 					? t
-						? t("deleteSkillPartial", { name })
+						? formatDeleteMessage("partial", {
+								name,
+								t,
+								context: options.context,
+							})
 						: "partial"
 					: t
 						? t("failedToDeleteSkill")

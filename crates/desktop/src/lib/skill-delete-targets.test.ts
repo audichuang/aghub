@@ -54,96 +54,69 @@ test("a row with no agent is never named", () => {
 	assert.equal(unmanaged.length, 0);
 });
 
-test("bulk delete: disabled agent is not named and its source_path delete is not sent without consent", () => {
-	const groups = [
-		{
-			key: "my-skill",
-			items: [
-				{
-					name: "my-skill",
-					agent: "claude",
-					source: "global",
-					source_path: "/home/user/.claude/skills/my-skill",
-				},
-				{
-					name: "my-skill",
-					agent: "cursor",
-					source: "global",
-					source_path: "/home/user/.cursor/skills/my-skill",
-				},
+const globalClaude = (path = "/home/user/.claude/skills/my-skill") => ({
+	name: "my-skill",
+	agent: "claude",
+	source: "global",
+	source_path: path,
+});
+const globalCursor = (path = "/home/user/.cursor/skills/my-skill") => ({
+	name: "my-skill",
+	agent: "cursor",
+	source: "global",
+	source_path: path,
+});
+
+test("bulk delete: disabled agent is not named in any scope without consent", () => {
+	const { requests, skillDeletes, skippedGroupKeys } =
+		buildBulkDeleteRequests({
+			groups: [
+				{ key: "my-skill", items: [globalClaude(), globalCursor()] },
 			],
+			resourceType: "skill",
+			backendHolders: { managed: ["claude"] },
+			includeUnmanaged: false,
+		});
+
+	assert.deepEqual(requests, []);
+	assert.deepEqual(skillDeletes, [
+		{
+			name: "my-skill",
+			scopes: [
+				{ scope: "global", projectRoot: null, agents: ["claude"] },
+			],
+			agents: ["claude"],
 		},
-	];
-	const managed: BackendHolders = {
-		managed: ["claude"],
-	};
-
-	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
-		groups,
-		resourceType: "skill",
-		backendHolders: managed,
-		includeUnmanaged: false,
-	});
-
-	assert.deepEqual(
-		requests.map((r) => r.agent),
-		["claude"],
-	);
-	assert.deepEqual(requests[0].agents, ["claude"]);
-	assert.equal(requests[0].sourcePath, "/home/user/.claude/skills/my-skill");
-	assert.ok(!requests.some((r) => r.agent === "cursor"));
-	assert.ok(
-		!requests.some(
-			(r) => r.sourcePath === "/home/user/.cursor/skills/my-skill",
-		),
-	);
-	assert.ok(!requests.some((r) => r.agents.includes("cursor")));
+	]);
+	assert.ok(!JSON.stringify(skillDeletes).includes("cursor"));
 	assert.deepEqual(skippedGroupKeys, []);
 });
 
-test("bulk delete: disabled agent is named and its source_path delete is sent when consent is ticked", () => {
-	const groups = [
-		{
-			key: "my-skill",
-			items: [
-				{
-					name: "my-skill",
-					agent: "claude",
-					source: "global",
-					source_path: "/home/user/.claude/skills/my-skill",
-				},
-				{
-					name: "my-skill",
-					agent: "cursor",
-					source: "global",
-					source_path: "/home/user/.cursor/skills/my-skill",
-				},
-			],
-		},
-	];
-	const managed: BackendHolders = {
-		managed: ["claude"],
-	};
-
-	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
-		groups,
+test("bulk delete: consent names the disabled agent in ONE delete, not one per source_path", () => {
+	const { skillDeletes, skippedGroupKeys } = buildBulkDeleteRequests({
+		groups: [{ key: "my-skill", items: [globalClaude(), globalCursor()] }],
 		resourceType: "skill",
-		backendHolders: managed,
+		backendHolders: { managed: ["claude"] },
 		includeUnmanaged: true,
 	});
 
-	assert.deepEqual(
-		requests.map((r) => r.agent),
-		["claude", "cursor"],
-	);
-	assert.deepEqual(requests[0].agents, ["claude", "cursor"]);
-	assert.deepEqual(requests[1].agents, ["claude", "cursor"]);
-	assert.equal(requests[0].sourcePath, "/home/user/.claude/skills/my-skill");
-	assert.equal(requests[1].sourcePath, "/home/user/.cursor/skills/my-skill");
+	assert.deepEqual(skillDeletes, [
+		{
+			name: "my-skill",
+			scopes: [
+				{
+					scope: "global",
+					projectRoot: null,
+					agents: ["claude", "cursor"],
+				},
+			],
+			agents: ["claude", "cursor"],
+		},
+	]);
 	assert.deepEqual(skippedGroupKeys, []);
 });
 
-test("bulk delete: shared source_path is deduplicated but carries consented agents", () => {
+test("bulk delete: shared source_path yields one delete carrying only the consented agents", () => {
 	const groups = [
 		{
 			key: "shared-skill",
@@ -163,9 +136,7 @@ test("bulk delete: shared source_path is deduplicated but carries consented agen
 			],
 		},
 	];
-	const managed: BackendHolders = {
-		managed: ["claude"],
-	};
+	const managed: BackendHolders = { managed: ["claude"] };
 
 	const withoutConsent = buildBulkDeleteRequests({
 		groups,
@@ -173,8 +144,8 @@ test("bulk delete: shared source_path is deduplicated but carries consented agen
 		backendHolders: managed,
 		includeUnmanaged: false,
 	});
-	assert.equal(withoutConsent.requests.length, 1);
-	assert.deepEqual(withoutConsent.requests[0].agents, ["claude"]);
+	assert.equal(withoutConsent.skillDeletes.length, 1);
+	assert.deepEqual(withoutConsent.skillDeletes[0].agents, ["claude"]);
 	assert.deepEqual(withoutConsent.skippedGroupKeys, []);
 
 	const withConsent = buildBulkDeleteRequests({
@@ -183,12 +154,12 @@ test("bulk delete: shared source_path is deduplicated but carries consented agen
 		backendHolders: managed,
 		includeUnmanaged: true,
 	});
-	assert.equal(withConsent.requests.length, 1);
-	assert.deepEqual(withConsent.requests[0].agents, ["claude", "cursor"]);
+	assert.equal(withConsent.skillDeletes.length, 1);
+	assert.deepEqual(withConsent.skillDeletes[0].agents, ["claude", "cursor"]);
 	assert.deepEqual(withConsent.skippedGroupKeys, []);
 });
 
-test("bulk delete: a group held only by a disabled agent is skipped without consent and requested with consent", () => {
+test("bulk delete: a group held only by a disabled agent is skipped without consent and sent with consent", () => {
 	const groups = [
 		{
 			key: "orphan-skill",
@@ -202,34 +173,29 @@ test("bulk delete: a group held only by a disabled agent is skipped without cons
 			],
 		},
 	];
-	const managed: BackendHolders = {
-		managed: [],
-	};
+	const managed: BackendHolders = { managed: [] };
 
-	// No consent: appears in skippedGroupKeys, produces no request
 	const withoutConsent = buildBulkDeleteRequests({
 		groups,
 		resourceType: "skill",
 		backendHolders: managed,
 		includeUnmanaged: false,
 	});
-	assert.equal(withoutConsent.requests.length, 0);
+	assert.equal(withoutConsent.skillDeletes.length, 0);
 	assert.deepEqual(withoutConsent.skippedGroupKeys, ["orphan-skill"]);
 
-	// With consent: request produced, not skipped
 	const withConsent = buildBulkDeleteRequests({
 		groups,
 		resourceType: "skill",
 		backendHolders: managed,
 		includeUnmanaged: true,
 	});
-	assert.equal(withConsent.requests.length, 1);
-	assert.equal(withConsent.requests[0].agent, "cursor");
-	assert.deepEqual(withConsent.requests[0].agents, ["cursor"]);
+	assert.equal(withConsent.skillDeletes.length, 1);
+	assert.deepEqual(withConsent.skillDeletes[0].agents, ["cursor"]);
 	assert.deepEqual(withConsent.skippedGroupKeys, []);
 });
 
-test("bulk delete: mixed selection filters skill group but leaves mcp group unchanged", () => {
+test("bulk delete: mixed selection filters the skill group but leaves the mcp group unchanged", () => {
 	const groups = [
 		{
 			key: "skill-group",
@@ -253,44 +219,80 @@ test("bulk delete: mixed selection filters skill group but leaves mcp group unch
 			key: "mcp-group",
 			resourceType: "mcp" as const,
 			items: [
-				{
-					name: "mcp-server",
-					agent: "claude",
-					source: "global",
-				},
-				{
-					name: "mcp-server",
-					agent: "cursor",
-					source: "global",
-				},
+				{ name: "mcp-server", agent: "claude", source: "global" },
+				{ name: "mcp-server", agent: "cursor", source: "global" },
 			],
 		},
 	];
-	const managed: BackendHolders = {
-		managed: ["claude"],
-	};
 
-	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
-		groups,
-		resourceType: "mixed",
-		backendHolders: managed,
-		includeUnmanaged: false,
-	});
+	const { requests, skillDeletes, skippedGroupKeys } =
+		buildBulkDeleteRequests({
+			groups,
+			resourceType: "mixed",
+			backendHolders: { managed: ["claude"] },
+			includeUnmanaged: false,
+		});
 
 	assert.deepEqual(skippedGroupKeys, []);
-
-	const skillReqs = requests.filter((r) => r.resourceType === "skill");
-	const mcpReqs = requests.filter((r) => r.resourceType === "mcp");
-
-	// Skill request leaves out the disabled agent cursor
-	assert.equal(skillReqs.length, 1);
-	assert.equal(skillReqs[0].agent, "claude");
-	assert.deepEqual(skillReqs[0].agents, ["claude"]);
+	assert.equal(skillDeletes.length, 1);
+	assert.deepEqual(skillDeletes[0].agents, ["claude"]);
 
 	// MCP request is unchanged: all its agents named
-	assert.equal(mcpReqs.length, 2);
-	assert.deepEqual(mcpReqs[0].agents, ["claude", "cursor"]);
-	assert.deepEqual(mcpReqs[1].agents, ["claude", "cursor"]);
+	assert.equal(requests.length, 2);
+	assert.deepEqual(requests[0].agents, ["claude", "cursor"]);
+	assert.deepEqual(requests[1].agents, ["claude", "cursor"]);
+});
+
+test("bulk delete: one by-name delete per skill, global scope before project", () => {
+	const item = (
+		name: string,
+		agent: string,
+		source: string,
+		source_path: string,
+	) => ({ name, agent, source, source_path });
+	const groups = [
+		{
+			key: "a",
+			items: [
+				// Project row listed first: the scope order must still be global first.
+				item("a", "codex", "project", "/p/.codex/skills/a"),
+				item("a", "claude", "global", "/h/.claude/skills/a"),
+				item("a", "claude", "global", "/h/.agents/skills/a"),
+				item("a", "cursor", "global", "/h/.cursor/skills/a"),
+			],
+		},
+		{
+			key: "b",
+			items: [item("b", "claude", "global", "/h/.claude/skills/b")],
+		},
+	];
+
+	const { requests, skillDeletes } = buildBulkDeleteRequests({
+		groups,
+		resourceType: "skill",
+		backendHolders: { managed: ["claude", "codex"] },
+		includeUnmanaged: false,
+		projectPath: "/p",
+	});
+
+	assert.deepEqual(requests, []);
+	assert.deepEqual(skillDeletes, [
+		{
+			name: "a",
+			scopes: [
+				{ scope: "global", projectRoot: null, agents: ["claude"] },
+				{ scope: "project", projectRoot: "/p", agents: ["codex"] },
+			],
+			agents: ["claude", "codex"],
+		},
+		{
+			name: "b",
+			scopes: [
+				{ scope: "global", projectRoot: null, agents: ["claude"] },
+			],
+			agents: ["claude"],
+		},
+	]);
 });
 
 test("collectUnmanagedDeleteTargets returns unmanaged items across skill groups", () => {
