@@ -515,11 +515,13 @@ Tests: `transfer::tests::reconcile_skill_refuses_plugin_owned_removal_and_writes
 the request named. The sweep also removes copies held by agents the request did
 not name, so a Claude Code plugin's copy in an unnamed agent's dir was deleted
 while the named agent's copy was not plugin-owned. The fix checks every path the
-plan deletes (`refuse_plugin_owned_plan`): once before any plan, and again inside
-the mutation lock before any write, because the in-lock replan can sweep a copy
+plan deletes (`refuse_plugin_owned_plan`, reading the rows `plan_rows` already
+planned): once before any write, and again inside the mutation lock, because the in-lock replan can sweep a copy
 the preflight never saw. Both checks refuse the whole batch.
 
 Tests: `removal::batch::tests::test_all_agents_sweep_refuses_plugin_owned_copy_of_unnamed_agent`,
+`removal::batch::tests::test_all_agents_sweep_refuses_swept_path_inside_plugin_root_not_own_root`
+(the first one is also refused via the Master's own root; this one pins the swept path),
 `removal::batch::tests::test_in_lock_plugin_recheck_refuses_owned_copy_appearing_after_preflight`.
 
 Ownership now compares path identity (`path_identity::entry_identity`), so a
