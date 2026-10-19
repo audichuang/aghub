@@ -1666,24 +1666,27 @@ fn remove_skill_by_name(
 		shared_first_order(&in_lock_target_agents, scope, project_root);
 	// Re-checked under the lock, before any write: the in-lock replan may sweep a
 	// copy the preflight never saw. The rows feed ONLY this check; execution
-	// below re-plans each row against the disk earlier rows left behind.
-	let in_lock_rows = plan_rows(
-		request,
-		name,
-		&holders,
-		&in_lock_target_agents,
-		is_exhaustive,
-		&execution_order,
-		Vec::new(),
-		false,
-		false,
-	);
-	refuse_plugin_owned_plan(
-		name,
-		&in_lock_target_agents,
-		&in_lock_rows.probes,
-		plugin_roots,
-	)?;
+	// below re-plans each row against the disk earlier rows left behind. With no
+	// known plugin the check is a no-op, so the extra dry-run plan is skipped.
+	if !plugin_roots.is_empty() {
+		let in_lock_rows = plan_rows(
+			request,
+			name,
+			&holders,
+			&in_lock_target_agents,
+			is_exhaustive,
+			&execution_order,
+			Vec::new(),
+			false,
+			false,
+		);
+		refuse_plugin_owned_plan(
+			name,
+			&in_lock_target_agents,
+			&in_lock_rows.probes,
+			plugin_roots,
+		)?;
+	}
 
 	check_unreadable_exhaustive(
 		name,
