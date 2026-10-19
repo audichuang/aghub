@@ -16,11 +16,10 @@ use aghub_core::errors::ConfigError;
 use aghub_core::models::{AgentType, ResourceScope};
 use aghub_core::transfer::{
 	ensure_disjoint, ensure_mcp_exists, ensure_mcp_reconcile_spares,
-	ensure_skill_reconcile_spares, ensure_sub_agent_exists,
-	ensure_sub_agent_reconcile_spares, reconcile_mcp, reconcile_skill,
-	reconcile_skill_preview, reconcile_sub_agent, transfer_mcp, transfer_skill,
-	transfer_sub_agent, InstallTarget, OperationBatchResult,
-	OperationBatchView, ResourceLocator,
+	ensure_sub_agent_exists, ensure_sub_agent_reconcile_spares, reconcile_mcp,
+	reconcile_skill, reconcile_skill_preview, reconcile_sub_agent,
+	transfer_mcp, transfer_skill, transfer_sub_agent, InstallTarget,
+	OperationBatchResult, OperationBatchView, ResourceLocator,
 };
 use aghub_core::WriteScope;
 use anyhow::{bail, Result};
@@ -105,13 +104,10 @@ type ReconcileFn = fn(
 	bool,
 ) -> aghub_core::Result<OperationBatchResult>;
 
-/// A core `ensure_*_exists` fn — the read-only source check a dry-run makes.
-type ExistsFn = fn(&ResourceLocator) -> aghub_core::Result<()>;
-
-/// A core `ensure_*_reconcile_spares` fn — the read-only shared-backing check.
-/// It is the ONE refusal that exists to prevent data loss, so the preview has
-/// to be able to raise it without writing anything.
-type SpareFn =
+/// A read-only preview of a reconcile: everything the commit would refuse,
+/// raised without writing. The shared-backing check inside it is the ONE
+/// refusal that exists to prevent data loss.
+type PreviewFn =
 	fn(&ResourceLocator, &[AgentType], &[AgentType]) -> aghub_core::Result<()>;
 
 /// clap value parser for an agent id, reusing the canonical FromStr so the CLI
@@ -185,33 +181,34 @@ pub fn execute_reconcile(
 	resolved: &crate::Scope,
 	json: bool,
 ) -> Result<()> {
-	let (args, run, exists, spares, kind): (
+	let (args, run, preview, kind): (
 		&ReconcileArgs,
 		ReconcileFn,
-		ExistsFn,
-		SpareFn,
+		PreviewFn,
 		&str,
 	) = match action {
-		ReconcileAction::Skill(a) => (
-			a,
-			reconcile_skill,
-			// existence is decided by reconcile_skill_preview (same planner as the commit)
-			|_| Ok(()),
-			ensure_skill_reconcile_spares,
-			"skill",
-		),
+		// The skill preview is one core call: the same planner as the commit.
+		ReconcileAction::Skill(a) => {
+			(a, reconcile_skill, reconcile_skill_preview, "skill")
+		}
 		ReconcileAction::Mcp(a) => (
 			a,
 			reconcile_mcp,
-			ensure_mcp_exists,
-			ensure_mcp_reconcile_spares,
+			|s, a, r| {
+				ensure_mcp_exists(s)?;
+				ensure_disjoint(a, r)?;
+				ensure_mcp_reconcile_spares(s, a, r)
+			},
 			"MCP server",
 		),
 		ReconcileAction::SubAgent(a) => (
 			a,
 			reconcile_sub_agent,
-			ensure_sub_agent_exists,
-			ensure_sub_agent_reconcile_spares,
+			|s, a, r| {
+				ensure_sub_agent_exists(s)?;
+				ensure_disjoint(a, r)?;
+				ensure_sub_agent_reconcile_spares(s, a, r)
+			},
 			"sub-agent",
 		),
 	};
@@ -240,18 +237,8 @@ pub fn execute_reconcile(
 	// alone are non-destructive and run immediately (like `transfer`), unless
 	// --dry-run is asked for explicitly.
 	if args.dry_run || (!args.remove.is_empty() && !args.yes) {
-		// Anything the commit will refuse, the preview refuses too: the source
-		// exists, add/remove are disjoint, and no removal takes the resource
-		// from a copy target or the source (THE data-loss check).
-		exists(&source)?;
-		ensure_disjoint(&args.add, &args.remove)?;
-		spares(&source, &args.add, &args.remove)?;
-		// Skills also refuse an end state that cannot exist (removing an agent
-		// that reads the shared Master while it stays) — ask core, never
-		// restate it. MCP/sub-agent have no such preview check yet.
-		if let ReconcileAction::Skill(_) = action {
-			reconcile_skill_preview(&source, &args.add, &args.remove)?;
-		}
+		// Anything the commit will refuse, the preview refuses too.
+		preview(&source, &args.add, &args.remove)?;
 		return render_dry_run(args, json);
 	}
 
