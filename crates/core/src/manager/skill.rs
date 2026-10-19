@@ -757,71 +757,21 @@ impl ConfigManager {
 			requested_agents,
 		);
 
-		if executed {
-			if let removal::Verdict::Refused {
-				ref reason,
-				ref kind,
-				ref path,
-			} = verdict
-			{
-				let operation = if all_agents {
-					"remove from every agent"
-				} else {
-					"remove for this agent alone"
-				};
-				let rejected_targets = removal::batch::build_rejected_targets(
-					requested_agents,
-					reason,
-					Some(kind),
-					path.as_deref(),
-					scope,
-					project_root.as_deref(),
-					requested_agents,
-				);
-				return Err(ConfigError::unsupported_operation_with_targets(
-					operation,
-					reason,
-					self.adapter.name(),
-					Some(rejected_targets),
-				));
-			}
-		}
-
-		// Kept never commits: it would report `removed` and prune lock.
-		if matches!(verdict, removal::Verdict::Kept { .. }) {
-			return removal::RemovalOutcome::preview(
-				plan,
-				verdict,
-				scope,
-				project_root.as_deref(),
-				name,
-			);
-		}
-
-		if !executed {
-			return removal::RemovalOutcome::preview(
-				plan,
-				verdict,
-				scope,
-				project_root.as_deref(),
-				name,
-			);
-		}
-
-		info!(
-			"removing skill '{}' (layout={:?}, all_agents={})",
-			name, plan.layout, all_agents
-		);
-		// Execute + fold the real result back into the plan + reconcile the
-		// per-scope lock, through the ONE producer both surfaces use.
-		let outcome = removal::RemovalOutcome::commit(
+		let outcome = removal::settle_removal(
 			plan,
+			verdict,
+			executed,
+			all_agents,
+			self.adapter.name(),
+			requested_agents,
 			&roots,
 			scope,
 			project_root.as_deref(),
 			name,
 		)?;
-		debug_assert_eq!(verdict, removal::verdict::Verdict::Removed);
+		if !outcome.executed {
+			return Ok(outcome);
+		}
 
 		// Skills are disk-derived; drop the in-memory view (save_current persists
 		// MCPs, not skills, so this is a best-effort cache update).

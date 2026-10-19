@@ -9,8 +9,8 @@ use std::sync::Arc;
 use super::{
 	agent_skill_dirs_in_scope, allowed_skill_roots, assert_strictly_contained,
 	by_path_skill_dir, by_path_skill_name, evaluate_removal_verdict,
-	expand_tilde_path, plan_copy_removal, unmanaged_skill_dirs, PruneStatus,
-	RemovalOutcome, Verdict,
+	expand_tilde_path, plan_copy_removal, settle_removal, unmanaged_skill_dirs,
+	PruneStatus, Verdict,
 };
 use crate::batch::{Backing, RemovalCredits};
 use crate::errors::{ConfigError, Result};
@@ -1241,48 +1241,18 @@ fn remove_skill_by_path(
 			&target_agents,
 		);
 
-		if !request.dry_run {
-			if let Verdict::Refused {
-				ref reason,
-				ref kind,
-				ref path,
-			} = verdict
-			{
-				let rejected_targets = build_rejected_targets(
-					&target_agents,
-					reason,
-					Some(kind),
-					path.as_deref(),
-					scope,
-					project_root,
-					&target_agents,
-				);
-				return Err(ConfigError::unsupported_operation_with_targets(
-					"remove for this agent alone",
-					reason,
-					crate::create_adapter(first_agent).name(),
-					Some(rejected_targets),
-				));
-			}
-		}
-
-		if matches!(verdict, Verdict::Kept { .. }) || request.dry_run {
-			RemovalOutcome::preview(
-				plan,
-				verdict,
-				scope,
-				project_root,
-				&skill_name,
-			)?
-		} else {
-			RemovalOutcome::commit(
-				plan,
-				&roots,
-				scope,
-				project_root,
-				&skill_name,
-			)?
-		}
+		settle_removal(
+			plan,
+			verdict,
+			!request.dry_run,
+			false,
+			crate::create_adapter(first_agent).name(),
+			&target_agents,
+			&roots,
+			scope,
+			project_root,
+			&skill_name,
+		)?
 	} else {
 		// By-path removes the targeted entry only; all_agents is ignored and stays false.
 		manager.remove_skill_planned_at_dir_for_agents(

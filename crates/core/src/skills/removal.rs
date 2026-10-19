@@ -1558,6 +1558,79 @@ pub enum PruneStatus {
 	WouldPrune(Vec<String>),
 }
 
+/// The shared tail of a planned removal: verdict -> refuse / preview / commit.
+/// One producer for the manager and the by-path copy layout, so the refusal
+/// wording and the rejected-target rows cannot drift between them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn settle_removal(
+	plan: RemovalPlan,
+	verdict: Verdict,
+	executed: bool,
+	all_agents: bool,
+	agent_name: &str,
+	requested_agents: &[AgentType],
+	roots: &[PathBuf],
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	name: &str,
+) -> crate::errors::Result<RemovalOutcome> {
+	if executed {
+		if let Verdict::Refused {
+			ref reason,
+			ref kind,
+			ref path,
+		} = verdict
+		{
+			let operation = if all_agents {
+				"remove from every agent"
+			} else {
+				"remove for this agent alone"
+			};
+			let rejected_targets = batch::build_rejected_targets(
+				requested_agents,
+				reason,
+				Some(kind),
+				path.as_deref(),
+				scope,
+				project_root,
+				requested_agents,
+			);
+			return Err(
+				crate::errors::ConfigError::unsupported_operation_with_targets(
+					operation,
+					reason,
+					agent_name,
+					Some(rejected_targets),
+				),
+			);
+		}
+	}
+
+	// Kept never commits: it would report `removed` and prune lock.
+	if matches!(verdict, Verdict::Kept { .. }) || !executed {
+		return RemovalOutcome::preview(
+			plan,
+			verdict,
+			scope,
+			project_root,
+			name,
+		);
+	}
+
+	log::info!(
+		"removing skill '{}' (layout={:?}, all_agents={})",
+		name,
+		plan.layout,
+		all_agents
+	);
+	// Execute + fold the real result back into the plan + reconcile the
+	// per-scope lock, through the ONE producer both surfaces use.
+	let outcome =
+		RemovalOutcome::commit(plan, roots, scope, project_root, name)?;
+	debug_assert_eq!(verdict, Verdict::Removed);
+	Ok(outcome)
+}
+
 /// Result of a planned removal request: the (post-execution) plan plus whether
 /// destructive deletion actually ran. `executed == false` means a dry-run or a
 /// destructive op awaiting an explicit confirm — nothing was deleted. `prune`
