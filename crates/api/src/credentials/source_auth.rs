@@ -200,18 +200,6 @@ impl SourceAuth {
 			keyring_unavailable,
 		}
 	}
-
-	#[cfg(test)]
-	pub(crate) fn require_github_credential_url_for_test(
-		source: &str,
-	) -> Result<(), ApiError> {
-		require_github_credential_url(source)
-	}
-
-	#[cfg(test)]
-	pub(crate) fn same_origin_for_test(a: &str, b: &str) -> bool {
-		origins_match(a, b)
-	}
 }
 
 impl TokenResolver for SourceAuth {
@@ -318,7 +306,10 @@ fn require_github_credential_url(url: &str) -> Result<(), ApiError> {
 mod tests {
 	use std::collections::BTreeMap;
 
-	use crate::credentials::forwarding::{ForwardedEntry, ForwardedGitTokens};
+	use crate::credentials::forwarding::{
+		ForwardedEntry, ForwardedGitTokens, ForwardedOrigin,
+	};
+	use rocket::http::Status;
 
 	use super::{forwarded_token, ForwardedCredentialPolicy, SourceAuth};
 
@@ -353,6 +344,225 @@ mod tests {
 				"https://tfs.example/Collection/_git/repo.git"
 			),
 			"https://tfs.example/Collection/_git/repo",
+		);
+	}
+
+	#[test]
+	fn github_credential_url_accepts_github_https() {
+		assert!(super::require_github_credential_url(
+			"https://github.com/owner/repo.git",
+		)
+		.is_ok());
+	}
+
+	#[test]
+	fn github_credential_url_rejects_non_github_hosts() {
+		let err =
+			super::require_github_credential_url("https://evil.example/x.git")
+				.unwrap_err();
+
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
+	}
+
+	#[test]
+	fn github_credential_url_rejects_github_lookalikes() {
+		let err = super::require_github_credential_url(
+			"https://github.com.attacker.example/x.git",
+		)
+		.unwrap_err();
+
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
+	}
+
+	#[test]
+	fn github_credential_url_rejects_non_https_github() {
+		let err =
+			super::require_github_credential_url("http://github.com/x.git")
+				.unwrap_err();
+
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
+	}
+
+	#[test]
+	fn github_credential_url_rejects_non_default_port() {
+		let err = super::require_github_credential_url(
+			"https://github.com:8443/owner/repo.git",
+		)
+		.unwrap_err();
+
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
+	}
+
+	#[test]
+	fn github_credential_url_accepts_default_port() {
+		assert!(super::require_github_credential_url(
+			"https://github.com:443/owner/repo.git",
+		)
+		.is_ok());
+	}
+
+	// ─── forwarded_for_scan: host-scoped match + D8 origin pin ─────────
+
+	fn forwarded(pairs: &[(&str, &str)]) -> ForwardedGitTokens {
+		use crate::credentials::forwarding::ForwardedEntry;
+		// Entries with NO explicit origin: `forwarded_token_for_url` then
+		// re-resolves the forwarded source's clone-URL origin, exercising the
+		// host-scoped + origin-pin path independently of the wire origin.
+		ForwardedGitTokens(
+			pairs
+				.iter()
+				.map(|(k, v)| {
+					(
+						(*k).to_string(),
+						ForwardedEntry {
+							token: (*v).to_string(),
+							origin: None,
+						},
+					)
+				})
+				.collect(),
+		)
+	}
+
+	#[test]
+	fn forwarded_token_matches_same_github_source() {
+		// Forwarded as the bare shorthand; the request uses the full URL. Both
+		// resolve to the same github.com origin, so the token is attached.
+		let map = forwarded(&[("owner/repo", "TOK")]);
+		assert_eq!(
+			SourceAuth::forwarded_for_scan(
+				&map,
+				"https://github.com/owner/repo.git"
+			),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_not_attached_cross_host() {
+		// A github.com forwarded token must not satisfy a gitlab.com request of
+		// the same `owner/repo` shape (host is encoded in the key set).
+		let map = forwarded(&[("owner/repo", "GHTOK")]);
+		assert_eq!(
+			SourceAuth::forwarded_for_scan(
+				&map,
+				"https://gitlab.com/owner/repo.git"
+			),
+			None
+		);
+	}
+
+	#[test]
+	fn forwarded_token_not_attached_same_host_different_port() {
+		// D8: a token forwarded for a self-hosted forge on one port must NOT be
+		// attached to a request for the SAME host on a different port.
+		let map =
+			forwarded(&[("https://git.internal:8443/owner/repo.git", "TOK")]);
+		assert_eq!(
+			SourceAuth::forwarded_for_scan(
+				&map,
+				"https://git.internal:9090/owner/repo.git"
+			),
+			None
+		);
+	}
+
+	#[test]
+	fn forwarded_token_attached_same_host_same_port() {
+		// The positive counterpart to the D8 negative: a self-hosted forge on a
+		// custom port DOES match when the request is for the SAME origin. This
+		// proves the port-mismatch rejection above is the origin pin, not a
+		// resolve failure on custom-port URLs.
+		let map =
+			forwarded(&[("https://git.internal:8443/owner/repo.git", "TOK")]);
+		assert_eq!(
+			SourceAuth::forwarded_for_scan(
+				&map,
+				"https://git.internal:8443/owner/repo.git"
+			),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_none_for_empty_map() {
+		let map = forwarded(&[]);
+		assert_eq!(
+			SourceAuth::forwarded_for_scan(
+				&map,
+				"https://github.com/owner/repo.git"
+			),
+			None
+		);
+	}
+
+	/// Build a single-entry map carrying an explicit wire `origin`, exercising
+	/// the new `{ token, origin }` shape on the scan path.
+	fn forwarded_with_origin(
+		source: &str,
+		token: &str,
+		scheme: &str,
+		host: &str,
+		port: Option<u16>,
+	) -> ForwardedGitTokens {
+		use crate::credentials::forwarding::ForwardedEntry;
+		let mut m = std::collections::BTreeMap::new();
+		m.insert(
+			source.to_string(),
+			ForwardedEntry {
+				token: token.to_string(),
+				origin: Some(ForwardedOrigin {
+					scheme: scheme.to_string(),
+					host: host.to_string(),
+					port,
+				}),
+			},
+		);
+		ForwardedGitTokens(m)
+	}
+
+	#[test]
+	fn forwarded_token_uses_entry_origin_to_pin() {
+		// The entry carries its own controller-resolved origin (matching the
+		// request), so the token is attached using the wire origin.
+		let map = forwarded_with_origin(
+			"owner/repo",
+			"TOK",
+			"https",
+			"github.com",
+			Some(443),
+		);
+		assert_eq!(
+			SourceAuth::forwarded_for_scan(
+				&map,
+				"https://github.com/owner/repo.git"
+			),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_entry_origin_mismatch_rejected() {
+		// The entry's wire origin pins a DIFFERENT port than the request: the
+		// scan path must not attach the token even though the host-scoped key
+		// would match.
+		let map = forwarded_with_origin(
+			"https://git.internal:8443/owner/repo.git",
+			"TOK",
+			"https",
+			"git.internal",
+			Some(8443),
+		);
+		assert_eq!(
+			SourceAuth::forwarded_for_scan(
+				&map,
+				"https://git.internal:9090/owner/repo.git"
+			),
+			None
 		);
 	}
 }

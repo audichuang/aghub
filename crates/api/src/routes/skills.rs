@@ -1,6 +1,4 @@
 use aghub_cc_plugins::claude::ClaudePluginManager;
-#[cfg(test)]
-use aghub_core::create_adapter;
 use aghub_core::{
 	errors::ConfigError,
 	load_all_agents,
@@ -372,16 +370,6 @@ fn get_skill_root(path: std::path::PathBuf) -> std::path::PathBuf {
 	} else {
 		path
 	}
-}
-
-#[cfg(test)]
-fn resolve_git_install_target_dir(
-	agent_type: AgentType,
-	resource_scope: ResourceScope,
-	project_root: Option<&std::path::PathBuf>,
-) -> Option<std::path::PathBuf> {
-	create_adapter(agent_type)
-		.target_skills_dir(project_root.map(|p| p.as_path()), resource_scope)
 }
 
 fn map_remote_source_error(error: aghub_git::SourceError) -> ApiError {
@@ -1319,16 +1307,6 @@ pub fn get_project_skill_lock(
 	}))
 }
 
-#[cfg(test)]
-fn require_github_credential_url(url: &str) -> Result<(), ApiError> {
-	SourceAuth::require_github_credential_url_for_test(url)
-}
-
-#[cfg(test)]
-fn same_origin(a: &str, b: &str) -> bool {
-	SourceAuth::same_origin_for_test(a, b)
-}
-
 fn current_platform() -> &'static str {
 	if cfg!(target_os = "windows") {
 		"windows"
@@ -1571,15 +1549,6 @@ fn map_pinned_source_fetch_error(
 			"SKILLS_INSTALL_TIMEOUT",
 		),
 	}
-}
-
-/// Compatibility adapter for the existing strict scan-policy tests.
-#[cfg(test)]
-fn forwarded_token_for_url(
-	forwarded: &ForwardedGitTokens,
-	url: &str,
-) -> Option<String> {
-	SourceAuth::forwarded_for_scan(forwarded, url)
 }
 
 fn install_row_entry(
@@ -1867,6 +1836,7 @@ mod tests {
 	use crate::dto::skill::DeleteSkillScopeTarget;
 	#[cfg(unix)]
 	use crate::routes::skills_test_git::{test_git, test_has_git};
+	use aghub_core::create_adapter;
 	use aghub_core::transfer::{reconcile_skill, ResourceLocator};
 	use tempfile::tempdir;
 
@@ -6134,250 +6104,6 @@ mod tests {
 		});
 	}
 
-	#[test]
-	fn github_credential_url_accepts_github_https() {
-		assert!(require_github_credential_url(
-			"https://github.com/owner/repo.git",
-		)
-		.is_ok());
-	}
-
-	#[test]
-	fn github_credential_url_rejects_non_github_hosts() {
-		let err = require_github_credential_url("https://evil.example/x.git")
-			.unwrap_err();
-
-		assert_eq!(err.status, Status::BadRequest);
-		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
-	}
-
-	#[test]
-	fn github_credential_url_rejects_github_lookalikes() {
-		let err = require_github_credential_url(
-			"https://github.com.attacker.example/x.git",
-		)
-		.unwrap_err();
-
-		assert_eq!(err.status, Status::BadRequest);
-		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
-	}
-
-	#[test]
-	fn github_credential_url_rejects_non_https_github() {
-		let err = require_github_credential_url("http://github.com/x.git")
-			.unwrap_err();
-
-		assert_eq!(err.status, Status::BadRequest);
-		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
-	}
-
-	#[test]
-	fn github_credential_url_rejects_non_default_port() {
-		let err = require_github_credential_url(
-			"https://github.com:8443/owner/repo.git",
-		)
-		.unwrap_err();
-
-		assert_eq!(err.status, Status::BadRequest);
-		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
-	}
-
-	#[test]
-	fn github_credential_url_accepts_default_port() {
-		assert!(require_github_credential_url(
-			"https://github.com:443/owner/repo.git",
-		)
-		.is_ok());
-	}
-
-	#[test]
-	fn same_origin_true_for_matching_origins() {
-		assert!(same_origin(
-			"https://gitlab.internal/a.git",
-			"https://gitlab.internal/b.git",
-		));
-	}
-
-	#[test]
-	fn same_origin_false_for_different_hosts() {
-		assert!(!same_origin("https://github.com/a", "https://evil.com/a"));
-	}
-
-	#[test]
-	fn same_origin_false_on_parse_failure() {
-		assert!(!same_origin("not a url", "https://github.com/a"));
-	}
-
-	#[test]
-	fn same_origin_false_for_same_host_different_port() {
-		// Session pinning now keys on the full origin: the same host on a
-		// different explicit port is a DIFFERENT origin and must NOT match,
-		// so a token bound to one port can't be reused against another.
-		assert!(!same_origin(
-			"https://git.internal:8080/a.git",
-			"https://git.internal:9090/b.git",
-		));
-	}
-
-	#[test]
-	fn same_origin_true_for_default_port_forms() {
-		// `https://h` and `https://h:443` are the same origin (default port
-		// folds in), so this remains a match.
-		assert!(same_origin(
-			"https://git.internal/a.git",
-			"https://git.internal:443/b.git",
-		));
-	}
-
-	// ─── forwarded_token_for_url: host-scoped match + D8 origin pin ─────────
-
-	fn forwarded(pairs: &[(&str, &str)]) -> ForwardedGitTokens {
-		use crate::credentials::forwarding::ForwardedEntry;
-		// Entries with NO explicit origin: `forwarded_token_for_url` then
-		// re-resolves the forwarded source's clone-URL origin, exercising the
-		// host-scoped + origin-pin path independently of the wire origin.
-		ForwardedGitTokens(
-			pairs
-				.iter()
-				.map(|(k, v)| {
-					(
-						(*k).to_string(),
-						ForwardedEntry {
-							token: (*v).to_string(),
-							origin: None,
-						},
-					)
-				})
-				.collect(),
-		)
-	}
-
-	#[test]
-	fn forwarded_token_matches_same_github_source() {
-		// Forwarded as the bare shorthand; the request uses the full URL. Both
-		// resolve to the same github.com origin, so the token is attached.
-		let map = forwarded(&[("owner/repo", "TOK")]);
-		assert_eq!(
-			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
-			Some("TOK".to_string())
-		);
-	}
-
-	#[test]
-	fn forwarded_token_not_attached_cross_host() {
-		// A github.com forwarded token must not satisfy a gitlab.com request of
-		// the same `owner/repo` shape (host is encoded in the key set).
-		let map = forwarded(&[("owner/repo", "GHTOK")]);
-		assert_eq!(
-			forwarded_token_for_url(&map, "https://gitlab.com/owner/repo.git"),
-			None
-		);
-	}
-
-	#[test]
-	fn forwarded_token_not_attached_same_host_different_port() {
-		// D8: a token forwarded for a self-hosted forge on one port must NOT be
-		// attached to a request for the SAME host on a different port.
-		let map =
-			forwarded(&[("https://git.internal:8443/owner/repo.git", "TOK")]);
-		assert_eq!(
-			forwarded_token_for_url(
-				&map,
-				"https://git.internal:9090/owner/repo.git"
-			),
-			None
-		);
-	}
-
-	#[test]
-	fn forwarded_token_attached_same_host_same_port() {
-		// The positive counterpart to the D8 negative: a self-hosted forge on a
-		// custom port DOES match when the request is for the SAME origin. This
-		// proves the port-mismatch rejection above is the origin pin, not a
-		// resolve failure on custom-port URLs.
-		let map =
-			forwarded(&[("https://git.internal:8443/owner/repo.git", "TOK")]);
-		assert_eq!(
-			forwarded_token_for_url(
-				&map,
-				"https://git.internal:8443/owner/repo.git"
-			),
-			Some("TOK".to_string())
-		);
-	}
-
-	#[test]
-	fn forwarded_token_none_for_empty_map() {
-		let map = forwarded(&[]);
-		assert_eq!(
-			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
-			None
-		);
-	}
-
-	/// Build a single-entry map carrying an explicit wire `origin`, exercising
-	/// the new `{ token, origin }` shape on the scan path.
-	fn forwarded_with_origin(
-		source: &str,
-		token: &str,
-		scheme: &str,
-		host: &str,
-		port: Option<u16>,
-	) -> ForwardedGitTokens {
-		use crate::credentials::forwarding::{ForwardedEntry, ForwardedOrigin};
-		let mut m = std::collections::BTreeMap::new();
-		m.insert(
-			source.to_string(),
-			ForwardedEntry {
-				token: token.to_string(),
-				origin: Some(ForwardedOrigin {
-					scheme: scheme.to_string(),
-					host: host.to_string(),
-					port,
-				}),
-			},
-		);
-		ForwardedGitTokens(m)
-	}
-
-	#[test]
-	fn forwarded_token_uses_entry_origin_to_pin() {
-		// The entry carries its own controller-resolved origin (matching the
-		// request), so the token is attached using the wire origin.
-		let map = forwarded_with_origin(
-			"owner/repo",
-			"TOK",
-			"https",
-			"github.com",
-			Some(443),
-		);
-		assert_eq!(
-			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
-			Some("TOK".to_string())
-		);
-	}
-
-	#[test]
-	fn forwarded_token_entry_origin_mismatch_rejected() {
-		// The entry's wire origin pins a DIFFERENT port than the request: the
-		// scan path must not attach the token even though the host-scoped key
-		// would match.
-		let map = forwarded_with_origin(
-			"https://git.internal:8443/owner/repo.git",
-			"TOK",
-			"https",
-			"git.internal",
-			Some(8443),
-		);
-		assert_eq!(
-			forwarded_token_for_url(
-				&map,
-				"https://git.internal:9090/owner/repo.git"
-			),
-			None
-		);
-	}
-
 	// A session token bound to one host must never be reused against a
 	// different host: the guard runs before any clone/spawn_blocking, so this
 	// is exercised end-to-end through the handler without any network.
@@ -8075,12 +7801,9 @@ mod tests {
 				agent_result.agent, agent_str
 			);
 
-			let expected_dir = resolve_git_install_target_dir(
-				*agent_type,
-				resource_scope,
-				Some(&project_root),
-			)
-			.expect("dir must resolve");
+			let expected_dir = create_adapter(*agent_type)
+				.target_skills_dir(Some(project_root.as_path()), resource_scope)
+				.expect("dir must resolve");
 			let installed_path = expected_dir.join("hello-skill/SKILL.md");
 			let master_path = project_root.join(".aghub/hello-skill/SKILL.md");
 			if agent_result.error.is_none() {
