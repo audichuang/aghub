@@ -3523,7 +3523,7 @@ fn delete_by_path_rejects_aghub_store_path_before_the_keep_rule() {
 		master.join("SKILL.md").exists(),
 		".aghub store real dir must survive"
 	);
-	// No agent reads `.aghub`, so the route's location validation
+	// No agent reads `.aghub`, so by-path location validation
 	// refuses before the keep rule is reached; the keep rule itself
 	// is pinned in core (`single_agent_keep_reason_aghub_store_*`).
 }

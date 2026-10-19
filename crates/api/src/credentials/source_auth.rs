@@ -408,8 +408,7 @@ mod tests {
 	// ─── forwarded_for_scan: host-scoped match + D8 origin pin ─────────
 
 	fn forwarded(pairs: &[(&str, &str)]) -> ForwardedGitTokens {
-		use crate::credentials::forwarding::ForwardedEntry;
-		// Entries with NO explicit origin: `forwarded_token_for_url` then
+		// Entries with NO explicit origin: `forwarded_for_scan` then
 		// re-resolves the forwarded source's clone-URL origin, exercising the
 		// host-scoped + origin-pin path independently of the wire origin.
 		ForwardedGitTokens(
@@ -509,7 +508,6 @@ mod tests {
 		host: &str,
 		port: Option<u16>,
 	) -> ForwardedGitTokens {
-		use crate::credentials::forwarding::ForwardedEntry;
 		let mut m = std::collections::BTreeMap::new();
 		m.insert(
 			source.to_string(),

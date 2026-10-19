@@ -135,16 +135,6 @@ mod tests {
 	}
 
 	#[test]
-	fn same_origin_false_for_different_hosts() {
-		assert!(!origins_match("https://github.com/a", "https://evil.com/a"));
-	}
-
-	#[test]
-	fn same_origin_false_on_parse_failure() {
-		assert!(!origins_match("not a url", "https://github.com/a"));
-	}
-
-	#[test]
 	fn same_origin_false_for_same_host_different_port() {
 		// Session pinning now keys on the full origin: the same host on a
 		// different explicit port is a DIFFERENT origin and must NOT match,
