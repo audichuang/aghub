@@ -125,4 +125,33 @@ mod tests {
 	fn origins_match_false_on_parse_failure() {
 		assert!(!origins_match("not a url", "https://github.com/a"));
 	}
+
+	#[test]
+	fn same_origin_true_for_matching_origins() {
+		assert!(origins_match(
+			"https://gitlab.internal/a.git",
+			"https://gitlab.internal/b.git",
+		));
+	}
+
+	#[test]
+	fn same_origin_false_for_same_host_different_port() {
+		// Session pinning now keys on the full origin: the same host on a
+		// different explicit port is a DIFFERENT origin and must NOT match,
+		// so a token bound to one port can't be reused against another.
+		assert!(!origins_match(
+			"https://git.internal:8080/a.git",
+			"https://git.internal:9090/b.git",
+		));
+	}
+
+	#[test]
+	fn same_origin_true_for_default_port_forms() {
+		// `https://h` and `https://h:443` are the same origin (default port
+		// folds in), so this remains a match.
+		assert!(origins_match(
+			"https://git.internal/a.git",
+			"https://git.internal:443/b.git",
+		));
+	}
 }

@@ -29,11 +29,12 @@ opencode` printed a plan and exited 0, and only the `--yes` run reported
 writes — so the preview needs read-only preflights, not a planner call.
 
 Rule: every refusal the commit can raise has a read-only seam the preview calls
-first (skill existence is decided by `reconcile_skill_preview`, which shares
-`plan_reconcile_skill` with the commit; `ensure_skill_exists` was removed;
-`ensure_mcp_exists`, `ensure_sub_agent_exists`, `ensure_disjoint`, and
-`ensure_*_reconcile_spares` remain for their respective domains), and preview
-and commit share one definition.
+first, and preview and commit share one definition. For skills that seam is
+`plan_reconcile_skill` itself — existence, disjointness and the shared-backing
+spares check all live in it, so `reconcile_skill_preview` is one call
+(`ensure_skill_exists` and `ensure_skill_reconcile_spares` were removed). MCP
+and sub-agent reconcile still use `ensure_mcp_exists`, `ensure_sub_agent_exists`,
+`ensure_disjoint` and their `ensure_*_reconcile_spares`.
 
 Tests: `reconcile_rejects_empty_target_set_and_validates_source_in_preview`,
 `reconcile_skill_preview_refuses_what_the_commit_refuses`,

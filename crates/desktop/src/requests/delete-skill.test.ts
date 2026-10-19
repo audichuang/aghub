@@ -557,6 +557,26 @@ test("cross-scope deleteSkill with only a kept row is refused with the kept-shar
 	assert.equal(result.message, "deleteSkillKeptSharedMaster|cross-skill");
 });
 
+test("cross-scope deleteSkill in bulk context keeps the short kept wording", async () => {
+	const result = await deleteSkill({
+		api: byNameApi(() => ({
+			success: false,
+			outcome: "kept",
+			scopes: [scopeRow("global", null, "kept")],
+			still_read_by_managed: [],
+			still_read_by_unmanaged: [],
+		})),
+		skillName: "cross-skill",
+		scopes: [{ scope: "global", projectRoot: null, agents: ["claude"] }],
+		intent: { kind: "all-agents" },
+		context: "bulk",
+		t,
+	});
+
+	assert.equal(result.verdict, "refused");
+	assert.equal(result.message, "bulkDeleteKept");
+});
+
 test("cross-scope deleteSkill surfaces still_read_by_unmanaged as unmanagedKept", async () => {
 	const result = await deleteSkill({
 		api: byNameApi(() => ({
@@ -711,22 +731,27 @@ test("mixed-scope group: disabled agent is not named in either scope's request",
 		],
 	};
 
-	const { requests, skippedGroupKeys } = buildBulkDeleteRequests({
-		groups: [group],
-		resourceType: "skill",
-		backendHolders,
-		includeUnmanaged: false,
-		projectPath: "/project",
-	});
+	const { requests, skillDeletes, skippedGroupKeys } =
+		buildBulkDeleteRequests({
+			groups: [group],
+			resourceType: "skill",
+			backendHolders,
+			includeUnmanaged: false,
+			projectPath: "/project",
+		});
 
-	// Only global scope for claude should be requested; project scope held only by disabled cursor must not be requested
-	assert.equal(requests.length, 1);
-	assert.equal(requests[0].scope, "global");
-	assert.equal(requests[0].agent, "claude");
-	assert.deepEqual(requests[0].agents, ["claude"]);
-	assert.ok(!requests.some((r) => r.agent === "cursor"));
-	assert.ok(!requests.some((r) => r.agents.includes("cursor")));
-	assert.ok(!requests.some((r) => r.scope === "project"));
+	// Only the global scope for claude is sent; the project scope held only by
+	// disabled cursor must not appear.
+	assert.deepEqual(requests, []);
+	assert.deepEqual(skillDeletes, [
+		{
+			name: "my-skill",
+			scopes: [
+				{ scope: "global", projectRoot: null, agents: ["claude"] },
+			],
+			agents: ["claude"],
+		},
+	]);
 	assert.deepEqual(skippedGroupKeys, []);
 });
 

@@ -83,7 +83,7 @@ export function BulkDeleteDialog({
 		onClose();
 	};
 
-	const { requests, skippedGroupKeys } = useMemo(
+	const { requests, skillDeletes, skippedGroupKeys } = useMemo(
 		() =>
 			backendHolders
 				? buildBulkDeleteRequests({
@@ -93,7 +93,7 @@ export function BulkDeleteDialog({
 						includeUnmanaged,
 						projectPath,
 					})
-				: { requests: [], skippedGroupKeys: [] },
+				: { requests: [], skillDeletes: [], skippedGroupKeys: [] },
 		[groups, resourceType, backendHolders, includeUnmanaged, projectPath],
 	);
 
@@ -107,69 +107,82 @@ export function BulkDeleteDialog({
 			}> = [];
 
 			for (const req of requests) {
-				if (req.resourceType === "mcp") {
-					promises.push(
-						api.mcps.delete(
-							req.name,
-							req.agent,
-							req.scope,
-							req.projectRoot,
-							req.agents,
-						),
-					);
-				} else {
-					promises.push(
-						deleteSkill({
-							api,
-							queryClient,
-							skillName: req.groupKey,
-							t,
-							scope: req.scope,
-							projectRoot: req.projectRoot,
-							agent: req.agent,
-							context: "bulk",
-							intent: {
-								kind: "from-agents",
-								agents: req.agents,
-								includeUnmanaged,
-							},
-						}).then((res) => {
-							if (!res.success) {
-								throw new Error(
-									res.message || t("failedToDeleteSkill"),
-								);
-							}
-						}),
-					);
-				}
+				promises.push(
+					api.mcps.delete(
+						req.name,
+						req.agent,
+						req.scope,
+						req.projectRoot,
+						req.agents,
+					),
+				);
 				deleteInfo.push({
 					name: req.name,
 					agent: req.agent,
 					scope: req.scope,
 				});
 			}
+			// Attach the handler now so a rejection is never unhandled while
+			// the skill deletes run.
+			const mcpSettled = Promise.allSettled(promises);
 
-			const results = await Promise.allSettled(promises);
 			const failures: Array<{
 				name: string;
 				agent?: string | null;
 				error: string | null;
-			}> = results
-				.map((r, i) => ({ result: r, info: deleteInfo[i] }))
-				.filter(({ result }) => result.status === "rejected")
-				.map(({ result, info }) => ({
-					name: info.name,
-					agent: info.agent,
-					error:
-						(result as PromiseRejectedResult).reason instanceof
-						Error
-							? (
-									(result as PromiseRejectedResult)
-										.reason as Error
-								).message
-							: null,
-				}));
+			}> = [];
 
+			// Sequential: every skill delete serializes on the server's
+			// mutation lock, so concurrency only risks its timeout.
+			for (const del of skillDeletes) {
+				try {
+					const res = await deleteSkill({
+						api,
+						queryClient,
+						skillName: del.name,
+						t,
+						scopes: del.scopes,
+						context: "bulk",
+						intent: {
+							kind: "from-agents",
+							agents: del.agents,
+							includeUnmanaged,
+						},
+					});
+					if (!res.success) {
+						failures.push({
+							name: del.name,
+							agent: null,
+							error: res.message || t("failedToDeleteSkill"),
+						});
+					}
+				} catch (e) {
+					failures.push({
+						name: del.name,
+						agent: null,
+						error: e instanceof Error ? e.message : null,
+					});
+				}
+			}
+
+			const results = await mcpSettled;
+			failures.push(
+				...results
+					.map((r, i) => ({ result: r, info: deleteInfo[i] }))
+					.filter(({ result }) => result.status === "rejected")
+					.map(({ result, info }) => ({
+						name: info.name,
+						agent: info.agent,
+						error:
+							(result as PromiseRejectedResult).reason instanceof
+							Error
+								? (
+										(result as PromiseRejectedResult)
+											.reason as Error
+									).message
+								: null,
+					})),
+			);
 			for (const key of skippedGroupKeys) {
 				const group = groups.find((g) => g.key === key);
 				failures.push({
@@ -186,7 +199,7 @@ export function BulkDeleteDialog({
 				);
 				throw new BulkOperationError(failures);
 			}
-			return { deleted: promises.length };
+			return { deleted: promises.length + skillDeletes.length };
 		},
 		// A partial failure throws, but the requests that succeeded still
 		// changed MCP config — refresh on every outcome, not only success.
@@ -321,7 +334,7 @@ export function BulkDeleteDialog({
 								loadingHolders ||
 								!!holdersError ||
 								deleteMutation.isPending ||
-								requests.length === 0
+								requests.length + skillDeletes.length === 0
 							}
 							className="min-h-[44px] min-w-[120px]"
 						>

@@ -2086,6 +2086,41 @@ fn test_all_agents_sweep_refuses_plugin_owned_copy_of_unnamed_agent() {
 
 #[cfg(unix)]
 #[test]
+fn test_all_agents_sweep_refuses_swept_path_inside_plugin_root_not_own_root() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+	crate::testing::master_with_claude_referrer(&root, "swept");
+	// The plugin owns Claude's whole skills dir, so only the SWEPT path
+	// (never Cursor's own Master root) lies inside it.
+	let _roots = crate::skills::plugin_roots::test_override::set(vec![(
+		"p".to_string(),
+		root.join(".claude/skills"),
+	)]);
+	for dry_run in [true, false] {
+		let req = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("swept".to_string()),
+			scope: WriteScope::project(&root),
+			agents: vec![AgentType::Cursor],
+			dry_run,
+			all_agents: true,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let err = remove_skill_batch(&req).expect_err("must be refused");
+		assert_eq!(
+			crate::error_codes::wire_code(&err),
+			"MANAGED_RESOURCE",
+			"dry_run={dry_run}"
+		);
+	}
+	assert!(root.join(".aghub/swept/SKILL.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn test_in_lock_plugin_recheck_refuses_owned_copy_appearing_after_preflight() {
 	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 	let temp = tempdir().unwrap();
@@ -2881,4 +2916,664 @@ fn test_by_path_leaf_symlink_into_plugin_never_deletes_plugin_files() {
 		plugin_md.exists(),
 		"commit must never delete the plugin's own SKILL.md through a leaf symlink"
 	);
+}
+
+// ── by-path policy: path-shape and containment refusals ─────────────────
+// The by-path route is a thin adapter over `remove_skill_batch(..)` +
+// `to_single_view(..)`; these helpers drive the same two calls.
+
+/// Every agent that reads `slot`. A request naming exactly these passes
+/// per-agent validation and the shared-slot guard, so only the path checks
+/// under test stand between it and deletion.
+#[cfg(unix)]
+fn slot_reader_ids(
+	slot: &Path,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<&'static str> {
+	let readers =
+		removal::skill_dir_readers_outside(slot, scope, project_root, &[]);
+	assert!(!readers.is_empty(), "slot must have readers");
+	readers
+}
+
+#[cfg(unix)]
+fn agent_list(ids: &[&str]) -> Vec<AgentType> {
+	AgentType::parse_list(&ids.join(",")).unwrap()
+}
+
+#[cfg(unix)]
+fn by_path(
+	source_path: String,
+	scope: WriteScope,
+	agents: Vec<AgentType>,
+	confirm: bool,
+) -> Result<SingleSkillRemovalView> {
+	let req = SkillRemovalRequest {
+		target: SkillRemovalTarget::ByPath(PathBuf::from(source_path)),
+		scope,
+		agents,
+		dry_run: !confirm,
+		all_agents: false,
+		prior_removed_paths: Vec::new(),
+		keeps_master: false,
+	};
+	remove_skill_batch(&req).and_then(|r| r.to_single_view(!confirm))
+}
+
+/// The refusal message of a by-path request that must be rejected as an
+/// invalid-config error (the API maps that variant to 400 `INVALID_CONFIG`).
+#[cfg(unix)]
+fn by_path_refused(
+	source_path: String,
+	scope: WriteScope,
+	agents: Vec<AgentType>,
+	confirm: bool,
+) -> String {
+	match by_path(source_path, scope, agents, confirm) {
+		Ok(view) => panic!("by-path must be refused, got {view:?}"),
+		Err(ConfigError::InvalidConfig(msg)) => msg,
+		Err(other) => panic!("expected InvalidConfig, got {other:?}"),
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_trailing_dotdot_project_agents_slot() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let slot = proj.join(".agents/skills");
+	let y = slot.join("y");
+	let z = slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+
+	let msg = by_path_refused(
+		format!("{}/..", y.display()),
+		WriteScope::project(proj.clone()),
+		agent_list(&slot_reader_ids(
+			&slot,
+			ResourceScope::ProjectOnly,
+			Some(&proj),
+		)),
+		true,
+	);
+
+	assert!(slot.exists(), "slot dir must survive");
+	assert!(y.join("SKILL.md").exists(), "skill y must survive");
+	assert!(z.join("SKILL.md").exists(), "skill z must survive");
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_trailing_dotdot_project_cursor_slot() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let slot = proj.join(".cursor/skills");
+	let y = slot.join("y");
+	let z = slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+
+	let msg = by_path_refused(
+		format!("{}/..", y.display()),
+		WriteScope::project(proj.clone()),
+		agent_list(&slot_reader_ids(
+			&slot,
+			ResourceScope::ProjectOnly,
+			Some(&proj),
+		)),
+		true,
+	);
+
+	assert!(slot.exists(), "cursor slot dir must survive");
+	assert!(y.join("SKILL.md").exists(), "skill y must survive");
+	assert!(z.join("SKILL.md").exists(), "skill z must survive");
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_trailing_dotdot_global_agents_slot() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let slot = home.join(".agents/skills");
+	let y = slot.join("y");
+	let z = slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+
+	let msg = by_path_refused(
+		format!("{}/..", y.display()),
+		WriteScope::Global,
+		agent_list(&slot_reader_ids(&slot, ResourceScope::GlobalOnly, None)),
+		true,
+	);
+
+	assert!(slot.exists(), "global slot dir must survive");
+	assert!(y.join("SKILL.md").exists(), "skill y must survive");
+	assert!(z.join("SKILL.md").exists(), "skill z must survive");
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_dotdot_in_middle_of_path() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let slot = proj.join(".agents/skills");
+	let y = slot.join("y");
+	let z = slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+
+	let msg = by_path_refused(
+		format!("{}/../z", y.display()),
+		WriteScope::project(proj.clone()),
+		agent_list(&slot_reader_ids(
+			&slot,
+			ResourceScope::ProjectOnly,
+			Some(&proj),
+		)),
+		true,
+	);
+
+	assert!(slot.exists(), "slot dir must survive");
+	assert!(y.join("SKILL.md").exists(), "skill y must survive");
+	assert!(z.join("SKILL.md").exists(), "skill z must survive");
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_dotdot_before_skills_root_with_no_strippable_prefix()
+{
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let slot = proj.join(".agents/skills");
+	let y = slot.join("y");
+	let z = slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(proj.join("foo")).unwrap();
+
+	assert!(slot.exists(), "slot dir must exist before");
+	assert!(y.join("SKILL.md").exists(), "skill y must exist before");
+	assert!(z.join("SKILL.md").exists(), "skill z must exist before");
+
+	let msg = by_path_refused(
+		format!("{}/foo/../.agents/skills/y/..", proj.display()),
+		WriteScope::project(proj.clone()),
+		agent_list(&slot_reader_ids(
+			&slot,
+			ResourceScope::ProjectOnly,
+			Some(&proj),
+		)),
+		true,
+	);
+
+	assert!(slot.exists(), "slot dir must survive");
+	assert!(y.join("SKILL.md").exists(), "skill y must survive");
+	assert!(z.join("SKILL.md").exists(), "skill z must survive");
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
+	assert!(
+		!err.contains(&proj.display().to_string()),
+		"error must not contain filesystem path: {err}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_dotdot_before_skills_root_without_trailing_dotdot() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let slot = proj.join(".agents/skills");
+	let y = slot.join("y");
+	let z = slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(proj.join("foo")).unwrap();
+
+	assert!(slot.exists(), "slot dir must exist before");
+	assert!(y.join("SKILL.md").exists(), "skill y must exist before");
+	assert!(z.join("SKILL.md").exists(), "skill z must exist before");
+
+	let msg = by_path_refused(
+		format!("{}/foo/../.agents/skills/y", proj.display()),
+		WriteScope::project(proj.clone()),
+		agent_list(&slot_reader_ids(
+			&slot,
+			ResourceScope::ProjectOnly,
+			Some(&proj),
+		)),
+		true,
+	);
+
+	assert!(slot.exists(), "slot dir must survive");
+	assert!(y.join("SKILL.md").exists(), "skill y must survive");
+	assert!(z.join("SKILL.md").exists(), "skill z must survive");
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
+	assert!(
+		!err.contains(&proj.display().to_string()),
+		"error must not contain filesystem path: {err}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_accepts_dotdot_in_project_root() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let x = home.join("x");
+	let proj = home.join("proj");
+	std::fs::create_dir_all(&x).unwrap();
+	let slot = proj.join(".agents/skills");
+	let y = slot.join("y");
+	let z = slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+
+	let unnormalized_proj =
+		PathBuf::from(format!("{}/x/../proj", home.display()));
+	let source_path =
+		format!("{}/x/../proj/.agents/skills/y/SKILL.md", home.display());
+
+	let resp = by_path(
+		source_path,
+		WriteScope::project(unnormalized_proj.clone()),
+		agent_list(&slot_reader_ids(
+			&slot,
+			ResourceScope::ProjectOnly,
+			Some(&unnormalized_proj),
+		)),
+		true,
+	)
+	.expect("by-path delete must succeed");
+
+	assert!(
+		resp.removal_view.success,
+		"delete must succeed: {:?}",
+		resp.removal_view
+	);
+	assert!(!y.exists(), "skill y dir must be gone");
+	assert!(z.join("SKILL.md").exists(), "sibling skill z must survive");
+	assert!(slot.exists(), "slot dir must survive");
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_cross_slot_dotdot() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let cursor_slot = proj.join(".cursor/skills");
+	let agents_slot = proj.join(".agents/skills");
+	std::fs::create_dir_all(&cursor_slot).unwrap();
+	let y = agents_slot.join("y");
+	let z = agents_slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+
+	let mut ids =
+		slot_reader_ids(&cursor_slot, ResourceScope::ProjectOnly, Some(&proj));
+	ids.extend(slot_reader_ids(
+		&agents_slot,
+		ResourceScope::ProjectOnly,
+		Some(&proj),
+	));
+	ids.sort();
+	ids.dedup();
+
+	let msg = by_path_refused(
+		format!("{}/.cursor/skills/../../.agents/skills/y", proj.display()),
+		WriteScope::project(proj.clone()),
+		agent_list(&ids),
+		true,
+	);
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
+	assert!(cursor_slot.exists(), "cursor slot dir must survive");
+	assert!(agents_slot.exists(), "agents slot dir must survive");
+	assert!(y.join("SKILL.md").exists(), "skill y must survive");
+	assert!(z.join("SKILL.md").exists(), "skill z must survive");
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_skills_root_itself() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let slot = proj.join(".agents/skills");
+	let sibling = slot.join("sibling");
+	std::fs::create_dir_all(&sibling).unwrap();
+	std::fs::write(
+		sibling.join("SKILL.md"),
+		"---\nname: sibling\ndescription: s\n---\n",
+	)
+	.unwrap();
+
+	let readers =
+		slot_reader_ids(&slot, ResourceScope::ProjectOnly, Some(&proj));
+
+	// Case 1: source_path = <proj>/.agents/skills
+	let msg = by_path_refused(
+		slot.display().to_string(),
+		WriteScope::project(proj.clone()),
+		agent_list(&readers),
+		true,
+	);
+
+	assert!(slot.exists(), "slot dir must survive");
+	assert!(
+		sibling.join("SKILL.md").exists(),
+		"sibling skill must survive"
+	);
+	let err = msg.as_str();
+	assert!(
+		err.contains("strictly"),
+		"error must mention strictly: {err}"
+	);
+
+	// Case 2: source_path = <proj>/.agents/skills/SKILL.md (SKILL.md need not exist)
+	let msg = by_path_refused(
+		slot.join("SKILL.md").display().to_string(),
+		WriteScope::project(proj.clone()),
+		agent_list(&readers),
+		true,
+	);
+
+	assert!(slot.exists(), "slot dir must survive");
+	assert!(
+		sibling.join("SKILL.md").exists(),
+		"sibling skill must survive"
+	);
+	let err = msg.as_str();
+	assert!(
+		err.contains("strictly"),
+		"error must mention strictly: {err}"
+	);
+
+	// Case 3: global <home>/.agents/skills (scope global)
+	let global_slot = home.join(".agents/skills");
+	let global_sibling = global_slot.join("sibling");
+	std::fs::create_dir_all(&global_sibling).unwrap();
+	std::fs::write(
+		global_sibling.join("SKILL.md"),
+		"---\nname: sibling\ndescription: s\n---\n",
+	)
+	.unwrap();
+
+	let global_readers =
+		slot_reader_ids(&global_slot, ResourceScope::GlobalOnly, None);
+
+	let msg = by_path_refused(
+		global_slot.display().to_string(),
+		WriteScope::Global,
+		agent_list(&global_readers),
+		true,
+	);
+
+	assert!(global_slot.exists(), "global slot dir must survive");
+	assert!(
+		global_sibling.join("SKILL.md").exists(),
+		"global sibling skill must survive"
+	);
+	let err = msg.as_str();
+	assert!(
+		err.contains("strictly"),
+		"error must mention strictly: {err}"
+	);
+}
+
+/// A `SKILL.md` placed directly in the skills root (not in a subdirectory)
+/// must not delete the root or the sibling — the dir parent is the skills
+/// root itself, so the strictly-contained guard rejects it.
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_skill_md_directly_under_the_skills_root() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let slot = proj.join(".agents/skills");
+	let sibling = slot.join("sibling");
+	std::fs::create_dir_all(&sibling).unwrap();
+	std::fs::write(
+		sibling.join("SKILL.md"),
+		"---\nname: sibling\ndescription: s\n---\n",
+	)
+	.unwrap();
+	// A bare SKILL.md in the root — not inside a skill subdirectory.
+	std::fs::write(
+		slot.join("SKILL.md"),
+		"---\nname: root-skill\ndescription: r\n---\n",
+	)
+	.unwrap();
+
+	let readers =
+		slot_reader_ids(&slot, ResourceScope::ProjectOnly, Some(&proj));
+	by_path_refused(
+		slot.join("SKILL.md").display().to_string(),
+		WriteScope::project(proj.clone()),
+		agent_list(&readers),
+		true,
+	);
+
+	assert!(slot.exists(), "slot dir must survive");
+	assert!(
+		sibling.join("SKILL.md").exists(),
+		"sibling skill must survive"
+	);
+}
+
+/// `<proj>/.agents/skills/y/..` with sibling skills y and z: both must
+/// survive because the path contains `..`.
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_child_then_dotdot() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let proj = home.join("proj");
+	let slot = proj.join(".agents/skills");
+	let y = slot.join("y");
+	let z = slot.join("z");
+	std::fs::create_dir_all(&y).unwrap();
+	std::fs::write(y.join("SKILL.md"), "---\nname: y\ndescription: y\n---\n")
+		.unwrap();
+	std::fs::create_dir_all(&z).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: z\n---\n")
+		.unwrap();
+
+	let readers =
+		slot_reader_ids(&slot, ResourceScope::ProjectOnly, Some(&proj));
+	let msg = by_path_refused(
+		format!("{}/{}", y.display(), ".."),
+		WriteScope::project(proj.clone()),
+		agent_list(&readers),
+		true,
+	);
+
+	assert!(y.join("SKILL.md").exists(), "skill y must survive");
+	assert!(z.join("SKILL.md").exists(), "skill z must survive");
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
+}
+
+/// A directory INSIDE a skill, or a stray file inside it, must not resolve to
+/// the enclosing skill either: `<slot>/z/scripts`, `<slot>/z/scripts/run.sh`
+/// and `<slot>/z/gone.txt` (whose `parent()` is the skill root) all refuse.
+#[cfg(unix)]
+#[test]
+fn delete_by_path_refuses_skill_subdirectory_and_stray_file() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let z = home.join(".claude/skills/z");
+	std::fs::create_dir_all(z.join("scripts")).unwrap();
+	std::fs::write(z.join("SKILL.md"), "---\nname: z\ndescription: d\n---\n")
+		.unwrap();
+	std::fs::write(z.join("scripts/run.sh"), "#!/bin/sh\n").unwrap();
+
+	for target in [
+		z.join("scripts"),
+		z.join("scripts/run.sh"),
+		z.join("gone.txt"),
+	] {
+		by_path_refused(
+			target.display().to_string(),
+			WriteScope::Global,
+			vec![AgentType::Claude],
+			true,
+		);
+		assert!(z.join("SKILL.md").exists(), "the skill must survive");
+		assert!(z.join("scripts/run.sh").exists());
+	}
+}
+
+/// A REAL directory inside `.aghub/<name>` (the Master store) must survive a
+/// by-path request from a single enabled agent.
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_aghub_store_path_before_the_keep_rule() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let off: Vec<&str> = AgentType::ALL
+		.iter()
+		.map(|a| a.as_str())
+		.filter(|a| *a != "cursor")
+		.collect();
+	let _off = crate::agent_settings::test_override::disable(&off);
+
+	let proj = home;
+	let name = "store-real";
+	let master = proj.join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+	// Agent marker so project root is recognized.
+	std::fs::create_dir_all(proj.join(".cursor")).unwrap();
+
+	by_path_refused(
+		master.join("SKILL.md").display().to_string(),
+		WriteScope::project(proj.clone()),
+		vec![AgentType::Cursor],
+		true,
+	);
+
+	assert!(
+		master.join("SKILL.md").exists(),
+		".aghub store real dir must survive"
+	);
+	// No agent reads `.aghub`, so by-path location validation
+	// refuses before the keep rule is reached; the keep rule itself
+	// is pinned in core (`single_agent_keep_reason_aghub_store_*`).
+}
+
+/// A source_path spelling `..` into `.aghub` (e.g.
+/// `<proj>/.agents/skills/../../.aghub/<name>/SKILL.md`) must be
+/// rejected because the `..` components escape the agent skills root.
+#[cfg(unix)]
+#[test]
+fn delete_by_path_rejects_dotdot_into_aghub_store() {
+	let tmp = tempdir().unwrap();
+	let _env = crate::skills::removal::verdict::tests::TestEnv::new(tmp.path());
+	let home = tmp.path().join("home");
+	let off: Vec<&str> = AgentType::ALL
+		.iter()
+		.map(|a| a.as_str())
+		.filter(|a| *a != "cursor")
+		.collect();
+	let _off = crate::agent_settings::test_override::disable(&off);
+
+	let proj = home;
+	let name = "store-dot";
+	let master = proj.join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: test\n---\n"),
+	)
+	.unwrap();
+	std::fs::create_dir_all(proj.join(".cursor")).unwrap();
+
+	// Spell the path through .. into .aghub.
+	let dotdot_path = format!(
+		"{}/.agents/skills/../../.aghub/{}/SKILL.md",
+		proj.display(),
+		name
+	);
+	let msg = by_path_refused(
+		dotdot_path,
+		WriteScope::project(proj.clone()),
+		vec![AgentType::Cursor],
+		true,
+	);
+
+	assert!(
+		master.join("SKILL.md").exists(),
+		".aghub store dir must survive the dotdot attempt"
+	);
+	// The handler rejects the `..` before reaching the store
+	// guard, so this is a validation failure, not a kept outcome.
+	let err = msg.as_str();
+	assert!(err.contains("'..'"), "error must mention '..': {err}");
 }

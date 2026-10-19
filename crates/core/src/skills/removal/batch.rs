@@ -9,8 +9,8 @@ use std::sync::Arc;
 use super::{
 	agent_skill_dirs_in_scope, allowed_skill_roots, assert_strictly_contained,
 	by_path_skill_dir, by_path_skill_name, evaluate_removal_verdict,
-	expand_tilde_path, plan_copy_removal, unmanaged_skill_dirs, PruneStatus,
-	RemovalOutcome, Verdict,
+	expand_tilde_path, plan_copy_removal, settle_removal, unmanaged_skill_dirs,
+	PruneStatus, Verdict,
 };
 use crate::batch::{Backing, RemovalCredits};
 use crate::errors::{ConfigError, Result};
@@ -424,6 +424,14 @@ impl SkillRemovalResponse {
 		}
 	}
 
+	/// Some row's verdict is `Refused`: a commit would reject this scope, so a
+	/// dry run must report the same stop.
+	pub(crate) fn has_refused_row(&self) -> bool {
+		self.rows
+			.iter()
+			.any(|r| matches!(r.verdict, Verdict::Refused { .. }))
+	}
+
 	/// Project this batch removal response into an aggregate single-skill removal view.
 	///
 	/// Yields the aggregate outcome, success, paths, and any fatal error across ALL rows.
@@ -538,17 +546,11 @@ impl SkillRemovalResponse {
 			outcome,
 		};
 
-		let code = self.rows.iter().find_map(|r| {
-			if dry_run && matches!(r.verdict, Verdict::Refused { .. }) {
-				Some(crate::error_codes::wire_code(
-					&ConfigError::UnsupportedOperation {
-						message: String::new(),
-						rejected_targets: None,
-					},
-				))
-			} else {
-				None
-			}
+		let code = (dry_run && self.has_refused_row()).then(|| {
+			crate::error_codes::wire_code(&ConfigError::UnsupportedOperation {
+				message: String::new(),
+				rejected_targets: None,
+			})
 		});
 
 		Ok(SingleSkillRemovalView {
@@ -634,8 +636,10 @@ pub fn remove_skill_across_scopes(
 			keeps_master: false,
 		};
 		let result = remove_skill_batch_with(&req, &plugin_roots);
+		let mut would_stop = false;
 		if let Ok(resp) = &result {
 			wrote |= resp.wrote_anything();
+			would_stop = dry_run && resp.has_refused_row();
 		}
 		let view = match result.and_then(|r| r.to_single_view(dry_run)) {
 			Ok(view) => view,
@@ -664,7 +668,7 @@ pub fn remove_skill_across_scopes(
 			error: None,
 		});
 		// The commit refuses this scope and stops the run here; the dry run must too.
-		if dry_run && view.code.is_some() {
+		if would_stop {
 			stop = Some(if previewed {
 				RemovalKind::Partial
 			} else {
@@ -966,49 +970,206 @@ fn check_unreadable_exhaustive(
 	Ok(())
 }
 
+/// What the plugin check needs per agent, captured while planning a row: the
+/// agent's own skill root and every path its plan would delete.
+struct PluginProbe {
+	agent: AgentType,
+	own_root: Option<PathBuf>,
+	doomed: Vec<PathBuf>,
+}
+
+/// The result of planning every row of a by-name removal once.
+#[derive(Default)]
+struct PlannedRows {
+	verdicts: Vec<SkillRemovalRow>,
+	failures: Vec<(AgentType, Arc<ConfigError>)>,
+	load_failures: Vec<(AgentType, Arc<ConfigError>)>,
+	probes: Vec<PluginProbe>,
+}
+
+/// Caller-alone needs-confirm of an exhaustive row: the main plan sweeps
+/// (`all_agents = true`), this one does not. `None` when the plan errs.
+fn caller_needs_confirm(
+	manager: &mut ConfigManager,
+	name: &str,
+	all_agents: bool,
+	targets: &[AgentType],
+	prior: &[PathBuf],
+) -> Option<bool> {
+	manager
+		.remove_skill_planned_for_agents(
+			name, all_agents, true, // dry_run
+			true, // confirm
+			targets, prior,
+		)
+		.map(|o| o.plan.needs_confirm)
+		.ok()
+}
+
+/// Dry-run plan every row of `execution_order` once. `seed` and `can_credit`
+/// carry earlier rows' deletions forward; `want_confirm` skips the extra
+/// caller-alone re-plan when only the doomed paths matter.
+#[allow(clippy::too_many_arguments)]
+fn plan_rows(
+	request: &SkillRemovalRequest,
+	name: &str,
+	holders: &[AgentType],
+	target_agents: &[AgentType],
+	is_exhaustive: bool,
+	execution_order: &[AgentType],
+	seed: Vec<PathBuf>,
+	can_credit_prior: bool,
+	want_confirm: bool,
+) -> PlannedRows {
+	let scope = request.scope.resource_scope();
+	let project_root = request.scope.project_root();
+	let mut accumulated_deletions = seed;
+	let mut rows = PlannedRows::default();
+
+	for &agent in execution_order {
+		let descriptor = registry::get(agent);
+		if !descriptor.supports_skill_scope(scope) {
+			let scope_word = scope_to_word(scope);
+			let reason = format!("no {} skill config", scope_word);
+			rows.failures.push((
+				agent,
+				Arc::new(ConfigError::unsupported_operation(
+					"remove for this agent alone",
+					&reason,
+					agent.as_str(),
+				)),
+			));
+			continue;
+		}
+
+		let mut manager = create_manager(agent, scope, project_root);
+		if let Err(e) = manager.load() {
+			rows.load_failures.push((agent, Arc::new(e)));
+			continue;
+		}
+		let own_root = manager.get_skill(name).and_then(super::skill_root);
+
+		let is_agent_exhaustive = is_exhaustive && holders.contains(&agent);
+		let plan_result = manager.remove_skill_planned_for_agents(
+			name,
+			is_agent_exhaustive || request.all_agents,
+			true, // dry_run
+			true, // confirm
+			target_agents,
+			&accumulated_deletions,
+		);
+
+		let doomed = match &plan_result {
+			Ok(outcome) => outcome.plan.paths.clone(),
+			Err(_) => Vec::new(),
+		};
+		rows.probes.push(PluginProbe {
+			agent,
+			own_root,
+			doomed,
+		});
+
+		match plan_result {
+			Ok(outcome) => {
+				let needs_confirm = if want_confirm
+					&& is_agent_exhaustive
+					&& !request.all_agents
+				{
+					caller_needs_confirm(
+						&mut manager,
+						name,
+						request.all_agents,
+						target_agents,
+						&accumulated_deletions,
+					)
+					.unwrap_or(outcome.plan.needs_confirm)
+				} else {
+					outcome.plan.needs_confirm
+				};
+				let mut row = SkillRemovalRow::from_outcome(
+					agent,
+					&outcome,
+					request.dry_run,
+				);
+				row.needs_confirm = needs_confirm;
+				rows.verdicts.push(row);
+				if let Verdict::Refused {
+					ref reason,
+					ref kind,
+					ref path,
+				} = outcome.verdict
+				{
+					let op = if request.all_agents {
+						"remove from every agent"
+					} else {
+						"remove for this agent alone"
+					};
+					let rejected_target = build_rejected_targets(
+						&[agent],
+						reason,
+						Some(kind),
+						path.as_deref(),
+						scope,
+						project_root,
+						&request.agents,
+					)
+					.remove(0);
+					rows.failures.push((
+						agent,
+						Arc::new(
+							ConfigError::unsupported_operation_with_targets(
+								op,
+								reason,
+								agent.as_str(),
+								Some(vec![rejected_target]),
+							),
+						),
+					));
+				} else if can_credit_prior {
+					accumulated_deletions
+						.extend(outcome.plan.paths.iter().cloned());
+				}
+			}
+			Err(ConfigError::ResourceNotFound { .. }) => {
+				let outcome = manager.skill_noop_outcome(name);
+				rows.verdicts.push(SkillRemovalRow::from_outcome(
+					agent,
+					&outcome,
+					request.dry_run,
+				));
+			}
+			Err(err) => {
+				rows.failures.push((agent, Arc::new(err)));
+			}
+		}
+	}
+	rows
+}
+
 /// Refuse when anything this by-name removal would delete is plugin-owned: each
 /// target's own skill root AND every path its plan deletes. An `all_agents` /
 /// exhaustive plan sweeps other agents' copies, which the targets alone never
-/// show (#67). Skipped when no plugin is known (fail-open, spec #24 decision 7).
+/// show (#67). Reads the already-planned rows; skipped when no plugin is known
+/// (fail-open, spec #24 decision 7).
 fn refuse_plugin_owned_plan(
-	request: &SkillRemovalRequest,
 	name: &str,
 	target_agents: &[AgentType],
-	holders: &[AgentType],
-	is_exhaustive: bool,
+	probes: &[PluginProbe],
 	plugin_roots: &PluginRoots,
 ) -> Result<()> {
 	if plugin_roots.is_empty() {
 		return Ok(());
 	}
-	let scope = request.scope.resource_scope();
-	let project_root = request.scope.project_root();
 	for &agent in target_agents {
-		if !registry::get(agent).supports_skill_scope(scope) {
+		// Unsupported scope / load failure: no probe, reported per row later.
+		let Some(probe) = probes.iter().find(|p| p.agent == agent) else {
 			continue;
+		};
+		if let Some(path) = &probe.own_root {
+			plugin_roots.refuse(path, name, "delete")?;
 		}
-		let mut manager = create_manager(agent, scope, project_root);
-		// A load failure is reported per row by the batch.
-		if manager.load().is_err() {
-			continue;
-		}
-		if let Some(path) = manager.get_skill(name).and_then(super::skill_root)
-		{
-			plugin_roots.refuse(&path, name, "delete")?;
-		}
-		let sweeps =
-			(is_exhaustive && holders.contains(&agent)) || request.all_agents;
-		if let Ok(outcome) = manager.remove_skill_planned_for_agents(
-			name,
-			sweeps,
-			true, // dry_run
-			true, // confirm
-			target_agents,
-			&[],
-		) {
-			for path in &outcome.plan.paths {
-				plugin_roots.refuse(path, name, "delete")?;
-			}
+		for path in &probe.doomed {
+			plugin_roots.refuse(path, name, "delete")?;
 		}
 	}
 	Ok(())
@@ -1241,48 +1402,18 @@ fn remove_skill_by_path(
 			&target_agents,
 		);
 
-		if !request.dry_run {
-			if let Verdict::Refused {
-				ref reason,
-				ref kind,
-				ref path,
-			} = verdict
-			{
-				let rejected_targets = build_rejected_targets(
-					&target_agents,
-					reason,
-					Some(kind),
-					path.as_deref(),
-					scope,
-					project_root,
-					&target_agents,
-				);
-				return Err(ConfigError::unsupported_operation_with_targets(
-					"remove for this agent alone",
-					reason,
-					crate::create_adapter(first_agent).name(),
-					Some(rejected_targets),
-				));
-			}
-		}
-
-		if matches!(verdict, Verdict::Kept { .. }) || request.dry_run {
-			RemovalOutcome::preview(
-				plan,
-				verdict,
-				scope,
-				project_root,
-				&skill_name,
-			)?
-		} else {
-			RemovalOutcome::commit(
-				plan,
-				&roots,
-				scope,
-				project_root,
-				&skill_name,
-			)?
-		}
+		settle_removal(
+			plan,
+			verdict,
+			!request.dry_run,
+			false,
+			crate::create_adapter(first_agent).name(),
+			&target_agents,
+			&roots,
+			scope,
+			project_root,
+			&skill_name,
+		)?
 	} else {
 		// By-path removes the targeted entry only; all_agents is ignored and stays false.
 		manager.remove_skill_planned_at_dir_for_agents(
@@ -1347,15 +1478,37 @@ fn remove_skill_by_name(
 	let (holders, unreadable, target_agents, is_exhaustive) =
 		resolve_name_targets(request, name);
 
-	// Refused before any plan, preview included (the API always did this).
-	refuse_plugin_owned_plan(
+	let execution_order =
+		shared_first_order(&target_agents, scope, project_root);
+
+	// Whole-batch dry-run preflight
+	// Prior-row credit applies only to non-exhaustive runs; an exhaustive run
+	// removes the Master as part of the batch itself.
+	let can_credit_prior = !is_exhaustive && unreadable.is_empty();
+	let seed = if can_credit_prior && request.dry_run {
+		request.prior_removed_paths.clone()
+	} else {
+		Vec::new()
+	};
+	let PlannedRows {
+		verdicts: preflight_verdicts,
+		failures: preflight_failures,
+		load_failures: preflight_load_failures,
+		probes,
+	} = plan_rows(
 		request,
 		name,
-		&target_agents,
 		&holders,
+		&target_agents,
 		is_exhaustive,
-		plugin_roots,
-	)?;
+		&execution_order,
+		seed,
+		can_credit_prior,
+		true,
+	);
+
+	// Refused before any write, preview included (the API always did this).
+	refuse_plugin_owned_plan(name, &target_agents, &probes, plugin_roots)?;
 
 	check_unreadable_exhaustive(
 		name,
@@ -1374,131 +1527,6 @@ fn remove_skill_by_name(
 			master_reclaimed: false,
 			would_reclaim_master: false,
 		});
-	}
-
-	let execution_order =
-		shared_first_order(&target_agents, scope, project_root);
-
-	// Whole-batch dry-run preflight
-	// Prior-row credit applies only to non-exhaustive runs; an exhaustive run
-	// removes the Master as part of the batch itself.
-	let can_credit_prior = !is_exhaustive && unreadable.is_empty();
-	let mut accumulated_deletions = if can_credit_prior && request.dry_run {
-		request.prior_removed_paths.clone()
-	} else {
-		Vec::new()
-	};
-	let mut preflight_verdicts: Vec<SkillRemovalRow> = Vec::new();
-	let mut preflight_failures: Vec<(AgentType, Arc<ConfigError>)> = Vec::new();
-	let mut preflight_load_failures: Vec<(AgentType, Arc<ConfigError>)> =
-		Vec::new();
-
-	for &agent in &execution_order {
-		let descriptor = registry::get(agent);
-		if !descriptor.supports_skill_scope(scope) {
-			let scope_word = scope_to_word(scope);
-			let reason = format!("no {} skill config", scope_word);
-			preflight_failures.push((
-				agent,
-				Arc::new(ConfigError::unsupported_operation(
-					"remove for this agent alone",
-					&reason,
-					agent.as_str(),
-				)),
-			));
-			continue;
-		}
-
-		let mut manager = create_manager(agent, scope, project_root);
-		if let Err(e) = manager.load() {
-			preflight_load_failures.push((agent, Arc::new(e)));
-			continue;
-		}
-
-		let is_agent_exhaustive = is_exhaustive && holders.contains(&agent);
-		let plan_result = manager.remove_skill_planned_for_agents(
-			name,
-			is_agent_exhaustive || request.all_agents,
-			true, // dry_run
-			true, // confirm
-			&target_agents,
-			&accumulated_deletions,
-		);
-
-		match plan_result {
-			Ok(outcome) => {
-				let needs_confirm =
-					if is_agent_exhaustive && !request.all_agents {
-						manager
-							.remove_skill_planned_for_agents(
-								name,
-								request.all_agents,
-								true, // dry_run
-								true, // confirm
-								&target_agents,
-								&accumulated_deletions,
-							)
-							.map(|o| o.plan.needs_confirm)
-							.unwrap_or(outcome.plan.needs_confirm)
-					} else {
-						outcome.plan.needs_confirm
-					};
-				let mut row = SkillRemovalRow::from_outcome(
-					agent,
-					&outcome,
-					request.dry_run,
-				);
-				row.needs_confirm = needs_confirm;
-				preflight_verdicts.push(row);
-				if let Verdict::Refused {
-					ref reason,
-					ref kind,
-					ref path,
-				} = outcome.verdict
-				{
-					let op = if request.all_agents {
-						"remove from every agent"
-					} else {
-						"remove for this agent alone"
-					};
-					let rejected_target = build_rejected_targets(
-						&[agent],
-						reason,
-						Some(kind),
-						path.as_deref(),
-						scope,
-						project_root,
-						&request.agents,
-					)
-					.remove(0);
-					preflight_failures.push((
-						agent,
-						Arc::new(
-							ConfigError::unsupported_operation_with_targets(
-								op,
-								reason,
-								agent.as_str(),
-								Some(vec![rejected_target]),
-							),
-						),
-					));
-				} else if can_credit_prior {
-					accumulated_deletions
-						.extend(outcome.plan.paths.iter().cloned());
-				}
-			}
-			Err(ConfigError::ResourceNotFound { .. }) => {
-				let outcome = manager.skill_noop_outcome(name);
-				preflight_verdicts.push(SkillRemovalRow::from_outcome(
-					agent,
-					&outcome,
-					request.dry_run,
-				));
-			}
-			Err(err) => {
-				preflight_failures.push((agent, Arc::new(err)));
-			}
-		}
 	}
 
 	// Preview (dry-run): does not acquire write lock, returns verdicts.
@@ -1634,19 +1662,31 @@ fn remove_skill_by_name(
 
 	let (holders, unreadable, in_lock_target_agents, is_exhaustive) =
 		resolve_name_targets(request, name);
-	// Re-checked under the lock, before any write: the in-lock replan may sweep a
-	// copy the preflight never saw.
-	refuse_plugin_owned_plan(
-		request,
-		name,
-		&in_lock_target_agents,
-		&holders,
-		is_exhaustive,
-		plugin_roots,
-	)?;
-
 	let execution_order =
 		shared_first_order(&in_lock_target_agents, scope, project_root);
+	// Re-checked under the lock, before any write: the in-lock replan may sweep a
+	// copy the preflight never saw. The rows feed ONLY this check; execution
+	// below re-plans each row against the disk earlier rows left behind. With no
+	// known plugin the check is a no-op, so the extra dry-run plan is skipped.
+	if !plugin_roots.is_empty() {
+		let in_lock_rows = plan_rows(
+			request,
+			name,
+			&holders,
+			&in_lock_target_agents,
+			is_exhaustive,
+			&execution_order,
+			Vec::new(),
+			false,
+			false,
+		);
+		refuse_plugin_owned_plan(
+			name,
+			&in_lock_target_agents,
+			&in_lock_rows.probes,
+			plugin_roots,
+		)?;
+	}
 
 	check_unreadable_exhaustive(
 		name,
@@ -1681,17 +1721,13 @@ fn remove_skill_by_name(
 		let is_agent_exhaustive = is_exhaustive && holders.contains(&agent);
 		let caller_needs_confirm = if is_agent_exhaustive && !request.all_agents
 		{
-			manager
-				.remove_skill_planned_for_agents(
-					name,
-					request.all_agents,
-					true, // dry_run
-					true, // confirm
-					&in_lock_target_agents,
-					&[],
-				)
-				.map(|o| o.plan.needs_confirm)
-				.ok()
+			caller_needs_confirm(
+				&mut manager,
+				name,
+				request.all_agents,
+				&in_lock_target_agents,
+				&[],
+			)
 		} else {
 			None
 		};

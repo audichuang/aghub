@@ -587,15 +587,6 @@ pub fn ensure_mcp_delete_spares(
 	)
 }
 
-/// [`ensure_reconcile_spares`] for a skill — the preview seam.
-pub fn ensure_skill_reconcile_spares(
-	source: &ResourceLocator,
-	added: &[AgentType],
-	removed: &[AgentType],
-) -> Result<()> {
-	ensure_reconcile_spares(source, added, removed, false, skill_backing_dir)
-}
-
 /// [`ensure_reconcile_spares`] for an MCP — the preview seam.
 pub fn ensure_mcp_reconcile_spares(
 	source: &ResourceLocator,
@@ -1700,6 +1691,8 @@ struct ReconcileSkillPlan {
 	unreadable: Vec<&'static str>,
 	copies: Vec<OperationPlan>,
 	deletes: Vec<OperationPlan>,
+	/// The list the upfront and the post-copy spares checks share.
+	protect: Vec<Protected>,
 	dry_run_delete_response:
 		Option<crate::skills::removal::SkillRemovalResponse>,
 	scope: WriteScope,
@@ -1772,6 +1765,7 @@ fn plan_reconcile_skill(
 	removed: &[AgentType],
 	plugin_roots: &crate::skills::plugin_roots::PluginRoots,
 ) -> Result<ReconcileSkillPlan> {
+	ensure_disjoint(added, removed)?;
 	let skill = load_reconcile_skill(source, added, removed)?;
 	let source_root = resolve_skill_root(&skill)?;
 
@@ -1811,6 +1805,25 @@ fn plan_reconcile_skill(
 		(Vec::new(), Vec::new(), None)
 	};
 
+	// No copy target (nor the source, unless removed) may share a skills
+	// DIRECTORY with a removal target. Distinct from `preflight`'s end-state
+	// check; both run.
+	let removing: Vec<InstallTarget> =
+		deletes.iter().map(|row| row.target.clone()).collect();
+	let protect = protected_targets(
+		&copies,
+		source,
+		removed.contains(&source.agent),
+		&removing,
+		false,
+	);
+	ensure_removals_spare(
+		&protect,
+		&removing,
+		source.agent,
+		skill_backing_dir,
+	)?;
+
 	Ok(ReconcileSkillPlan {
 		skill,
 		source_root,
@@ -1818,6 +1831,7 @@ fn plan_reconcile_skill(
 		unreadable,
 		copies,
 		deletes,
+		protect,
 		dry_run_delete_response,
 		scope: source.scope.clone(),
 	})
@@ -2046,9 +2060,9 @@ impl ReconcileSkillPlan {
 
 /// Everything a `reconcile_skill` would refuse, without touching anything.
 ///
-/// Same per-row preflight over the same plan and the same
-/// `batch_preflight_error`, so preview and commit match down to the code and
-/// message. Advisory: no mutation lock (the commit re-runs it under one), so
+/// Refuses everything the plan refuses (disjointness, shared backing), then the
+/// same per-row preflight and `batch_preflight_error`, so preview and commit
+/// match down to the code and message. Advisory: no mutation lock (the commit re-runs it under one), so
 /// inspection never serializes against real work.
 /// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
 pub fn reconcile_skill_preview(
@@ -2056,7 +2070,6 @@ pub fn reconcile_skill_preview(
 	added: &[AgentType],
 	removed: &[AgentType],
 ) -> Result<()> {
-	ensure_disjoint(added, removed)?;
 	// Read before any lock is taken here: it may spawn `claude`.
 	let plugin_roots = crate::skills::plugin_roots::PluginRoots::current_if(
 		!removed.is_empty(),
@@ -2113,24 +2126,6 @@ pub fn reconcile_skill(
 	// Does this reconcile take the skill AWAY from its source? Only then must a
 	// copy prove the content actually landed — see the Copy arm below.
 	let deletes_source = removed.contains(&source.agent);
-	// No copy target (nor the source, unless removed) may share a skills
-	// DIRECTORY with a removal target. Distinct from `plan.preflight`'s
-	// end-state check; both run.
-	let removing: Vec<InstallTarget> =
-		plan.deletes.iter().map(|row| row.target.clone()).collect();
-	let protect = protected_targets(
-		&plan.copies,
-		&source,
-		deletes_source,
-		&removing,
-		false,
-	);
-	ensure_removals_spare(
-		&protect,
-		&removing,
-		source.agent,
-		skill_backing_dir,
-	)?;
 	let mut report = crate::batch::run_staged_multi_target_mutation(
 		&plan.copies,
 		&plan.deletes,
@@ -2228,7 +2223,7 @@ pub fn reconcile_skill(
 			// that pass are removed together, once, below — this value is
 			// always replaced before it reaches the report.
 			OperationAction::Delete => ensure_removals_spare(
-				&protect,
+				&plan.protect,
 				std::slice::from_ref(&row.target),
 				source.agent,
 				skill_backing_dir,
@@ -5797,6 +5792,7 @@ mod tests {
 				})
 				.collect(),
 			deletes: vec![],
+			protect: vec![],
 			dry_run_delete_response: None,
 			scope: WriteScope::Global,
 		}
@@ -6460,6 +6456,65 @@ mod tests {
 		// Codex's skill must survive.
 		let codex_skill = codex_dir.join("test-skill");
 		assert!(codex_skill.exists(), "Codex's skill must survive");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_preview_and_commit_refuse_a_shared_skills_dir_alike() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let master = root.join(".aghub/test-skill");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: test-skill\ndescription: Test\n---\n\n# Test\n",
+		)
+		.unwrap();
+		let codex_dir = private_slot_for(AgentType::Codex, &root);
+		fs::create_dir_all(&codex_dir).unwrap();
+		std::os::unix::fs::symlink(&master, codex_dir.join("test-skill"))
+			.unwrap();
+
+		// Claude's dir EXISTS up front, so the inodes match before any copy.
+		let claude_dir = private_slot_for(AgentType::Claude, &root);
+		fs::create_dir_all(&claude_dir).unwrap();
+		let windsurf_dir = private_slot_for(AgentType::Windsurf, &root);
+		fs::create_dir_all(windsurf_dir.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&claude_dir, &windsurf_dir).unwrap();
+
+		let source = ResourceLocator {
+			agent: AgentType::Codex,
+			scope: WriteScope::project(root.clone()),
+			name: "test-skill".to_string(),
+		};
+		let preview = reconcile_skill_preview(
+			&source,
+			&[AgentType::Claude],
+			&[AgentType::Windsurf],
+		)
+		.expect_err("preview must refuse a shared skills dir");
+		let commit = reconcile_skill(
+			source,
+			vec![AgentType::Claude],
+			vec![AgentType::Windsurf],
+			true,
+		)
+		.expect_err("commit must refuse a shared skills dir");
+
+		assert!(matches!(preview, ConfigError::InvalidConfig(_)));
+		assert!(matches!(commit, ConfigError::InvalidConfig(_)));
+		assert_eq!(preview.to_string(), commit.to_string());
+		assert!(
+			preview
+				.to_string()
+				.contains("resolve to the same place on disk"),
+			"{preview}"
+		);
+		assert!(!claude_dir.join("test-skill").exists(), "nothing copied");
+		assert!(codex_dir.join("test-skill").exists());
 	}
 
 	#[test]
