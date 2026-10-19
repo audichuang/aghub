@@ -231,4 +231,4 @@ impl Verdict {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::skills::removal) mod tests;

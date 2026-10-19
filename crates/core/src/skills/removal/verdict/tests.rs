@@ -2,13 +2,13 @@ use super::*;
 use std::ffi::OsString;
 use std::sync::MutexGuard;
 
-struct TestEnv {
+pub(in crate::skills::removal) struct TestEnv {
 	_guard: MutexGuard<'static, ()>,
 	prev_vars: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl TestEnv {
-	fn new(tmp: &Path) -> Self {
+	pub(in crate::skills::removal) fn new(tmp: &Path) -> Self {
 		let guard = crate::skills::prune::test_lock::env_lock()
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
