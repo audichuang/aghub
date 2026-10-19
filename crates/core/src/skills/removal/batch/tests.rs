@@ -2086,6 +2086,41 @@ fn test_all_agents_sweep_refuses_plugin_owned_copy_of_unnamed_agent() {
 
 #[cfg(unix)]
 #[test]
+fn test_all_agents_sweep_refuses_swept_path_inside_plugin_root_not_own_root() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+	crate::testing::master_with_claude_referrer(&root, "swept");
+	// The plugin owns Claude's whole skills dir, so only the SWEPT path
+	// (never Cursor's own Master root) lies inside it.
+	let _roots = crate::skills::plugin_roots::test_override::set(vec![(
+		"p".to_string(),
+		root.join(".claude/skills"),
+	)]);
+	for dry_run in [true, false] {
+		let req = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("swept".to_string()),
+			scope: WriteScope::project(&root),
+			agents: vec![AgentType::Cursor],
+			dry_run,
+			all_agents: true,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		let err = remove_skill_batch(&req).expect_err("must be refused");
+		assert_eq!(
+			crate::error_codes::wire_code(&err),
+			"MANAGED_RESOURCE",
+			"dry_run={dry_run}"
+		);
+	}
+	assert!(root.join(".aghub/swept/SKILL.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn test_in_lock_plugin_recheck_refuses_owned_copy_appearing_after_preflight() {
 	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 	let temp = tempdir().unwrap();
