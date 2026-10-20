@@ -4847,6 +4847,9 @@ mod tests {
 	/// An AMBIGUOUS global entry (URL-less `gitlab`, maybe self-hosted) keeps
 	/// fork/main's identity: its host cannot be proved, so `describes` permits a
 	/// session from the real self-hosted host instead of guessing gitlab.com.
+	/// Unix-only: it installs into the GLOBAL scope, and on Windows
+	/// `dirs::home_dir()` ignores `HOME`, so the isolated home is never read.
+	#[cfg(unix)]
 	#[test]
 	fn git_sync_permits_its_own_self_hosted_host_for_an_ambiguous_global_entry()
 	{
