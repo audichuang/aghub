@@ -1208,7 +1208,7 @@ pub fn import_ref(
 
 /// The distinct refs `scope`'s lock entries for `source` are pinned to.
 pub fn recorded_refs(scope: &WriteScope, source: &str) -> Vec<Option<String>> {
-	read_scope_lock(scope).recorded_refs(source)
+	aghub_core::skills::source_coordinate::recorded_refs(scope, source)
 }
 
 /// One `source sync`'s whole pre-decision read: the fetched tree, what it is,

@@ -127,7 +127,9 @@ list, or `all`), `-g`/`-p`, `--all`.
   untracked unless the target already had an entry of that name; re-install
   from the real URL to track. A copy is refused when the target's same-named
   Master is untracked and differs; a CARRIED (host-known) copy also refuses a
-  different owner. A copy onto an OWNED Master grants it as-is, stale content
+  different owner, and refuses when the target scope tracks that source on
+  another ref (it would leave a mixed cohort `source sync` refuses; run
+  `source sync --ref` there first). A copy onto an OWNED Master grants it as-is, stale content
   included (a carried owner does not make the copied content remote, so the
   Master is not byte-compared). Accept-rename refuses such an ambiguous entry
   before fetching.

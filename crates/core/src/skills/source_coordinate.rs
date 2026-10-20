@@ -225,6 +225,57 @@ pub fn source_matches(
 	}
 }
 
+/// The distinct refs `scope`'s lock entries for `want` are pinned to: entries
+/// with a `skillPath` that [`source_matches`] admits, in `Option` order. More
+/// than one is a mixed cohort that `source sync` refuses (MultipleRefs).
+pub fn recorded_refs(
+	scope: &crate::scope::WriteScope,
+	want: &str,
+) -> Vec<Option<String>> {
+	let want = want.trim();
+	let mut refs = std::collections::BTreeSet::new();
+	let mut visit = |source: &str,
+	                 url: Option<&str>,
+	                 source_type: &str,
+	                 ref_name: Option<&str>,
+	                 skill_path: Option<&str>| {
+		if skill_path.is_some()
+			&& source_matches(want, source, url, source_type)
+		{
+			refs.insert(ref_name.map(str::to_string));
+		}
+	};
+	match scope {
+		crate::scope::WriteScope::Global => {
+			for entry in skill::lock::global::read_skill_lock().skills.values()
+			{
+				visit(
+					&entry.source,
+					Some(&entry.source_url),
+					&entry.source_type,
+					entry.ref_name.as_deref(),
+					entry.skill_path.as_deref(),
+				);
+			}
+		}
+		crate::scope::WriteScope::Project { root } => {
+			for entry in skill::lock::local::read_local_lock(Some(root))
+				.skills
+				.values()
+			{
+				visit(
+					&entry.source,
+					entry.source_url.as_deref(),
+					&entry.source_type,
+					entry.ref_name.as_deref(),
+					entry.skill_path.as_deref(),
+				);
+			}
+		}
+	}
+	refs.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

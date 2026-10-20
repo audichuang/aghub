@@ -521,3 +521,15 @@ Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `add_skill_from_path_universal_does_not_overwrite_existing_canonical` was
 deleted (the refusal is pinned by
 `install_local_skill_refuses_to_adopt_untracked_master_when_content_differs`).
+
+A carry also wrote the source's `ref` with no cohort check: a project skill from
+`owner/repo@dev` carried into a global lock that tracks `owner/repo` on `main`
+left the destination pinned to two refs, so `source sync` refused that source
+(MultipleRefs) and fetched installs refused it too until a `source sync --ref`.
+The pre-range transfer wrote no lock and could not produce this. Rule: under
+the destination guard, before any write, a carry reads the destination's refs
+for that source (`source_coordinate::recorded_refs`, the membership the fetched
+install already uses, moved to core) and refuses unless they are empty or
+exactly the carried ref; an entry for the same name on another ref counts (a
+re-pin). Test:
+`transfer_skill_cross_scope_refuses_to_split_the_destination_ref_cohort`.

@@ -99,6 +99,40 @@ fn write_local_install_lock(
 	.map_err(ConfigError::SkillLock)
 }
 
+/// A carried owner must not leave the destination's entries for that source
+/// pinned to more than one ref: `source sync` then refuses the whole source
+/// (MultipleRefs) and fetched installs refuse it too. Checked under the
+/// destination guard, before any write — the same rule a fetched install
+/// applies (`skill-update` `mutation.rs`). An entry for THIS name on another
+/// ref counts: re-pinning it is that refusal as well.
+fn ensure_one_ref_cohort(
+	name: &str,
+	scope: &WriteScope,
+	owner: &LockedSourceOwner,
+) -> Result<(), ConfigError> {
+	use crate::skills::source_coordinate::{known_clone_source, recorded_refs};
+	let want = known_clone_source(
+		&owner.source,
+		owner.source_url.as_deref(),
+		&owner.source_type,
+	)
+	.unwrap_or_else(|| owner.source.clone());
+	let recorded = recorded_refs(scope, &want);
+	if recorded.is_empty() || recorded == [owner.ref_name.clone()] {
+		return Ok(());
+	}
+	let spell = |r: &Option<String>| {
+		format!("'{}'", r.as_deref().unwrap_or("the default branch"))
+	};
+	Err(ConfigError::ValidationFailed(format!(
+		"Skill '{name}' is pinned to {} at its source, but this source is \
+		 pinned to {} in the destination scope; nothing was written. Run \
+		 `source sync --ref` there to put its skills on one ref first",
+		spell(&owner.ref_name),
+		recorded.iter().map(spell).collect::<Vec<_>>().join(", "),
+	)))
+}
+
 fn all_targets_already_linked(
 	canonical: &Path,
 	safe_name: &str,
@@ -179,6 +213,10 @@ pub fn install_local_skill(
 		project_root,
 	)
 	.map_err(ConfigError::Io)?;
+
+	if let LocalInstallLock::Carry(owner) = &req.lock {
+		ensure_one_ref_cohort(effective_name, &req.scope, owner)?;
+	}
 
 	let writes_lock = !matches!(req.lock, LocalInstallLock::Untouched);
 	let lock_write = match req.lock {

@@ -6311,6 +6311,98 @@ mod tests {
 		);
 	}
 
+	/// A carry must not split the destination's cohort for that source: the
+	/// global lock tracks `owner/repo` on `main`, and a project skill from
+	/// `owner/repo@dev` would leave it pinned to two refs, which `source sync`
+	/// and fetched installs then refuse. Refused with nothing written; the
+	/// same carry on `main` succeeds.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_scope_refuses_to_split_the_destination_ref_cohort()
+	{
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		for (carried_ref, refused) in [("dev", true), ("main", false)] {
+			let home = tempdir().unwrap();
+			let _home = EnvVarGuard::set("HOME", home.path());
+			let _config = EnvVarGuard::set(
+				"XDG_CONFIG_HOME",
+				&home.path().join(".config"),
+			);
+			let _state = EnvVarGuard::set(
+				"XDG_STATE_HOME",
+				&home.path().join(".local/state"),
+			);
+			// Global already tracks another skill of owner/repo on `main`.
+			let sibling = home.path().join(".aghub/sibling");
+			github_owned_master(
+				&sibling,
+				&home.path().join(".claude/skills"),
+				"sibling",
+			);
+			skill::write_global_install_lock(
+				"sibling",
+				&github_source(),
+				Some("skills/sibling/SKILL.md".to_string()),
+				&sibling,
+				None,
+			)
+			.unwrap();
+			let project = tempdir().unwrap();
+			let root = project.path();
+			let master = root.join(".aghub/owned");
+			github_owned_master(&master, &root.join(".claude/skills"), "owned");
+			let mut source = github_source();
+			source.ref_name = Some(carried_ref.to_string());
+			skill::write_project_install_lock(
+				"owned",
+				&source,
+				Some("skills/owned/SKILL.md".to_string()),
+				&master,
+				root,
+				None,
+			)
+			.unwrap();
+			let lock_path = skill::get_skill_lock_path();
+			let lock_before = fs::read(&lock_path).unwrap();
+
+			let result = transfer_skill(
+				ResourceLocator {
+					agent: AgentType::Claude,
+					scope: WriteScope::project(root.to_path_buf()),
+					name: "owned".to_string(),
+				},
+				vec![InstallTarget {
+					agent: AgentType::Cursor,
+					scope: WriteScope::Global,
+				}],
+			)
+			.unwrap();
+
+			if refused {
+				let error = result.results[0].error.clone().unwrap_or_default();
+				assert!(
+					error.contains("'main'") && error.contains("'dev'"),
+					"the refusal must name both refs: {error}"
+				);
+				assert_eq!(fs::read(&lock_path).unwrap(), lock_before);
+				assert!(!home.path().join(".aghub/owned").exists());
+			} else {
+				assert_eq!(
+					result.failed_count(),
+					0,
+					"{:?}",
+					result.results[0].error
+				);
+				assert_eq!(
+					skill::lock::global::get_skill_from_lock("owned")
+						.and_then(|e| e.ref_name)
+						.as_deref(),
+					Some("main")
+				);
+			}
+		}
+	}
+
 	/// Global -> project carries the SOURCE scope's entry: its owner (so
 	/// `check` / `apply-update` still know where the copy came from) and, for
 	/// a LOCALLY EDITED source, its stored hash rather than the edited
