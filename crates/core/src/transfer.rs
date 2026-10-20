@@ -6157,11 +6157,12 @@ mod tests {
 		.unwrap()
 	}
 
-	/// A carried URL-less gitlab owner is the same owner as a destination that
-	/// already tracks the repo by its full URL.
+	/// A carried URL-less gitlab owner is NOT provably the destination's
+	/// gitlab.com owner: npx 1.5.11 records a self-hosted gitlab the same way.
+	/// The copy is refused, naming both owners, and the destination entry stays.
 	#[cfg(unix)]
 	#[test]
-	fn transfer_skill_cross_project_url_less_gitlab_matches_a_full_url_owner() {
+	fn transfer_skill_cross_project_url_less_gitlab_refuses_a_full_url_owner() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let (source, dest) = (temp.path().join("s"), temp.path().join("d"));
@@ -6182,9 +6183,63 @@ mod tests {
 		)
 		.unwrap();
 
+		let lock_before = fs::read(dest.join("skills-lock.json")).unwrap();
+
 		let result =
 			transfer_between_projects(&source, &dest, AgentType::Cursor, "gl");
+		assert_eq!(result.failed_count(), 1);
+		let error = result.results[0].error.clone().unwrap_or_default();
+		assert!(
+			error.contains("already owned by source 'gitlab:o/r'")
+				&& error.contains("requested source 'gitlab:o/r'"),
+			"the refusal must name both owners: {error}"
+		);
+		assert_eq!(
+			fs::read(dest.join("skills-lock.json")).unwrap(),
+			lock_before
+		);
+		assert!(!dest.join(".aghub/gl").exists());
+	}
+
+	/// A URL-less gitlab carried into the GLOBAL lock keeps a blank `sourceUrl`:
+	/// `gitlab.com` would be a guess (npx records self-hosted gitlab the same
+	/// way), and a persisted guess reads as a recorded owner.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_url_less_gitlab_carried_to_global_keeps_a_blank_url() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let project = tempdir().unwrap();
+		url_less_gitlab_skill(project.path(), "gl");
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::project(project.path().to_path_buf()),
+				name: "gl".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::Global,
+			}],
+		)
+		.unwrap();
+
 		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		let entry = skill::lock::global::get_skill_from_lock("gl")
+			.expect("global lock entry");
+		assert_eq!(
+			(entry.source.as_str(), entry.source_type.as_str()),
+			("o/r", "gitlab")
+		);
+		assert_eq!(entry.source_url, "");
 	}
 
 	/// A fresh cross-project copy writes another URL-less gitlab entry; a retry

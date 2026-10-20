@@ -438,22 +438,37 @@ unresolvable, so `describes` accepted ANY repository and the API's git-sync
 could install repo B's bytes under transferred skill A; accept-rename fetched a
 hostless gitlab `group/repo` as GitHub. Now one provider-aware rule,
 `skills::source_coordinate::entry_clone_source` (moved from skill-update), is
-used by the carried GLOBAL write (the fetched-install coordinate:
-byte-identical for github, at most a `.git` apart for gitlab, which
-`same_source_owner` ignores), by `of_global_entry` (legacy blank entries already on disk) and by
+used by the carried GLOBAL write when the rebuild is certain
+(`reconstruction_is_unambiguous`: github — byte-identical to a fetched install
+— local, or a source that spells its own host; a URL-less gitlab stays blank,
+see below), by `of_global_entry` (legacy blank entries already on disk) and by
 rename's global arm — and, since a URL-less legacy gitlab PROJECT entry had
 the same GitHub misread, by `of_project_entry` and rename's project arm too
 (capture and verify both use it, so a github project entry still compares
 equal to itself).
 
-`same_source_owner` then refused a carried URL-less gitlab owner (every npx
-gitlab project entry) against a destination tracking the same repo by full
-URL, and against its OWN earlier copy on a retry or a second agent: its
-URL-less arm accepted only github/local. It now compares both sides through
-`entry_clone_source` first; a hostless custom type still falls through to the
-fail-closed arm. Tests:
-`transfer_skill_cross_project_url_less_gitlab_matches_a_full_url_owner`,
+A URL-less `gitlab` entry does NOT name gitlab.com. npx `skills` 1.5.11
+records ANY non-github `/-/tree/` host as `type: "gitlab"`, strips the host to
+`group/repo` and writes no `sourceUrl` (newer npx, e.g. 1.5.22, does write
+`sourceUrl` for git/gitlab, but old entries stay on disk). One round rebuilt
+both sides in `same_source_owner` through `entry_clone_source`; that accepted
+a gitlab.com claimant for a self-hosted entry (any registrant of the same
+`group/repo` on gitlab.com could take it over) and conflated a namespace
+literally named `gitlab.com` (`gitlab.com/team/repo`) with `team/repo`.
+
+Rule: the ownership guard never rebuilds a coordinate. Its rules are the
+original ones plus ONE accept: when NEITHER side records a URL, the exact
+`source` + `sourceType` is the identity (a carried entry against its own
+earlier copy, or a second agent's grant). So a URL-less entry against a full
+gitlab.com URL — either direction — is REFUSED, naming both owners, and the
+carried GLOBAL write leaves a URL-less gitlab `sourceUrl` blank rather than
+persist the gitlab.com guess (readers rebuild at read time). Tests:
+`transfer_skill_cross_project_url_less_gitlab_refuses_a_full_url_owner`,
 `transfer_skill_cross_project_url_less_gitlab_can_be_retried_and_regranted`,
+`transfer_skill_url_less_gitlab_carried_to_global_keeps_a_blank_url`,
+`a_url_less_gitlab_entry_refuses_a_full_gitlab_com_url`,
+`url_less_entries_match_only_on_the_exact_spelling`,
+`a_dotted_gitlab_namespace_is_not_its_host_stripped_twin`,
 `a_url_less_gitlab_entry_refuses_another_repo`,
 `a_url_less_custom_remote_still_fails_closed`.
 

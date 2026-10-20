@@ -22,6 +22,23 @@ pub fn entry_clone_source(
 		.unwrap_or_else(|| reconstruct_source_url(source, source_type))
 }
 
+/// Does [`reconstruct_source_url`] name the RIGHT repository for this entry,
+/// rather than a guess? True for `github` (one host) and `local` (a path), and
+/// for a source that spells its own host. NOT for a URL-less `gitlab`: npx
+/// 1.5.11 records any self-hosted `/-/tree/` host as `gitlab` with the host
+/// stripped, so `gitlab.com` is only the likeliest reading. A writer must not
+/// persist that guess as if it were recorded.
+pub fn reconstruction_is_unambiguous(source: &str, source_type: &str) -> bool {
+	source_type.eq_ignore_ascii_case("github")
+		|| source_type.eq_ignore_ascii_case("local")
+		|| carries_authority(source.trim())
+}
+
+/// `://`, `@` or `:` means the string carries its own transport/authority.
+fn carries_authority(source: &str) -> bool {
+	source.contains("://") || source.contains('@') || source.contains(':')
+}
+
 /// The [`entry_clone_source`] half that has to invent a coordinate, because the
 /// entry recorded no `sourceUrl`.
 ///
@@ -39,8 +56,7 @@ pub fn reconstruct_source_url(source: &str, source_type: &str) -> String {
 	}
 	// `://`, `@` or `:` means the string carries its own transport/authority, so
 	// the resolver can read the host out of it and the provider is irrelevant.
-	let carries_authority =
-		source.contains("://") || source.contains('@') || source.contains(':');
+	let carries_authority = carries_authority(source);
 	let provider_host = match source_type.to_ascii_lowercase().as_str() {
 		"github" => Some("github.com"),
 		"gitlab" => Some("gitlab.com"),

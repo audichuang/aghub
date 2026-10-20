@@ -103,25 +103,19 @@ pub fn same_source_owner(
 	{
 		return false;
 	}
-	// One clone-coordinate rule for both sides: a URL-less entry (npx writes
-	// none in a project lock) and an empty requested URL (a carried project
-	// entry) are rebuilt by provider, so the same gitlab repo with and without
-	// a recorded URL is one owner. Only a coordinate that names a host compares
-	// here; a hostless custom type falls through to the fail-closed arms below.
-	use crate::skills::source_coordinate::entry_clone_source;
-	if let (Some(existing), Some(requested)) = (
-		remote_owner_from_url(&entry_clone_source(
-			&existing.source,
-			existing.source_url.as_deref(),
-			&existing.source_type,
-		)),
-		remote_owner_from_url(&entry_clone_source(
-			&requested.source,
-			Some(&requested.source_url),
-			&requested.source_type,
-		)),
-	) {
-		return existing == requested;
+	// Neither side names a URL (a carried npx project entry against its own
+	// earlier copy, or a second agent's grant): only the exact recorded spelling
+	// can match. Never rebuilt into a host here — npx 1.5.11 records ANY
+	// self-hosted `/-/tree/` host as `gitlab` with the host stripped, so a
+	// URL-less `gitlab` entry does not name gitlab.com.
+	if existing
+		.source_url
+		.as_deref()
+		.is_none_or(|url| url.trim().is_empty())
+		&& requested.source_url.trim().is_empty()
+	{
+		return existing.source_type == requested.source_type
+			&& existing.source == requested.source;
 	}
 	match existing
 		.source_url
@@ -320,23 +314,61 @@ mod tests {
 		}
 	}
 
-	/// npx records no `sourceUrl` in a project lock, and a carried project
-	/// entry asks with an empty one; the provider still names the repository,
-	/// so one gitlab repo with and without a URL is ONE owner.
+	/// A URL-less `gitlab` entry does not name gitlab.com: npx 1.5.11 records
+	/// any self-hosted `/-/tree/` host as `gitlab` with the host stripped. So a
+	/// gitlab.com claimant is refused, as is a URL-less entry against a full
+	/// URL in either direction.
 	#[test]
-	fn a_url_less_gitlab_entry_is_the_same_owner_as_its_full_url() {
-		let url_less = owner("o/r", "gitlab", None);
-		assert!(same_source_owner(
-			&url_less,
-			&requested("o/r", "gitlab", "https://gitlab.com/o/r.git"),
+	fn a_url_less_gitlab_entry_refuses_a_full_gitlab_com_url() {
+		assert!(!same_source_owner(
+			&owner("group/repo", "gitlab", None),
+			&requested(
+				"group/repo",
+				"gitlab",
+				"https://gitlab.com/group/repo.git"
+			),
 		));
-		assert!(same_source_owner(
-			&url_less,
-			&requested("o/r", "gitlab", "")
-		));
-		assert!(same_source_owner(
+		assert!(!same_source_owner(
 			&owner("o/r", "gitlab", Some("https://gitlab.com/o/r.git")),
 			&requested("o/r", "gitlab", ""),
+		));
+	}
+
+	/// Both sides URL-less (a carried entry against its own earlier copy):
+	/// the exact recorded spelling is the only identity there is.
+	#[test]
+	fn url_less_entries_match_only_on_the_exact_spelling() {
+		assert!(same_source_owner(
+			&owner("o/r", "gitlab", None),
+			&requested("o/r", "gitlab", ""),
+		));
+		assert!(!same_source_owner(
+			&owner("o/r", "gitlab", None),
+			&requested("o/other", "gitlab", ""),
+		));
+		assert!(!same_source_owner(
+			&owner("o/r", "gitlab", None),
+			&requested("o/r", "git", ""),
+		));
+	}
+
+	/// `gitlab.com/team/repo` is a namespace literally named `gitlab.com`
+	/// (https://gitlab.com/gitlab.com/team/repo.git), not `team/repo` with its
+	/// host spelled out — rebuilding coordinates conflated the two.
+	#[test]
+	fn a_dotted_gitlab_namespace_is_not_its_host_stripped_twin() {
+		let dotted = owner("gitlab.com/team/repo", "gitlab", None);
+		assert!(!same_source_owner(
+			&dotted,
+			&requested(
+				"team/repo",
+				"gitlab",
+				"https://gitlab.com/team/repo.git"
+			),
+		));
+		assert!(!same_source_owner(
+			&dotted,
+			&requested("team/repo", "gitlab", "")
 		));
 	}
 
@@ -349,13 +381,13 @@ mod tests {
 		));
 	}
 
-	/// A hostless custom remote without a URL has lost its host: still fail
-	/// closed, even against the same spelling.
+	/// A hostless custom remote without a URL has lost its host: a claimant
+	/// that names ANY host is refused, even with the same `owner/repo`.
 	#[test]
 	fn a_url_less_custom_remote_still_fails_closed() {
 		assert!(!same_source_owner(
 			&owner("o/r", "git", None),
-			&requested("o/r", "git", ""),
+			&requested("o/r", "git", "https://git.example.com/o/r.git"),
 		));
 	}
 }

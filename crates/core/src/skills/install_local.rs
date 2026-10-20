@@ -181,19 +181,31 @@ pub fn install_local_skill(
 	let lock_write = match req.lock {
 		LocalInstallLock::Carry(owner) => LockWrite {
 			source: skill::InstallLockSource {
-				// A global entry always records a clone coordinate (npx and a
-				// fetched install do), so a project entry's omitted URL is
-				// rebuilt by the shared rule: byte-identical for github, at most
-				// a `.git` apart for gitlab, which owner comparison ignores. The
-				// project writer drops reconstructable URLs itself.
+				// A global entry records a clone coordinate (npx and a fetched
+				// install do), so a project entry's omitted URL is rebuilt —
+				// but only when the rebuild is certain (github byte-identical to
+				// a fetched install). A URL-less gitlab may be self-hosted:
+				// leave it blank rather than persist a gitlab.com guess;
+				// readers rebuild at read time and ownership fails closed.
+				// The project writer drops reconstructable URLs itself.
 				source_url: match req.scope {
-					WriteScope::Global => {
+					WriteScope::Global
+						if owner
+							.source_url
+							.as_deref()
+							.is_some_and(|url| !url.trim().is_empty())
+							|| crate::skills::source_coordinate::reconstruction_is_unambiguous(
+								&owner.source,
+								&owner.source_type,
+							) =>
+					{
 						crate::skills::source_coordinate::entry_clone_source(
 							&owner.source,
 							owner.source_url.as_deref(),
 							&owner.source_type,
 						)
 					}
+					WriteScope::Global => String::new(),
 					WriteScope::Project { .. } => {
 						owner.source_url.unwrap_or_default()
 					}
