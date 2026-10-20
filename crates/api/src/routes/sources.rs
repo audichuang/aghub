@@ -159,8 +159,8 @@ fn map_summary_to_dto(summary: SourceSummary) -> SourceSummaryResponse {
 	// still selects its row: `source_matches` compares origins, and every flow
 	// fetches from the entry's own recorded URL, never from this one.
 	SourceSummaryResponse {
-		source: aghub_git::redact_source_credentials(&summary.source),
-		source_url: aghub_git::redact_source_credentials(&summary.source_url),
+		source: aghub_git::strip_source_credentials(&summary.source),
+		source_url: aghub_git::strip_source_credentials(&summary.source_url),
 		source_type: summary.source_type,
 		scope,
 		skill_count: summary.skill_count,
@@ -568,7 +568,10 @@ mod tests {
 			let response = client.get(&path).dispatch();
 			assert_eq!(response.status(), Status::Ok, "{path}");
 			let body = response.into_string().expect("body");
-			assert!(body.contains("***@git.example.com"), "{path}: {body}");
+			assert!(
+				body.contains("git.example.com") && !body.contains("***"),
+				"{path}: {body}"
+			);
 			assert!(!body.contains("TOKEN"), "{path} leaked: {body}");
 		}
 	}

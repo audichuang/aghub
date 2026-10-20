@@ -175,8 +175,10 @@ pub(crate) fn source_binding_response(
 			.map(|c| c.name.clone())
 	});
 
+	// A key bound before sources were stripped can still carry `user:token@`;
+	// the stripped one stays an equivalent key for lookup and unbinding.
 	SourceCredentialBindingResponse {
-		source: source.to_string(),
+		source: aghub_git::strip_source_credentials(source),
 		credential_id: credential_id.map(str::to_string),
 		credential_name,
 	}
@@ -358,6 +360,20 @@ mod tests {
 		assert_eq!(responses[0].credential_name.as_deref(), Some("github.com"));
 		assert_eq!(responses[1].source, "b/source");
 		assert_eq!(responses[1].credential_name.as_deref(), Some("gitlab.com"));
+	}
+
+	#[test]
+	fn a_listed_binding_hides_a_credential_in_its_key_and_still_unbinds() {
+		let mut b = SourceBindings::default();
+		let key = "https://u:TOKEN@git.example.com/o/r.git";
+		b.0.insert(key.into(), "c1".into());
+
+		let listed = list_source_binding_responses(&b, &[]);
+		assert_eq!(listed[0].source, "https://git.example.com/o/r.git");
+
+		bind_source_to_credential(&mut b, &listed[0].source, None, &[])
+			.unwrap();
+		assert!(b.0.is_empty(), "the listed key must unbind the stored one");
 	}
 
 	#[test]

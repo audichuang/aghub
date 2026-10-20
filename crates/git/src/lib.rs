@@ -49,7 +49,8 @@ pub use remote::{
 };
 pub use source::{
 	normalize_repo_source_from_url, normalize_tfs_clone_url,
-	resolve_remote_source, RemoteSourceType, ResolvedRemoteSource, SourceError,
+	resolve_remote_source, strip_source_credentials, RemoteSourceType,
+	ResolvedRemoteSource, SourceError,
 };
 pub use stage::{stage_tree_entries, StageError, StagedEntry, StagedEntryMode};
 pub use system_git::{

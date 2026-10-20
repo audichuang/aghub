@@ -286,6 +286,21 @@ pub fn resolve_remote_source(
 	})
 }
 
+/// A recorded source safe to HAND OUT and still usable as one: the clean
+/// `source_url` [`resolve_remote_source`] would persist (no https userinfo, no
+/// password, an ssh user kept). A source carrying no secret comes back as is,
+/// so a lock identifier is never rewritten into a URL; an unresolvable one
+/// falls back to [`crate::redact::redact_source_credentials`].
+pub fn strip_source_credentials(source: &str) -> String {
+	let redacted = crate::redact::redact_source_credentials(source);
+	if redacted == source {
+		return redacted;
+	}
+	resolve_remote_source(source)
+		.map(|resolved| resolved.source_url)
+		.unwrap_or(redacted)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -368,6 +383,36 @@ mod tests {
 		);
 		assert_eq!(r.clone_url, r.source_url);
 		assert!(!r.source_url.contains("SECRET"));
+	}
+
+	#[test]
+	fn stripped_sources_carry_no_secret_and_keep_an_ssh_user() {
+		for (input, want) in [
+			(
+				"https://u:TOK@git.example.com/o/r.git",
+				"https://git.example.com/o/r.git",
+			),
+			(
+				"https://TOK@github.com/o/r.git",
+				"https://github.com/o/r.git",
+			),
+			(
+				"ssh://git@github.com/o/r.git",
+				"ssh://git@github.com/o/r.git",
+			),
+			(
+				"ssh://git:TOK@github.com/o/r.git",
+				"ssh://git@github.com/o/r.git",
+			),
+			("o/r", "o/r"),
+		] {
+			assert_eq!(strip_source_credentials(input), want, "{input}");
+		}
+		let scp = strip_source_credentials("u:TOK@git.example.com:o/r.git");
+		assert!(
+			!scp.contains("TOK") && scp.contains("u@git.example.com"),
+			"{scp}"
+		);
 	}
 
 	#[test]

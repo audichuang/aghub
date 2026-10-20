@@ -515,7 +515,7 @@ mod origin_tests {
 				"u:TOKEN@git.other.com:o/r.git",
 			),
 		] {
-			let want = aghub_git::redact_source_credentials(recorded);
+			let want = aghub_git::strip_source_credentials(recorded);
 			assert!(!want.contains("TOKEN"));
 			assert!(
 				source_matches(&want, "o/r", Some(recorded), "git"),

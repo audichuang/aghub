@@ -19,7 +19,7 @@ justify before review.
 | ownership on install                                | core `skills::adoption` (`same_source_owner`, `adoption_guard`)                   | owner fields; Master hash on adoption                          |
 | delete lock-prune, `prune-lock`, `repair`, `doctor` | core `skills::removal`, `prune`, `repair`, `health`                               | membership by name; Master presence and health                 |
 | transfer / reconcile copy, `add --from`             | core `skills::transfer` (`owner_is_carriable`), `skills::install_local`           | owner, ref, hash carried into the other scope's lock           |
-| API raw lock routes                                 | api `GET /skills/lock/global`, `/skills/lock/project`                             | every field, sources through `redact_source_credentials`       |
+| API raw lock routes                                 | api `GET /skills/lock/global`, `/skills/lock/project`                             | every field, sources through `strip_source_credentials`        |
 | desktop skill detail / check-updates                | `crates/desktop` via the api DTOs and the raw lock routes                         | the API's projection of the same entry                         |
 | npx `skills`                                        | global v3 / project v1 (see npx-skills-contract)                                  | every field; unknown ones must round-trip                      |
 
@@ -32,7 +32,8 @@ The traps that each cost a round, so check them first:
   then accepts any repository.
 - **Credentials**: a recorded URL may embed `user:TOKEN@`. A project lock gets
   committed; error text reaches logs and API responses. Pass sources through
-  `aghub_git::redact_source_credentials` before printing them, and never
+  `aghub_git::redact_source_credentials` before printing them (a response
+  the client sends back uses `strip_source_credentials`, which keeps it usable), and never
   carry a credential-bearing source into another lock.
 - **Hash**: an unknown stored hash stays the placeholder
   (`skill::lock_hash_unknown`). Re-hashing a copied folder turns a local edit
