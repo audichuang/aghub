@@ -15,9 +15,12 @@ just release verify X.Y.Z   # re-check a published release (read-only)
 **Before running it** (the script does neither): run `just preflight` (the
 pre-push hook runs no tests). `preflight` is Linux-only, so while the last
 review round runs, push the branch to `fork` and run
-`gh workflow run ci.yml --repo audichuang/aghub --ref <branch>` to get the
-macOS/Windows test matrix early — a Windows-only test failure otherwise
-surfaces at the tag, one CI cycle later. If the release includes an upstream
+`gh workflow run ci.yml --repo audichuang/aghub --ref <branch>` (a feature
+branch, never `main`: a dispatch there can cancel the push run `release.sh`
+waits on) to get the macOS/Windows test matrix early. That run does not count
+for the release — `release.sh` waits for the push run on `main` — but a
+Windows-only failure otherwise surfaces only during that wait, one CI cycle
+later. If the release includes an upstream
 (AkaraChen/aghub) port, add its row to `UPSTREAM.md` and bump "Last full
 review" — that log, not the commit message, is the durable record.
 
@@ -86,9 +89,10 @@ the other.
 ```bash
 # 0. Same prerequisites as above (UPSTREAM.md row, just preflight).
 just preflight
-git push fork main
+SHA=$(git rev-parse HEAD)   # pin it: main may move while CI runs
+git push fork "$SHA:refs/heads/main"
 gh run watch <ci-run-id> --repo audichuang/aghub --exit-status   # MUST be green
-git tag vX.Y.Z && git push fork vX.Y.Z
+git tag vX.Y.Z "$SHA" && git push fork vX.Y.Z
 gh run list  --repo audichuang/aghub --workflow release.yml --limit 1
 gh run watch <run-id> --repo audichuang/aghub --exit-status
 just release verify X.Y.Z

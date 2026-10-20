@@ -118,12 +118,16 @@ HEAD_SHA="$(git rev-parse HEAD)"
 # main may move on (another session's commits) while a release run waits —
 # means this release was already cut and the script was interrupted
 # afterwards: resume at the watch, against the TAGGED commit. A local-only tag
-# or one off HEAD's history is a real conflict. (The fetch above brought the
+# or one off HEAD's history is a real conflict. Every older tag is an ancestor
+# too, so an ancestor resumes only when it is the newest stable tag — a mistyped
+# old version must not rerun an abandoned release. (The fetch above brought the
 # fork's tag in locally.)
 RESUME=0
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
 	TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+	NEWEST="$(git tag --list 'v*' --sort=-v:refname | sed '/-/d' | head -1)"
 	if git merge-base --is-ancestor "$TAG_SHA" "$HEAD_SHA" &&
+		{ [ "$TAG_SHA" = "$HEAD_SHA" ] || [ "$TAG" = "$NEWEST" ]; } &&
 		git ls-remote --tags "$REMOTE" "$TAG" | grep -q "refs/tags/$TAG"; then
 		RESUME=1
 		[ "$TAG_SHA" = "$HEAD_SHA" ] ||
@@ -131,7 +135,7 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
 		HEAD_SHA="$TAG_SHA"
 		info "$TAG is already on $REMOTE — resuming: watch the release run, then verify"
 	else
-		err "tag $TAG already exists on another commit (or only locally). To re-release a botched tag, delete it first (see releasing-aghub)."
+		err "tag $TAG already exists on another commit (or only locally, or is not the newest release). To re-release a botched tag, delete it first (see releasing-aghub)."
 		exit 1
 	fi
 fi

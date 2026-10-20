@@ -51,8 +51,9 @@ APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
 ## The tag followed a moving HEAD
 
-`release.sh` read `HEAD_SHA` once for the CI wait, then ran `git push fork
-main` and `git tag "$TAG"` against whatever `HEAD` was by then. A release waits
+`release.sh` read `HEAD_SHA` once for the CI wait, but pushed `main` by name
+(seconds later, a small window) and ran the "commits to ship" log and
+`git tag "$TAG"` against whatever `HEAD` was after the wait. A release waits
 up to 40 minutes for CI, and on 2026-10-21 another session in the same clone
 committed three local, un-pushed, un-CI'd commits onto main during the v2.41.6
 wait. The tag would have landed on them, and `verify-ci` would have refused
