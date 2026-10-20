@@ -157,7 +157,7 @@ pub fn pack(skill_dir: &Path, output_path: &Path) -> Result<()> {
 
 /// Unpack the .skill/.zip file `skill_file` into `output_dir`.
 ///
-/// Errors: `Io` or `Zip`.
+/// Errors: `Io`, `Zip`, or `InvalidFormat` when two entries extract to one path.
 pub fn unpack(skill_file: &Path, output_dir: &Path) -> Result<()> {
 	if !skill_file.exists() {
 		return Err(SkillError::NotFound(format!(
@@ -170,6 +170,19 @@ pub fn unpack(skill_file: &Path, output_dir: &Path) -> Result<()> {
 
 	let file = File::open(skill_file)?;
 	let mut archive = ZipArchive::new(file)?;
+
+	// Refuse before writing anything: two entries landing on one path would let
+	// the second silently overwrite the first (zip 9 folds legacy CP437 names).
+	let mut seen = std::collections::HashSet::new();
+	for i in 0..archive.len() {
+		let rel = archive.by_index(i)?.mangled_name()?;
+		if !seen.insert(rel.clone()) {
+			return Err(SkillError::InvalidFormat(format!(
+				"two archive entries extract to the same path: {}",
+				rel.display()
+			)));
+		}
+	}
 
 	for i in 0..archive.len() {
 		let mut file = archive.by_index(i)?;
@@ -225,6 +238,32 @@ mod tests {
 	use super::*;
 	use std::path::PathBuf;
 	use tempfile::TempDir;
+
+	/// Two entries whose names differ in the archive but extract to the same
+	/// path (zip 9 also folds legacy CP437 names this way) must refuse, not
+	/// let the second silently overwrite the first.
+	#[test]
+	fn unpack_refuses_entries_that_extract_to_the_same_path() {
+		let tmp = TempDir::new().unwrap();
+		let archive = tmp.path().join("collide.skill");
+		let mut zip = ZipWriter::new(File::create(&archive).unwrap());
+		let options = SimpleFileOptions::default();
+		for (name, body) in [
+			("s/SKILL.md", "---\nname: s\ndescription: d\n---\n"),
+			("s/assets/x.txt", "first"),
+			("s\\assets\\x.txt", "second"),
+		] {
+			zip.start_file(name, options).unwrap();
+			zip.write_all(body.as_bytes()).unwrap();
+		}
+		zip.finish().unwrap();
+
+		let out = tmp.path().join("out");
+		let err =
+			unpack(&archive, &out).expect_err("colliding entries must refuse");
+		assert!(matches!(err, SkillError::InvalidFormat(_)), "{err:?}");
+		assert!(!out.join("s/assets/x.txt").exists(), "nothing written");
+	}
 
 	fn create_test_skill_dir(dir: &Path) -> PathBuf {
 		let skill_dir = dir.join("test-skill");
