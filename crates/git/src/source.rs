@@ -170,7 +170,13 @@ fn strip_scp_like_password(source: &str) -> Option<String> {
 	if source.contains("://") {
 		return None;
 	}
-	let (userinfo, remote) = source.split_once('@')?;
+	// The password may itself hold an `@`, and so may the path after
+	// `host:`; the userinfo ends at the LAST `@` that still has `host:path`
+	// after it.
+	let (userinfo, remote) = source
+		.rmatch_indices('@')
+		.map(|(at, _)| (&source[..at], &source[at + 1..]))
+		.find(|(_, remote)| remote.contains(':'))?;
 	let (user, password) = userinfo.split_once(':')?;
 	if user.is_empty() || password.is_empty() || !remote.contains(':') {
 		return None;
@@ -296,9 +302,30 @@ pub fn strip_source_credentials(source: &str) -> String {
 	if redacted == source {
 		return redacted;
 	}
+	// Resolution can hand a secret back (a scheme-less `user:tok@host/path`
+	// reads as scp with host `user`, a remote-helper address passes through);
+	// only a result that changed AND reads clean is trusted.
 	resolve_remote_source(source)
+		.ok()
 		.map(|resolved| resolved.source_url)
+		.filter(|out| reads_clean(out))
 		.unwrap_or(redacted)
+}
+
+/// No secret left in a resolved source. An `ssh://` user names an account, not
+/// a secret (resolution keeps it on purpose), so there only a password counts;
+/// everywhere else anything [`crate::redact::redact_source_credentials`] would
+/// still remove does.
+fn reads_clean(out: &str) -> bool {
+	match out.strip_prefix("ssh://") {
+		Some(rest) => {
+			let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+			authority
+				.rsplit_once('@')
+				.is_none_or(|(userinfo, _)| !userinfo.contains(':'))
+		}
+		None => crate::redact::redact_source_credentials(out) == out,
+	}
 }
 
 #[cfg(test)]
@@ -413,6 +440,30 @@ mod tests {
 			!scp.contains("TOK") && scp.contains("u@git.example.com"),
 			"{scp}"
 		);
+		for leaky in [
+			"alice:TOK@host/o/r",
+			"git:TOK@part@github.com:o/r.git",
+			"codecommit::https://u:TOK@host/r",
+		] {
+			let out = strip_source_credentials(leaky);
+			assert!(
+				!out.contains("TOK") && !out.contains("part"),
+				"{leaky} -> {out}"
+			);
+		}
+		// What resolution PERSISTS into a lock: an `@` in the password or in
+		// the path must not hide the userinfo from the scp strip.
+		for (input, want) in [
+			("git:TOK@part@github.com:o/r.git", "git@github.com:o/r.git"),
+			("u:TOK@git.example.com:o/r@v1", "u@git.example.com:o/r@v1"),
+		] {
+			let url = resolve_remote_source(input).unwrap().source_url;
+			assert!(
+				!url.contains("TOK") && !url.contains("part"),
+				"{input} -> {url}"
+			);
+			assert!(url.contains(want), "{input} -> {url}");
+		}
 	}
 
 	#[test]
