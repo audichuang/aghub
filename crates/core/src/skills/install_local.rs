@@ -54,9 +54,10 @@ struct LockWrite {
 	source: skill::InstallLockSource,
 	skill_path: Option<String>,
 	ref_commit: Option<String>,
-	/// A carried entry's usable stored Source hash. Re-hashing a locally edited
-	/// source would stamp the edit as the upstream baseline and `check` would
-	/// call it current, so the copied folder is hashed only when this is `None`.
+	/// A carried entry's stored Source hash, or the placeholder when unknown.
+	/// Re-hashing a locally edited source would stamp the edit as the upstream
+	/// baseline and `check` would call it current, so the copied folder is
+	/// hashed only for a `Local` import (`None`).
 	stored_hash: Option<String>,
 }
 
@@ -246,9 +247,17 @@ pub fn install_local_skill(
 			},
 			skill_path: owner.skill_path,
 			ref_commit: owner.ref_commit,
-			stored_hash: owner
-				.stored_hash
-				.filter(|h| !skill::lock_hash_unknown(Some(h))),
+			// An UNKNOWN carried baseline stays unknown (the placeholder digest):
+			// hashing the copied folder would turn a local edit into the
+			// recorded upstream baseline, and `check` would call it current.
+			stored_hash: Some(
+				owner
+					.stored_hash
+					.filter(|h| !skill::lock_hash_unknown(Some(h)))
+					.unwrap_or_else(|| {
+						skill::EMPTY_SKILLS_LOCK_DIGEST.to_string()
+					}),
+			),
 		},
 		LocalInstallLock::Local | LocalInstallLock::Untouched => LockWrite {
 			source: skill::InstallLockSource {

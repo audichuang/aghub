@@ -508,6 +508,14 @@ was refused. The guard now takes `fetched` from its caller (only a remote
 checkout is fetched); pinned by
 `transfer_skill_carried_owner_with_python_cache_can_be_retried_and_regranted`.
 
+A carried owner with an UNKNOWN stored hash (an npx global entry records no
+`contentHash`) used to fall back to hashing the copied folder — a local edit
+then became the destination's recorded baseline and `check` reported it
+current, where a fetched install of the same skill reports it outdated. A carry
+now writes the placeholder digest, so the destination stays "baseline unknown"
+exactly like its source (ADR 0003 Decision 1); pinned by
+`transfer_skill_cross_scope_keeps_an_unknown_source_hash_unknown`.
+
 Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone`,
 `transfer_skill_same_scope_keeps_an_untracked_master_untracked`,

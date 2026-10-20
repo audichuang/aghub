@@ -6474,6 +6474,69 @@ mod tests {
 		);
 	}
 
+	/// An npx global entry records no `contentHash`. Carried, that UNKNOWN
+	/// baseline must stay unknown: hashing the (locally edited) copy instead
+	/// made the destination's `check` read the edit as upstream and report the
+	/// skill current, where a fetched install of the same skill reports it
+	/// outdated.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_scope_keeps_an_unknown_source_hash_unknown() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let master = home.path().join(".aghub/npx");
+		github_owned_master(
+			&master,
+			&home.path().join(".claude/skills"),
+			"npx",
+		);
+		skill::write_global_install_lock(
+			"npx",
+			&github_source(),
+			Some("skills/npx/SKILL.md".to_string()),
+			&master,
+			Some("abc123".to_string()),
+		)
+		.unwrap();
+		let mut entry =
+			skill::lock::global::get_skill_from_lock("npx").expect("entry");
+		entry.content_hash = None;
+		skill::lock::global::add_skill_to_lock("npx", entry).unwrap();
+		fs::write(master.join("LOCAL-EDIT.md"), "edited\n").unwrap();
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "npx".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		let entry = lock.skills.get("npx").expect("dest lock entry");
+		assert!(
+			skill::lock_hash_unknown(Some(&entry.computed_hash)),
+			"unknown baseline must stay unknown, got {}",
+			entry.computed_hash
+		);
+		assert_eq!(entry.source_type, "github");
+	}
+
 	#[test]
 	fn reconcile_skill_adds_multiple_agents_to_same_dir() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
