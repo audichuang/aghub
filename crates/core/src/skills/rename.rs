@@ -184,14 +184,15 @@ pub fn rename_source_from_lock(
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
-				// An empty URL (an entry carried from a project lock, which
-				// omits reconstructable URLs) falls back to `source`, as the
-				// Project arm does.
-				source_url: if entry.source_url.trim().is_empty() {
-					entry.source.clone()
-				} else {
-					entry.source_url.clone()
-				},
+				// A blank URL (an entry carried from a project lock, which
+				// omits reconstructable URLs) is rebuilt by provider; a bare
+				// `source` would read as GitHub for a hostless gitlab entry.
+				source_url:
+					crate::skills::source_coordinate::entry_clone_source(
+						&entry.source,
+						Some(&entry.source_url),
+						&entry.source_type,
+					),
 				ref_name: entry.ref_name.clone(),
 				skill_path,
 				captured,
@@ -915,16 +916,16 @@ pub fn rollback_materialized_install(
 mod tests {
 	use super::*;
 
-	/// A global entry carried from a project lock records `sourceUrl: ""`
-	/// (project locks omit reconstructable URLs); accept-rename must fetch
-	/// `source`, not the empty string.
+	/// A global entry with a blank `sourceUrl` (legacy, or carried from a
+	/// project lock) must fetch the provider's coordinate: a hostless gitlab
+	/// `group/repo` handed on bare would be resolved as GitHub.
 	#[test]
-	fn global_rename_source_falls_back_to_source_for_an_empty_url() {
+	fn global_rename_source_rebuilds_a_blank_url_by_provider() {
 		let _guard = crate::skills::prune::test_lock::GlobalLockGuard::new();
 		skill::lock::global::add_skill_to_lock(
 			"old-skill",
 			skill::SkillLockEntry {
-				source: "gitlab.com/o/r".to_string(),
+				source: "o/r".to_string(),
 				source_type: "gitlab".to_string(),
 				source_url: String::new(),
 				ref_name: Some("main".to_string()),
@@ -941,7 +942,7 @@ mod tests {
 
 		let source =
 			rename_source_from_lock("old-skill", &WriteScope::Global).unwrap();
-		assert_eq!(source.source_url, "gitlab.com/o/r");
+		assert_eq!(source.source_url, "https://gitlab.com/o/r.git");
 	}
 
 	/// The snapshot must cover everything the removal step will DELETE.

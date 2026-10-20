@@ -428,10 +428,15 @@ grant is refused "already owned". So the copy says what to do with the lock
 - Across scopes with no source entry: `Local`, recorded at the source root
   (for a Referrer, the Master discovery resolved it to).
 
-Project → global carries a github owner with `sourceUrl: ""` (project locks
-omit reconstructable URLs, and core has no reconstruction helper);
-`rename_source_from_lock`'s global arm now falls back to `source` for an empty
-URL, as its project arm always did.
+Project → global used to carry `sourceUrl: ""` (project locks omit
+reconstructable URLs). A blank global URL made `EntryIdentity::of_global_entry`
+unresolvable, so `describes` accepted ANY repository and the API's git-sync
+could install repo B's bytes under transferred skill A; accept-rename fetched a
+hostless gitlab `group/repo` as GitHub. Now one provider-aware rule,
+`skills::source_coordinate::entry_clone_source` (moved from skill-update), is
+used by the carried GLOBAL write (byte-identical to what a fetched install
+records), by `of_global_entry` (legacy blank entries already on disk) and by
+rename's global arm.
 
 Behaviour change: a destination Master with different content and no lock
 owner is now REFUSED ("different content") instead of reused — by `transfer`
@@ -446,7 +451,9 @@ Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_cross_scope_carries_the_stored_hash_of_an_edited_source`,
 `transfer_skill_cross_scope_untracked_records_the_master_not_the_referrer`,
 `transfer_skill_cross_scope_locks_both_scopes_in_either_direction`,
-`global_rename_source_falls_back_to_source_for_an_empty_url`; the reuse pin
+`global_rename_source_rebuilds_a_blank_url_by_provider`,
+`a_blank_global_url_still_refuses_a_different_repo`,
+`git_sync_refuses_a_different_repo_for_a_blank_url_global_entry`; the reuse pin
 `add_skill_from_path_universal_does_not_overwrite_existing_canonical` was
 deleted (the refusal is pinned by
 `install_local_skill_refuses_to_adopt_untracked_master_when_content_differs`).

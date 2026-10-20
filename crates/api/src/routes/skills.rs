@@ -4750,6 +4750,100 @@ mod tests {
 		});
 	}
 
+	/// The same pairing against a GLOBAL entry whose `sourceUrl` is blank — what
+	/// a project→global transfer of an npx project entry once wrote, and what a
+	/// legacy global lock can still hold. A blank effective source resolves to
+	/// nothing, so `describes` used to accept ANY repository for it.
+	#[test]
+	fn git_sync_refuses_a_different_repo_for_a_blank_url_global_entry() {
+		with_isolated_env(|home, _| {
+			let installed = home.join(".claude/skills/sync-me");
+			std::fs::create_dir_all(&installed).unwrap();
+			std::fs::write(
+				installed.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: mine\n---\n\nmine\n",
+			)
+			.unwrap();
+			skill::lock::global::add_skill_to_lock(
+				"sync-me",
+				skill::SkillLockEntry {
+					source: "owner/repo".to_string(),
+					source_type: "github".to_string(),
+					source_url: String::new(),
+					ref_name: Some("main".to_string()),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+					skill_folder_hash: String::new(),
+					installed_at: String::new(),
+					updated_at: String::new(),
+					plugin_name: None,
+					content_hash: Some("old".to_string()),
+					ref_commit: None,
+				},
+			)
+			.unwrap();
+			let lock_before = skill::lock::global::read_skill_lock();
+
+			let fixture = tempdir().unwrap();
+			let elsewhere = fixture.path().join("sync-me");
+			std::fs::create_dir_all(&elsewhere).unwrap();
+			std::fs::write(
+				elsewhere.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: theirs\n---\n\ntheirs\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("git clone sessions");
+			sessions.insert(
+				"other-repo".to_string(),
+				session_from_fixture(
+					fixture.path(),
+					"https://github.com/someone-else/repo.git",
+					"main",
+				),
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "other-repo",
+					"name": "sync-me",
+					"scope": "global",
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [home
+						.join(".claude/skills")
+						.display()
+						.to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::BadRequest);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+			assert_eq!(body["code"], "SKILL_SOURCE_MISMATCH");
+			assert!(
+				std::fs::read_to_string(installed.join("SKILL.md"))
+					.unwrap()
+					.contains("mine"),
+				"the locked skill's content must survive a mismatched session"
+			);
+			assert_eq!(
+				skill::lock::global::read_skill_lock().skills,
+				lock_before.skills,
+				"a refused sync must not stamp a hash"
+			);
+		});
+	}
+
 	/// Another process installs the skill while this request is fetching: the
 	/// lock entry is written from inside the fetch.
 	struct AppearingEntryBackend {

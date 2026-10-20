@@ -142,7 +142,9 @@ fn acquire(
 /// passes while the bytes came from the other coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryIdentity {
-	/// Effective source: the global entry's `source_url`, or the project entry's
+	/// Effective source: the global entry's clone coordinate
+	/// ([`entry_clone_source`](crate::skills::source_coordinate::entry_clone_source),
+	/// so a blank `sourceUrl` still names a repository), or the project entry's
 	/// `source_url` falling back to `source`.
 	source: String,
 	skill_path: Option<String>,
@@ -158,7 +160,13 @@ impl EntryIdentity {
 	/// docs for the two-read interleaving it rules out.
 	pub fn of_global_entry(entry: &skill::SkillLockEntry) -> Self {
 		Self {
-			source: entry.source_url.clone(),
+			// A blank recorded URL (a legacy entry, or one carried from a
+			// project lock) would make `describes` accept ANY repository.
+			source: crate::skills::source_coordinate::entry_clone_source(
+				&entry.source,
+				Some(&entry.source_url),
+				&entry.source_type,
+			),
 			skill_path: entry.skill_path.clone(),
 			ref_name: entry.ref_name.clone(),
 			source_type: entry.source_type.clone(),
@@ -361,6 +369,31 @@ mod tests {
 		assert!(
 			!entry.describes("https://gitlab.com/good/repo.git", "s/SKILL.md")
 		);
+	}
+
+	/// A GLOBAL entry with a blank `sourceUrl` (legacy, or carried from a
+	/// project lock) must still name its repository: a blank effective source
+	/// is unresolvable and `describes` would accept any repo for it.
+	#[test]
+	fn a_blank_global_url_still_refuses_a_different_repo() {
+		let entry = skill::SkillLockEntry {
+			source: "good/repo".to_string(),
+			source_type: "github".to_string(),
+			source_url: String::new(),
+			ref_name: Some("main".to_string()),
+			skill_path: Some("s/SKILL.md".to_string()),
+			skill_folder_hash: String::new(),
+			installed_at: String::new(),
+			updated_at: String::new(),
+			plugin_name: None,
+			content_hash: None,
+			ref_commit: None,
+		};
+		let identity = EntryIdentity::of_global_entry(&entry);
+		assert!(!identity
+			.describes("https://github.com/evil/repo.git", "s/SKILL.md"));
+		assert!(identity
+			.describes("https://github.com/good/repo.git", "s/SKILL.md"));
 	}
 
 	/// The false-negative trap this must NOT fall into. One repo has many legal

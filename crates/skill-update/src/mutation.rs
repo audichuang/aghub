@@ -663,7 +663,7 @@ fn prepare_locked_resync(
 			(
 				EntrySource {
 					source_ref: SourceRef {
-						source: crate::sources::entry_clone_source(
+						source: aghub_core::skills::source_coordinate::entry_clone_source(
 							&entry.source,
 							Some(&entry.source_url),
 							&entry.source_type,
@@ -696,7 +696,7 @@ fn prepare_locked_resync(
 						// `diff_source` fetches. Resolving the raw `source` here
 						// instead made a GitLab row fetch GitHub shorthand and
 						// stamp GitHub's commit into the GitLab lock entry.
-						source: crate::sources::entry_clone_source(
+						source: aghub_core::skills::source_coordinate::entry_clone_source(
 							&entry.source,
 							entry.source_url.as_deref(),
 							&entry.source_type,

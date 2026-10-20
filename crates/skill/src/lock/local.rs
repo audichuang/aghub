@@ -58,7 +58,7 @@ pub struct LocalSkillLockEntry {
 	/// NON-github host (TFS/Azure DevOps/on-prem GitLab) that the host-stripped
 	/// `source` (`owner/repo`) alone can only reconstruct as `github.com`.
 	/// `None` for github shorthand and for legacy locks that predate the field —
-	/// consumers fall back to `skill_update::sources::reconstruct_source_url`,
+	/// consumers fall back to `aghub_core::skills::source_coordinate::reconstruct_source_url`,
 	/// which can only recover a host for `github`/`gitlab` types.
 	///
 	/// NOT aghub-only: current npx `skills` writes `sourceUrl` for `git`/`gitlab`

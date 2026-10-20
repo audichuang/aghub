@@ -181,11 +181,23 @@ pub fn install_local_skill(
 	let lock_write = match req.lock {
 		LocalInstallLock::Carry(owner) => LockWrite {
 			source: skill::InstallLockSource {
+				// A global entry always records its clone coordinate (npx and
+				// a fetched install do), so a project entry's omitted URL is
+				// rebuilt; the project writer drops reconstructable URLs itself.
+				source_url: match req.scope {
+					WriteScope::Global => {
+						crate::skills::source_coordinate::entry_clone_source(
+							&owner.source,
+							owner.source_url.as_deref(),
+							&owner.source_type,
+						)
+					}
+					WriteScope::Project { .. } => {
+						owner.source_url.unwrap_or_default()
+					}
+				},
 				source: owner.source,
 				source_type: owner.source_type,
-				// A project entry omits a reconstructable URL; readers treat
-				// an empty one as missing.
-				source_url: owner.source_url.unwrap_or_default(),
 				ref_name: owner.ref_name,
 			},
 			skill_path: owner.skill_path,

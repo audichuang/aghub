@@ -15,6 +15,7 @@ pub mod rename;
 pub mod repair;
 pub mod resync;
 pub mod shape;
+pub mod source_coordinate;
 pub mod update;
 pub mod usage;
 

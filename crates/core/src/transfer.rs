@@ -6042,6 +6042,22 @@ mod tests {
 					Some("github"),
 					"to_global={to_global} aliased={aliased}: the owner rides along"
 				);
+				if to_global {
+					// The project entry recorded no URL; the global one must
+					// hold the coordinate a fetched install of the same repo
+					// writes, or one repo reads as two owners.
+					let fetched =
+						aghub_git::resolve_remote_source("owner/repo")
+							.unwrap()
+							.source_url;
+					assert_eq!(
+						skill::lock::global::get_skill_from_lock("owned")
+							.map(|e| e.source_url)
+							.as_deref(),
+						Some(fetched.as_str()),
+						"aliased={aliased}"
+					);
+				}
 			}
 		}
 	}

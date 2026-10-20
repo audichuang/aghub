@@ -31,7 +31,13 @@ its own, applying stamped GitHub's commit into a GitLab entry — silently,
 whenever a same-path repo existed on GitHub. Each consumer hand-mirroring
 `source_url.unwrap_or(source)` is what let them drift.
 
-Rule: every consumer goes through `sources::entry_clone_source`.
+Rule: every consumer goes through `entry_clone_source`. It now lives in
+`aghub_core::skills::source_coordinate` (core depends on `aghub-git` for it),
+because core readers and writers of a GLOBAL entry need the same rule: a blank
+`sourceUrl` made `EntryIdentity::describes` accept any repository, made
+accept-rename fetch a hostless `group/repo` as GitHub, and was what a
+project→global transfer wrote. See
+[core-transfer](core-transfer.md#transfer-and-reconcile-copies-share-the-local-install).
 
 Pinned by: `a_provider_typed_entry_applies_from_the_forge_the_row_advertises`
 (`tests/source_bulk_sync.rs`), `two_forges_serving_one_path_are_two_source_rows`,

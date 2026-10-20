@@ -250,7 +250,7 @@ pub fn global_lock_entries_with(
 				name,
 				scope: "global".to_string(),
 				source_ref: SourceRef {
-					source: crate::sources::entry_clone_source(
+					source: aghub_core::skills::source_coordinate::entry_clone_source(
 						&entry.source,
 						Some(&entry.source_url),
 						&entry.source_type,
@@ -298,7 +298,7 @@ fn project_lock_entries_with(
 					// The shared coordinate — NOT a local `source_url.unwrap_or(
 					// source)`, which reads a legacy GitLab entry's `group/repo` as
 					// GitHub shorthand and checks it against the wrong repository.
-					source: crate::sources::entry_clone_source(
+					source: aghub_core::skills::source_coordinate::entry_clone_source(
 						&entry.source,
 						entry.source_url.as_deref(),
 						&entry.source_type,
