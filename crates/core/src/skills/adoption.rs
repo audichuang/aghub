@@ -221,9 +221,9 @@ pub fn adoption_guard(
 				 canonical source owner differs from requested source '{}:{}', \
 				 so reassignment was refused",
 				existing_owner.source_type,
-				existing_owner.source,
+				aghub_git::redact_source_credentials(&existing_owner.source),
 				source.source_type,
-				source.source,
+				aghub_git::redact_source_credentials(&source.source),
 			)));
 		}
 	}
@@ -255,7 +255,7 @@ pub fn adoption_guard(
 					return Err(ConfigError::ValidationFailed(format!(
 						"Pre-existing Master for skill '{name}' has different content; \
 						 refusing to adopt it for {kind}source '{}'",
-						source.source,
+						aghub_git::redact_source_credentials(&source.source),
 					)));
 				}
 			}

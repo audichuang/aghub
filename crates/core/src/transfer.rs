@@ -6610,6 +6610,71 @@ mod tests {
 		);
 	}
 
+	/// The other direction: a clean carried owner meeting a DESTINATION entry
+	/// that records a credential. The ownership refusal names both owners, so
+	/// it must not echo the token into the row error (and the API response).
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_refusal_never_echoes_a_destination_credential() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let master = home.path().join(".aghub/tok");
+		github_owned_master(
+			&master,
+			&home.path().join(".claude/skills"),
+			"tok",
+		);
+		skill::write_global_install_lock(
+			"tok",
+			&github_source(),
+			Some("tok/SKILL.md".to_string()),
+			&master,
+			None,
+		)
+		.unwrap();
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+		let tokened = "https://user:SECRET-TOKEN@git.example/acme/skills.git";
+		skill::add_skill_to_local_lock(
+			"tok",
+			skill::LocalSkillLockEntry {
+				source_url: Some(tokened.to_string()),
+				ref_commit: None,
+				source: tokened.to_string(),
+				ref_name: Some("main".to_string()),
+				source_type: "git".to_string(),
+				computed_hash: "h".to_string(),
+				skill_path: Some("tok/SKILL.md".to_string()),
+			},
+			Some(&root),
+		)
+		.unwrap();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "tok".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		let error = result.results[0].error.clone().expect("owner refusal");
+		assert!(error.contains("already owned"), "{error}");
+		assert!(!error.contains("SECRET-TOKEN"), "token echoed: {error}");
+	}
+
 	#[test]
 	fn reconcile_skill_adds_multiple_agents_to_same_dir() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
