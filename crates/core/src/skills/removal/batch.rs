@@ -668,6 +668,7 @@ pub fn remove_skill_across_scopes(
 			error: None,
 		});
 		// The commit refuses this scope and stops the run here; the dry run must too.
+		// Read core's own `has_refused_row`, not the wire `code` it projects into.
 		if would_stop {
 			stop = Some(if previewed {
 				RemovalKind::Partial
