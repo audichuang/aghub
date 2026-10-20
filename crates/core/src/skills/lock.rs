@@ -130,9 +130,10 @@ fn acquire(
 /// [`of_project_entry`](Self::of_project_entry) when the entry is in hand, else
 /// [`capture`](Self::capture). Never by hand, which rules out two traps:
 ///
-/// - A re-derived source is not comparable: a PROJECT entry's `sourceUrl` is
-///   absent on npx-written locks (effective source = `owner/repo`), so a
-///   reconstructed HTTPS URL would falsely reject every such entry.
+/// - A source derived any other way is not comparable: a PROJECT entry's
+///   `sourceUrl` is absent on npx-written locks, and only the `of_*_entry`
+///   rule (`entry_clone_source`) is guaranteed to rebuild it the same way on
+///   capture and on verify.
 /// - A flow that OVERRIDES a coordinate (a `--ref`, a rename's moved
 ///   `skillPath`) must still compare the value that was there BEFORE: the
 ///   snapshot is the expectation, what the flow writes is the intent.
@@ -142,10 +143,9 @@ fn acquire(
 /// passes while the bytes came from the other coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryIdentity {
-	/// Effective source: the global entry's clone coordinate
-	/// ([`entry_clone_source`](crate::skills::source_coordinate::entry_clone_source),
-	/// so a blank `sourceUrl` still names a repository), or the project entry's
-	/// `source_url` falling back to `source`.
+	/// Effective source: the entry's clone coordinate
+	/// ([`entry_clone_source`](crate::skills::source_coordinate::entry_clone_source)),
+	/// so a blank or absent `sourceUrl` still names a repository.
 	source: String,
 	skill_path: Option<String>,
 	ref_name: Option<String>,
@@ -174,14 +174,15 @@ impl EntryIdentity {
 	}
 
 	/// [`of_global_entry`](Self::of_global_entry) for a PROJECT entry, whose
-	/// `sourceUrl` is optional (npx writes none) so the effective source falls
-	/// back to `source`.
+	/// `sourceUrl` is optional (npx writes none for github), so the effective
+	/// source is rebuilt by provider — the same rule on capture and on verify.
 	pub fn of_project_entry(entry: &skill::LocalSkillLockEntry) -> Self {
 		Self {
-			source: entry
-				.source_url
-				.clone()
-				.unwrap_or_else(|| entry.source.clone()),
+			source: crate::skills::source_coordinate::entry_clone_source(
+				&entry.source,
+				entry.source_url.as_deref(),
+				&entry.source_type,
+			),
 			skill_path: entry.skill_path.clone(),
 			ref_name: entry.ref_name.clone(),
 			source_type: entry.source_type.clone(),

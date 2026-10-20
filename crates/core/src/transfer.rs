@@ -5947,10 +5947,12 @@ mod tests {
 		);
 	}
 
-	/// A cross-scope copy holds BOTH scopes' mutation locks while it reads the
-	/// source entry. Which lock orders first depends on the paths (global
-	/// first, then by resolved lock path), so both directions and an aliased
-	/// project root must succeed rather than trip the inversion refusal.
+	/// A cross-scope copy must not trip the lock-order inversion refusal in
+	/// either direction or under an aliased project root: which scope orders
+	/// first depends on the paths (global first, then by resolved lock path).
+	/// Single-threaded, so this cannot tell whether the source lock is HELD at
+	/// all — `a_cross_scope_transfer_reads_the_source_entry_under_its_lock`
+	/// (`tests/mutation_lock_flows.rs`, a real second process) pins that.
 	#[cfg(unix)]
 	#[test]
 	fn transfer_skill_cross_scope_locks_both_scopes_in_either_direction() {

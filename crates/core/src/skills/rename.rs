@@ -216,12 +216,14 @@ pub fn rename_source_from_lock(
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
-				// Prefer the recorded clone URL so a non-github host is fetched
-				// correctly; fall back to `source` for github/legacy locks.
-				source_url: entry
-					.source_url
-					.clone()
-					.unwrap_or_else(|| entry.source.clone()),
+				// The recorded clone URL, else rebuilt by provider: a URL-less
+				// gitlab `group/repo` handed on bare would be fetched as GitHub.
+				source_url:
+					crate::skills::source_coordinate::entry_clone_source(
+						&entry.source,
+						entry.source_url.as_deref(),
+						&entry.source_type,
+					),
 				ref_name: entry.ref_name.clone(),
 				skill_path,
 				captured,
@@ -915,6 +917,34 @@ pub fn rollback_materialized_install(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The PROJECT arm under the same rule: npx writes no `sourceUrl` for a
+	/// legacy gitlab entry, and a bare `group/repo` would be fetched as GitHub.
+	#[test]
+	fn project_rename_source_rebuilds_a_missing_url_by_provider() {
+		let project = tempfile::tempdir().unwrap();
+		skill::lock::local::add_skill_to_local_lock(
+			"old-skill",
+			skill::LocalSkillLockEntry {
+				source: "o/r".to_string(),
+				source_type: "gitlab".to_string(),
+				source_url: None,
+				ref_name: Some("main".to_string()),
+				skill_path: Some("old-skill/SKILL.md".to_string()),
+				computed_hash: "h".to_string(),
+				ref_commit: None,
+			},
+			Some(project.path()),
+		)
+		.unwrap();
+
+		let source = rename_source_from_lock(
+			"old-skill",
+			&WriteScope::project(project.path()),
+		)
+		.unwrap();
+		assert_eq!(source.source_url, "https://gitlab.com/o/r.git");
+	}
 
 	/// A global entry with a blank `sourceUrl` (legacy, or carried from a
 	/// project lock) must fetch the provider's coordinate: a hostless gitlab

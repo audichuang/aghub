@@ -29,6 +29,9 @@ use std::time::{Duration, Instant};
 const ROOT_ENV: &str = "AGHUB_LOCK_FLOW_TEST_ROOT";
 const HOLD_ENV: &str = "AGHUB_LOCK_FLOW_TEST_HOLD_MS";
 const READY_FILE: &str = "lock-acquired";
+/// When set, the child REPOINTS this lock entry (instead of installing
+/// `child-skill`) while it still holds the lock.
+const REPOINT_ENV: &str = "AGHUB_LOCK_FLOW_TEST_REPOINT";
 
 /// The other process: takes the project mutation lock, writes a lock entry and
 /// its on-disk skill dir while holding it, then releases. Normally a no-op
@@ -46,6 +49,18 @@ fn holder_child() {
 			.expect("child acquire");
 	std::fs::write(root.join(READY_FILE), b"").expect("signal readiness");
 	std::thread::sleep(Duration::from_millis(hold_ms.parse().unwrap()));
+
+	if let Ok(name) = std::env::var(REPOINT_ENV) {
+		let mut repointed = entry();
+		repointed.source = "repointed/repo".to_string();
+		skill::lock::local::add_skill_to_local_lock(
+			&name,
+			repointed,
+			Some(&root),
+		)
+		.expect("child repoint");
+		return;
+	}
 
 	// Installed by "another process" INSIDE the held lock: disk first, then the
 	// lock entry, the same order a real install writes them.
@@ -82,10 +97,23 @@ fn entry() -> skill::LocalSkillLockEntry {
 
 /// Spawn the holder and return once it reports the lock is held.
 fn spawn_holder(root: &Path, hold: Duration) -> Child {
-	let mut child = Command::new(std::env::current_exe().unwrap())
+	spawn_holder_with(root, hold, None)
+}
+
+fn spawn_holder_with(
+	root: &Path,
+	hold: Duration,
+	repoint: Option<&str>,
+) -> Child {
+	let mut command = Command::new(std::env::current_exe().unwrap());
+	command
 		.args(["--exact", "holder_child"])
 		.env(ROOT_ENV, root)
-		.env(HOLD_ENV, hold.as_millis().to_string())
+		.env(HOLD_ENV, hold.as_millis().to_string());
+	if let Some(name) = repoint {
+		command.env(REPOINT_ENV, name);
+	}
+	let mut child = command
 		.stdout(Stdio::null())
 		.stderr(Stdio::null())
 		.spawn()
@@ -302,5 +330,69 @@ fn a_skill_reconcile_reports_the_lock_before_it_looks_the_skill_up() {
 		message.contains("mutation lock"),
 		"the LOCK must be what refused this, not a lookup the flow should \
 		 never have reached without it; got: {message}"
+	);
+}
+
+/// A cross-scope `transfer skill` reads the SOURCE scope's lock entry and
+/// writes it into the destination's, so it must hold the source scope's lock
+/// before that read — the destination's alone serializes nothing against a
+/// writer of the source lock.
+///
+/// The child holds the SOURCE project's lock and repoints the entry before
+/// releasing. Guarded, the transfer waits and carries the repointed owner;
+/// unguarded it never waits (the destination lock is free) and carries the
+/// owner it read mid-mutation. Verified: deleting the `write_scopes_guard`
+/// block in `install_skill_copy` fails on the `source` assertion with
+/// `owner/repo`.
+///
+/// Timing dependence, as above: losing requires the parent to be descheduled
+/// for the whole hold; a starved parent would pass spuriously, never fail.
+#[cfg(unix)]
+#[test]
+fn a_cross_scope_transfer_reads_the_source_entry_under_its_lock() {
+	use aghub_core::models::AgentType;
+	use aghub_core::transfer::{
+		transfer_skill, InstallTarget, ResourceLocator,
+	};
+
+	let tmp = tempfile::tempdir().unwrap();
+	let source = tmp.path().join("source");
+	let dest = tmp.path().join("dest");
+	std::fs::create_dir_all(&dest).unwrap();
+	let master = source.join(".aghub/mover");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(master.join("SKILL.md"), skill_md("mover")).unwrap();
+	std::fs::create_dir_all(skills_dir(&source)).unwrap();
+	std::os::unix::fs::symlink(&master, skills_dir(&source).join("mover"))
+		.unwrap();
+	skill::lock::local::add_skill_to_local_lock(
+		"mover",
+		entry(),
+		Some(&source),
+	)
+	.unwrap();
+
+	let mut child =
+		spawn_holder_with(&source, Duration::from_millis(1200), Some("mover"));
+	let result = transfer_skill(
+		ResourceLocator {
+			agent: AgentType::Claude,
+			scope: WriteScope::project(source.clone()),
+			name: "mover".to_string(),
+		},
+		vec![InstallTarget {
+			agent: AgentType::Cursor,
+			scope: WriteScope::project(dest.clone()),
+		}],
+	)
+	.unwrap();
+	assert!(child.wait().unwrap().success(), "holder child failed");
+
+	assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+	let lock = skill::lock::local::read_local_lock(Some(&dest));
+	let carried = lock.skills.get("mover").expect("dest lock entry");
+	assert_eq!(
+		carried.source, "repointed/repo",
+		"the source entry must be read only once its lock is held"
 	);
 }

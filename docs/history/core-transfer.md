@@ -424,7 +424,11 @@ grant is refused "already owned". So the copy says what to do with the lock
   The source entry is read while BOTH scopes' mutation locks are held, taken
   in one ordered acquire (`skills::lock::write_scopes_guard`): which scope
   orders first depends on the paths, so taking them one by one inverts in one
-  direction.
+  direction. Pinned across processes by
+  `a_cross_scope_transfer_reads_the_source_entry_under_its_lock`
+  (`tests/mutation_lock_flows.rs`); the in-process
+  `transfer_skill_cross_scope_locks_both_scopes_in_either_direction` pins only
+  that neither direction trips the inversion refusal.
 - Across scopes with no source entry: `Local`, recorded at the source root
   (for a Referrer, the Master discovery resolved it to).
 
@@ -434,9 +438,13 @@ unresolvable, so `describes` accepted ANY repository and the API's git-sync
 could install repo B's bytes under transferred skill A; accept-rename fetched a
 hostless gitlab `group/repo` as GitHub. Now one provider-aware rule,
 `skills::source_coordinate::entry_clone_source` (moved from skill-update), is
-used by the carried GLOBAL write (byte-identical to what a fetched install
-records), by `of_global_entry` (legacy blank entries already on disk) and by
-rename's global arm.
+used by the carried GLOBAL write (the fetched-install coordinate:
+byte-identical for github, at most a `.git` apart for gitlab, which
+`same_source_owner` ignores), by `of_global_entry` (legacy blank entries already on disk) and by
+rename's global arm — and, since a URL-less legacy gitlab PROJECT entry had
+the same GitHub misread, by `of_project_entry` and rename's project arm too
+(capture and verify both use it, so a github project entry still compares
+equal to itself).
 
 Behaviour change: a destination Master with different content and no lock
 owner is now REFUSED ("different content") instead of reused — by `transfer`
@@ -453,6 +461,7 @@ Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_cross_scope_locks_both_scopes_in_either_direction`,
 `global_rename_source_rebuilds_a_blank_url_by_provider`,
 `a_blank_global_url_still_refuses_a_different_repo`,
+`project_rename_source_rebuilds_a_missing_url_by_provider`,
 `git_sync_refuses_a_different_repo_for_a_blank_url_global_entry`; the reuse pin
 `add_skill_from_path_universal_does_not_overwrite_existing_canonical` was
 deleted (the refusal is pinned by
