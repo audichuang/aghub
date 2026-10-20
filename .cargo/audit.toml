@@ -1,0 +1,13 @@
+# Advisories reachable only through a dependency we cannot upgrade past them.
+# Each entry needs a reason and a lift condition:
+# docs/history/tooling.md#cargo-audit-ignores-the-updaters-zip-4
+[advisories]
+ignore = [
+	# zip 4.x, pulled in only by tauri-plugin-updater (Windows). Every
+	# release through 2.14.0 / 3.0.0-alpha pins `zip ^4`. The updater extracts
+	# only an archive whose minisign signature `download()` already verified
+	# against our pinned pubkey. Lift when the updater moves to zip >= 9.
+	"RUSTSEC-2026-0367",
+	"RUSTSEC-2026-0368",
+	"RUSTSEC-2026-0369",
+]

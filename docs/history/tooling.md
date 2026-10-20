@@ -148,3 +148,20 @@ target/cargo/rustup; building the desktop crate in the same cargo pass after
 an early `bun run build`; `rust-lld` as the MSVC linker; a Defender exclusion
 in CI. `CARGO_PROFILE_DEV_DEBUG=0` cut one macOS CI test build 593s → 397s
 but was within noise on Windows and drops line numbers from CI backtraces.
+
+## cargo audit ignores the updater's zip 4
+
+On 2026-10-20 three `zip` advisories (RUSTSEC-2026-0367, -0368, -0369: an
+archive extract can write through or create symlinks outside the destination)
+turned `cargo audit` red, which blocked the v2.41.3 release at `ci.yml`. Our
+own `zip` 8 dependency (`crates/skill`, `src-tauri`) moved to 9. The 4.x copy
+comes only from `tauri-plugin-updater`, on Windows, and every published
+updater release through 2.14.0 and 3.0.0-alpha.3 still requires `zip ^4`, so
+no upgrade removes it.
+
+`.cargo/audit.toml` ignores those three IDs. That is safe only while the
+updater extracts nothing it has not verified: `Update::download()` checks the
+minisign signature against the `tauri.conf.json` pubkey before `install()`
+hands the bytes to `extract_zip`, so an attacker-built archive never reaches
+the extractor. Remove the ignores when the updater depends on `zip >= 9`, and
+never widen them to cover a `zip` our own code calls.
