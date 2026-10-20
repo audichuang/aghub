@@ -290,6 +290,7 @@ pub fn install_local_skill(
 		&lock_write.source,
 		is_already_installed,
 		!writes_lock,
+		false,
 	)?;
 
 	let canonical_dir = adoption.canonical.as_ref().ok_or_else(|| {

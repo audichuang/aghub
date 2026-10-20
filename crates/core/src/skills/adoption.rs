@@ -193,6 +193,7 @@ pub fn adoption_guard(
 	source: &skill::InstallLockSource,
 	is_already_installed: bool,
 	keep_owner: bool,
+	fetched: bool,
 ) -> Result<AdoptionCheck, ConfigError> {
 	let safe_name = sanitize_name(name);
 	let installed_hash = skill::compute_skill_folder_hash(source_root)
@@ -204,7 +205,7 @@ pub fn adoption_guard(
 		.map(|skills_dir| skills_dir.join(&safe_name));
 	let existing_owner = skill_lock_source(name, scope);
 	if let Some(existing_owner) = existing_owner.as_ref() {
-		let is_regranting_canonical = source.source_type == "local"
+		let is_regranting_canonical = !fetched
 			&& canonical
 				.as_ref()
 				.map(|c| c.as_path() == source_root)
@@ -235,16 +236,18 @@ pub fn adoption_guard(
 		}
 		if canonical.exists() {
 			ensure_link_free_master(name, canonical)?;
-			if source.source_type == "local"
-				&& skill::parser::parse(canonical).is_err()
-			{
+			if !fetched && skill::parser::parse(canonical).is_err() {
 				return Err(ConfigError::InvalidConfig(format!(
 					"the master at '{}' does not parse",
 					canonical.display()
 				)));
 			}
 			let is_adoption = existing_owner.is_none();
-			let is_fetched = source.source_type != "local";
+			// `fetched`: the content came from a remote checkout, so an existing
+			// Master must match it byte for byte. Local-disk content (an import,
+			// or a transfer carrying a remote OWNER) is only compared on
+			// adoption: the copier drops caches the raw hash still counts.
+			let is_fetched = fetched;
 			if is_fetched || (is_adoption && !is_already_installed) {
 				let master_hash = hash_master(name, canonical)?;
 				if master_hash != installed_hash {

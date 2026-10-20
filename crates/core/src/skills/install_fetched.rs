@@ -192,6 +192,7 @@ fn adoption_guard(
 		req.source,
 		false,
 		false,
+		req.source.source_type != "local",
 	)
 }
 

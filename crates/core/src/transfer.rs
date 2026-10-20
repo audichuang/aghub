@@ -6182,6 +6182,64 @@ mod tests {
 		.unwrap()
 	}
 
+	/// A carried remote OWNER does not make the content remote: the copier
+	/// drops `__pycache__`, so comparing the source's raw hash against the
+	/// Master it just made refused every second agent and every retry.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_carried_owner_with_python_cache_can_be_retried_and_regranted(
+	) {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let (source, dest) = (temp.path().join("s"), temp.path().join("d"));
+		let master = source.join(".aghub/py");
+		github_owned_master(&master, &source.join(".claude/skills"), "py");
+		fs::create_dir_all(master.join("scripts/__pycache__")).unwrap();
+		fs::write(master.join("scripts/helper.py"), b"x = 1\n").unwrap();
+		fs::write(
+			master.join("scripts/__pycache__/helper.cpython-313.pyc"),
+			b"\x00cache",
+		)
+		.unwrap();
+		skill::add_skill_to_local_lock(
+			"py",
+			skill::LocalSkillLockEntry {
+				source_url: None,
+				ref_commit: None,
+				source: "owner/repo".to_string(),
+				ref_name: None,
+				source_type: "github".to_string(),
+				computed_hash: skill::compute_skill_folder_hash(&master)
+					.unwrap(),
+				skill_path: Some("py/SKILL.md".to_string()),
+			},
+			Some(&source),
+		)
+		.unwrap();
+		fs::create_dir_all(&dest).unwrap();
+
+		for (agent, step) in [
+			(AgentType::Cursor, "first copy"),
+			(AgentType::Cursor, "retry"),
+			(AgentType::Windsurf, "second agent"),
+		] {
+			let result = transfer_between_projects(&source, &dest, agent, "py");
+			assert_eq!(
+				result.failed_count(),
+				0,
+				"{step}: {:?}",
+				result.results[0].error
+			);
+		}
+		let lock = skill::lock::local::read_local_lock(Some(&dest));
+		let entry = lock
+			.skills
+			.get("py")
+			.expect("a host-known owner is carried");
+		assert_eq!(entry.source_type, "github");
+		assert!(!dest.join(".aghub/py/scripts/__pycache__").exists());
+	}
+
 	/// A URL-less `gitlab:o/r` owner does not name its host (npx 1.5.11 records
 	/// a self-hosted gitlab the same way), so a cross-project copy is made
 	/// UNTRACKED: Master and grant land, the destination lock is not written,

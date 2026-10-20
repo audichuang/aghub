@@ -499,10 +499,14 @@ same spelling included. Tests:
 
 Behaviour change: a destination Master with different content and no lock
 owner is now REFUSED ("different content") instead of reused — by `transfer`
-and by `reconcile --add` alike — and a copy with a carried remote owner
-refuses a destination Master whose hash differs. A same-scope copy onto an
-OWNED Master still grants it as-is (the hash check runs only for an untracked
-Master or a carried remote owner).
+and by `reconcile --add` alike. A copy onto an OWNED Master still grants it
+as-is: the hash check runs only for an untracked Master. A carried remote
+owner once made `adoption_guard` treat the copy as a FETCHED install and
+byte-compare every existing Master; the copier drops `__pycache__` while the
+raw hash counts it, so every second agent and every retry of a Python skill
+was refused. The guard now takes `fetched` from its caller (only a remote
+checkout is fetched); pinned by
+`transfer_skill_carried_owner_with_python_cache_can_be_retried_and_regranted`.
 
 Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone`,
