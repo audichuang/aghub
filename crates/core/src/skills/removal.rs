@@ -87,9 +87,11 @@ pub fn expand_tilde_path(path: &Path) -> PathBuf {
 
 /// Resolve the on-disk root directory of an installed skill from its model
 /// (`canonical_path` preferred, else `source_path`), expanding a leading `~/`
-/// and stepping up from a `SKILL.md` file to its containing folder. The single
-/// home shared by `installed_skill_roots` and the hash-baseline scans in the
-/// CLI `check` and the API check-updates path.
+/// and stepping up from a marker file to its containing folder
+/// (`skill_source_root`). Never requires the root to exist. The single home
+/// shared by `installed_skill_roots`, the removal planner, transfer's copy
+/// source and the hash-baseline scans in the CLI `check` and the API
+/// check-updates path.
 pub fn skill_root(skill: &crate::models::Skill) -> Option<PathBuf> {
 	let raw = skill
 		.canonical_path
@@ -100,14 +102,7 @@ pub fn skill_root(skill: &crate::models::Skill) -> Option<PathBuf> {
 	} else {
 		PathBuf::from(raw)
 	};
-	let is_skill_file = path
-		.file_name()
-		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
-	Some(if is_skill_file {
-		path.parent().map(Path::to_path_buf).unwrap_or(path)
-	} else {
-		path
-	})
+	Some(crate::skills::skill_source_root(&path))
 }
 
 /// Resolve the on-disk roots of every installed skill named `name` in the given
@@ -586,7 +581,7 @@ pub(crate) fn plan_removal_for_agents(
 	// keep fall through to the unchanged symlink planner.
 	// See docs/history/core-removal.md#disabled-agent-blocked-a-single-agent-delete
 	if !all_agents && skill.canonical_path.is_some() {
-		if let Some(canonical) = crate::transfer::skill_root_unchecked(skill) {
+		if let Some(canonical) = skill_root(skill) {
 			if !Linker::is_link(&canonical)
 				&& canonical.is_dir()
 				&& is_universal_master(&canonical, project_root)
@@ -668,7 +663,7 @@ fn plan_symlink_removal(
 ) -> RemovalPlan {
 	let all_agents = all_agents_except.is_some();
 	let unmanaged = all_agents_except.unwrap_or_default();
-	let canonical = crate::transfer::skill_root_unchecked(skill);
+	let canonical = skill_root(skill);
 	let canonical_real = canonical.as_ref().and_then(|c| c.canonicalize().ok());
 
 	let mut paths: Vec<PathBuf> = Vec::new();
@@ -924,7 +919,7 @@ pub(crate) fn plan_copy_removal(
 		}
 	} else {
 		let mut shared_master_kept = false;
-		if let Some(root) = crate::transfer::skill_root_unchecked(skill) {
+		if let Some(root) = skill_root(skill) {
 			if root.exists() {
 				match single_agent_keep_reason(
 					&root,
@@ -2421,17 +2416,14 @@ pub(crate) mod tests {
 	}
 
 	#[test]
-	fn skill_root_unchecked_takes_parent_of_canonical_skill_md() {
+	fn skill_root_takes_parent_of_canonical_skill_md() {
 		// Pins reuse of the single shared resolver (no 4th tilde copy) + the
 		// "canonical is a FILE path -> take PARENT dir" rule.
 		let tmp = tempdir().unwrap();
 		let canonical = tmp.path().join(".agents/skills/foo");
 		write_skill_md(&canonical);
 		let skill = symlink_skill(&canonical, &canonical);
-		assert_eq!(
-			crate::transfer::skill_root_unchecked(&skill),
-			Some(canonical)
-		);
+		assert_eq!(skill_root(&skill), Some(canonical));
 	}
 
 	#[cfg(unix)]

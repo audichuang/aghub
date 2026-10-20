@@ -351,3 +351,23 @@ as `ok=false`.
 Tests: `reconcile_skill_delete_rows_carry_outcome_and_surviving_holders`,
 `reconcile_skill_first_delete_row_spared_out_still_removes_the_rest`,
 `delete_row_result_maps_each_verdict`.
+
+## Lowercase skill marker resolved to the file
+
+"Where is this skill's folder" was spelled six times: `transfer::skill_root_unchecked`
+and `removal::skill_root` (byte-identical, each documented as "the one"),
+`skills::skill_source_root`, and the API by-path read route's `get_skill_root`.
+Every copy stepped up from a file named exactly `SKILL.md`, while discovery's
+marker rule (`enumerate::skill_marker`) and the parser also accept a root
+`skill.md`. Discovered skills were never affected, because `convert_skill` and
+enumerate record `<dir>/SKILL.md` whatever the real marker is. A path the user
+names was affected: `install_local_skill` on `<dir>/skill.md` took the FILE as
+the source root and failed hashing it with "Not a directory".
+
+Rule: `enumerate::SKILL_MARKERS` is the one marker list. `skill_source_root`
+reads it and stays pure (no disk probe; `skill_root_returns_nonexistent_dir_as_is`
+pins that), and `removal::skill_root` is the only model→root resolver, which
+transfer calls.
+
+Tests: `install_local_skill_from_lowercase_skill_md_installs_its_folder`,
+`skill_source_root_resolves_lowercase_skill_md_to_parent`.

@@ -111,6 +111,41 @@ fn install_local_skill_links_master_and_writes_lock() {
 	});
 }
 
+/// A source whose marker is the lowercase `skill.md` discovery also accepts:
+/// naming that file must install its FOLDER, not the file.
+#[test]
+fn install_local_skill_from_lowercase_skill_md_installs_its_folder() {
+	with_isolated_env(|home, _data| {
+		let source_skill = home.join("source-skills/lower-skill");
+		std::fs::create_dir_all(source_skill.join("scripts")).unwrap();
+		std::fs::write(
+			source_skill.join("skill.md"),
+			"---\nname: lower-skill\ndescription: test\n---\n\n# Body\n",
+		)
+		.unwrap();
+		std::fs::write(source_skill.join("scripts/run.sh"), "echo hi\n")
+			.unwrap();
+
+		let project = home.join("myproject");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+
+		let req = LocalSkillInstallRequest {
+			source_path: &source_skill.join("skill.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+
+		install_local_skill(req).expect("install_local_skill must succeed");
+		let master = project.join(".aghub/lower-skill");
+		assert!(master.is_dir(), "Master must be a directory");
+		assert!(
+			master.join("scripts/run.sh").is_file(),
+			"the whole source folder must be copied"
+		);
+	});
+}
+
 #[test]
 fn install_local_skill_refuses_when_different_owner_lock_entry_exists() {
 	with_isolated_env(|home, _data| {

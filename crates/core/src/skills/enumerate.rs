@@ -31,12 +31,16 @@ pub(crate) enum SkillMarker {
 	Unknown,
 }
 
-/// Whether `entry` serves a skill, by ONE rule: a root `SKILL.md` or `skill.md`,
-/// links followed. `skill.md` too, as the skills-ref parser accepts
-/// (`find_skill_md`). `Present` wins over `Unknown`, which wins over `Absent`.
+/// The marker file names a skill root may hold: `skill.md` too, as the
+/// skills-ref parser accepts (`find_skill_md`). Shared by `skill_marker` and
+/// `skill_source_root`, so a path naming either marker resolves to its folder.
+pub(crate) const SKILL_MARKERS: [&str; 2] = ["SKILL.md", "skill.md"];
+
+/// Whether `entry` serves a skill, by ONE rule: a root `SKILL_MARKERS` file,
+/// links followed. `Present` wins over `Unknown`, which wins over `Absent`.
 pub(crate) fn skill_marker(entry: &Path) -> SkillMarker {
 	let mut answer = SkillMarker::Absent;
-	for file in ["SKILL.md", "skill.md"] {
+	for file in SKILL_MARKERS {
 		match fs::metadata(entry.join(file)) {
 			Ok(meta) if meta.is_file() => return SkillMarker::Present,
 			Ok(_) => {}

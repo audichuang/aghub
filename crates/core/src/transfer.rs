@@ -919,31 +919,8 @@ fn resolve_skill_file(path: &str) -> PathBuf {
 	}
 }
 
-/// Resolve a skill's on-disk root directory WITHOUT requiring it to exist.
-///
-/// Prefers `canonical_path` over `source_path` (tilde-expanded); a `SKILL.md`
-/// path yields its PARENT. `None` only when no path is recorded. The one
-/// resolver behind `resolve_skill_root` and the removal planner.
-pub(crate) fn skill_root_unchecked(skill: &Skill) -> Option<PathBuf> {
-	let path = skill
-		.canonical_path
-		.as_deref()
-		.or(skill.source_path.as_deref())
-		.map(resolve_skill_file)?;
-
-	let is_skill_file = path
-		.file_name()
-		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
-
-	Some(if is_skill_file {
-		path.parent().map(Path::to_path_buf).unwrap_or(path)
-	} else {
-		path
-	})
-}
-
 fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
-	let root = skill_root_unchecked(skill).ok_or_else(|| {
+	let root = crate::skills::removal::skill_root(skill).ok_or_else(|| {
 		ConfigError::InvalidConfig(format!(
 			"Skill '{}' has no source path to copy from",
 			skill.name
@@ -3311,13 +3288,13 @@ mod tests {
 	}
 
 	#[test]
-	fn skill_root_unchecked_returns_nonexistent_dir_as_is() {
+	fn skill_root_returns_nonexistent_dir_as_is() {
 		let temp = tempdir().unwrap();
 		let missing = temp.path().join(".aghub/foo");
 		let mut skill = Skill::new("foo");
 		skill.canonical_path = Some(missing.to_string_lossy().to_string());
 
-		assert_eq!(skill_root_unchecked(&skill), Some(missing));
+		assert_eq!(crate::skills::removal::skill_root(&skill), Some(missing));
 	}
 
 	#[test]

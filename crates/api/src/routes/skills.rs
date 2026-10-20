@@ -361,17 +361,6 @@ fn get_parent_folder(path: std::path::PathBuf) -> std::path::PathBuf {
 	path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
 }
 
-fn get_skill_root(path: std::path::PathBuf) -> std::path::PathBuf {
-	let is_skill_file = path
-		.file_name()
-		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
-	if is_skill_file {
-		get_parent_folder(path)
-	} else {
-		path
-	}
-}
-
 fn map_remote_source_error(error: aghub_git::SourceError) -> ApiError {
 	ApiError::new(
 		Status::BadRequest,
@@ -1240,7 +1229,7 @@ pub fn get_skill_tree(
 	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
 
 	let path = expand_tilde_path(&query.path);
-	let root = get_skill_root(path);
+	let root = aghub_core::skills::skill_source_root(&path);
 	let safe_root = assert_skill_read_allowed(
 		&root,
 		resource_scope,
