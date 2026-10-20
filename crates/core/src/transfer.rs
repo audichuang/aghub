@@ -1303,63 +1303,24 @@ pub fn transfer_mcp(
 		mcp.name,
 		destinations.len()
 	);
+	let plans = copy_plans(destinations);
 	let report = crate::batch::run_multi_target_mutation(
-		&destinations,
-		|target| mcp_supported_for_target(target, &mcp, false),
-		|target| {
-			let outcome = copy_mcp_into(target, &mcp);
+		&plans,
+		|plan| mcp_supported_for_target(&plan.target, &mcp, false),
+		|plan| {
+			let outcome = copy_mcp_into(&plan.target, &mcp);
 			log_operation_outcome(
 				"MCP",
 				&mcp.name,
-				OperationAction::Copy,
-				target,
+				plan.action,
+				&plan.target,
 				&outcome,
 			);
 			outcome
 		},
 	)
-	.map_err(|error| {
-		let failures = error
-			.failures
-			.into_iter()
-			.map(|failure| {
-				let scope = failure.target.scope.label();
-				format!(
-					"{} ({scope}): {}",
-					failure.target.agent.as_str(),
-					failure.reason
-				)
-			})
-			.collect::<Vec<_>>()
-			.join("; ");
-		ConfigError::InvalidConfig(format!(
-			"MCP transfer preflight failed; nothing was written: {failures}"
-		))
-	})?;
-
-	let results = report
-		.results
-		.into_iter()
-		.map(|row| {
-			let (success, already_present, error) = match row.result {
-				Ok(already_present) => (true, already_present, None),
-				Err(error) => (false, false, Some(error.to_string())),
-			};
-			OperationResult {
-				target: row.target,
-				action: OperationAction::Copy,
-				success,
-				already_present,
-				error,
-				outcome: None,
-				still_read_by: None,
-				still_read_by_managed: None,
-				still_read_by_unmanaged: None,
-			}
-		})
-		.collect();
-
-	Ok(OperationBatchResult { results })
+	.map_err(|error| batch_preflight_error("MCP transfer", error))?;
+	Ok(operation_batch(report))
 }
 
 pub fn reconcile_mcp(
@@ -2571,6 +2532,67 @@ mod tests {
 		assert!(
 			valid_manager.get_mcp("filesystem").is_none(),
 			"no target may be written before every target passes preflight",
+		);
+	}
+
+	/// Every row refusing as UnsupportedOperation must keep that variant (and
+	/// its rejected targets) through batch aggregation, like every other
+	/// transfer/reconcile entry — not flatten to InvalidConfig.
+	#[test]
+	fn transfer_mcp_all_unsupported_targets_keep_unsupported_variant() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temporary = tempdir().unwrap();
+		let source_root = temporary.path().join("source");
+		let unsupported_root = temporary.path().join("unsupported-target");
+		fs::create_dir_all(&source_root).unwrap();
+		fs::create_dir_all(&unsupported_root).unwrap();
+
+		let mut source_manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&source_root),
+		);
+		source_manager.load().unwrap();
+		source_manager
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::stdio("npx", vec!["mcp-filesystem".to_string()]),
+			))
+			.unwrap();
+
+		let error = transfer_mcp(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::project(source_root),
+				name: "filesystem".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::AugmentCode,
+				scope: WriteScope::project(unsupported_root.clone()),
+			}],
+		)
+		.expect_err("a target without MCP support must refuse");
+
+		let ConfigError::UnsupportedOperation {
+			message,
+			rejected_targets: Some(rejected),
+		} = &error
+		else {
+			panic!("expected UnsupportedOperation with targets, got {error:?}");
+		};
+		assert!(
+			message.contains("MCP transfer preflight failed"),
+			"{message}"
+		);
+		let agents: Vec<&str> = rejected
+			.iter()
+			.map(|target| target.agent.as_str())
+			.collect();
+		assert_eq!(agents, vec![AgentType::AugmentCode.as_str()]);
+		assert_eq!(
+			fs::read_dir(&unsupported_root).unwrap().count(),
+			0,
+			"nothing may be written when every target refuses",
 		);
 	}
 

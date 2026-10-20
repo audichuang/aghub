@@ -270,6 +270,11 @@ Rule: when every row refused for the same domain reason, keep that variant.
 
 Commit: 1b373c2c.
 
+`transfer_mcp` was the last entry still outside `batch_preflight_error`: it
+flattened every preflight refusal to `InvalidConfig` and dropped
+`rejected_targets`. It now shares the batch shape; pinned by
+`transfer_mcp_all_unsupported_targets_keep_unsupported_variant`.
+
 ## Missing source blocked a removal-only reconcile
 
 In the desktop app, after a skill was removed from Claude, subsequent removal
