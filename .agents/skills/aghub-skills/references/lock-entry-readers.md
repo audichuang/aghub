@@ -6,8 +6,7 @@ entry a fetched install (`skill-update` `fetched_install` → core
 `install_fetched_skill_and_lock`) writes for the same repo, ref and skill.
 Fill the table: for each row, does the new entry make the reader behave
 differently from the baseline? Every "differs" row is a finding to fix or to
-justify before review. v2.41.5 shipped after one adversarial round per row
-because this table did not exist.
+justify before review.
 
 | Reader                                              | Where                                                                             | What it reads off the entry                                    |
 | --------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------- |
@@ -19,7 +18,9 @@ because this table did not exist.
 | API git-sync / `EntryIdentity`                      | core `skills::lock` (`of_global_entry`, `of_project_entry`, `describes`)          | source / URL / type, `skillPath`                               |
 | ownership on install                                | core `skills::adoption` (`same_source_owner`, `adoption_guard`)                   | owner fields; Master hash on adoption                          |
 | delete lock-prune, `prune-lock`, `repair`, `doctor` | core `skills::removal`, `prune`, `repair`, `health`                               | membership by name; Master presence and health                 |
-| desktop skill detail / check-updates                | `crates/desktop` via the api DTOs                                                 | the API's projection of the same entry                         |
+| transfer / reconcile copy, `add --from`             | core `skills::transfer` (`owner_is_carriable`), `skills::install_local`           | owner, ref, hash carried into the other scope's lock           |
+| API raw lock routes                                 | api `GET /skills/lock/global`, `/skills/lock/project`                             | the entry as stored, every field                               |
+| desktop skill detail / check-updates                | `crates/desktop` via the api DTOs and the raw lock routes                         | the API's projection of the same entry                         |
 | npx `skills`                                        | global v3 / project v1 (see npx-skills-contract)                                  | every field; unknown ones must round-trip                      |
 
 The traps that each cost a round, so check them first:
@@ -27,7 +28,7 @@ The traps that each cost a round, so check them first:
 - **Host**: a URL-less non-github entry may be self-hosted (npx 1.5.11 records
   any non-github `/-/tree/` host as `gitlab`). Write or compare a host only
   when `source_coordinate::known_clone_source` proves it; otherwise keep the
-  baseline value. A blank `sourceUrl` resolves to nothing, and `describes`
+  value the entry already recorded. A blank `sourceUrl` resolves to nothing, and `describes`
   then accepts any repository.
 - **Credentials**: a recorded URL may embed `user:TOKEN@`. A project lock gets
   committed; error text reaches logs and API responses. Pass sources through

@@ -36,7 +36,7 @@ codegraph — enumerated trees drift):
   `source_coordinate.rs` (the ONE home of a lock entry's clone coordinate,
   whether its host is provable — `known_clone_source` —, Source membership
   `source_matches` and a scope's ref cohort `recorded_refs`; skill-update,
-  rename, `EntryIdentity` and transfer all call it),
+  rename, `EntryIdentity`, transfer and `install_local` all call it),
   `linker/classify.rs` (which
   Referrer each agent needs), `lock.rs` (`EntryIdentity` + the `mutation_guard`
   forward), `rename.rs` (the transactional skill rename — rollback lives here,
