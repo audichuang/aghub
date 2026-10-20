@@ -13,6 +13,9 @@ pub struct LockedSourceOwner {
 	pub ref_name: Option<String>,
 	pub skill_path: Option<String>,
 	pub ref_commit: Option<String>,
+	/// The entry's stored Source hash (`contentHash` / `computedHash`), as
+	/// recorded; `None` when the entry has none.
+	pub stored_hash: Option<String>,
 }
 
 pub fn skill_lock_source(
@@ -29,6 +32,7 @@ pub fn skill_lock_source(
 					ref_name: entry.ref_name,
 					skill_path: entry.skill_path,
 					ref_commit: entry.ref_commit,
+					stored_hash: entry.content_hash,
 				}
 			})
 		}
@@ -43,6 +47,7 @@ pub fn skill_lock_source(
 					ref_name: entry.ref_name.clone(),
 					skill_path: entry.skill_path.clone(),
 					ref_commit: entry.ref_commit.clone(),
+					stored_hash: Some(entry.computed_hash.clone()),
 				})
 		}
 	}
@@ -187,6 +192,7 @@ pub fn adoption_guard(
 	scope: &WriteScope,
 	source: &skill::InstallLockSource,
 	is_already_installed: bool,
+	keep_owner: bool,
 ) -> Result<AdoptionCheck, ConfigError> {
 	let safe_name = sanitize_name(name);
 	let installed_hash = skill::compute_skill_folder_hash(source_root)
@@ -203,7 +209,10 @@ pub fn adoption_guard(
 				.as_ref()
 				.map(|c| c.as_path() == source_root)
 				.unwrap_or(false);
-		if !is_regranting_canonical
+		// `keep_owner`: a same-scope regrant reassigns nothing and writes no
+		// lock, so the recorded owner is not compared against `source`.
+		if !keep_owner
+			&& !is_regranting_canonical
 			&& !same_source_owner(existing_owner, source)
 		{
 			return Err(ConfigError::ValidationFailed(format!(

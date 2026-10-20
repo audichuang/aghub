@@ -941,10 +941,11 @@ fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
 /// (adoption guard, lock entry, rollback). One agent per call so each batch row
 /// keeps its own outcome.
 ///
-/// The source scope's lock owner rides along: in the same scope it re-asserts
-/// the owner already there (a regrant writes no lock at all), across scopes it
-/// keeps the copy's provenance. A source with no entry is recorded as `local`
-/// at its resolved path, i.e. the Master rather than the Referrer.
+/// Same scope (one lock file) is a pure regrant: the lock is neither compared
+/// nor written, so an untracked Master stays untracked. Across scopes the
+/// source entry rides along (owner, ref, stored Source hash); a source with no
+/// entry is recorded as `local` at its root, which for a Referrer is the
+/// Master discovery resolved it to.
 /// See docs/history/core-transfer.md#transfer-and-reconcile-copies-share-the-local-install
 fn install_skill_copy(
 	skill_name: &str,
@@ -952,18 +953,35 @@ fn install_skill_copy(
 	source_root: &Path,
 	target: &InstallTarget,
 ) -> Result<crate::skills::LocalSkillInstallReport> {
+	use crate::skills::LocalInstallLock;
+	let lock = if same_lock_scope(source_scope, &target.scope) {
+		LocalInstallLock::Untouched
+	} else {
+		crate::skills::adoption::skill_lock_source(skill_name, source_scope)
+			.map_or(LocalInstallLock::Local, LocalInstallLock::Carry)
+	};
 	crate::skills::install_local_skill(
 		crate::skills::LocalSkillInstallRequest {
 			source_path: source_root,
 			scope: target.scope.clone(),
 			target_agents: std::slice::from_ref(&target.agent),
 			install_name: None,
-			lock_owner: crate::skills::adoption::skill_lock_source(
-				skill_name,
-				source_scope,
-			),
+			lock,
 		},
 	)
+}
+
+/// Do two write scopes share one lock file? Project roots compare by resolved
+/// location, so two spellings of one project are one scope.
+fn same_lock_scope(a: &WriteScope, b: &WriteScope) -> bool {
+	match (a, b) {
+		(WriteScope::Global, WriteScope::Global) => true,
+		(WriteScope::Project { root: a }, WriteScope::Project { root: b }) => {
+			crate::skills::path_identity::resolved_location(a)
+				== crate::skills::path_identity::resolved_location(b)
+		}
+		_ => false,
+	}
 }
 
 fn skill_target_dir(target: &InstallTarget) -> Result<PathBuf> {
@@ -5891,6 +5909,159 @@ mod tests {
 		assert_eq!(entry.ref_name.as_deref(), Some("main"));
 		assert_eq!(entry.skill_path.as_deref(), Some("skills/owned/SKILL.md"));
 		assert_eq!(entry.ref_commit.as_deref(), Some("abc123"));
+	}
+
+	/// A same-scope copy is a pure regrant: an npx project entry for a
+	/// non-github remote (no `sourceUrl`, which the owner comparison cannot
+	/// match even against itself) is neither compared nor rewritten.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().to_path_buf();
+		let master = root.join(".aghub/owned");
+		github_owned_master(&master, &root.join(".claude/skills"), "owned");
+		skill::add_skill_to_local_lock(
+			"owned",
+			skill::LocalSkillLockEntry {
+				source_url: None,
+				ref_commit: None,
+				source: "o/r".to_string(),
+				ref_name: None,
+				source_type: "gitlab".to_string(),
+				computed_hash: skill::compute_skill_folder_hash(&master)
+					.unwrap(),
+				skill_path: Some("owned/SKILL.md".to_string()),
+			},
+			Some(&root),
+		)
+		.unwrap();
+		let lock_before = fs::read(root.join("skills-lock.json")).unwrap();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::project(root.clone()),
+				name: "owned".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		assert!(crate::skills::linker::Linker::is_link(
+			&root.join(".cursor/skills/owned")
+		));
+		assert_eq!(
+			fs::read(root.join("skills-lock.json")).unwrap(),
+			lock_before
+		);
+	}
+
+	/// An untracked Master stays untracked: a same-scope grant writes no lock
+	/// entry pointing the Master at itself.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_same_scope_keeps_an_untracked_master_untracked() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().to_path_buf();
+		github_owned_master(
+			&root.join(".aghub/loose"),
+			&root.join(".claude/skills"),
+			"loose",
+		);
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::project(root.clone()),
+				name: "loose".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		assert!(crate::skills::linker::Linker::is_link(
+			&root.join(".cursor/skills/loose")
+		));
+		assert!(
+			!root.join("skills-lock.json").exists(),
+			"no lock entry may be written for an untracked Master"
+		);
+	}
+
+	/// A cross-scope copy of a LOCALLY EDITED source carries the source
+	/// entry's stored hash, not the edited content's: otherwise the copy's
+	/// `check` reads the edit as the upstream baseline and reports it current
+	/// while the source scope reports it modified.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_scope_carries_the_stored_hash_of_an_edited_source()
+	{
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let master = home.path().join(".aghub/owned");
+		github_owned_master(
+			&master,
+			&home.path().join(".claude/skills"),
+			"owned",
+		);
+		skill::write_global_install_lock(
+			"owned",
+			&github_source(),
+			Some("skills/owned/SKILL.md".to_string()),
+			&master,
+			Some("abc123".to_string()),
+		)
+		.unwrap();
+		let stored = skill::lock::global::get_skill_from_lock("owned")
+			.and_then(|e| e.content_hash)
+			.expect("stored hash");
+		fs::write(master.join("LOCAL-EDIT.md"), "edited\n").unwrap();
+		let edited = skill::compute_skill_folder_hash(&master).unwrap();
+		assert_ne!(stored, edited, "fixture: the edit must change the hash");
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "owned".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		let entry = lock.skills.get("owned").expect("dest lock entry");
+		assert_eq!(entry.computed_hash, stored);
+		assert_eq!(
+			skill::compute_skill_folder_hash(&root.join(".aghub/owned"))
+				.unwrap(),
+			edited,
+			"the copy carries the edited content"
+		);
 	}
 
 	#[test]

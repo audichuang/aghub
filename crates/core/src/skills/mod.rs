@@ -20,7 +20,8 @@ pub mod usage;
 
 pub use discovery::{load_skills_from_dir, load_skills_from_dirs};
 pub use install_local::{
-	install_local_skill, LocalSkillInstallReport, LocalSkillInstallRequest,
+	install_local_skill, LocalInstallLock, LocalSkillInstallReport,
+	LocalSkillInstallRequest,
 };
 /// Undo a `materialize_universal_master` from the caller's OWN receipt. Shared
 /// by every flow that writes files before it writes the lock (rename, fetched

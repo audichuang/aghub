@@ -117,10 +117,11 @@ list, or `all`), `-g`/`-p`, `--all`.
   `reconcile skill` refuses BEFORE the first write so the disk is untouched;
   `reconcile skill --remove` refuses a plugin-owned skill with `MANAGED_RESOURCE`
   like `delete`, in preview and commit alike. A SKILL copy (transfer, reconcile
-  `--add`) is core `install_local_skill`, the `add --from` install: it writes the
-  destination lock entry (carrying the source scope's owner, so a same-scope
-  grant leaves the lock untouched), and its adoption guard refuses a
-  destination Master with different content or a different lock owner.
+  `--add`) is core `install_local_skill`, the `add --from` install. Within one
+  scope it never touches the lock (an untracked Master stays untracked);
+  across scopes it writes the target's entry carrying the source's owner and
+  STORED Source hash. Both refuse a target Master whose content differs (an
+  untracked one included), and a cross-scope copy refuses a different owner.
   The preview runs the commit's own core plan and per-row preflight
   (`reconcile_{skill,mcp,sub_agent}_preview`), so it refuses what `--yes` would,
   with the same code — including an MCP/sub-agent copy that would lose a field

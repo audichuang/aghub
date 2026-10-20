@@ -512,7 +512,7 @@ fn local_install(
 			scope: aghub_core::WriteScope::project(project_root),
 			target_agents: &[agent],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		},
 	)
 }

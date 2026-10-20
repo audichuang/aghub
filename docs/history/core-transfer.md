@@ -405,18 +405,41 @@ path as the owner, and the destination lock already names `github:…` for the
 common same-scope grant. Under a root spelled through a symlink (macOS `/var`)
 the source path (discovery canonicalizes a Referrer to its Master) no longer
 equals the Master's spelling, so the guard's regrant shortcut misses and the
-grant is refused "already owned". So the copy carries the SOURCE scope's lock
-owner (`LocalSkillInstallRequest::lock_owner`): in the same scope it is the
-owner already there and a regrant writes no lock; across scopes it keeps the
-provenance (`source`, type, ref, `skillPath`, `refCommit`). No source entry
-records a `local` owner at the Master path.
+grant is refused "already owned". So the copy says what to do with the lock
+(`LocalSkillInstallRequest::lock`, `LocalInstallLock`):
+
+- Same scope (one lock file; project roots compared by resolved location):
+  `Untouched`, a pure regrant. The owner is neither compared nor written.
+  Carrying the entry and comparing it with itself was review round 1's fix,
+  and it refused an npx `gitlab`/`git` project entry (no `sourceUrl`;
+  `same_source_owner` accepts that only for github/local), and it stamped an
+  untracked Master with a `local:<root>/.aghub/<name>` entry pointing at
+  itself. The Master content and link-free guards still run.
+- Across scopes: `Carry` the source entry — `source`, type, ref, `skillPath`,
+  `refCommit` and its STORED Source hash. Re-hashing the copied content wrote
+  a locally edited source's hash as the baseline, so `check` took the
+  fast path and called the copy current while the source scope said
+  modified. The hash is recomputed only when none is stored (empty or
+  placeholder).
+- Across scopes with no source entry: `Local`, recorded at the source root
+  (for a Referrer, the Master discovery resolved it to).
+
+Project → global carries a github owner with `sourceUrl: ""` (project locks
+omit reconstructable URLs, and core has no reconstruction helper);
+`rename_source_from_lock`'s global arm now falls back to `source` for an empty
+URL, as its project arm always did.
 
 Behaviour change: a destination Master with different content and no lock
-owner is now REFUSED ("different content") instead of reused, and a copy
-with a carried remote owner refuses a destination Master whose hash differs.
+owner is now REFUSED ("different content") instead of reused — by `transfer`
+and by `reconcile --add` alike — and a copy with a carried remote owner
+refuses a destination Master whose hash differs.
 
 Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
-`transfer_skill_cross_scope_carries_the_source_lock_owner`; the reuse pin
+`transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone`,
+`transfer_skill_same_scope_keeps_an_untracked_master_untracked`,
+`transfer_skill_cross_scope_carries_the_source_lock_owner`,
+`transfer_skill_cross_scope_carries_the_stored_hash_of_an_edited_source`,
+`global_rename_source_falls_back_to_source_for_an_empty_url`; the reuse pin
 `add_skill_from_path_universal_does_not_overwrite_existing_canonical` was
 deleted (the refusal is pinned by
 `install_local_skill_refuses_to_adopt_untracked_master_when_content_differs`).

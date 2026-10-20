@@ -184,6 +184,24 @@ pub fn write_global_install_lock(
 	ref_commit: Option<String>,
 ) -> std::io::Result<Option<crate::SkillLockEntry>> {
 	let content_hash = compute_install_hash(source_dir)?;
+	write_global_install_lock_hashed(
+		skill_name,
+		source,
+		skill_path,
+		content_hash,
+		ref_commit,
+	)
+}
+
+/// [`write_global_install_lock`] with a Source hash the caller already holds
+/// (a copy carrying another scope's entry), instead of hashing a folder.
+pub fn write_global_install_lock_hashed(
+	skill_name: &str,
+	source: &InstallLockSource,
+	skill_path: Option<String>,
+	content_hash: String,
+	ref_commit: Option<String>,
+) -> std::io::Result<Option<crate::SkillLockEntry>> {
 	global::add_skill_to_lock(
 		skill_name,
 		SkillLockEntry {
@@ -246,6 +264,25 @@ pub fn write_project_install_lock(
 	ref_commit: Option<String>,
 ) -> std::io::Result<Option<local::LocalSkillLockEntry>> {
 	let computed_hash = compute_install_hash(source_dir)?;
+	write_project_install_lock_hashed(
+		skill_name,
+		source,
+		skill_path,
+		computed_hash,
+		cwd,
+		ref_commit,
+	)
+}
+
+/// [`write_project_install_lock`] with a Source hash the caller already holds.
+pub fn write_project_install_lock_hashed(
+	skill_name: &str,
+	source: &InstallLockSource,
+	skill_path: Option<String>,
+	computed_hash: String,
+	cwd: &Path,
+	ref_commit: Option<String>,
+) -> std::io::Result<Option<local::LocalSkillLockEntry>> {
 	local::add_skill_to_local_lock(
 		skill_name,
 		local::LocalSkillLockEntry {

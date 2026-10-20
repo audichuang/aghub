@@ -50,10 +50,13 @@ a local `add --from` skill, which `source sync` cannot grant — `transfer skill
 --from-agent <LINKED_AGENT> --name <NAME> --to <AGENT>` (repeat `--to`) links
 the EXISTING Master. It writes at once (no preview), never fetches (so the
 outdated trap does not apply), and grants the Master as-is, stale content
-included. Across scopes (`-g` source, `-p` target or the reverse) it copies
-the Master and records the source's lock owner in the target's lock; it
-refuses when the target scope already holds a same-named Master with
-different content or a different owner.
+included, and never touches the lock: an untracked Master stays untracked.
+Across scopes (`-g` source, `-p` target or the reverse) it copies the Master
+and records the source's owner and stored Source hash in the target's lock,
+so a locally edited source still reads as modified there. Both `transfer`
+and `reconcile --add` refuse when the target scope already holds a
+same-named Master with different content (an untracked one included); a
+cross-scope copy also refuses a different owner.
 
 ## Publish an edit to a skill you author
 

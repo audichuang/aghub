@@ -3653,7 +3653,7 @@ fn cli_add_and_fetched_install_produce_identical_master_and_link() {
 			scope: crate::WriteScope::project(&cli_root),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		},
 	)
 	.unwrap();

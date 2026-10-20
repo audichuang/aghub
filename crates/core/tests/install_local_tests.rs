@@ -75,7 +75,7 @@ fn install_local_skill_links_master_and_writes_lock() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let report =
@@ -135,7 +135,7 @@ fn install_local_skill_from_lowercase_skill_md_installs_its_folder() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		install_local_skill(req).expect("install_local_skill must succeed");
@@ -172,7 +172,7 @@ fn install_local_skill_from_folder_named_skill_md_keeps_that_folder() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		install_local_skill(req).expect("install_local_skill must succeed");
@@ -220,7 +220,7 @@ fn install_local_skill_refuses_when_different_owner_lock_entry_exists() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let err =
@@ -289,7 +289,7 @@ fn install_local_skill_rolls_back_when_the_lock_write_fails() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let result = install_local_skill(req);
@@ -354,7 +354,7 @@ fn install_local_skill_adopts_an_untracked_master_when_content_matches() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let report = install_local_skill(req).expect("adoption must succeed");
@@ -407,7 +407,7 @@ fn install_local_skill_refuses_to_adopt_untracked_master_when_content_differs()
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let err = install_local_skill(req)
@@ -424,6 +424,12 @@ fn install_local_skill_refuses_to_adopt_untracked_master_when_content_differs()
 		assert!(
 			!project.join(".claude/skills/differ").exists(),
 			"Referrer must not be created on refusal"
+		);
+		// Nor may the refused Master be overwritten
+		assert_eq!(
+			std::fs::read_to_string(master.join("SKILL.md")).unwrap(),
+			"---\nname: differ\ndescription: old\n---\n\nold body\n",
+			"the pre-existing Master must be untouched"
 		);
 	});
 }
@@ -447,7 +453,7 @@ fn install_local_skill_with_custom_name_installs_and_rewrites_frontmatter() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: Some("custom-name"),
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let report =
@@ -482,7 +488,7 @@ fn install_local_skill_with_custom_name_installs_and_rewrites_frontmatter() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: Some("custom-name"),
-			lock_owner: None,
+			lock: Default::default(),
 		};
 		let err = install_local_skill(req2)
 			.expect_err("taken custom name must be rejected");
@@ -512,7 +518,7 @@ fn reimport_from_different_local_path_is_refused_when_master_exists() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 		let rep1 = install_local_skill(req1).expect("first install succeeds");
 		assert!(!rep1.already_installed);
@@ -546,7 +552,7 @@ fn reimport_from_different_local_path_is_refused_when_master_exists() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 		let err = install_local_skill(req2)
 			.expect_err("a different local owner must be refused");
@@ -627,7 +633,7 @@ fn reimport_from_different_local_path_is_refused_when_master_is_missing() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 		let err = install_local_skill(req)
 			.expect_err("a different local owner must be refused");
@@ -680,7 +686,7 @@ fn install_local_skill_refuses_unparseable_preexisting_master_as_invalid_config(
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let err = install_local_skill(req)
@@ -721,7 +727,7 @@ fn install_local_skill_refuses_when_agent_slot_occupied_by_real_directory() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let err = install_local_skill(req).expect_err(
@@ -773,7 +779,7 @@ fn install_local_skill_no_op_survives_a_corrupt_lock() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 		let rep1 = install_local_skill(req1).expect("first install succeeds");
 		assert!(!rep1.already_installed);
@@ -805,7 +811,7 @@ fn install_local_skill_no_op_survives_a_corrupt_lock() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 		let rep2 = install_local_skill(req2).expect(
 			"a re-import writes nothing, so a corrupt lock must not fail it",
@@ -834,7 +840,7 @@ fn install_local_skill_no_op_survives_a_corrupt_lock() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 		install_local_skill(req_fresh)
 			.expect_err("a real install must refuse while the lock is corrupt");
@@ -874,7 +880,7 @@ fn install_local_skill_accepts_a_source_with_npx_excluded_files() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		install_local_skill(req).expect("install_local_skill must succeed");
@@ -913,7 +919,7 @@ fn install_local_skill_refuses_a_malformed_agent_config() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let err = install_local_skill(req)
@@ -965,7 +971,7 @@ fn install_local_skill_refuses_a_name_already_discovered_in_another_folder() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let err = install_local_skill(req)
@@ -1018,7 +1024,7 @@ fn install_local_skill_leaves_no_lock_entry_when_the_master_does_not_parse() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: None,
-			lock_owner: None,
+			lock: Default::default(),
 		};
 
 		let err = install_local_skill(req)
@@ -1065,7 +1071,7 @@ fn install_local_skill_refuses_to_rename_onto_a_foreign_master() {
 			scope: WriteScope::project(&project),
 			target_agents: &[AgentType::Claude],
 			install_name: Some("renamed"),
-			lock_owner: None,
+			lock: Default::default(),
 		})
 		.expect_err("a Master this call did not create is not ours to edit");
 

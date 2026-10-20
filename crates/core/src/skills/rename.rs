@@ -184,7 +184,14 @@ pub fn rename_source_from_lock(
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
-				source_url: entry.source_url.clone(),
+				// An empty URL (an entry carried from a project lock, which
+				// omits reconstructable URLs) falls back to `source`, as the
+				// Project arm does.
+				source_url: if entry.source_url.trim().is_empty() {
+					entry.source.clone()
+				} else {
+					entry.source_url.clone()
+				},
 				ref_name: entry.ref_name.clone(),
 				skill_path,
 				captured,
@@ -907,6 +914,35 @@ pub fn rollback_materialized_install(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A global entry carried from a project lock records `sourceUrl: ""`
+	/// (project locks omit reconstructable URLs); accept-rename must fetch
+	/// `source`, not the empty string.
+	#[test]
+	fn global_rename_source_falls_back_to_source_for_an_empty_url() {
+		let _guard = crate::skills::prune::test_lock::GlobalLockGuard::new();
+		skill::lock::global::add_skill_to_lock(
+			"old-skill",
+			skill::SkillLockEntry {
+				source: "gitlab.com/o/r".to_string(),
+				source_type: "gitlab".to_string(),
+				source_url: String::new(),
+				ref_name: Some("main".to_string()),
+				skill_path: Some("old-skill/SKILL.md".to_string()),
+				skill_folder_hash: String::new(),
+				installed_at: String::new(),
+				updated_at: String::new(),
+				plugin_name: None,
+				content_hash: Some("h".to_string()),
+				ref_commit: None,
+			},
+		)
+		.unwrap();
+
+		let source =
+			rename_source_from_lock("old-skill", &WriteScope::Global).unwrap();
+		assert_eq!(source.source_url, "gitlab.com/o/r");
+	}
 
 	/// The snapshot must cover everything the removal step will DELETE.
 	///

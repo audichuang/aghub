@@ -253,7 +253,7 @@ fn project_store_symlink_cannot_redirect_from_path_install() {
 		scope: WriteScope::project(&project),
 		target_agents: &[AgentType::Claude],
 		install_name: None,
-		lock_owner: None,
+		lock: Default::default(),
 	});
 	assert!(result.is_err(), "install escaped through project/.aghub");
 	assert!(
@@ -404,7 +404,7 @@ fn global_store_symlink_keeps_install_update_and_delete_working() {
 		scope: WriteScope::Global,
 		target_agents: &[AgentType::Claude],
 		install_name: None,
-		lock_owner: None,
+		lock: Default::default(),
 	})
 	.expect("global install through a user-linked store");
 	let mut claude =

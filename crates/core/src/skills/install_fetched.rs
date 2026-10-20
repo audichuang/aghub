@@ -191,6 +191,7 @@ fn adoption_guard(
 		&req.scope,
 		req.source,
 		false,
+		false,
 	)
 }
 
