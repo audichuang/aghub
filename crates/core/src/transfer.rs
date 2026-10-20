@@ -943,10 +943,26 @@ fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
 ///
 /// Same scope (one lock file) is a pure regrant: the lock is neither compared
 /// nor written, so an untracked Master stays untracked. Across scopes the
-/// source entry rides along (owner, ref, stored Source hash); a source with no
-/// entry is recorded as `local` at its root, which for a Referrer is the
+/// source entry rides along (owner, ref, stored Source hash) only when its
+/// host is known; an ambiguous legacy owner is copied untracked. A source with
+/// no entry is recorded as `local` at its root, which for a Referrer is the
 /// Master discovery resolved it to.
 /// See docs/history/core-transfer.md#transfer-and-reconcile-copies-share-the-local-install
+/// Does the owner name its repository's host — a recorded URL, or a rebuild
+/// that cannot guess (`reconstruction_is_unambiguous`)?
+fn owner_host_is_known(
+	owner: &crate::skills::adoption::LockedSourceOwner,
+) -> bool {
+	owner
+		.source_url
+		.as_deref()
+		.is_some_and(|url| !url.trim().is_empty())
+		|| crate::skills::source_coordinate::reconstruction_is_unambiguous(
+			&owner.source,
+			&owner.source_type,
+		)
+}
+
 fn install_skill_copy(
 	skill_name: &str,
 	source_scope: &WriteScope,
@@ -973,8 +989,19 @@ fn install_skill_copy(
 	let lock = if same_scope {
 		LocalInstallLock::Untouched
 	} else {
-		crate::skills::adoption::skill_lock_source(skill_name, source_scope)
-			.map_or(LocalInstallLock::Local, LocalInstallLock::Carry)
+		match crate::skills::adoption::skill_lock_source(
+			skill_name,
+			source_scope,
+		) {
+			None => LocalInstallLock::Local,
+			Some(owner) if owner_host_is_known(&owner) => {
+				LocalInstallLock::Carry(owner)
+			}
+			// A URL-less owner whose host cannot be derived (npx 1.5.11 records
+			// a self-hosted gitlab as `gitlab:group/repo`): carrying it would
+			// let the update flow fetch from a guessed host. Copy untracked.
+			Some(_) => LocalInstallLock::Untouched,
+		}
 	};
 	crate::skills::install_local_skill(
 		crate::skills::LocalSkillInstallRequest {
@@ -6157,56 +6184,44 @@ mod tests {
 		.unwrap()
 	}
 
-	/// A carried URL-less gitlab owner is NOT provably the destination's
-	/// gitlab.com owner: npx 1.5.11 records a self-hosted gitlab the same way.
-	/// The copy is refused, naming both owners, and the destination entry stays.
+	/// A URL-less `gitlab:o/r` owner does not name its host (npx 1.5.11 records
+	/// a self-hosted gitlab the same way), so a cross-project copy is made
+	/// UNTRACKED: Master and grant land, the destination lock is not written,
+	/// and a retry and a second agent's grant succeed the same way.
 	#[cfg(unix)]
 	#[test]
-	fn transfer_skill_cross_project_url_less_gitlab_refuses_a_full_url_owner() {
+	fn transfer_skill_cross_project_ambiguous_owner_is_copied_untracked() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let (source, dest) = (temp.path().join("s"), temp.path().join("d"));
 		url_less_gitlab_skill(&source, "gl");
 		fs::create_dir_all(&dest).unwrap();
-		skill::add_skill_to_local_lock(
-			"gl",
-			skill::LocalSkillLockEntry {
-				source_url: Some("https://gitlab.com/o/r.git".to_string()),
-				ref_commit: None,
-				source: "o/r".to_string(),
-				ref_name: None,
-				source_type: "gitlab".to_string(),
-				computed_hash: "h".to_string(),
-				skill_path: Some("gl/SKILL.md".to_string()),
-			},
-			Some(&dest),
-		)
-		.unwrap();
 
-		let lock_before = fs::read(dest.join("skills-lock.json")).unwrap();
-
-		let result =
-			transfer_between_projects(&source, &dest, AgentType::Cursor, "gl");
-		assert_eq!(result.failed_count(), 1);
-		let error = result.results[0].error.clone().unwrap_or_default();
+		for (agent, step) in [
+			(AgentType::Cursor, "first copy"),
+			(AgentType::Cursor, "retry"),
+			(AgentType::Windsurf, "second agent"),
+		] {
+			let result = transfer_between_projects(&source, &dest, agent, "gl");
+			assert_eq!(
+				result.failed_count(),
+				0,
+				"{step}: {:?}",
+				result.results[0].error
+			);
+		}
+		assert!(dest.join(".aghub/gl/SKILL.md").is_file());
 		assert!(
-			error.contains("already owned by source 'gitlab:o/r'")
-				&& error.contains("requested source 'gitlab:o/r'"),
-			"the refusal must name both owners: {error}"
+			!dest.join("skills-lock.json").exists(),
+			"an ambiguous owner must not be carried into the destination lock"
 		);
-		assert_eq!(
-			fs::read(dest.join("skills-lock.json")).unwrap(),
-			lock_before
-		);
-		assert!(!dest.join(".aghub/gl").exists());
 	}
 
-	/// A URL-less gitlab carried into the GLOBAL lock keeps a blank `sourceUrl`:
-	/// `gitlab.com` would be a guess (npx records self-hosted gitlab the same
-	/// way), and a persisted guess reads as a recorded owner.
+	/// The same population carried to GLOBAL: the global lock gets no entry,
+	/// so the update flow never fetches it from a guessed gitlab.com.
 	#[cfg(unix)]
 	#[test]
-	fn transfer_skill_url_less_gitlab_carried_to_global_keeps_a_blank_url() {
+	fn transfer_skill_ambiguous_owner_to_global_is_copied_untracked() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let home = tempdir().unwrap();
 		let _home = EnvVarGuard::set("HOME", home.path());
@@ -6233,48 +6248,10 @@ mod tests {
 		.unwrap();
 
 		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
-		let entry = skill::lock::global::get_skill_from_lock("gl")
-			.expect("global lock entry");
-		assert_eq!(
-			(entry.source.as_str(), entry.source_type.as_str()),
-			("o/r", "gitlab")
-		);
-		assert_eq!(entry.source_url, "");
-	}
-
-	/// A fresh cross-project copy writes another URL-less gitlab entry; a retry
-	/// and a grant to a second agent must still read it as the same owner.
-	#[cfg(unix)]
-	#[test]
-	fn transfer_skill_cross_project_url_less_gitlab_can_be_retried_and_regranted(
-	) {
-		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-		let temp = tempdir().unwrap();
-		let (source, dest) = (temp.path().join("s"), temp.path().join("d"));
-		url_less_gitlab_skill(&source, "gl");
-		fs::create_dir_all(&dest).unwrap();
-
-		for (agent, step) in [
-			(AgentType::Cursor, "first copy"),
-			(AgentType::Cursor, "retry"),
-			(AgentType::Windsurf, "second agent"),
-		] {
-			let result = transfer_between_projects(&source, &dest, agent, "gl");
-			assert_eq!(
-				result.failed_count(),
-				0,
-				"{step}: {:?}",
-				result.results[0].error
-			);
-		}
-		let entry = skill::lock::local::read_local_lock(Some(&dest))
-			.skills
-			.get("gl")
-			.cloned()
-			.expect("dest lock entry");
-		assert_eq!(
-			(entry.source.as_str(), entry.source_type.as_str()),
-			("o/r", "gitlab")
+		assert!(home.path().join(".aghub/gl/SKILL.md").is_file());
+		assert!(
+			skill::lock::global::get_skill_from_lock("gl").is_none(),
+			"an ambiguous owner must not be carried into the global lock"
 		);
 	}
 

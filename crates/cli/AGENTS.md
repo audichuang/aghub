@@ -120,7 +120,10 @@ list, or `all`), `-g`/`-p`, `--all`.
   `--add`) is core `install_local_skill`, the `add --from` install. Within one
   scope it never touches the lock (an untracked Master stays untracked);
   across scopes it writes the target's entry carrying the source's owner and
-  STORED Source hash. A copy is refused when the target's same-named Master is
+  STORED Source hash — only when the source's host is known (a recorded URL,
+  github, local, or a source spelling its host); an ambiguous legacy entry
+  (npx 1.5.11 `gitlab:group/repo`, which may be self-hosted) is copied
+  untracked: `doctor` shows it untracked, re-install from the real URL to track. A copy is refused when the target's same-named Master is
   untracked and differs, or when it carries a remote owner and the Master
   differs; a cross-scope copy also refuses a different owner. A same-scope copy
   onto an OWNED Master grants it as-is, stale content included.

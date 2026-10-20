@@ -28,7 +28,10 @@ pub enum LocalInstallLock {
 	#[default]
 	Local,
 	/// Record another scope's entry: owner, ref, `skillPath`, `refCommit` and
-	/// its STORED Source hash (a cross-scope copy keeps its provenance).
+	/// its STORED Source hash (a cross-scope copy keeps its provenance). The
+	/// owner must name its host (a recorded URL, or
+	/// `source_coordinate::reconstruction_is_unambiguous`): a global write
+	/// rebuilds the URL, and a guessed host would feed the update flow.
 	Carry(LockedSourceOwner),
 	/// Same-scope copy: a pure regrant. The lock is never compared nor written
 	/// (an untracked Master stays untracked); the Master content guards still run.
@@ -182,30 +185,19 @@ pub fn install_local_skill(
 		LocalInstallLock::Carry(owner) => LockWrite {
 			source: skill::InstallLockSource {
 				// A global entry records a clone coordinate (npx and a fetched
-				// install do), so a project entry's omitted URL is rebuilt —
-				// but only when the rebuild is certain (github byte-identical to
-				// a fetched install). A URL-less gitlab may be self-hosted:
-				// leave it blank rather than persist a gitlab.com guess;
-				// readers rebuild at read time and ownership fails closed.
-				// The project writer drops reconstructable URLs itself.
+				// install do), so a project entry's omitted URL is rebuilt
+				// (github byte-identical to a fetched install). Only an owner
+				// whose host is known is carried — transfer copies an ambiguous
+				// one untracked — so this rebuild is never a guess. The project
+				// writer drops reconstructable URLs itself.
 				source_url: match req.scope {
-					WriteScope::Global
-						if owner
-							.source_url
-							.as_deref()
-							.is_some_and(|url| !url.trim().is_empty())
-							|| crate::skills::source_coordinate::reconstruction_is_unambiguous(
-								&owner.source,
-								&owner.source_type,
-							) =>
-					{
+					WriteScope::Global => {
 						crate::skills::source_coordinate::entry_clone_source(
 							&owner.source,
 							owner.source_url.as_deref(),
 							&owner.source_type,
 						)
 					}
-					WriteScope::Global => String::new(),
 					WriteScope::Project { .. } => {
 						owner.source_url.unwrap_or_default()
 					}

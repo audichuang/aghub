@@ -439,9 +439,8 @@ could install repo B's bytes under transferred skill A; accept-rename fetched a
 hostless gitlab `group/repo` as GitHub. Now one provider-aware rule,
 `skills::source_coordinate::entry_clone_source` (moved from skill-update), is
 used by the carried GLOBAL write when the rebuild is certain
-(`reconstruction_is_unambiguous`: github — byte-identical to a fetched install
-— local, or a source that spells its own host; a URL-less gitlab stays blank,
-see below), by `of_global_entry` (legacy blank entries already on disk) and by
+(an ambiguous owner is never carried, see below; github is byte-identical to a
+fetched install), by `of_global_entry` (legacy blank entries already on disk) and by
 rename's global arm — and, since a URL-less legacy gitlab PROJECT entry had
 the same GitHub misread, by `of_project_entry` and rename's project arm too
 (capture and verify both use it, so a github project entry still compares
@@ -456,18 +455,26 @@ a gitlab.com claimant for a self-hosted entry (any registrant of the same
 `group/repo` on gitlab.com could take it over) and conflated a namespace
 literally named `gitlab.com` (`gitlab.com/team/repo`) with `team/repo`.
 
-Rule: the ownership guard never rebuilds a coordinate. Its rules are the
-original ones plus ONE accept: when NEITHER side records a URL, the exact
-`source` + `sourceType` is the identity (a carried entry against its own
-earlier copy, or a second agent's grant). So a URL-less entry against a full
-gitlab.com URL — either direction — is REFUSED, naming both owners, and the
-carried GLOBAL write leaves a URL-less gitlab `sourceUrl` blank rather than
-persist the gitlab.com guess (readers rebuild at read time). Tests:
-`transfer_skill_cross_project_url_less_gitlab_refuses_a_full_url_owner`,
-`transfer_skill_cross_project_url_less_gitlab_can_be_retried_and_regranted`,
-`transfer_skill_url_less_gitlab_carried_to_global_keeps_a_blank_url`,
+A narrower follow-up accepted two URL-less entries with the same spelling as
+one owner (for a retry or a second agent's grant). That still merged two
+self-hosted hosts' `gitlab:group/repo`, and carrying such an owner to GLOBAL
+with a blank URL let `prepare_locked_resync` and `EntryIdentity` both rebuild
+gitlab.com and agree — `apply-update` would replace the content from a guessed
+host (resync never asks `same_source_owner`).
+
+Rule: a cross-scope copy carries the owner ONLY when its host is known — a
+recorded URL, or `source_coordinate::reconstruction_is_unambiguous` (github,
+local, or a source that spells its own host). An ambiguous legacy owner is
+copied UNTRACKED (`LocalInstallLock::Untouched`: no lock entry, no owner
+comparison, Master guards still run), which is what transfer did before this
+range for every copy: `doctor` shows it untracked, and re-installing from the
+real URL tracks it. `same_source_owner` is back to its original rules and
+never rebuilds a coordinate: a URL-less non-github entry fails closed, the
+same spelling included. Tests:
+`transfer_skill_cross_project_ambiguous_owner_is_copied_untracked`,
+`transfer_skill_ambiguous_owner_to_global_is_copied_untracked`,
 `a_url_less_gitlab_entry_refuses_a_full_gitlab_com_url`,
-`url_less_entries_match_only_on_the_exact_spelling`,
+`url_less_gitlab_entries_with_one_spelling_are_not_one_owner`,
 `a_dotted_gitlab_namespace_is_not_its_host_stripped_twin`,
 `a_url_less_gitlab_entry_refuses_another_repo`,
 `a_url_less_custom_remote_still_fails_closed`.

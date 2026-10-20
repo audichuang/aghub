@@ -103,20 +103,6 @@ pub fn same_source_owner(
 	{
 		return false;
 	}
-	// Neither side names a URL (a carried npx project entry against its own
-	// earlier copy, or a second agent's grant): only the exact recorded spelling
-	// can match. Never rebuilt into a host here — npx 1.5.11 records ANY
-	// self-hosted `/-/tree/` host as `gitlab` with the host stripped, so a
-	// URL-less `gitlab` entry does not name gitlab.com.
-	if existing
-		.source_url
-		.as_deref()
-		.is_none_or(|url| url.trim().is_empty())
-		&& requested.source_url.trim().is_empty()
-	{
-		return existing.source_type == requested.source_type
-			&& existing.source == requested.source;
-	}
 	match existing
 		.source_url
 		.as_deref()
@@ -334,21 +320,14 @@ mod tests {
 		));
 	}
 
-	/// Both sides URL-less (a carried entry against its own earlier copy):
-	/// the exact recorded spelling is the only identity there is.
+	/// Two URL-less non-github entries with the same spelling may still be two
+	/// self-hosted hosts: refused. Transfer never asks this (it copies an
+	/// ambiguous owner untracked).
 	#[test]
-	fn url_less_entries_match_only_on_the_exact_spelling() {
-		assert!(same_source_owner(
+	fn url_less_gitlab_entries_with_one_spelling_are_not_one_owner() {
+		assert!(!same_source_owner(
 			&owner("o/r", "gitlab", None),
 			&requested("o/r", "gitlab", ""),
-		));
-		assert!(!same_source_owner(
-			&owner("o/r", "gitlab", None),
-			&requested("o/other", "gitlab", ""),
-		));
-		assert!(!same_source_owner(
-			&owner("o/r", "gitlab", None),
-			&requested("o/r", "git", ""),
 		));
 	}
 
@@ -381,10 +360,14 @@ mod tests {
 		));
 	}
 
-	/// A hostless custom remote without a URL has lost its host: a claimant
-	/// that names ANY host is refused, even with the same `owner/repo`.
+	/// A hostless custom remote without a URL has lost its host: fail closed,
+	/// even against the same spelling or a claimant naming a host.
 	#[test]
 	fn a_url_less_custom_remote_still_fails_closed() {
+		assert!(!same_source_owner(
+			&owner("o/r", "git", None),
+			&requested("o/r", "git", ""),
+		));
 		assert!(!same_source_owner(
 			&owner("o/r", "git", None),
 			&requested("o/r", "git", "https://git.example.com/o/r.git"),
