@@ -948,17 +948,23 @@ fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
 /// no entry is recorded as `local` at its root, which for a Referrer is the
 /// Master discovery resolved it to.
 /// See docs/history/core-transfer.md#transfer-and-reconcile-copies-share-the-local-install
-/// Does the owner name its repository's host
-/// (`source_coordinate::known_clone_source`)?
-fn owner_host_is_known(
+/// May the owner be written into another scope's lock? Only when it names its
+/// repository's host (`source_coordinate::known_clone_source`) AND carries no
+/// credentials: a global entry may record `https://user:TOKEN@…`, and a
+/// project lock is a file people commit.
+fn owner_is_carriable(
 	owner: &crate::skills::adoption::LockedSourceOwner,
 ) -> bool {
+	let has_credentials =
+		|s: &str| aghub_git::redact_source_credentials(s) != s;
 	crate::skills::source_coordinate::known_clone_source(
 		&owner.source,
 		owner.source_url.as_deref(),
 		&owner.source_type,
 	)
 	.is_some()
+		&& !has_credentials(&owner.source)
+		&& !owner.source_url.as_deref().is_some_and(has_credentials)
 }
 
 fn install_skill_copy(
@@ -992,12 +998,13 @@ fn install_skill_copy(
 			source_scope,
 		) {
 			None => LocalInstallLock::Local,
-			Some(owner) if owner_host_is_known(&owner) => {
+			Some(owner) if owner_is_carriable(&owner) => {
 				LocalInstallLock::Carry(owner)
 			}
 			// A URL-less owner whose host cannot be derived (npx 1.5.11 records
-			// a self-hosted gitlab as `gitlab:group/repo`): carrying it would
-			// let the update flow fetch from a guessed host. Copy untracked.
+			// a self-hosted gitlab as `gitlab:group/repo`) would let the update
+			// flow fetch from a guessed host; a credential-bearing one would
+			// publish its token. Copy untracked.
 			Some(_) => LocalInstallLock::Untouched,
 		}
 	};
@@ -6535,6 +6542,72 @@ mod tests {
 			entry.computed_hash
 		);
 		assert_eq!(entry.source_type, "github");
+	}
+
+	/// A global entry may record a credential-bearing URL. Carrying it would
+	/// copy the token into the project's `skills-lock.json`, a file people
+	/// commit; such an owner is copied untracked instead.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_never_carries_a_credential_into_a_project_lock() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let master = home.path().join(".aghub/tok");
+		github_owned_master(
+			&master,
+			&home.path().join(".claude/skills"),
+			"tok",
+		);
+		let tokened = "https://user:SECRET-TOKEN@git.example/acme/skills.git";
+		skill::write_global_install_lock(
+			"tok",
+			&skill::InstallLockSource {
+				source: tokened.to_string(),
+				source_type: "git".to_string(),
+				source_url: tokened.to_string(),
+				ref_name: Some("main".to_string()),
+			},
+			Some("tok/SKILL.md".to_string()),
+			&master,
+			None,
+		)
+		.unwrap();
+		assert!(
+			skill::lock::global::get_skill_from_lock("tok")
+				.is_some_and(|e| e.source_url.contains("SECRET-TOKEN")),
+			"fixture: the global entry must hold the credential"
+		);
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "tok".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		assert!(root.join(".aghub/tok/SKILL.md").is_file());
+		let lock_text = fs::read_to_string(root.join("skills-lock.json"))
+			.unwrap_or_default();
+		assert!(
+			!lock_text.contains("SECRET-TOKEN"),
+			"a credential reached the project lock: {lock_text}"
+		);
 	}
 
 	#[test]

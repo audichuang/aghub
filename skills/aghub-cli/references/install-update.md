@@ -54,8 +54,9 @@ included, and never touches the lock: an untracked Master stays untracked.
 Across scopes (`-g` source, `-p` target or the reverse) it copies the Master
 and records the source's owner and stored Source hash in the target's lock,
 so a locally edited source still reads as modified there — when the source's
-host is known. A legacy URL-less entry whose host is ambiguous (an old npx
-`gitlab:group/repo`, possibly self-hosted) is copied untracked instead and
+host is known and its URL carries no credentials. A legacy URL-less entry
+whose host is ambiguous (an old npx `gitlab:group/repo`, possibly
+self-hosted), or one whose URL embeds a token, is copied untracked instead and
 compares no owner: `doctor` shows it untracked unless the target already had
 an entry of that name; re-install from the real URL to track it. `transfer`
 and `reconcile --add` refuse when the target scope's same-named Master is

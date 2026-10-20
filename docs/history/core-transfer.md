@@ -516,6 +516,13 @@ now writes the placeholder digest, so the destination stays "baseline unknown"
 exactly like its source (ADR 0003 Decision 1); pinned by
 `transfer_skill_cross_scope_keeps_an_unknown_source_hash_unknown`.
 
+A global entry may record a credential-bearing URL (`https://user:TOKEN@…`).
+Carried verbatim, the token landed in the project's `skills-lock.json` — a
+file people commit — where a fetched install of the same repo records a
+credential-free coordinate. Such an owner is now not carriable and the copy is
+untracked; pinned by
+`transfer_skill_never_carries_a_credential_into_a_project_lock`.
+
 Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone`,
 `transfer_skill_same_scope_keeps_an_untracked_master_untracked`,

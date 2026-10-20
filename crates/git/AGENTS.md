@@ -3,7 +3,9 @@
 **Crate**: `aghub-git` — clone/fetch with credential injection + pluggable
 fetch backends (`RepoFetchBackend`: gix shallow / GitHub REST).
 
-**Used by**: `aghub-api`, `aghub-cli`, `skill-update`, `aghub-cc-plugins` (NOT core).
+**Used by**: `aghub-api`, `aghub-cli`, `skill-update`, `aghub-cc-plugins`, and
+`aghub-core` (pure source normalization / redaction only — `source_coordinate`
+and transfer's credential check; core never fetches).
 
 ## GOTCHAS
 
