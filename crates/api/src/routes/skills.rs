@@ -649,6 +649,7 @@ pub async fn import_skill(
 				scope: write_scope,
 				target_agents: &[agent_type],
 				install_name: request.name.as_deref(),
+				lock_owner: None,
 			};
 		let report =
 			aghub_core::skills::install_local::install_local_skill(install_req)

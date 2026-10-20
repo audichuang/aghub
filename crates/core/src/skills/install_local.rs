@@ -6,6 +6,7 @@ use skill::sanitize::sanitize_name;
 use crate::errors::ConfigError;
 use crate::models::{ResourceScope, Skill};
 use crate::scope::WriteScope;
+use crate::skills::adoption::LockedSourceOwner;
 use crate::skills::install_fetched::{
 	materialize_universal_master, AgentInstallResult, MaterializedMaster,
 };
@@ -17,6 +18,10 @@ pub struct LocalSkillInstallRequest<'a> {
 	pub scope: WriteScope,
 	pub target_agents: &'a [AgentType],
 	pub install_name: Option<&'a str>,
+	/// Lock owner to record instead of this local path: transfer/reconcile pass
+	/// the source scope's entry so a copy keeps its provenance. `None` records
+	/// `source_path` as a `local` source.
+	pub lock_owner: Option<LockedSourceOwner>,
 }
 
 /// Report of a local skill install.
@@ -34,16 +39,19 @@ fn write_local_install_lock(
 	skill_name: &str,
 	scope: &WriteScope,
 	source: &skill::InstallLockSource,
+	owner: Option<&LockedSourceOwner>,
 	source_dir: &Path,
 ) -> Result<(), ConfigError> {
+	let skill_path = owner.and_then(|o| o.skill_path.clone());
+	let ref_commit = owner.and_then(|o| o.ref_commit.clone());
 	match scope {
 		WriteScope::Global => skill::write_global_install_lock(
-			skill_name, source, None, source_dir, None,
+			skill_name, source, skill_path, source_dir, ref_commit,
 		)
 		.map(|_| ())
 		.map_err(ConfigError::SkillLock),
 		WriteScope::Project { root } => skill::write_project_install_lock(
-			skill_name, source, None, source_dir, root, None,
+			skill_name, source, skill_path, source_dir, root, ref_commit,
 		)
 		.map(|_| ())
 		.map_err(ConfigError::SkillLock),
@@ -131,11 +139,21 @@ pub fn install_local_skill(
 	)
 	.map_err(ConfigError::Io)?;
 
-	let lock_source = skill::InstallLockSource {
-		source: expanded_path.display().to_string(),
-		source_type: "local".to_string(),
-		source_url: expanded_path.display().to_string(),
-		ref_name: None,
+	let lock_source = match &req.lock_owner {
+		Some(owner) => skill::InstallLockSource {
+			source: owner.source.clone(),
+			source_type: owner.source_type.clone(),
+			// A project entry omits a reconstructable URL; readers treat an
+			// empty one as missing.
+			source_url: owner.source_url.clone().unwrap_or_default(),
+			ref_name: owner.ref_name.clone(),
+		},
+		None => skill::InstallLockSource {
+			source: expanded_path.display().to_string(),
+			source_type: "local".to_string(),
+			source_url: expanded_path.display().to_string(),
+			ref_name: None,
+		},
 	};
 
 	let canonical_root = if matches!(resource_scope, ResourceScope::ProjectOnly)
@@ -150,7 +168,7 @@ pub fn install_local_skill(
 	// Under the guard, re-read each target agent's discovered skills: a name the
 	// agent already sees (in any folder) is taken. Idempotent only when THIS
 	// agent's Referrer slot already links to the intended Master; an explicit
-	// name always refuses. Restores the base add_skill_from_path_universal rule.
+	// name always refuses.
 	for &agent in req.target_agents {
 		let mut manager = crate::ConfigManager::for_write(
 			crate::create_adapter(agent),
@@ -343,6 +361,7 @@ pub fn install_local_skill(
 			effective_name,
 			&req.scope,
 			&lock_source,
+			req.lock_owner.as_ref(),
 			lock_source_dir,
 		) {
 			crate::skills::rename::rollback_materialized_install(

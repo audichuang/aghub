@@ -79,8 +79,8 @@ pub(crate) fn master_on_disk(canonical: &Path, name: &str) -> Option<Skill> {
 	Some(found)
 }
 
-/// Shared preparation for the two universal-install entry points
-/// (`add_skill_universal` / `add_skill_from_path_universal`): resolves the
+/// Preparation for the from-struct universal install
+/// (`add_skill_universal`): resolves the
 /// `.agents` canonical directory plus the current agent's symlink target.
 struct UniversalPrep {
 	agent_name: String,
@@ -911,194 +911,6 @@ impl ConfigManager {
 		self.set_skill_enabled(name, true)
 	}
 
-	pub fn add_skill_from_path(&mut self, path: &Path) -> Result<SkillAdd> {
-		debug!(
-			"adding skill from path '{}' for agent '{}'",
-			path.display(),
-			self.adapter.name()
-		);
-		// Symlink-only model: there is no copy install path.
-		self.add_skill_from_path_universal(path, None)
-	}
-
-	/// Symlink-only install from a local path: parses the skill, writes the full
-	/// source tree once into the Master store and symlinks THIS agent's skills
-	/// dir to it (matching the API's `install_git_skill_universal`).
-	///
-	/// `as_name` (CLI `add --from <path> --name <new>`) is applied BEFORE the
-	/// duplicate check, so the install is ONE step inside ONE lock span.
-	/// See docs/history/core-manager.md#add-as-name-was-import-then-rename
-	pub fn add_skill_from_path_universal(
-		&mut self,
-		path: &Path,
-		as_name: Option<&str>,
-	) -> Result<SkillAdd> {
-		debug!(
-			"adding skill (universal) from path '{}' for agent '{}'",
-			path.display(),
-			self.adapter.name()
-		);
-		let skill_pkg = skill::parser::parse(path).map_err(|e| {
-			ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
-		})?;
-		let mut skill = convert_skill(skill_pkg);
-		// The source's OWN name, kept because the Master's SKILL.md still
-		// carries it after the copy and discovery keys on that field.
-		let source_name = skill.name.clone();
-		if let Some(requested) = as_name {
-			skill.name = requested.to_string();
-		}
-
-		let UniversalPrep {
-			agent_name,
-			agent_write_dir,
-			canonical_dir,
-			use_relative,
-			link_need,
-		} = self.universal_install_prep()?;
-		// Capture the materializer inputs BEFORE borrowing `config` mutably so
-		// the shared materializer can run while the config check is in flight.
-		let scope = self.write_resource_scope();
-		let project_root = self.project_root.clone();
-		let agent_type = self.agent_type();
-
-		// Same span as `add_skill_universal`: duplicate check → Master → link,
-		// with config re-read under the lock.
-		let _mutation_guard =
-			self.guard_and_reload("add skill from path", scope)?;
-
-		let config = self.config_mut()?;
-		if config.skills.iter().any(|s| s.name == skill.name) {
-			// An explicit `--name` never takes the idempotent no-op branches
-			// (they write NOTHING); refusing BEFORE any write needs no rollback.
-			if as_name.is_some() {
-				return Err(ConfigError::resource_exists("skill", &skill.name));
-			}
-			let safe = sanitize_name(&skill.name);
-			let canonical = canonical_dir.join(&safe);
-			// The no-op reports the INSTALLED skill, never the one parsed from
-			// `path`: nothing was written.
-			let installed = || {
-				config
-					.skills
-					.iter()
-					.find(|s| s.name == skill.name)
-					.cloned()
-					.unwrap_or_else(|| skill.clone())
-			};
-			// Idempotence is decided by the RESOLVED link target, never by the
-			// skill name: a name match on an unrelated same-named skill once let
-			// `reconcile --remove` delete the only copy.
-			// See docs/history/core-manager.md#name-based-idempotence-deleted-the-source
-			if let Some(ref agent_dir) = agent_write_dir {
-				let slot = agent_dir.join(&safe);
-				if Linker::is_link(&slot) {
-					let master_real = std::fs::canonicalize(&canonical)
-						.unwrap_or_else(|_| canonical.clone());
-					if std::fs::canonicalize(&slot)
-						.map(|r| r == master_real)
-						.unwrap_or(false)
-					{
-						return Ok(SkillAdd::already_installed(installed()));
-					}
-				}
-			}
-			return Err(ConfigError::resource_exists("skill", &skill.name));
-		}
-		info!(
-			"adding skill '{}' (universal layout, from path) for agent '{}'",
-			skill.name, agent_name
-		);
-
-		let safe_name = sanitize_name(&skill.name);
-		let canonical = canonical_dir.join(&safe_name);
-
-		// ONE materializer, shared with the fetched/desktop path: copies only
-		// when the Master is absent (a pre-existing one is preserved), then links.
-		let source_root = crate::skills::skill_source_root(path);
-		let target_link = if use_relative {
-			crate::skills::linker::LinkTarget::Relative
-		} else {
-			crate::skills::linker::LinkTarget::Absolute
-		};
-		let results =
-			crate::skills::install_fetched::materialize_universal_master(
-				&source_root,
-				&safe_name,
-				scope,
-				project_root.as_deref(),
-				std::slice::from_ref(&agent_type),
-				target_link,
-			)?;
-		Self::ensure_single_agent_installed(
-			&results.agent_results,
-			&link_need,
-			&skill.name,
-		)?;
-
-		// The copied SKILL.md still says `name: <source_name>`, and discovery
-		// keys on frontmatter, so a renamed install must rewrite it. Gated on the
-		// materializer's OWN receipt (`created_master`, an atomic create-claim):
-		// never edit a Master someone else owns (crates/core/AGENTS.md
-		// "Mutation attribution").
-		if skill.name != source_name {
-			if !results.created_master {
-				undo_created_referrers(&results, &safe_name);
-				return Err(ConfigError::resource_exists("skill", &skill.name));
-			}
-			if let Err(e) = rewrite_master_skill_name(&canonical, &skill.name) {
-				// Undo this call's own writes: the Master it just claimed and
-				// every referrer it just linked.
-				undo_created_referrers(&results, &safe_name);
-				let _ = std::fs::remove_dir_all(&canonical);
-				return Err(ConfigError::Io(e));
-			}
-		}
-
-		let canonical_md =
-			canonical.join("SKILL.md").to_string_lossy().to_string();
-		let mut fs_skill = skill.clone();
-		fs_skill.source_path = Some(canonical_md.clone());
-		fs_skill.canonical_path = Some(canonical_md);
-		// What is ON DISK: `created_master` is false exactly when a pre-existing
-		// Master was preserved and the parsed source never written.
-		let on_disk = if results.created_master {
-			fs_skill.clone()
-		} else {
-			warn!(
-				"canonical '{}' already exists; reusing it without overwriting \
-				 SKILL.md — the skill reported below is the MASTER on disk, not \
-				 the source just read (use `aghub update` to refresh content)",
-				canonical.display()
-			);
-			match master_on_disk(&canonical, &skill.name) {
-				Some(found) => found,
-				// Do NOT fall back to the parsed source: nothing can read a
-				// Master that does not parse. Undo the referrer and say so.
-				None => {
-					crate::skills::rename::rollback_materialized_install(
-						&skill.name,
-						scope,
-						project_root.as_deref(),
-						&results.created_referrer_dirs,
-						false,
-					);
-					return Err(ConfigError::InvalidConfig(format!(
-						"the existing master at '{}' does not parse, so nothing \
-						 can read it and aghub cannot report what is installed. \
-						 Fix or remove that master, then re-run.",
-						canonical.display()
-					)));
-				}
-			}
-		};
-		config.skills.push(on_disk.clone());
-
-		// Report the entry ON DISK, never the parsed source (whose `source_path`
-		// names the caller's input). Not `save_current()` — see `add_skill`.
-		Ok(SkillAdd::installed(on_disk, &results))
-	}
-
 	/// Map the single-agent result from `materialize_universal_master` onto the
 	/// CLI add path's historical error contract.
 	///
@@ -1490,21 +1302,6 @@ pub(crate) fn rewrite_master_skill_name(
 	);
 	let yaml = serde_yaml::to_string(&map).map_err(std::io::Error::other)?;
 	std::fs::write(&md, format!("---\n{yaml}---\n\n{body}\n"))
-}
-
-/// Drop the referrer links THIS install created, by the linker's own receipt.
-/// Best-effort: it runs on a path that is already returning an error, and a
-/// link that is gone is the state we wanted anyway.
-fn undo_created_referrers(
-	results: &crate::skills::install_fetched::MaterializedMaster,
-	safe_name: &str,
-) {
-	for dir in &results.created_referrer_dirs {
-		let link = dir.join(safe_name);
-		if Linker::is_link(&link) {
-			let _ = Linker::unlink(&link);
-		}
-	}
 }
 
 /// The frontmatter keys aghub's reduced [`Skill`] model owns. Everything else

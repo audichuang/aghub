@@ -262,44 +262,6 @@ fn add_skill_writes_master_and_symlinks_agent() {
 	assert!(saved.canonical_path.is_some());
 }
 
-// no-copy regression: add_skill_from_path writes a .agents Master and a
-// link in the agent dir, never a private copy.
-#[cfg(unix)]
-#[test]
-fn add_skill_from_path_links_master_not_copy() {
-	use crate::create_adapter;
-	use crate::models::AgentType;
-	use crate::skills::linker::Linker;
-
-	let tmp = tempfile::tempdir().unwrap();
-	let root = tmp.path();
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
-
-	// Create a source skill directory with SKILL.md
-	let src = tmp.path().join("src/my-skill");
-	std::fs::create_dir_all(&src).unwrap();
-	std::fs::write(
-		src.join("SKILL.md"),
-		"---\nname: my-skill\ndescription: d\n---\nbody",
-	)
-	.unwrap();
-
-	mgr.add_skill_from_path(&src.join("SKILL.md")).unwrap();
-
-	let canonical = root.join(".aghub/my-skill");
-	let link = root.join(".claude/skills/my-skill");
-	assert!(canonical.join("SKILL.md").exists(), "Master materialized");
-	assert!(
-		Linker::is_link(&link),
-		"agent dir must hold a link to the Master, not a copy"
-	);
-}
-
 // No-copy regression: add_skill (manual-create) writes a Master and a link
 // in the agent dir, never a private copy, and records canonical_path (link
 // provenance) -- proving the add_skill -> add_skill_universal delegation.
@@ -2352,223 +2314,6 @@ fn add_skill_universal_fresh_install_writes_canonical() {
 }
 
 // -----------------------------------------------------------------------
-// P0-A fix: add_skill_from_path_universal dropped all non-SKILL.md assets
-// -----------------------------------------------------------------------
-
-#[cfg(unix)]
-#[test]
-fn add_skill_from_path_universal_copies_full_source_tree() {
-	use crate::create_adapter;
-	use crate::models::AgentType;
-
-	let tmp = tempfile::tempdir().unwrap();
-	let root = tmp.path();
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
-
-	// Create a source skill with assets
-	let src = root.join("src/my-skill");
-	std::fs::create_dir_all(&src).unwrap();
-	std::fs::write(
-		src.join("SKILL.md"),
-		"---\nname: my-skill\ndescription: test\n---\nBody.\n",
-	)
-	.unwrap();
-	std::fs::create_dir_all(src.join("assets")).unwrap();
-	std::fs::write(src.join("assets/data.json"), "{}").unwrap();
-	std::fs::create_dir_all(src.join("scripts")).unwrap();
-	std::fs::write(src.join("scripts/setup.sh"), "#!/bin/sh\necho ok").unwrap();
-
-	let added = mgr.add_skill_from_path_universal(&src, None).unwrap();
-	assert_eq!(added.skill.name, "my-skill");
-	assert!(!added.already_installed);
-
-	// Canonical should have the full tree
-	let canonical = root.join(".aghub/my-skill");
-	assert!(canonical.join("SKILL.md").exists());
-	assert!(canonical.join("assets/data.json").exists());
-	assert!(canonical.join("scripts/setup.sh").exists());
-	assert_eq!(
-		std::fs::read_to_string(canonical.join("assets/data.json")).unwrap(),
-		"{}"
-	);
-
-	// Agent dir should be a symlink
-	let link = root.join(".claude/skills/my-skill");
-	assert!(std::fs::symlink_metadata(&link)
-		.unwrap()
-		.file_type()
-		.is_symlink());
-
-	// Reading assets via the symlink should work
-	assert_eq!(
-		std::fs::read_to_string(link.join("assets/data.json")).unwrap(),
-		"{}"
-	);
-}
-
-#[cfg(unix)]
-#[test]
-fn add_skill_from_path_universal_accepts_skill_md_file() {
-	use crate::create_adapter;
-	use crate::models::AgentType;
-
-	let tmp = tempfile::tempdir().unwrap();
-	let root = tmp.path();
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
-
-	// Pass SKILL.md file directly (should use parent as source root)
-	let src = root.join("src/other-skill");
-	std::fs::create_dir_all(&src).unwrap();
-	std::fs::write(
-		src.join("SKILL.md"),
-		"---\nname: other-skill\ndescription: test\n---\n",
-	)
-	.unwrap();
-	std::fs::write(src.join("extra.txt"), "bonus").unwrap();
-
-	let skill_md = src.join("SKILL.md");
-	let added = mgr.add_skill_from_path_universal(&skill_md, None).unwrap();
-	assert_eq!(added.skill.name, "other-skill");
-	assert!(!added.already_installed);
-
-	// extra.txt should have been copied to canonical
-	let canonical = root.join(".aghub/other-skill");
-	assert!(canonical.join("extra.txt").exists());
-	assert_eq!(
-		std::fs::read_to_string(canonical.join("extra.txt")).unwrap(),
-		"bonus"
-	);
-}
-
-// A `--name` install rewrites the copied Master's frontmatter `name:`. That
-// is only ever ITS OWN copy: a Master this call did not create belongs to
-// someone else, and rewriting it would change the folder hash the npx lock
-// contract is checked against. Here `.aghub/renamed` exists but is
-// discovered under a DIFFERENT name, so the duplicate check cannot see it
-// and only the materializer's `created_master` receipt catches it.
-#[cfg(unix)]
-#[test]
-fn add_skill_from_path_universal_refuses_to_rename_onto_a_foreign_master() {
-	use crate::create_adapter;
-	use crate::models::AgentType;
-
-	let tmp = tempfile::tempdir().unwrap();
-	let root = tmp.path();
-	let foreign = root.join(".aghub/renamed");
-	std::fs::create_dir_all(&foreign).unwrap();
-	std::fs::write(
-		foreign.join("SKILL.md"),
-		"---\nname: something-else\ndescription: foreign\n---\nFOREIGN\n",
-	)
-	.unwrap();
-
-	let src = root.join("src/fresh");
-	std::fs::create_dir_all(&src).unwrap();
-	std::fs::write(
-		src.join("SKILL.md"),
-		"---\nname: fresh\ndescription: mine\n---\nMINE\n",
-	)
-	.unwrap();
-
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
-	mgr.add_skill_from_path_universal(&src, Some("renamed"))
-		.expect_err("a Master this call did not create is not ours to edit");
-
-	let content = std::fs::read_to_string(foreign.join("SKILL.md")).unwrap();
-	assert!(
-		content.contains("name: something-else") && content.contains("FOREIGN"),
-		"the foreign master must be untouched: {content}"
-	);
-	// The link the materializer created on the way in is undone, so the
-	// refusal leaves nothing of this call behind.
-	assert!(
-		root.join(".claude/skills/renamed")
-			.symlink_metadata()
-			.is_err(),
-		"the referrer this call created must be undone"
-	);
-}
-
-#[cfg(unix)]
-#[test]
-fn add_skill_from_path_universal_does_not_overwrite_existing_canonical() {
-	use crate::create_adapter;
-	use crate::models::AgentType;
-
-	let tmp = tempfile::tempdir().unwrap();
-	let root = tmp.path();
-
-	// Pre-create canonical with old content
-	let canonical = root.join(".aghub/shared-skill");
-	std::fs::create_dir_all(&canonical).unwrap();
-	std::fs::write(
-		canonical.join("SKILL.md"),
-		"---\nname: shared-skill\ndescription: old\n---\nOld version.\n",
-	)
-	.unwrap();
-
-	// Source has updated content
-	let src = root.join("src/shared-skill");
-	std::fs::create_dir_all(&src).unwrap();
-	std::fs::write(
-		src.join("SKILL.md"),
-		"---\nname: shared-skill\ndescription: new\n---\nNew version.\n",
-	)
-	.unwrap();
-
-	// Claude installs from path — canonical already exists, should NOT
-	// be overwritten
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
-	mgr.add_skill_from_path_universal(&src, None).unwrap();
-
-	let content = std::fs::read_to_string(canonical.join("SKILL.md")).unwrap();
-	assert!(
-		content.contains("Old version."),
-		"Canonical should not be overwritten: {content}"
-	);
-
-	// Cursor must NOT discover the skill: it was installed for another
-	// agent, and Cursor has its own Referrer directory rather than reading
-	// the store.
-	let mut mgr2 = ConfigManager::new(
-		create_adapter(AgentType::Cursor),
-		false,
-		Some(root),
-	);
-	mgr2.load().unwrap();
-	assert!(
-		!mgr2
-			.config
-			.as_ref()
-			.unwrap()
-			.skills
-			.iter()
-			.any(|s| s.name == "shared-skill"),
-		"Cursor was never granted shared-skill and must not see it"
-	);
-}
-
-// -----------------------------------------------------------------------
 // remove_skill_planned owns the post-delete lock prune.
 // -----------------------------------------------------------------------
 
@@ -3861,7 +3606,7 @@ fn ensure_single_agent_installed_covers_every_branch() {
 	// Unsupported -> Ok (defensive arm only: the add path never reaches
 	// this helper — the materialize preflight hard-errors first; that
 	// contract is pinned by
-	// `add_skill_from_path_unsupported_scope_errors_and_writes_nothing`
+	// `install_local_unsupported_scope_errors_and_writes_nothing`
 	// in tests/test_agent_paths.rs).
 	assert!(ConfigManager::ensure_single_agent_installed(
 		&conflict,
@@ -3881,7 +3626,6 @@ fn ensure_single_agent_installed_covers_every_branch() {
 #[cfg(unix)]
 #[test]
 fn cli_add_and_fetched_install_produce_identical_master_and_link() {
-	use crate::create_adapter;
 	use crate::models::AgentType;
 	use crate::skills::install_fetched::{
 		install_fetched_skill_and_lock, FetchedSkillInstallRequest,
@@ -3903,13 +3647,16 @@ fn cli_add_and_fetched_install_produce_identical_master_and_link() {
 	// Path A: CLI add-from-path universal install.
 	let cli_root_tmp = tempfile::tempdir().unwrap();
 	let cli_root = cli_root_tmp.path().canonicalize().unwrap();
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(&cli_root),
-	);
-	mgr.load().unwrap();
-	mgr.add_skill_from_path_universal(&src, None).unwrap();
+	crate::skills::install_local_skill(
+		crate::skills::LocalSkillInstallRequest {
+			source_path: &src,
+			scope: crate::WriteScope::project(&cli_root),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+			lock_owner: None,
+		},
+	)
+	.unwrap();
 
 	// Path B: fetched/desktop universal install of the same source.
 	let fetched_root_tmp = tempfile::tempdir().unwrap();

@@ -23,6 +23,12 @@ Pinning tests: `add_skill_universal_idempotent_readd_is_noop`,
 `add_skill_from_path_universal_does_not_overwrite_existing_canonical`.
 Commit: b610db98.
 
+Later: the from-path half is gone. `add --from`, `transfer` and `reconcile`
+all install through `skills::install_local_skill`, which also reports the
+Master on disk but REFUSES a differing untracked Master instead of preserving
+it, so the second pinning test was deleted.
+See [core-transfer](core-transfer.md#transfer-and-reconcile-copies-share-the-local-install).
+
 ## Skill mutations rewrote MCP config
 
 `save()` / `save_current()` serialize MCPs and nothing else, but skill
@@ -143,13 +149,15 @@ CLI `add --from <path> --name <new>` used to be import followed by an
 (another process could swap the Master out from under the rename) and stranded
 the imported skill when the rename failed.
 
-Rule: `add_skill_from_path_universal(path, as_name)` applies the name BEFORE
-the duplicate check, so the install is one step in one lock span; an explicit
+Rule: `install_local_skill` (`install_name`) applies the name BEFORE the
+duplicate check, so the install is one step in one lock span; an explicit
 name never takes the idempotent no-op, and it refuses to rewrite a Master this
-call did not create.
+call did not create. (Written for `add_skill_from_path_universal(path,
+as_name)`, since deleted.)
 
 Pinning tests:
-`add_skill_from_path_universal_refuses_to_rename_onto_a_foreign_master`,
+`install_local_skill_refuses_to_rename_onto_a_foreign_master`
+(`crates/core/tests/install_local_tests.rs`),
 `rename_import_refuses_when_the_target_name_is_taken` (`crates/cli/tests`).
 Commit: d7d1ea91.
 
@@ -161,7 +169,9 @@ paired with `reconcile --remove` — whose gate only asks whether the copy
 ERRORED — the copy did nothing, the delete ran, and the content was gone.
 
 Rule: idempotence is decided by the RESOLVED link target (the agent slot
-canonicalizes to the Master), never by the name.
+canonicalizes to the Master), never by the name. It now lives in
+`install_local_skill`'s taken-name check (`all_targets_already_linked`); the
+from-path manager method it was written for is deleted.
 
 Commit: 75d2452d.
 

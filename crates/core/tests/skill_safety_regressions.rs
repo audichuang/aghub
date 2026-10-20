@@ -2,7 +2,8 @@
 
 use aghub_core::manager::ConfigManager;
 use aghub_core::models::{AgentType, Skill};
-use aghub_core::{create_adapter, PATH_OVERRIDE_VARS};
+use aghub_core::skills::{install_local_skill, LocalSkillInstallRequest};
+use aghub_core::{create_adapter, WriteScope, PATH_OVERRIDE_VARS};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -247,13 +248,13 @@ fn project_store_symlink_cannot_redirect_from_path_install() {
 	let source = tmp.path().join("source/escaped");
 	write_skill(&source, "escaped");
 
-	let mut manager = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(&project),
-	);
-	manager.load().unwrap();
-	let result = manager.add_skill_from_path_universal(&source, None);
+	let result = install_local_skill(LocalSkillInstallRequest {
+		source_path: &source,
+		scope: WriteScope::project(&project),
+		target_agents: &[AgentType::Claude],
+		install_name: None,
+		lock_owner: None,
+	});
 	assert!(result.is_err(), "install escaped through project/.aghub");
 	assert!(
 		!outside.join("escaped").exists(),
@@ -398,12 +399,16 @@ fn global_store_symlink_keeps_install_update_and_delete_working() {
 	let source = tmp.path().join("source/dotted");
 	write_skill(&source, "dotted");
 
+	install_local_skill(LocalSkillInstallRequest {
+		source_path: &source,
+		scope: WriteScope::Global,
+		target_agents: &[AgentType::Claude],
+		install_name: None,
+		lock_owner: None,
+	})
+	.expect("global install through a user-linked store");
 	let mut claude =
 		ConfigManager::new(create_adapter(AgentType::Claude), true, None);
-	claude.load().unwrap();
-	claude
-		.add_skill_from_path_universal(&source, None)
-		.expect("global install through a user-linked store");
 	assert!(dotfiles.join("dotted/SKILL.md").is_file());
 
 	claude.load().unwrap();

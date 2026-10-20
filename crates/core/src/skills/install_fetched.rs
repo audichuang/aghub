@@ -371,7 +371,7 @@ pub struct MaterializedMaster {
 /// The ONE universal-install materializer shared by every install path: the
 /// fetched/desktop install ([`install_fetched_skill_and_lock`]) AND the local
 /// install ([`crate::skills::install_local::install_local_skill`]) / legacy
-/// `ConfigManager::add_skill_universal` / `add_skill_from_path_universal`.
+/// `ConfigManager::add_skill_universal`.
 /// Materializes the `.aghub` Master from
 /// `source_root` (copied only when absent) and links each `NeedsLink` agent.
 ///

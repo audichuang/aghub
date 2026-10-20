@@ -52,15 +52,15 @@ and `master_copy_skips_links_and_preserves_source_hash`.
 
 ## aghub install
 
-| Upstream concept                                   | aghub                                                                                                                      |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `runAdd` from a local path                         | `ConfigManager::add_skill_from_path_universal` (`crates/core/src/manager/skill.rs`); `add_skill_from_path` delegates to it |
-| `runAdd` from git (CLI `source sync`, API install) | `install_fetched_skill_and_lock` (`crates/core/src/skills/install_fetched.rs`)                                             |
-| `installSkillForAgent` symlink mode                | `install_universal` (`crates/core/src/skills/linker/mod.rs`)                                                               |
-| materialize Master                                 | `install_universal`: atomic `create_dir` claim, then `copy_dir_recursive`; `AlreadyExists` → reuse, no copy                |
-| link each agent                                    | `link_agents_to_canonical`                                                                                                 |
-| relative vs absolute link                          | `LinkTarget::{Relative,Absolute}` + `relative_path`; project → relative, global → absolute                                 |
-| symlink failure                                    | per-agent entry in `UniversalInstallReport.failed` — no copy fallback                                                      |
+| Upstream concept                                   | aghub                                                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `runAdd` from a local path                         | `install_local_skill` (`crates/core/src/skills/install_local.rs`); `transfer` / `reconcile` skill copies use it too |
+| `runAdd` from git (CLI `source sync`, API install) | `install_fetched_skill_and_lock` (`crates/core/src/skills/install_fetched.rs`)                                      |
+| `installSkillForAgent` symlink mode                | `install_universal` (`crates/core/src/skills/linker/mod.rs`)                                                        |
+| materialize Master                                 | `install_universal`: atomic `create_dir` claim, then `copy_dir_recursive`; `AlreadyExists` → reuse, no copy         |
+| link each agent                                    | `link_agents_to_canonical`                                                                                          |
+| relative vs absolute link                          | `LinkTarget::{Relative,Absolute}` + `relative_path`; project → relative, global → absolute                          |
+| symlink failure                                    | per-agent entry in `UniversalInstallReport.failed` — no copy fallback                                               |
 
 Master location is `master_store_dir(root)/<sanitize_name(name)>` (`.aghub`), not
 `.agents/skills`; which agents need a Referrer is `classify_agent` / `agent_link_need`

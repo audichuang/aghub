@@ -94,6 +94,7 @@ pub fn execute(
 						scope: manager.write_scope()?.clone(),
 						target_agents: &[agent_type],
 						install_name: name.as_deref(),
+						lock_owner: None,
 					},
 				)?;
 				let skill = added.skill;

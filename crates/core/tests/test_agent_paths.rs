@@ -498,6 +498,25 @@ fn write_import_skill_with_resources(dir: &Path, name: &str, body: &str) {
 	std::fs::write(dir.join("assets/logo.txt"), "logo").unwrap();
 }
 
+fn local_install(
+	source: &std::path::Path,
+	project_root: &std::path::Path,
+	agent: aghub_core::AgentType,
+) -> Result<
+	aghub_core::skills::LocalSkillInstallReport,
+	aghub_core::errors::ConfigError,
+> {
+	aghub_core::skills::install_local_skill(
+		aghub_core::skills::LocalSkillInstallRequest {
+			source_path: source,
+			scope: aghub_core::WriteScope::project(project_root),
+			target_agents: &[agent],
+			install_name: None,
+			lock_owner: None,
+		},
+	)
+}
+
 #[test]
 fn skill_import_directory_preserves_body_and_resources() {
 	aghub_core::skills::agent_dirs::set_skills_path_override("claude", None);
@@ -511,13 +530,13 @@ fn skill_import_directory_preserves_body_and_resources() {
 		"# Real imported instructions",
 	);
 
-	let mut manager = aghub_core::ConfigManager::new(
-		aghub_core::create_adapter(aghub_core::AgentType::Claude),
-		false,
-		Some(&project_root),
-	);
-	manager.load().unwrap();
-	let imported = manager.add_skill_from_path(&source_dir).unwrap().skill;
+	let imported = local_install(
+		&source_dir,
+		&project_root,
+		aghub_core::AgentType::Claude,
+	)
+	.unwrap()
+	.skill;
 
 	assert_eq!(imported.name, "imported-skill");
 	assert!(imported
@@ -558,7 +577,7 @@ fn skill_import_directory_preserves_body_and_resources() {
 // Unsupported) is a preflight HARD error — the add must not soft-succeed and
 // record a dangling config entry against a never-written Master.
 #[test]
-fn add_skill_from_path_unsupported_scope_errors_and_writes_nothing() {
+fn install_local_unsupported_scope_errors_and_writes_nothing() {
 	aghub_core::skills::agent_dirs::set_skills_path_override("hermes", None);
 	let temp = tempfile::tempdir().unwrap();
 	let project_root = temp.path().join("project");
@@ -566,13 +585,12 @@ fn add_skill_from_path_unsupported_scope_errors_and_writes_nothing() {
 	let source_dir = temp.path().join("source/orphan-skill");
 	write_import_skill_with_resources(&source_dir, "orphan-skill", "# body");
 
-	let mut manager = aghub_core::ConfigManager::new(
-		aghub_core::create_adapter(aghub_core::AgentType::Hermes),
-		false,
-		Some(&project_root),
-	);
-	manager.load().unwrap();
-	let err = manager.add_skill_from_path(&source_dir).unwrap_err();
+	let err = local_install(
+		&source_dir,
+		&project_root,
+		aghub_core::AgentType::Hermes,
+	)
+	.unwrap_err();
 
 	let msg = err.to_string();
 	assert!(
@@ -609,16 +627,13 @@ fn skill_import_skill_md_file_copies_sibling_resources() {
 		"# Body from SKILL.md path",
 	);
 
-	let mut manager = aghub_core::ConfigManager::new(
-		aghub_core::create_adapter(aghub_core::AgentType::Claude),
-		false,
-		Some(&project_root),
-	);
-	manager.load().unwrap();
-	let imported = manager
-		.add_skill_from_path(&source_dir.join("SKILL.md"))
-		.unwrap()
-		.skill;
+	let imported = local_install(
+		&source_dir.join("SKILL.md"),
+		&project_root,
+		aghub_core::AgentType::Claude,
+	)
+	.unwrap()
+	.skill;
 
 	assert_eq!(imported.name, "md-skill");
 	let target_dir = project_root.join(".aghub/md-skill");

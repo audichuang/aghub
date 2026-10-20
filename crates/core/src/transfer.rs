@@ -937,6 +937,35 @@ fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
 	Ok(root)
 }
 
+/// One skill copy to ONE agent, through the same local install as `add --from`
+/// (adoption guard, lock entry, rollback). One agent per call so each batch row
+/// keeps its own outcome.
+///
+/// The source scope's lock owner rides along: in the same scope it re-asserts
+/// the owner already there (a regrant writes no lock at all), across scopes it
+/// keeps the copy's provenance. A source with no entry is recorded as `local`
+/// at its resolved path, i.e. the Master rather than the Referrer.
+/// See docs/history/core-transfer.md#transfer-and-reconcile-copies-share-the-local-install
+fn install_skill_copy(
+	skill_name: &str,
+	source_scope: &WriteScope,
+	source_root: &Path,
+	target: &InstallTarget,
+) -> Result<crate::skills::LocalSkillInstallReport> {
+	crate::skills::install_local_skill(
+		crate::skills::LocalSkillInstallRequest {
+			source_path: source_root,
+			scope: target.scope.clone(),
+			target_agents: std::slice::from_ref(&target.agent),
+			install_name: None,
+			lock_owner: crate::skills::adoption::skill_lock_source(
+				skill_name,
+				source_scope,
+			),
+		},
+	)
+}
+
 fn skill_target_dir(target: &InstallTarget) -> Result<PathBuf> {
 	let adapter = create_adapter(target.agent);
 	let dir = adapter.target_skills_dir(
@@ -1635,16 +1664,16 @@ pub fn transfer_skill(
 		|plan| skill_target_dir(&plan.target).map(|_| ()),
 		|plan| {
 			let outcome = (|| -> Result<bool> {
-				let mut manager = build_manager(&plan.target);
-				ensure_loaded(&mut manager)?;
-				// No pre-check: `add_skill_from_path` owns the already-present
-				// decision (`reconcile --add` uses the same call); a real
-				// foreign occupant is refused by
-				// `add_skill_from_path_universal`. Content is deliberately not
-				// compared: that is the documented `add_skill_from_path`
-				// contract, shared with `aghub add skill --from`.
+				// No pre-check: `install_local_skill` owns the already-present
+				// decision (`reconcile --add` uses the same call) and refuses a
+				// real foreign occupant.
 				// See docs/history/core-transfer.md#transfer-skill-pre-check-refused-genuine-no-ops
-				let added = manager.add_skill_from_path(&source_root)?;
+				let added = install_skill_copy(
+					&skill.name,
+					&source.scope,
+					&source_root,
+					&plan.target,
+				)?;
 				Ok(added.already_installed)
 			})();
 			log_operation_outcome(
@@ -2134,8 +2163,8 @@ pub fn reconcile_skill(
 			OperationAction::Copy => {
 				let outcome = (|| -> Result<bool> {
 					let target_scope = row.target.scope.resource_scope();
-					// ONE guard across check → write → rollback; the manager's
-					// own guard ends when `add_skill_from_path` returns.
+					// ONE guard across check → write → rollback; the install's
+					// own guard ends when `install_local_skill` returns.
 					// See crates/core/AGENTS.md "Mutation attribution".
 					let _copy_guard = crate::skills::lock::mutation_guard(
 						"reconcile skill copy",
@@ -2143,12 +2172,14 @@ pub fn reconcile_skill(
 						row.target.scope.project_root(),
 					)
 					.map_err(ConfigError::Io)?;
-					let mut manager = build_manager(&row.target);
-					ensure_loaded(&mut manager)?;
-					// `add_skill_from_path` owns the already-present decision;
+					// `install_local_skill` owns the already-present decision;
 					// `transfer_skill` defers to the same call.
-					let added =
-						manager.add_skill_from_path(&plan.source_root)?;
+					let added = install_skill_copy(
+						&plan.skill.name,
+						&source.scope,
+						&plan.source_root,
+						&row.target,
+					)?;
 
 					// When this reconcile also REMOVES, the copy must prove the
 					// source content landed. `wrote_master` is the only outcome
@@ -5685,7 +5716,7 @@ mod tests {
 		// This used to assert `failed_count == 1`, because `transfer_skill`
 		// carried its own `get_skill(..).is_some()` guard while
 		// `reconcile_skill --add` had none: the same operation, opposite
-		// verdicts. The guard is gone; `add_skill_from_path` decides, and it
+		// verdicts. The guard is gone; `install_local_skill` decides, and it
 		// still refuses a REAL foreign occupant (a same-named directory that is
 		// not a link to the Master).
 		assert_eq!(
@@ -5716,6 +5747,150 @@ mod tests {
 			Some("Existing skill"),
 			"an already-present transfer must not overwrite the destination"
 		);
+	}
+
+	/// A github-owned Universal skill on one agent, as `install_fetched`
+	/// leaves it: Master, a Claude Referrer and a well-formed lock entry.
+	#[cfg(unix)]
+	fn github_owned_master(master: &Path, claude_skills: &Path, name: &str) {
+		fs::create_dir_all(master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: owned\n---\n\n# {name}\n"),
+		)
+		.unwrap();
+		fs::create_dir_all(claude_skills).unwrap();
+		std::os::unix::fs::symlink(master, claude_skills.join(name)).unwrap();
+	}
+
+	#[cfg(unix)]
+	fn github_source() -> skill::InstallLockSource {
+		skill::InstallLockSource {
+			source: "owner/repo".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/owner/repo.git".to_string(),
+			ref_name: Some("main".to_string()),
+		}
+	}
+
+	/// The most common transfer — a github-installed skill granted to another
+	/// agent in the SAME scope — regrants the Master: it succeeds and leaves
+	/// the lock entry byte-identical. Run under both spellings of the project
+	/// root; the aliased one is the macOS `/var` -> `/private/var` shape, where
+	/// discovery's canonicalized source path and the root's own spelling differ.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_same_scope_regrant_keeps_the_lock_owner() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		for aliased in [false, true] {
+			let temp = tempdir().unwrap();
+			let real = temp.path().join("real");
+			fs::create_dir_all(&real).unwrap();
+			let root = if aliased {
+				let alias = temp.path().join("alias");
+				std::os::unix::fs::symlink(&real, &alias).unwrap();
+				alias
+			} else {
+				real.clone()
+			};
+			let master = real.join(".aghub/owned");
+			github_owned_master(&master, &real.join(".claude/skills"), "owned");
+			skill::write_project_install_lock(
+				"owned",
+				&github_source(),
+				Some("skills/owned/SKILL.md".to_string()),
+				&master,
+				&real,
+				Some("abc123".to_string()),
+			)
+			.unwrap();
+			let lock_before = fs::read(real.join("skills-lock.json")).unwrap();
+
+			let result = transfer_skill(
+				ResourceLocator {
+					agent: AgentType::Claude,
+					scope: WriteScope::project(root.clone()),
+					name: "owned".to_string(),
+				},
+				vec![InstallTarget {
+					agent: AgentType::Cursor,
+					scope: WriteScope::project(root.clone()),
+				}],
+			)
+			.unwrap();
+
+			assert_eq!(
+				result.failed_count(),
+				0,
+				"aliased={aliased}: {:?}",
+				result.results[0].error
+			);
+			assert_eq!(
+				fs::canonicalize(real.join(".cursor/skills/owned")).unwrap(),
+				fs::canonicalize(&master).unwrap(),
+				"aliased={aliased}: the grant must link the existing Master"
+			);
+			assert_eq!(
+				fs::read(real.join("skills-lock.json")).unwrap(),
+				lock_before,
+				"aliased={aliased}: a regrant must leave the owner untouched"
+			);
+		}
+	}
+
+	/// Global -> project carries the SOURCE scope's owner into the destination
+	/// lock, so `check` / `apply-update` still know where the copy came from.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_scope_carries_the_source_lock_owner() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let master = home.path().join(".aghub/owned");
+		github_owned_master(
+			&master,
+			&home.path().join(".claude/skills"),
+			"owned",
+		);
+		skill::write_global_install_lock(
+			"owned",
+			&github_source(),
+			Some("skills/owned/SKILL.md".to_string()),
+			&master,
+			Some("abc123".to_string()),
+		)
+		.unwrap();
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "owned".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		assert!(root.join(".aghub/owned/SKILL.md").is_file());
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		let entry = lock.skills.get("owned").expect("dest lock entry");
+		assert_eq!(entry.source, "owner/repo");
+		assert_eq!(entry.source_type, "github");
+		assert_eq!(entry.ref_name.as_deref(), Some("main"));
+		assert_eq!(entry.skill_path.as_deref(), Some("skills/owned/SKILL.md"));
+		assert_eq!(entry.ref_commit.as_deref(), Some("abc123"));
 	}
 
 	#[test]

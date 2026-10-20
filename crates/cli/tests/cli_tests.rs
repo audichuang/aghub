@@ -12796,7 +12796,7 @@ fn doctor_separates_orphan_masters_and_can_gate_on_issues() {
 /// paired `--remove` must not run.
 ///
 /// The data-loss path this pins: making `transfer` idempotent moved the
-/// already-present decision into `add_skill_from_path`, whose NativeReader
+/// already-present decision into the from-path install, whose NativeReader
 /// branch returned on the NAME alone. A Master-reading agent's read paths
 /// include its OWN private dir, so an unrelated `<own-dir>/<name>` matched, the
 /// copy reported success having written nothing, and
@@ -13063,7 +13063,9 @@ fn third_review_sibling_shapes_stay_fixed() {
 	// one byte of the source was written. The paired delete then removed the
 	// source. Strengthening `already_present`, or the staged gate, closes
 	// neither: the copy did not lie about being a no-op, it lied about having
-	// carried the content over.
+	// carried the content over. The copy now goes through the local install,
+	// whose adoption guard refuses the differing untracked Master before
+	// linking; `prove_content_landed` stays the backstop for a linked target.
 	let master = home.path().join(".aghub/collide2");
 	std::fs::create_dir_all(&master).unwrap();
 	std::fs::write(
@@ -13110,10 +13112,9 @@ fn third_review_sibling_shapes_stay_fixed() {
 	);
 	assert!(!out.status.success());
 	assert!(
-		String::from_utf8_lossy(&out.stdout)
-			.contains("did not carry the source content over")
-			|| String::from_utf8_lossy(&out.stderr)
-				.contains("did not carry the source content over"),
+		String::from_utf8_lossy(&out.stdout).contains(
+			"Pre-existing Master for skill 'collide2' has different content"
+		),
 		"the error must say WHY: stdout={} stderr={}",
 		String::from_utf8_lossy(&out.stdout),
 		String::from_utf8_lossy(&out.stderr)
@@ -13794,7 +13795,7 @@ fn a_delete_that_removed_nothing_does_not_report_success() {
 fn what_the_tool_reports_matches_what_is_on_disk() {
 	// --- (1) A refused copy must leave nothing behind.
 	//
-	// The content-landing guard returns Err AFTER `add_skill_from_path` has
+	// The content-landing guard returns Err AFTER `install_local_skill` has
 	// already linked the target to the master, so `failed_count: 2` plus
 	// "nothing was removed" read as "no state changed" while the target had
 	// gained a skill it never had, holding content nobody asked to copy.

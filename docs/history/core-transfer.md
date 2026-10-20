@@ -159,8 +159,10 @@ two genuine no-ops — the target already reads the Master, or already holds a
 valid link to it — while `reconcile --add` accepted exactly those. Same
 operation, opposite verdict.
 
-Rule: no pre-check; `add_skill_from_path` owns the already-present decision,
-and a real foreign occupant is refused by `add_skill_from_path_universal`.
+Rule: no pre-check; `install_local_skill` owns the already-present decision
+and refuses a real foreign occupant. (Written for `add_skill_from_path`, since
+deleted — see
+[below](#transfer-and-reconcile-copies-share-the-local-install).)
 
 Test: `transfer_skill_already_present_is_an_idempotent_success`.
 
@@ -373,7 +375,7 @@ Follow-up (review): stepping up from any `skill.md` name made the resolver
 non-idempotent on a skill FOLDER literally named `skill.md` (`sanitize_name`
 keeps `.`, so the name is reachable). Callers that already hold a root —
 `install_local` on a folder, transfer re-resolving `plan.source_root` inside
-`add_skill_from_path` and `prove_content_landed`, `sources.rs` hashing scanned
+the copy install and `prove_content_landed`, `sources.rs` hashing scanned
 dirs — then copied or hashed the PARENT, and a reconcile move could delete the
 real source after a "proven" copy of the wrong tree. `skill_source_root` now
 steps up only when the path is not an existing directory. Residual: a MISSING
@@ -384,3 +386,37 @@ Tests: `install_local_skill_from_lowercase_skill_md_installs_its_folder`,
 `skill_source_root_resolves_lowercase_skill_md_to_parent`,
 `skill_source_root_keeps_directory_named_like_a_marker`,
 `install_local_skill_from_folder_named_skill_md_keeps_that_folder`.
+
+## Transfer and reconcile copies share the local install
+
+`transfer skill` and `reconcile skill --add` copied through
+`ConfigManager::add_skill_from_path`, a second local install beside
+`install_local_skill` (`add --from`, the API import). It wrote no lock entry,
+ran no adoption guard, rolled back differently, and silently REUSED a
+pre-existing same-named Master whose content differed. Nobody chose that
+difference. A transferred skill was invisible to `check` / `apply-update`, and
+a plain transfer could grant a target stale content without a word
+(`prove_content_landed` guards only a reconcile that also removes).
+
+Rule: every skill copy goes through `install_local_skill`, one agent per call
+(so batch rows keep their own outcome), and `add_skill_from_path{,_universal}`
+are deleted. The trap in a naive reroute: that install records the local
+path as the owner, and the destination lock already names `github:…` for the
+common same-scope grant. Under a root spelled through a symlink (macOS `/var`)
+the source path (discovery canonicalizes a Referrer to its Master) no longer
+equals the Master's spelling, so the guard's regrant shortcut misses and the
+grant is refused "already owned". So the copy carries the SOURCE scope's lock
+owner (`LocalSkillInstallRequest::lock_owner`): in the same scope it is the
+owner already there and a regrant writes no lock; across scopes it keeps the
+provenance (`source`, type, ref, `skillPath`, `refCommit`). No source entry
+records a `local` owner at the Master path.
+
+Behaviour change: a destination Master with different content and no lock
+owner is now REFUSED ("different content") instead of reused, and a copy
+with a carried remote owner refuses a destination Master whose hash differs.
+
+Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
+`transfer_skill_cross_scope_carries_the_source_lock_owner`; the reuse pin
+`add_skill_from_path_universal_does_not_overwrite_existing_canonical` was
+deleted (the refusal is pinned by
+`install_local_skill_refuses_to_adopt_untracked_master_when_content_differs`).

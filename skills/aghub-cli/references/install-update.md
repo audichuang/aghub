@@ -50,7 +50,10 @@ a local `add --from` skill, which `source sync` cannot grant — `transfer skill
 --from-agent <LINKED_AGENT> --name <NAME> --to <AGENT>` (repeat `--to`) links
 the EXISTING Master. It writes at once (no preview), never fetches (so the
 outdated trap does not apply), and grants the Master as-is, stale content
-included.
+included. Across scopes (`-g` source, `-p` target or the reverse) it copies
+the Master and records the source's lock owner in the target's lock; it
+refuses when the target scope already holds a same-named Master with
+different content or a different owner.
 
 ## Publish an edit to a skill you author
 
