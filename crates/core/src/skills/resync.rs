@@ -473,6 +473,7 @@ mod tests {
 
 	fn lock_entry() -> skill::LocalSkillLockEntry {
 		skill::LocalSkillLockEntry {
+			extra: Default::default(),
 			source_url: None,
 			source: "owner/repo".to_string(),
 			ref_name: Some("main".to_string()),
@@ -730,6 +731,7 @@ mod tests {
 		let global_master = home.join(".aghub/sync-me");
 		write_skill(&global_master, "sync-me", "global");
 		let mut global_entry = skill::SkillLockEntry {
+			extra: Default::default(),
 			source: "o/r".into(),
 			source_type: "github".into(),
 			source_url: "https://github.com/o/r".into(),

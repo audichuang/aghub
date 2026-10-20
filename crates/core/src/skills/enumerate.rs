@@ -307,6 +307,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				key,
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					ref_commit: None,
 					source: "o/r".to_string(),

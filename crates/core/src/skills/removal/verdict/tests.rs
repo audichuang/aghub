@@ -77,6 +77,7 @@ fn write_test_lock_entry(name: &str) {
 
 fn write_test_project_lock_entry(project_root: &Path, name: &str) {
 	let entry = skill::LocalSkillLockEntry {
+		extra: Default::default(),
 		source: "owner/repo".to_string(),
 		ref_name: None,
 		source_type: "github".to_string(),

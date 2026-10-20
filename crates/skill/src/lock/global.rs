@@ -34,6 +34,9 @@ pub fn add_skill_to_lock(
 			if entry.plugin_name.is_none() {
 				entry.plugin_name = existing.plugin_name.clone();
 			}
+			// Same for fields aghub does not model at all (another installer's
+			// pins, provider data): keep them, letting the caller's win on a clash.
+			entry.extra = merge_extra(&existing.extra, entry.extra);
 		} else {
 			entry.installed_at = now.clone();
 		}
@@ -41,6 +44,17 @@ pub fn add_skill_to_lock(
 
 		lock.skills.insert(skill_name.to_string(), entry)
 	})
+}
+
+/// `existing`'s unmodelled fields overlaid with `incoming`'s — what a rewrite
+/// of an entry keeps of the one it replaces.
+pub(crate) fn merge_extra(
+	existing: &BTreeMap<String, serde_json::Value>,
+	incoming: BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+	let mut merged = existing.clone();
+	merged.extend(incoming);
+	merged
 }
 
 /// Remove a skill from the lock file.
@@ -152,6 +166,7 @@ mod tests {
 
 	fn test_entry() -> SkillLockEntry {
 		SkillLockEntry {
+			extra: Default::default(),
 			source: "owner/repo".to_string(),
 			source_type: "github".to_string(),
 			source_url: "https://github.com/owner/repo".to_string(),
@@ -164,6 +179,36 @@ mod tests {
 			content_hash: None,
 			ref_commit: None,
 		}
+	}
+
+	/// Another installer's fields — at the root, in `dismissed`, on an entry
+	/// aghub never touches and on the entry it rewrites — survive an aghub write.
+	#[test]
+	fn add_skill_to_lock_keeps_unmodelled_fields() {
+		let _guard = TestLockGuard::new();
+		let path = get_skill_lock_path();
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		let mut raw = serde_json::to_value(SkillLockFile::new()).unwrap();
+		raw["providerSetting"] = serde_json::json!({"enabled": true});
+		raw["dismissed"] = serde_json::json!({"otherPrompt": true});
+		raw["skills"]["external"] = serde_json::to_value(test_entry()).unwrap();
+		raw["skills"]["external"]["providerData"] = serde_json::json!([1, 2]);
+		raw["skills"]["mine"] = serde_json::to_value(test_entry()).unwrap();
+		raw["skills"]["mine"]["pinnedRef"] = "v1.2.3".into();
+		raw["skills"]["mine"]["providerData"] = "old".into();
+		std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+		let mut incoming = test_entry();
+		incoming.extra.insert("providerData".into(), "new".into());
+		add_skill_to_lock("mine", incoming).unwrap();
+
+		let persisted: serde_json::Value =
+			serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+		assert_eq!(persisted["providerSetting"], raw["providerSetting"]);
+		assert_eq!(persisted["dismissed"], raw["dismissed"]);
+		assert_eq!(persisted["skills"]["external"], raw["skills"]["external"]);
+		assert_eq!(persisted["skills"]["mine"]["pinnedRef"], "v1.2.3");
+		assert_eq!(persisted["skills"]["mine"]["providerData"], "new");
 	}
 
 	#[test]

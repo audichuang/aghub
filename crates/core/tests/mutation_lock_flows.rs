@@ -85,6 +85,7 @@ fn skill_md(name: &str) -> String {
 
 fn entry() -> skill::LocalSkillLockEntry {
 	skill::LocalSkillLockEntry {
+		extra: Default::default(),
 		source: "owner/repo".to_string(),
 		source_url: None,
 		ref_name: Some("main".to_string()),

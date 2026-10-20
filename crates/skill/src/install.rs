@@ -205,6 +205,7 @@ pub fn write_global_install_lock_hashed(
 	global::add_skill_to_lock(
 		skill_name,
 		SkillLockEntry {
+			extra: Default::default(),
 			source: source.source.clone(),
 			source_type: source.source_type.clone(),
 			source_url: source.source_url.clone(),
@@ -286,6 +287,7 @@ pub fn write_project_install_lock_hashed(
 	local::add_skill_to_local_lock(
 		skill_name,
 		local::LocalSkillLockEntry {
+			extra: Default::default(),
 			ref_commit,
 			source: source.source.clone(),
 			ref_name: source.ref_name.clone(),

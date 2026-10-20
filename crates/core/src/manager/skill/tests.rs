@@ -2324,6 +2324,7 @@ use crate::skills::prune::test_lock::GlobalLockGuard;
 
 fn locked_entry() -> skill::SkillLockEntry {
 	skill::SkillLockEntry {
+		extra: Default::default(),
 		source: "o/r".to_string(),
 		source_type: "github".to_string(),
 		source_url: "https://github.com/o/r".to_string(),
@@ -2652,6 +2653,7 @@ fn remove_skill_planned_project_scope_without_root_leaves_prune_notrun() {
 
 fn local_entry() -> skill::lock::local::LocalSkillLockEntry {
 	skill::lock::local::LocalSkillLockEntry {
+		extra: Default::default(),
 		source_url: None,
 		source: "o/r".to_string(),
 		ref_name: None,

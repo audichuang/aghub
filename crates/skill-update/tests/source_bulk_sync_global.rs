@@ -107,6 +107,7 @@ fn write_skill(directory: &Path, name: &str, body: &str) {
 
 fn global_entry(source_url: &str, skill_path: &str) -> skill::SkillLockEntry {
 	skill::SkillLockEntry {
+		extra: Default::default(),
 		source: "owner/repo".to_string(),
 		source_type: "github".to_string(),
 		source_url: source_url.to_string(),
@@ -128,6 +129,7 @@ fn project_entry(
 	skill_path: &str,
 ) -> skill::LocalSkillLockEntry {
 	skill::LocalSkillLockEntry {
+		extra: Default::default(),
 		source: source.to_string(),
 		ref_name: Some("main".to_string()),
 		source_type: source_type.to_string(),

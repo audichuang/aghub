@@ -450,6 +450,7 @@ mod tests {
 
 	fn global_entry() -> skill::SkillLockEntry {
 		skill::SkillLockEntry {
+			extra: Default::default(),
 			source: "o/r".to_string(),
 			source_type: "github".to_string(),
 			source_url: "https://github.com/o/r".to_string(),
@@ -645,6 +646,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"proj-only",
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "o/r".to_string(),
@@ -670,6 +672,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"proj-gone",
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "o/r".to_string(),

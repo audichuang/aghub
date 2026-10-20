@@ -73,6 +73,15 @@ empty — see `CONTEXT.md`) and `refCommit` in both locks (project
 `computedHash` is npx's own field, not an extension). Pinned by
 `crates/skill/tests/npx_interop.rs` and the serde tests in `lock/{types,local}.rs`.
 
+The reverse direction: a key aghub does NOT model (another installer's
+`pinnedRef`, provider data, a newer schema's field) lands in the `extra`
+`#[serde(flatten)]` map on every lock struct and is written back unchanged.
+`add_skill_to_lock` / `add_skill_to_local_lock` merge the replaced entry's
+`extra` under the incoming one, as they do for `pluginName`. A global →
+project copy builds a fresh entry and starts with an empty `extra` on purpose:
+the project lock gets committed, and a field aghub cannot read could hold a
+token.
+
 ## Aligned with upstream — keep aligned
 
 - **Master materialization excludes** — `copy_dir_recursive`

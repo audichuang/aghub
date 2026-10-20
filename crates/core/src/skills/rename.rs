@@ -946,6 +946,7 @@ mod tests {
 		skill::lock::local::add_skill_to_local_lock(
 			"old-skill",
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source: "o/r".to_string(),
 				source_type: "gitlab".to_string(),
 				source_url: None,
@@ -979,6 +980,7 @@ mod tests {
 		skill::lock::global::add_skill_to_lock(
 			"old-skill",
 			skill::SkillLockEntry {
+				extra: Default::default(),
 				source: "o/r".to_string(),
 				source_type: "gitlab".to_string(),
 				source_url: String::new(),
@@ -1305,6 +1307,7 @@ mod tests {
 			lock.skills.insert(
 				"old-skill".to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
 					source_type: "github".to_string(),

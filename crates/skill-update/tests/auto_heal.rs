@@ -59,6 +59,7 @@ fn with_isolated_env<T>(f: impl FnOnce(&Path) -> T) -> T {
 
 fn global_entry() -> skill::SkillLockEntry {
 	skill::SkillLockEntry {
+		extra: Default::default(),
 		source: "owner/repo".to_string(),
 		source_type: "github".to_string(),
 		source_url: "https://github.com/owner/repo".to_string(),
@@ -372,6 +373,7 @@ fn auto_heal_writes_project_computed_hash_only() {
 		local.skills.insert(
 			"legacy".into(),
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "owner/repo".to_string(),

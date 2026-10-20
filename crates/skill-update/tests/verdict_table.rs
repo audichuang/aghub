@@ -272,6 +272,7 @@ fn lock_with(stored: String) -> skill::lock::local::LocalSkillLockFile {
 	lock.skills.insert(
 		"s".to_string(),
 		skill::LocalSkillLockEntry {
+			extra: Default::default(),
 			source: "owner/repo".to_string(),
 			source_type: "github".to_string(),
 			source_url: None,

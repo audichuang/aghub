@@ -107,6 +107,7 @@ impl TokenResolver for NoToken {
 
 fn lock_entry(skill_path: &str) -> skill::LocalSkillLockEntry {
 	skill::LocalSkillLockEntry {
+		extra: Default::default(),
 		source_url: None,
 		source: "owner/repo".to_string(),
 		ref_name: Some("main".to_string()),
@@ -388,6 +389,7 @@ fn rename_refuses_an_ambiguous_url_less_gitlab_entry_before_the_fetch() {
 		skill::lock::global::add_skill_to_lock(
 			"old-skill",
 			skill::SkillLockEntry {
+				extra: Default::default(),
 				source: "group/sub/repo".to_string(),
 				source_type: "gitlab".to_string(),
 				source_url: String::new(),

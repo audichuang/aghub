@@ -389,6 +389,7 @@ mod tests {
 	#[test]
 	fn a_blank_global_url_still_refuses_a_different_repo() {
 		let entry = skill::SkillLockEntry {
+			extra: Default::default(),
 			source: "good/repo".to_string(),
 			source_type: "github".to_string(),
 			source_url: String::new(),
@@ -487,6 +488,7 @@ mod tests {
 	fn a_gitlab_shorthand_entry_resolves_to_gitlab() {
 		let entry =
 			EntryIdentity::of_project_entry(&skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				source: "group/repo".to_string(),
 				ref_name: Some("main".to_string()),
@@ -512,6 +514,7 @@ mod tests {
 		for url in ["", "   "] {
 			let entry =
 				EntryIdentity::of_project_entry(&skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: Some(url.to_string()),
 					source: "group/repo".to_string(),
 					ref_name: Some("main".to_string()),

@@ -390,6 +390,7 @@ mod tests {
 
 	fn global_entry(source: &str, skill_path: &str) -> skill::SkillLockEntry {
 		skill::SkillLockEntry {
+			extra: Default::default(),
 			source: source.to_string(),
 			source_type: "github".to_string(),
 			source_url: format!("https://github.com/{source}.git"),
@@ -478,6 +479,7 @@ mod tests {
 		project_lock.skills.insert(
 			"alpha".to_string(),
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source: "acme/skills".to_string(),
 				source_url: Some(
 					"https://forge-b.example/acme/skills".to_string(),

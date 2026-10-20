@@ -303,6 +303,7 @@ mod tests {
 
 	fn sample_entry() -> super::super::types::SkillLockEntry {
 		super::super::types::SkillLockEntry {
+			extra: Default::default(),
 			source: "o/r".to_string(),
 			source_type: "github".to_string(),
 			source_url: "https://github.com/o/r".to_string(),

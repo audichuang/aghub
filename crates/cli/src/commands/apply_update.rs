@@ -397,6 +397,7 @@ mod tests {
 
 	fn global_entry() -> skill::SkillLockEntry {
 		skill::SkillLockEntry {
+			extra: Default::default(),
 			source: "owner/repo".to_string(),
 			source_type: "github".to_string(),
 			source_url: "https://github.com/owner/repo".to_string(),
@@ -452,6 +453,7 @@ mod tests {
 		skill::lock::local::add_skill_to_local_lock(
 			"legacy",
 			skill::lock::local::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				source: "owner/repo".to_string(),
 				ref_name: Some("main".to_string()),

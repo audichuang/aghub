@@ -83,6 +83,7 @@ fn locked_multi_resync_fetches_one_source_and_updates_every_skill() {
 		skill::add_skill_to_local_lock(
 			name,
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: Some(
 					"https://git.example/owner/repo.git".to_string(),
 				),
@@ -166,6 +167,7 @@ fn locked_multi_resync_fetches_each_source_ref_once_and_preserves_order() {
 		skill::add_skill_to_local_lock(
 			name,
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: Some(
 					"https://git.example/owner/repo.git".to_string(),
 				),
@@ -217,6 +219,7 @@ fn locked(project: &Path, name: &str, source: &str, source_url: Option<&str>) {
 	skill::add_skill_to_local_lock(
 		name,
 		skill::LocalSkillLockEntry {
+			extra: Default::default(),
 			source_url: source_url.map(str::to_string),
 			source: source.to_string(),
 			ref_name: Some("main".to_string()),
@@ -434,6 +437,7 @@ fn a_provider_typed_entry_applies_from_the_forge_the_row_advertises() {
 	skill::add_skill_to_local_lock(
 		"alpha",
 		skill::LocalSkillLockEntry {
+			extra: Default::default(),
 			source_url: None,
 			source: "group/repo".to_string(),
 			ref_name: Some("main".to_string()),

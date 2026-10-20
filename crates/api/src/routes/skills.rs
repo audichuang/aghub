@@ -4356,6 +4356,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					ref_commit: None,
 					source: "owner/repo".to_string(),
@@ -4506,6 +4507,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					ref_commit: None,
 					source: "owner/repo".to_string(),
@@ -4580,6 +4582,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					ref_commit: None,
 					source: "owner/repo".to_string(),
@@ -4673,6 +4676,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					ref_commit: None,
 					source: "owner/repo".to_string(),
@@ -4767,6 +4771,7 @@ mod tests {
 			skill::lock::global::add_skill_to_lock(
 				"sync-me",
 				skill::SkillLockEntry {
+					extra: Default::default(),
 					source: "owner/repo".to_string(),
 					source_type: "github".to_string(),
 					source_url: String::new(),
@@ -4864,6 +4869,7 @@ mod tests {
 			skill::lock::global::add_skill_to_lock(
 				"sync-me",
 				skill::SkillLockEntry {
+					extra: Default::default(),
 					source: "group/sub/repo".to_string(),
 					source_type: "gitlab".to_string(),
 					source_url: String::new(),
@@ -4979,6 +4985,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					ref_commit: None,
 					source: "owner/repo".to_string(),
@@ -5096,6 +5103,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					ref_commit: None,
 					source: "owner/repo".to_string(),
@@ -5750,6 +5758,7 @@ mod tests {
 			lock.skills.insert(
 				"other".to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "o/r".to_string(),
 					source_url: Some("https://github.com/o/r".to_string()),
 					source_type: "github".to_string(),
@@ -5843,6 +5852,7 @@ mod tests {
 			lock.skills.insert(
 				"other".to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "o/r".to_string(),
 					source_url: Some("https://github.com/o/r".to_string()),
 					source_type: "github".to_string(),
@@ -6029,6 +6039,7 @@ mod tests {
 			lock.skills.insert(
 				"other".to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "o/r".to_string(),
 					source_url: Some("https://github.com/o/r".to_string()),
 					source_type: "github".to_string(),
@@ -6142,6 +6153,7 @@ mod tests {
 			lock.skills.insert(
 				"other".to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "o/r".to_string(),
 					source_url: Some("https://github.com/o/r".to_string()),
 					source_type: "github".to_string(),
@@ -6236,6 +6248,7 @@ mod tests {
 			lock.skills.insert(
 				"other".to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "o/r".to_string(),
 					source_url: Some("https://github.com/o/r".to_string()),
 					source_type: "github".to_string(),
@@ -6248,6 +6261,7 @@ mod tests {
 			lock.skills.insert(
 				"alpha".to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "o/r".to_string(),
 					source_url: Some("https://github.com/o/r".to_string()),
 					source_type: "github".to_string(),

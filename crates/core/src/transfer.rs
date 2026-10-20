@@ -5905,6 +5905,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"owned",
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "o/r".to_string(),
@@ -6154,6 +6155,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			name,
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "o/r".to_string(),
@@ -6211,6 +6213,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"py",
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "owner/repo".to_string(),
@@ -6645,6 +6648,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"tok",
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: Some(tokened.to_string()),
 				ref_commit: None,
 				source: tokened.to_string(),

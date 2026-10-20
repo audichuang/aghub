@@ -71,6 +71,11 @@ pub struct LocalSkillLockEntry {
 		default
 	)]
 	pub source_url: Option<String>,
+	/// Fields this struct does not model — another installer's (npx `skills`,
+	/// `gh skill`) or a newer schema's. Carried through every rewrite so an
+	/// aghub write never drops metadata it only read.
+	#[serde(flatten)]
+	pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl LocalSkillLockEntry {
@@ -97,6 +102,11 @@ pub struct LocalSkillLockFile {
 	pub version: u32,
 	/// Map of skill name to its lock entry (sorted alphabetically)
 	pub skills: BTreeMap<String, LocalSkillLockEntry>,
+	/// Fields this struct does not model — another installer's (npx `skills`,
+	/// `gh skill`) or a newer schema's. Carried through every rewrite so an
+	/// aghub write never drops metadata it only read.
+	#[serde(flatten)]
+	pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for LocalSkillLockFile {
@@ -104,6 +114,7 @@ impl Default for LocalSkillLockFile {
 		Self {
 			version: CURRENT_VERSION,
 			skills: BTreeMap::new(),
+			extra: BTreeMap::new(),
 		}
 	}
 }
@@ -254,10 +265,14 @@ pub fn modify_local_lock_changed<R>(
 /// See [`crate::lock::global::add_skill_to_lock`] for why the receipt matters.
 pub fn add_skill_to_local_lock(
 	skill_name: &str,
-	entry: LocalSkillLockEntry,
+	mut entry: LocalSkillLockEntry,
 	cwd: Option<&Path>,
 ) -> std::io::Result<Option<LocalSkillLockEntry>> {
 	modify_local_lock(cwd, |lock| {
+		if let Some(existing) = lock.skills.get(skill_name) {
+			entry.extra =
+				super::global::merge_extra(&existing.extra, entry.extra);
+		}
 		lock.skills.insert(skill_name.to_string(), entry)
 	})
 }
@@ -314,6 +329,7 @@ mod tests {
 
 	fn sample_local_entry() -> LocalSkillLockEntry {
 		LocalSkillLockEntry {
+			extra: Default::default(),
 			source_url: None,
 			ref_commit: None,
 			source: "org/repo".to_string(),
@@ -322,6 +338,34 @@ mod tests {
 			computed_hash: "abc123".to_string(),
 			skill_path: None,
 		}
+	}
+
+	/// Mirror of the global `add_skill_to_lock_keeps_unmodelled_fields`.
+	#[test]
+	fn add_skill_to_local_lock_keeps_unmodelled_fields() {
+		let dir = TempDir::new().unwrap();
+		let path = get_local_lock_path(Some(dir.path()));
+		let mut raw = serde_json::to_value(LocalSkillLockFile::new()).unwrap();
+		raw["providerSetting"] = serde_json::json!({"enabled": true});
+		raw["skills"]["external"] =
+			serde_json::to_value(sample_local_entry()).unwrap();
+		raw["skills"]["external"]["providerData"] = serde_json::json!([1, 2]);
+		raw["skills"]["mine"] =
+			serde_json::to_value(sample_local_entry()).unwrap();
+		raw["skills"]["mine"]["pinnedRef"] = "v1.2.3".into();
+		fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+		// A real change, or `modify_local_lock` skips the write entirely.
+		let mut incoming = sample_local_entry();
+		incoming.computed_hash = "def456".to_string();
+		add_skill_to_local_lock("mine", incoming, Some(dir.path())).unwrap();
+
+		let persisted: serde_json::Value =
+			serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+		assert_eq!(persisted["providerSetting"], raw["providerSetting"]);
+		assert_eq!(persisted["skills"]["external"], raw["skills"]["external"]);
+		assert_eq!(persisted["skills"]["mine"]["computedHash"], "def456");
+		assert_eq!(persisted["skills"]["mine"]["pinnedRef"], "v1.2.3");
 	}
 
 	#[test]
@@ -363,6 +407,7 @@ mod tests {
 	#[test]
 	fn local_entry_key_order_matches_npx() {
 		let entry = LocalSkillLockEntry {
+			extra: Default::default(),
 			source_url: None,
 			source: "org/repo".to_string(),
 			ref_name: Some("main".to_string()),
@@ -491,6 +536,7 @@ mod tests {
 		// What an unresolved merge of two branches actually leaves behind.
 		write_local_lock(
 			&LocalSkillLockFile {
+				extra: Default::default(),
 				version: CURRENT_VERSION,
 				skills: [("keep-me".to_string(), sample_local_entry())]
 					.into_iter()
@@ -533,6 +579,7 @@ mod tests {
 		let path = dir.path().join("skills-lock.json");
 		write_local_lock(
 			&LocalSkillLockFile {
+				extra: Default::default(),
 				version: CURRENT_VERSION,
 				skills: [("keep-me".to_string(), sample_local_entry())]
 					.into_iter()
@@ -578,6 +625,7 @@ mod tests {
 		let path = dir.path().join("skills-lock.json");
 		write_local_lock(
 			&LocalSkillLockFile {
+				extra: Default::default(),
 				version: CURRENT_VERSION,
 				skills: [("keep-me".to_string(), sample_local_entry())]
 					.into_iter()
@@ -729,6 +777,7 @@ mod tests {
 		lock.skills.insert(
 			"zebra-skill".to_string(),
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/z".to_string(),
@@ -741,6 +790,7 @@ mod tests {
 		lock.skills.insert(
 			"alpha-skill".to_string(),
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/a".to_string(),
@@ -753,6 +803,7 @@ mod tests {
 		lock.skills.insert(
 			"middle-skill".to_string(),
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/m".to_string(),
@@ -781,6 +832,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"new-skill",
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/repo".to_string(),
@@ -805,6 +857,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/repo".to_string(),
@@ -820,6 +873,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/repo".to_string(),
@@ -845,6 +899,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-a",
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/a".to_string(),
@@ -860,6 +915,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-b",
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/b".to_string(),
@@ -884,6 +940,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/repo".to_string(),
@@ -983,6 +1040,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-a",
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/a".to_string(),
@@ -1004,6 +1062,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-b",
 			LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				ref_commit: None,
 				source: "org/b".to_string(),

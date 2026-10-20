@@ -98,6 +98,7 @@ impl Fetcher for DirFetcher {
 
 fn sync_me_entry() -> skill::LocalSkillLockEntry {
 	skill::LocalSkillLockEntry {
+		extra: Default::default(),
 		source_url: None,
 		source: "owner/repo".to_string(),
 		ref_name: Some("main".to_string()),

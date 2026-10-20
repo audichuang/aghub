@@ -454,6 +454,7 @@ mod tests {
 		lock.skills.insert(
 			"other".to_string(),
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source: "o/r".to_string(),
 				source_url: Some("https://github.com/o/r".to_string()),
 				source_type: "github".to_string(),

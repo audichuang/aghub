@@ -372,6 +372,7 @@ mod tests {
 		lock.skills.insert(
 			"legacy".to_string(),
 			skill::SkillLockEntry {
+				extra: Default::default(),
 				source: "owner/repo".to_string(),
 				source_type: "github".to_string(),
 				source_url: "https://github.com/owner/repo".to_string(),
@@ -428,6 +429,7 @@ mod tests {
 		lock.skills.insert(
 			"legacy".to_string(),
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source: "owner/repo".to_string(),
 				source_type: "github".to_string(),
 				source_url: None,
@@ -476,6 +478,7 @@ mod tests {
 		let project = tempfile::tempdir().unwrap();
 		write_skill(&project.path().join(".claude/skills/locked"), "locked");
 		let entry = skill::LocalSkillLockEntry {
+			extra: Default::default(),
 			source: "owner/repo".to_string(),
 			source_type: "github".to_string(),
 			source_url: None,

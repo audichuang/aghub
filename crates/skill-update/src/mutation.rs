@@ -1021,6 +1021,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
@@ -1135,6 +1136,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				name,
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: Some(
 						"https://git.example/owner/repo.git".to_string(),
 					),
@@ -1227,6 +1229,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: Some(
 						"https://git.example/owner/repo.git".to_string(),
 					),

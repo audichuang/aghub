@@ -831,6 +831,7 @@ fn legacy_remote_lock_without_host_identity_is_not_reassigned() {
 	skill::add_skill_to_local_lock(
 		"alpha",
 		skill::LocalSkillLockEntry {
+			extra: Default::default(),
 			source: "owner/repo".to_string(),
 			ref_name: Some("main".to_string()),
 			source_type: "git".to_string(),

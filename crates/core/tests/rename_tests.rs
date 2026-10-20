@@ -111,6 +111,7 @@ fn seed_global_lock(name: &str, skill_path: &str) {
 	lock.skills.insert(
 		name.to_string(),
 		skill::SkillLockEntry {
+			extra: Default::default(),
 			source: "owner/repo".to_string(),
 			source_type: "github".to_string(),
 			source_url: "https://github.com/owner/repo".to_string(),

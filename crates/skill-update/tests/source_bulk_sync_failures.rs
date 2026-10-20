@@ -113,6 +113,7 @@ fn write_skill(directory: &Path, name: &str, body: &str) {
 
 fn local_entry(source: &str, skill_path: &str) -> skill::LocalSkillLockEntry {
 	skill::LocalSkillLockEntry {
+		extra: Default::default(),
 		source_url: None,
 		source: source.to_string(),
 		ref_name: Some("main".to_string()),

@@ -1609,6 +1609,7 @@ mod classify_tests {
 		lock.skills.insert(
 			"cache-test".into(),
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source: "owner/repo".into(),
 				source_url: None,
 				source_type: "github".into(),
@@ -2294,6 +2295,7 @@ mod diff_tests {
 
 	fn ref_pinned_entry(ref_name: &str) -> skill::LocalSkillLockEntry {
 		skill::LocalSkillLockEntry {
+			extra: Default::default(),
 			source: "owner/repo".to_string(),
 			ref_name: Some(ref_name.to_string()),
 			source_type: "github".to_string(),
@@ -2634,6 +2636,7 @@ mod diff_tests {
 			lock.skills.insert(
 				name.to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "owner/repo".to_string(),
 					ref_name: Some(ref_name.to_string()),
 					source_type: "github".to_string(),
@@ -2732,6 +2735,7 @@ mod diff_tests {
 			lock.skills.insert(
 				name.to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "owner/repo".to_string(),
 					ref_name: Some(ref_name.to_string()),
 					source_type: "github".to_string(),
@@ -2793,6 +2797,7 @@ mod diff_tests {
 		lock.skills.insert(
 			"s".to_string(),
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				source: source.to_string(),
 				ref_name: ref_name.map(str::to_string),
@@ -2916,6 +2921,7 @@ mod diff_tests {
 			lock.skills.insert(
 				name.to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source_url: None,
 					source: source.to_string(),
 					ref_name: None,
@@ -3108,6 +3114,7 @@ mod diff_tests {
 		lock.skills.insert(
 			"legacy".to_string(),
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source: "group/repo".to_string(),
 				ref_name: Some("main".to_string()),
 				source_type: "gitlab".to_string(),
@@ -3151,6 +3158,7 @@ mod diff_tests {
 			lock.skills.insert(
 				name.to_string(),
 				skill::LocalSkillLockEntry {
+					extra: Default::default(),
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
 					source_type: source_type.to_string(),
@@ -3288,6 +3296,7 @@ mod snapshot_tests {
 		skill_path: &str,
 	) -> skill::LocalSkillLockEntry {
 		skill::LocalSkillLockEntry {
+			extra: Default::default(),
 			source: source.to_string(),
 			source_url: None,
 			source_type: source_type.to_string(),

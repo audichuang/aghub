@@ -203,6 +203,7 @@ fn install_local_skill_refuses_when_different_owner_lock_entry_exists() {
 		skill::add_skill_to_local_lock(
 			"owned-skill",
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: Some("https://github.com/someone/repo".to_string()),
 				ref_commit: Some("abcdef1".to_string()),
 				source: "someone/repo".to_string(),
@@ -606,6 +607,7 @@ fn reimport_from_different_local_path_is_refused_when_master_is_missing() {
 		skill::add_skill_to_local_lock(
 			"gone-skill",
 			skill::LocalSkillLockEntry {
+				extra: Default::default(),
 				source_url: None,
 				source: owner_a.join("SKILL.md").display().to_string(),
 				ref_name: None,
