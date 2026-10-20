@@ -32,12 +32,22 @@ Rule: every refusal the commit can raise has a read-only seam the preview calls
 first, and preview and commit share one definition. For skills that seam is
 `plan_reconcile_skill` itself — existence, disjointness and the shared-backing
 spares check all live in it, so `reconcile_skill_preview` is one call
-(`ensure_skill_exists` and `ensure_skill_reconcile_spares` were removed). MCP
-and sub-agent reconcile still use `ensure_mcp_exists`, `ensure_sub_agent_exists`,
-`ensure_disjoint` and their `ensure_*_reconcile_spares`.
+(`ensure_skill_exists` and `ensure_skill_reconcile_spares` were removed).
+
+MCP and sub-agent reconcile once previewed through a CLI-side chain of public
+guards (`ensure_mcp_exists` / `ensure_sub_agent_exists`, `ensure_disjoint`,
+`ensure_*_reconcile_spares`), while the commit additionally refused unmanaged
+source fields and, inside the batch preflight, a target that cannot hold the
+resource (losslessly, when the source is removed). So `reconcile mcp --remove
+codex --add cursor` on a Codex server with a timeout previewed clean and
+`--yes` refused it. They now mirror the skill shape: `plan_reconcile_mcp` /
+`plan_reconcile_sub_agent` plus the plan's per-row `preflight`, run by both the
+commit and `reconcile_{mcp,sub_agent}_preview`; the old guards are gone.
 
 Tests: `reconcile_rejects_empty_target_set_and_validates_source_in_preview`,
 `reconcile_skill_preview_refuses_what_the_commit_refuses`,
+`reconcile_mcp_preview_refuses_what_the_commit_refuses`,
+`reconcile_sub_agent_preview_refuses_what_the_commit_refuses`,
 `ensure_disjoint_rejects_agent_in_both_add_and_remove`.
 
 Commit: b610db98.

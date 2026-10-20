@@ -15,9 +15,8 @@
 use aghub_core::errors::ConfigError;
 use aghub_core::models::{AgentType, ResourceScope};
 use aghub_core::transfer::{
-	ensure_disjoint, ensure_mcp_exists, ensure_mcp_reconcile_spares,
-	ensure_sub_agent_exists, ensure_sub_agent_reconcile_spares, reconcile_mcp,
-	reconcile_skill, reconcile_skill_preview, reconcile_sub_agent,
+	reconcile_mcp, reconcile_mcp_preview, reconcile_skill,
+	reconcile_skill_preview, reconcile_sub_agent, reconcile_sub_agent_preview,
 	transfer_mcp, transfer_skill, transfer_sub_agent, InstallTarget,
 	OperationBatchResult, OperationBatchView, ResourceLocator,
 };
@@ -187,28 +186,17 @@ pub fn execute_reconcile(
 		PreviewFn,
 		&str,
 	) = match action {
-		// The skill preview is one core call: the same planner as the commit.
+		// Each preview is one core call: the same planner as the commit.
 		ReconcileAction::Skill(a) => {
 			(a, reconcile_skill, reconcile_skill_preview, "skill")
 		}
-		ReconcileAction::Mcp(a) => (
-			a,
-			reconcile_mcp,
-			|s, a, r| {
-				ensure_mcp_exists(s)?;
-				ensure_disjoint(a, r)?;
-				ensure_mcp_reconcile_spares(s, a, r)
-			},
-			"MCP server",
-		),
+		ReconcileAction::Mcp(a) => {
+			(a, reconcile_mcp, reconcile_mcp_preview, "MCP server")
+		}
 		ReconcileAction::SubAgent(a) => (
 			a,
 			reconcile_sub_agent,
-			|s, a, r| {
-				ensure_sub_agent_exists(s)?;
-				ensure_disjoint(a, r)?;
-				ensure_sub_agent_reconcile_spares(s, a, r)
-			},
+			reconcile_sub_agent_preview,
 			"sub-agent",
 		),
 	};

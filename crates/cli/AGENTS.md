@@ -117,8 +117,11 @@ list, or `all`), `-g`/`-p`, `--all`.
   `reconcile skill` refuses BEFORE the first write so the disk is untouched;
   `reconcile skill --remove` refuses a plugin-owned skill with `MANAGED_RESOURCE`
   like `delete`, in preview and commit alike.
-  The preview is a plan echo (`{dry_run, add, remove}`, no per-row results) and
-  does NOT check that a `--remove` target ever held the thing: a typo previews as
+  The preview runs the commit's own core plan and per-row preflight
+  (`reconcile_{skill,mcp,sub_agent}_preview`), so it refuses what `--yes` would,
+  with the same code — including an MCP/sub-agent copy that would lose a field
+  once the source is removed. It then echoes the plan (`{dry_run, add, remove}`,
+  no per-row results) and does NOT check that a `--remove` target ever held the thing: a typo previews as
   "would remove" and exits 0, then fails that row on commit and exits 1.
   `reconcile mcp` / `reconcile sub-agent` protect the whole ROSTER, not just the
   agents you named, so `reconcile mcp --remove claude -p` is always refused —

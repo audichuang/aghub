@@ -312,20 +312,6 @@ fn load_source_skill(source: &ResourceLocator) -> Result<Skill> {
 		.ok_or_else(|| ConfigError::resource_not_found("skill", &source.name))
 }
 
-/// Does the reconcile/transfer SOURCE resource exist? Read-only.
-///
-/// The preview seam: uses the same loaders as the real reconcile so the
-/// existence rule cannot drift.
-/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
-pub fn ensure_mcp_exists(source: &ResourceLocator) -> Result<()> {
-	load_source_mcp(source).map(|_| ())
-}
-
-/// See [`ensure_mcp_exists`].
-pub fn ensure_sub_agent_exists(source: &ResourceLocator) -> Result<()> {
-	load_source_sub_agent(source).map(|_| ())
-}
-
 /// Can we PROVE the target now holds the source content?
 ///
 /// Compared by the npx-compatible folder hash (the lock files' digest). It has
@@ -537,38 +523,11 @@ where
 	Ok(())
 }
 
-/// The shared-backing refusal a `--yes` run would raise, WITHOUT writing
-/// anything — one definition for preview and commit, so a preview cannot
-/// green-light what the commit refuses.
-/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
-fn ensure_reconcile_spares<F>(
-	source: &ResourceLocator,
-	added: &[AgentType],
-	removed: &[AgentType],
-	backing: F,
-) -> Result<()>
-where
-	F: Fn(&InstallTarget) -> Backed,
-{
-	let (copies, deletes) =
-		reconcile_plans(added.to_vec(), removed.to_vec(), &source.scope);
-	let removing: Vec<InstallTarget> =
-		deletes.iter().map(|plan| plan.target.clone()).collect();
-	let protect = protected_targets(
-		&copies,
-		source,
-		removed.contains(&source.agent),
-		&removing,
-		true, // roster
-	);
-	ensure_removals_spare(&protect, &removing, source.agent, backing)
-}
-
 /// The shared-reader guard for a direct MCP delete. `requested` is every agent
 /// this one request removes the server from (a CLI `-a` list, a desktop
 /// multi-select); an agent reading the same file outside that set must not
 /// lose it behind the caller's back.
-pub fn ensure_mcp_delete_spares(
+pub(crate) fn ensure_mcp_delete_spares(
 	source: &ResourceLocator,
 	requested: &[AgentType],
 ) -> Result<()> {
@@ -584,26 +543,6 @@ pub fn ensure_mcp_delete_spares(
 		mcp_backing_path,
 		Caller::Delete,
 	)
-}
-
-/// [`ensure_reconcile_spares`] for an MCP — the preview seam.
-pub fn ensure_mcp_reconcile_spares(
-	source: &ResourceLocator,
-	added: &[AgentType],
-	removed: &[AgentType],
-) -> Result<()> {
-	ensure_reconcile_spares(source, added, removed, mcp_backing_path)
-}
-
-/// [`ensure_reconcile_spares`] for a sub-agent — the preview seam.
-pub fn ensure_sub_agent_reconcile_spares(
-	source: &ResourceLocator,
-	added: &[AgentType],
-	removed: &[AgentType],
-) -> Result<()> {
-	ensure_reconcile_spares(source, added, removed, |target| {
-		sub_agent_backing_path(target, &source.name)
-	})
 }
 
 /// One entry of the protect list, plus whether the caller NAMED it.
@@ -1093,14 +1032,7 @@ fn ensure_reconcilable(
 
 /// Reject an agent in BOTH the add and remove sets (adds run first, so it would
 /// silently net to a delete).
-///
-/// Public so a preview can apply it read-only: `confirm = false` is not a
-/// dry-run switch.
-/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
-pub fn ensure_disjoint(
-	added: &[AgentType],
-	removed: &[AgentType],
-) -> Result<()> {
+fn ensure_disjoint(added: &[AgentType], removed: &[AgentType]) -> Result<()> {
 	for agent in added {
 		if removed.contains(agent) {
 			return Err(ConfigError::InvalidConfig(format!(
@@ -1323,6 +1255,107 @@ pub fn transfer_mcp(
 	Ok(operation_batch(report))
 }
 
+/// Everything an MCP reconcile decides before its first write. One struct so
+/// the PREVIEW and the COMMIT answer the same question — the skill arm's
+/// [`ReconcileSkillPlan`] shape.
+/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
+struct ReconcileMcpPlan {
+	mcp: McpServer,
+	/// Strict only when THIS source is the copy that disappears. Removing some
+	/// OTHER agent leaves the faithful original in place, so its copies are as
+	/// best-effort as a plain transfer.
+	deletes_source: bool,
+	copies: Vec<OperationPlan>,
+	deletes: Vec<OperationPlan>,
+	removing: Vec<InstallTarget>,
+	protect: Vec<Protected>,
+}
+
+fn plan_reconcile_mcp(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<ReconcileMcpPlan> {
+	ensure_disjoint(added, removed)?;
+	let mcp = load_source_mcp(source)?;
+	let deletes_source = removed.contains(&source.agent);
+	let (copies, deletes) =
+		reconcile_plans(added.to_vec(), removed.to_vec(), &source.scope);
+	if deletes_source && !copies.is_empty() {
+		ensure_mcp_source_fields_representable(source, &mcp)?;
+	}
+	// Before ANY write: an add and a remove resolving to one file cannot both
+	// be honoured. The protect list is the roster — see `protected_targets`.
+	let removing: Vec<InstallTarget> =
+		deletes.iter().map(|plan| plan.target.clone()).collect();
+	let protect =
+		protected_targets(&copies, source, deletes_source, &removing, true);
+	ensure_removals_spare(&protect, &removing, source.agent, mcp_backing_path)?;
+	Ok(ReconcileMcpPlan {
+		mcp,
+		deletes_source,
+		copies,
+		deletes,
+		removing,
+		protect,
+	})
+}
+
+impl ReconcileMcpPlan {
+	/// The read-only verdict for ONE row, run before any write in the batch and
+	/// reused verbatim by [`reconcile_mcp_preview`].
+	fn preflight(&self, plan: &OperationPlan) -> Result<()> {
+		if plan.action == OperationAction::Copy {
+			// Only a reconcile that REMOVES something can delete a source;
+			// an add-only one is as best-effort as a plain copy.
+			mcp_supported_for_target(
+				&plan.target,
+				&self.mcp,
+				self.deletes_source,
+			)?;
+		}
+		Ok(())
+	}
+}
+
+/// Would `reconcile_mcp(.., confirm = true)` refuse? Runs the commit's own
+/// plan and per-row preflight, so the two cannot disagree. Read-only and
+/// takes no mutation lock.
+/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
+pub fn reconcile_mcp_preview(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<()> {
+	let plan = plan_reconcile_mcp(source, added, removed)?;
+	reconcile_preview_rows(
+		"MCP reconcile",
+		&plan.copies,
+		&plan.deletes,
+		|row| plan.preflight(row),
+	)
+}
+
+/// The preview half of `run_staged_multi_target_mutation`: the same rows, the
+/// same preflight, the same error mapping — and no mutation.
+fn reconcile_preview_rows(
+	operation: &str,
+	copies: &[OperationPlan],
+	deletes: &[OperationPlan],
+	preflight: impl FnMut(&OperationPlan) -> Result<()>,
+) -> Result<()> {
+	let rows: Vec<OperationPlan> =
+		copies.iter().chain(deletes.iter()).cloned().collect();
+	let failures = crate::batch::collect_preflight_failures(&rows, preflight);
+	if failures.is_empty() {
+		return Ok(());
+	}
+	Err(batch_preflight_error(
+		operation,
+		crate::batch::MultiTargetMutationError { failures },
+	))
+}
+
 pub fn reconcile_mcp(
 	source: ResourceLocator,
 	added: Vec<AgentType>,
@@ -1330,58 +1363,42 @@ pub fn reconcile_mcp(
 	confirm: bool,
 ) -> Result<OperationBatchResult> {
 	ensure_reconcilable(&added, &removed, confirm)?;
-	let mcp = load_source_mcp(&source)?;
+	let plan = plan_reconcile_mcp(&source, &added, &removed)?;
+	let ReconcileMcpPlan {
+		ref mcp,
+		deletes_source: source_removed,
+		ref copies,
+		ref deletes,
+		ref removing,
+		ref protect,
+	} = plan;
 	info!(
 		"reconciling MCP '{}' with {} added and {} removed agent(s)",
 		mcp.name,
 		added.len(),
 		removed.len()
 	);
-	// Strict only when THIS source is the copy that disappears. Removing some
-	// OTHER agent leaves the faithful original in place, so its copies are as
-	// best-effort as a plain transfer.
-	let deletes_source = removed.contains(&source.agent);
-	let source_removed = deletes_source;
-	let (copies, deletes) = reconcile_plans(added, removed, &source.scope);
-	if deletes_source && !copies.is_empty() {
-		ensure_mcp_source_fields_representable(&source, &mcp)?;
-	}
-	// Before ANY write: an add and a remove resolving to one file cannot both
-	// be honoured. The protect list is the roster — see `protected_targets`.
-	let removing: Vec<InstallTarget> =
-		deletes.iter().map(|plan| plan.target.clone()).collect();
-	let protect =
-		protected_targets(&copies, &source, source_removed, &removing, true);
-	ensure_removals_spare(&protect, &removing, source.agent, mcp_backing_path)?;
 	// The rows the refusal's remedy creates must succeed: a row finding the
 	// entry gone because a sibling row took it is a success, credited below.
 	let mut credits =
-		RemovalCredits::from_mapped(
-			&removing,
-			|target| match mcp_backing_path(target) {
-				Backed::At(path) => Some((target.agent, Backing::of(path))),
-				Backed::Absent | Backed::Unknown => None,
-			},
-		);
+		RemovalCredits::from_mapped(removing, |target| match mcp_backing_path(
+			target,
+		) {
+			Backed::At(path) => Some((target.agent, Backing::of(path))),
+			Backed::Absent | Backed::Unknown => None,
+		});
 	// Preflight is a SNAPSHOT: Copilot's project path depends on which of
 	// `.mcp.json` / `.github/mcp.json` exists, so a copy can move the delete
 	// target. The delete arm re-resolves once every path is settled.
 	let report = crate::batch::run_staged_multi_target_mutation(
-		&copies,
-		&deletes,
-		|plan| {
-			if plan.action == OperationAction::Copy {
-				// Only a reconcile that REMOVES something can delete a source;
-				// an add-only one is as best-effort as a plain copy.
-				mcp_supported_for_target(&plan.target, &mcp, deletes_source)?;
-			}
-			Ok(())
-		},
+		copies,
+		deletes,
+		|row| plan.preflight(row),
 		|plan| {
 			let outcome = match plan.action {
 				// Same helper as `transfer_mcp` — the two must not disagree
 				// about what "already there" means.
-				OperationAction::Copy => copy_mcp_into(&plan.target, &mcp),
+				OperationAction::Copy => copy_mcp_into(&plan.target, mcp),
 				OperationAction::Delete => {
 					// The fresh value and shared-reader policy must be checked
 					// while holding the same lock as the deletion.
@@ -1389,9 +1406,9 @@ pub fn reconcile_mcp(
 						delete_reconciled_mcp(
 							&source,
 							&plan.target,
-							&mcp,
-							&protect,
-							&copies,
+							mcp,
+							protect,
+							copies,
 							source_removed,
 						),
 						plan.target.agent,
@@ -1469,6 +1486,76 @@ pub fn transfer_sub_agent(
 	Ok(operation_batch(report))
 }
 
+/// [`ReconcileMcpPlan`] for a sub-agent.
+struct ReconcileSubAgentPlan {
+	sub_agent: SubAgent,
+	source_removed: bool,
+	copies: Vec<OperationPlan>,
+	deletes: Vec<OperationPlan>,
+	removing: Vec<InstallTarget>,
+	protect: Vec<Protected>,
+}
+
+fn plan_reconcile_sub_agent(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<ReconcileSubAgentPlan> {
+	ensure_disjoint(added, removed)?;
+	let sub_agent = load_source_sub_agent(source)?;
+	let source_removed = removed.contains(&source.agent);
+	let (copies, deletes) =
+		reconcile_plans(added.to_vec(), removed.to_vec(), &source.scope);
+	if source_removed && !copies.is_empty() {
+		ensure_sub_agent_source_fields_representable(source, &sub_agent)?;
+	}
+	// Same shared-backing guard as the MCP arm.
+	let removing: Vec<InstallTarget> =
+		deletes.iter().map(|plan| plan.target.clone()).collect();
+	let protect =
+		protected_targets(&copies, source, source_removed, &removing, true);
+	ensure_removals_spare(&protect, &removing, source.agent, |target| {
+		sub_agent_backing_path(target, &source.name)
+	})?;
+	Ok(ReconcileSubAgentPlan {
+		sub_agent,
+		source_removed,
+		copies,
+		deletes,
+		removing,
+		protect,
+	})
+}
+
+impl ReconcileSubAgentPlan {
+	/// See [`ReconcileMcpPlan::preflight`].
+	fn preflight(&self, plan: &OperationPlan) -> Result<()> {
+		if plan.action == OperationAction::Copy {
+			sub_agent_supported_for_target(
+				&plan.target,
+				&self.sub_agent,
+				self.source_removed,
+			)?;
+		}
+		Ok(())
+	}
+}
+
+/// See [`reconcile_mcp_preview`].
+pub fn reconcile_sub_agent_preview(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<()> {
+	let plan = plan_reconcile_sub_agent(source, added, removed)?;
+	reconcile_preview_rows(
+		"sub-agent reconcile",
+		&plan.copies,
+		&plan.deletes,
+		|row| plan.preflight(row),
+	)
+}
+
 pub fn reconcile_sub_agent(
 	source: ResourceLocator,
 	added: Vec<AgentType>,
@@ -1476,29 +1563,24 @@ pub fn reconcile_sub_agent(
 	confirm: bool,
 ) -> Result<OperationBatchResult> {
 	ensure_reconcilable(&added, &removed, confirm)?;
-	let sub_agent = load_source_sub_agent(&source)?;
+	let plan = plan_reconcile_sub_agent(&source, &added, &removed)?;
+	let ReconcileSubAgentPlan {
+		ref sub_agent,
+		source_removed,
+		ref copies,
+		ref deletes,
+		ref removing,
+		ref protect,
+	} = plan;
 	info!(
 		"reconciling sub-agent '{}' with {} added and {} removed agent(s)",
 		sub_agent.name,
 		added.len(),
 		removed.len()
 	);
-	let source_removed = removed.contains(&source.agent);
-	let (copies, deletes) = reconcile_plans(added, removed, &source.scope);
-	if source_removed && !copies.is_empty() {
-		ensure_sub_agent_source_fields_representable(&source, &sub_agent)?;
-	}
-	// Same shared-backing guard as the MCP arm.
-	let removing: Vec<InstallTarget> =
-		deletes.iter().map(|plan| plan.target.clone()).collect();
-	let protect =
-		protected_targets(&copies, &source, source_removed, &removing, true);
-	ensure_removals_spare(&protect, &removing, source.agent, |target| {
-		sub_agent_backing_path(target, &source.name)
-	})?;
 	// Same credential as the MCP arm; the backing IS the file, so preflight is
 	// the only place it can be resolved.
-	let mut credits = RemovalCredits::from_mapped(&removing, |target| {
+	let mut credits = RemovalCredits::from_mapped(removing, |target| {
 		match sub_agent_backing_path(target, &source.name) {
 			Backed::At(path) => Some((target.agent, Backing::of(path))),
 			Backed::Absent | Backed::Unknown => None,
@@ -1507,31 +1589,22 @@ pub fn reconcile_sub_agent(
 	// …and only a snapshot: two agents sharing a dir both resolve to `Absent`
 	// until a copy writes the file. The delete-time re-check is the real one.
 	let report = crate::batch::run_staged_multi_target_mutation(
-		&copies,
-		&deletes,
-		|plan| {
-			if plan.action == OperationAction::Copy {
-				sub_agent_supported_for_target(
-					&plan.target,
-					&sub_agent,
-					source_removed,
-				)?;
-			}
-			Ok(())
-		},
+		copies,
+		deletes,
+		|row| plan.preflight(row),
 		|plan| {
 			let outcome = match plan.action {
 				// Same helper as `transfer_sub_agent`.
 				OperationAction::Copy => {
-					copy_sub_agent_into(&plan.target, &sub_agent)
+					copy_sub_agent_into(&plan.target, sub_agent)
 				}
 				OperationAction::Delete => sibling_already_took_it(
 					delete_reconciled_sub_agent(
 						&source,
 						&plan.target,
-						&sub_agent,
-						&protect,
-						&copies,
+						sub_agent,
+						protect,
+						copies,
 						source_removed,
 					),
 					plan.target.agent,
@@ -2035,22 +2108,12 @@ pub fn reconcile_skill_preview(
 		!removed.is_empty(),
 	);
 	let plan = plan_reconcile_skill(source, added, removed, &plugin_roots)?;
-	let rows: Vec<OperationPlan> = plan
-		.copies
-		.iter()
-		.chain(plan.deletes.iter())
-		.cloned()
-		.collect();
-	let failures = crate::batch::collect_preflight_failures(&rows, |row| {
-		plan.preflight(row)
-	});
-	if failures.is_empty() {
-		return Ok(());
-	}
-	Err(batch_preflight_error(
+	reconcile_preview_rows(
 		"skill reconcile",
-		crate::batch::MultiTargetMutationError { failures },
-	))
+		&plan.copies,
+		&plan.deletes,
+		|row| plan.preflight(row),
+	)
 }
 
 pub fn reconcile_skill(
@@ -2695,6 +2758,75 @@ mod tests {
 			cursor.get_mcp("filesystem").is_some(),
 			"the best-effort copy must land on disk"
 		);
+	}
+
+	/// The lossy-copy refusal lives in the batch preflight closure; the preview
+	/// must raise it too, with the commit's variant and message.
+	/// See docs/history/core-transfer.md#reconcile-preview-approved-what-the-commit-refused
+	#[test]
+	fn reconcile_mcp_preview_refuses_what_the_commit_refuses() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let mut codex = ConfigManager::new(
+			create_adapter(AgentType::Codex),
+			false,
+			Some(&root),
+		);
+		codex.load().unwrap();
+		codex
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::Stdio {
+					command: "npx".to_string(),
+					args: vec!["mcp-filesystem".to_string()],
+					env: None,
+					timeout: Some(30),
+				},
+			))
+			.unwrap();
+		let codex_path = codex.config_path().unwrap();
+		let before = fs::read_to_string(&codex_path).unwrap();
+		let source = ResourceLocator {
+			agent: AgentType::Codex,
+			scope: WriteScope::project(root.clone()),
+			name: "filesystem".to_string(),
+		};
+
+		let preview = reconcile_mcp_preview(
+			&source,
+			&[AgentType::Cursor],
+			&[AgentType::Codex],
+		)
+		.expect_err("preview must refuse the lossy copy");
+		assert_eq!(fs::read_to_string(&codex_path).unwrap(), before);
+		let commit = reconcile_mcp(
+			source,
+			vec![AgentType::Cursor],
+			vec![AgentType::Codex],
+			true,
+		)
+		.expect_err("commit must refuse the lossy copy");
+
+		assert!(
+			matches!(preview, ConfigError::UnsupportedOperation { .. }),
+			"{preview:?}"
+		);
+		assert!(
+			matches!(commit, ConfigError::UnsupportedOperation { .. }),
+			"{commit:?}"
+		);
+		assert_eq!(preview.to_string(), commit.to_string());
+		assert_eq!(preview.rejected_targets(), commit.rejected_targets());
+		assert_eq!(fs::read_to_string(&codex_path).unwrap(), before);
+		let mut cursor = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(&root),
+		);
+		cursor.load().unwrap();
+		assert!(cursor.get_mcp("filesystem").is_none(), "nothing copied");
 	}
 
 	#[test]
@@ -5333,6 +5465,52 @@ mod tests {
 		.unwrap();
 		assert_eq!(result.success_count(), 2);
 		assert!(target.exists());
+	}
+
+	/// See [`reconcile_mcp_preview_refuses_what_the_commit_refuses`].
+	#[test]
+	fn reconcile_sub_agent_preview_refuses_what_the_commit_refuses() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source_path = root.join(".claude/agents/coder.md");
+		let target = root.join(".codex/agents/coder.toml");
+		fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+		let body = "---\nname: coder\ndescription: Coder\ntools: Read\n---\n\nDo work.\n";
+		fs::write(&source_path, body).unwrap();
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: WriteScope::project(root.to_path_buf()),
+			name: "coder".to_string(),
+		};
+
+		let preview = reconcile_sub_agent_preview(
+			&source,
+			&[AgentType::Codex],
+			&[AgentType::Claude],
+		)
+		.expect_err("preview must refuse the lossy copy");
+		assert!(!target.exists());
+		let commit = reconcile_sub_agent(
+			source,
+			vec![AgentType::Codex],
+			vec![AgentType::Claude],
+			true,
+		)
+		.expect_err("commit must refuse the lossy copy");
+
+		assert!(
+			matches!(preview, ConfigError::UnsupportedOperation { .. }),
+			"{preview:?}"
+		);
+		assert!(
+			matches!(commit, ConfigError::UnsupportedOperation { .. }),
+			"{commit:?}"
+		);
+		assert_eq!(preview.to_string(), commit.to_string());
+		assert_eq!(preview.rejected_targets(), commit.rejected_targets());
+		assert_eq!(fs::read_to_string(&source_path).unwrap(), body);
+		assert!(!target.exists(), "nothing copied");
 	}
 
 	#[test]

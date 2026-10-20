@@ -58,7 +58,9 @@ Both copy normalized resources between agents; neither manages git provenance.
 - `--add` / `--remove` take a comma list or repeats.
 - The preview refuses what the commit would (a missing source resource →
   `RESOURCE_NOT_FOUND`, an agent in both sets, a removal that takes the
-  resource from the source or a copy target), then echoes the plan
+  resource from the source or a copy target, an `--add` agent that cannot hold
+  it — or, when `--remove` names the source, cannot hold it without losing a
+  field → `UNSUPPORTED_OPERATION`), then echoes the plan
   (`{dry_run, name, add, remove}`). It does NOT check that a `--remove` target
   ever held the resource: a typo previews as "would remove" with exit 0, then
   fails that row on commit (exit 1).
