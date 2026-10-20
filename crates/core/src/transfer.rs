@@ -6113,6 +6113,116 @@ mod tests {
 		);
 	}
 
+	/// An npx gitlab project entry (no `sourceUrl`) seeded in `root`, with its
+	/// Master and a Claude Referrer.
+	#[cfg(unix)]
+	fn url_less_gitlab_skill(root: &Path, name: &str) {
+		let master = root.join(".aghub").join(name);
+		github_owned_master(&master, &root.join(".claude/skills"), name);
+		skill::add_skill_to_local_lock(
+			name,
+			skill::LocalSkillLockEntry {
+				source_url: None,
+				ref_commit: None,
+				source: "o/r".to_string(),
+				ref_name: None,
+				source_type: "gitlab".to_string(),
+				computed_hash: skill::compute_skill_folder_hash(&master)
+					.unwrap(),
+				skill_path: Some(format!("{name}/SKILL.md")),
+			},
+			Some(root),
+		)
+		.unwrap();
+	}
+
+	#[cfg(unix)]
+	fn transfer_between_projects(
+		source: &Path,
+		dest: &Path,
+		agent: AgentType,
+		name: &str,
+	) -> OperationBatchResult {
+		transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::project(source.to_path_buf()),
+				name: name.to_string(),
+			},
+			vec![InstallTarget {
+				agent,
+				scope: WriteScope::project(dest.to_path_buf()),
+			}],
+		)
+		.unwrap()
+	}
+
+	/// A carried URL-less gitlab owner is the same owner as a destination that
+	/// already tracks the repo by its full URL.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_project_url_less_gitlab_matches_a_full_url_owner() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let (source, dest) = (temp.path().join("s"), temp.path().join("d"));
+		url_less_gitlab_skill(&source, "gl");
+		fs::create_dir_all(&dest).unwrap();
+		skill::add_skill_to_local_lock(
+			"gl",
+			skill::LocalSkillLockEntry {
+				source_url: Some("https://gitlab.com/o/r.git".to_string()),
+				ref_commit: None,
+				source: "o/r".to_string(),
+				ref_name: None,
+				source_type: "gitlab".to_string(),
+				computed_hash: "h".to_string(),
+				skill_path: Some("gl/SKILL.md".to_string()),
+			},
+			Some(&dest),
+		)
+		.unwrap();
+
+		let result =
+			transfer_between_projects(&source, &dest, AgentType::Cursor, "gl");
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+	}
+
+	/// A fresh cross-project copy writes another URL-less gitlab entry; a retry
+	/// and a grant to a second agent must still read it as the same owner.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_project_url_less_gitlab_can_be_retried_and_regranted(
+	) {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let (source, dest) = (temp.path().join("s"), temp.path().join("d"));
+		url_less_gitlab_skill(&source, "gl");
+		fs::create_dir_all(&dest).unwrap();
+
+		for (agent, step) in [
+			(AgentType::Cursor, "first copy"),
+			(AgentType::Cursor, "retry"),
+			(AgentType::Windsurf, "second agent"),
+		] {
+			let result = transfer_between_projects(&source, &dest, agent, "gl");
+			assert_eq!(
+				result.failed_count(),
+				0,
+				"{step}: {:?}",
+				result.results[0].error
+			);
+		}
+		let entry = skill::lock::local::read_local_lock(Some(&dest))
+			.skills
+			.get("gl")
+			.cloned()
+			.expect("dest lock entry");
+		assert_eq!(
+			(entry.source.as_str(), entry.source_type.as_str()),
+			("o/r", "gitlab")
+		);
+	}
+
 	/// Global -> project carries the SOURCE scope's entry: its owner (so
 	/// `check` / `apply-update` still know where the copy came from) and, for
 	/// a LOCALLY EDITED source, its stored hash rather than the edited

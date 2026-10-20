@@ -103,6 +103,26 @@ pub fn same_source_owner(
 	{
 		return false;
 	}
+	// One clone-coordinate rule for both sides: a URL-less entry (npx writes
+	// none in a project lock) and an empty requested URL (a carried project
+	// entry) are rebuilt by provider, so the same gitlab repo with and without
+	// a recorded URL is one owner. Only a coordinate that names a host compares
+	// here; a hostless custom type falls through to the fail-closed arms below.
+	use crate::skills::source_coordinate::entry_clone_source;
+	if let (Some(existing), Some(requested)) = (
+		remote_owner_from_url(&entry_clone_source(
+			&existing.source,
+			existing.source_url.as_deref(),
+			&existing.source_type,
+		)),
+		remote_owner_from_url(&entry_clone_source(
+			&requested.source,
+			Some(&requested.source_url),
+			&requested.source_type,
+		)),
+	) {
+		return existing == requested;
+	}
 	match existing
 		.source_url
 		.as_deref()
@@ -265,4 +285,77 @@ pub fn adoption_guard(
 		canonical,
 		existing_owner,
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn owner(
+		source: &str,
+		source_type: &str,
+		url: Option<&str>,
+	) -> LockedSourceOwner {
+		LockedSourceOwner {
+			source: source.to_string(),
+			source_type: source_type.to_string(),
+			source_url: url.map(str::to_string),
+			ref_name: None,
+			skill_path: None,
+			ref_commit: None,
+			stored_hash: None,
+		}
+	}
+
+	fn requested(
+		source: &str,
+		source_type: &str,
+		url: &str,
+	) -> skill::InstallLockSource {
+		skill::InstallLockSource {
+			source: source.to_string(),
+			source_type: source_type.to_string(),
+			source_url: url.to_string(),
+			ref_name: None,
+		}
+	}
+
+	/// npx records no `sourceUrl` in a project lock, and a carried project
+	/// entry asks with an empty one; the provider still names the repository,
+	/// so one gitlab repo with and without a URL is ONE owner.
+	#[test]
+	fn a_url_less_gitlab_entry_is_the_same_owner_as_its_full_url() {
+		let url_less = owner("o/r", "gitlab", None);
+		assert!(same_source_owner(
+			&url_less,
+			&requested("o/r", "gitlab", "https://gitlab.com/o/r.git"),
+		));
+		assert!(same_source_owner(
+			&url_less,
+			&requested("o/r", "gitlab", "")
+		));
+		assert!(same_source_owner(
+			&owner("o/r", "gitlab", Some("https://gitlab.com/o/r.git")),
+			&requested("o/r", "gitlab", ""),
+		));
+	}
+
+	/// ...but never a different repository.
+	#[test]
+	fn a_url_less_gitlab_entry_refuses_another_repo() {
+		assert!(!same_source_owner(
+			&owner("o/r", "gitlab", None),
+			&requested("o/other", "gitlab", "https://gitlab.com/o/other.git"),
+		));
+	}
+
+	/// A hostless custom remote without a URL has lost its host: still fail
+	/// closed, even against the same spelling.
+	#[test]
+	fn a_url_less_custom_remote_still_fails_closed() {
+		assert!(!same_source_owner(
+			&owner("o/r", "git", None),
+			&requested("o/r", "git", ""),
+		));
+	}
 }

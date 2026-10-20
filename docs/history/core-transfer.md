@@ -446,6 +446,17 @@ the same GitHub misread, by `of_project_entry` and rename's project arm too
 (capture and verify both use it, so a github project entry still compares
 equal to itself).
 
+`same_source_owner` then refused a carried URL-less gitlab owner (every npx
+gitlab project entry) against a destination tracking the same repo by full
+URL, and against its OWN earlier copy on a retry or a second agent: its
+URL-less arm accepted only github/local. It now compares both sides through
+`entry_clone_source` first; a hostless custom type still falls through to the
+fail-closed arm. Tests:
+`transfer_skill_cross_project_url_less_gitlab_matches_a_full_url_owner`,
+`transfer_skill_cross_project_url_less_gitlab_can_be_retried_and_regranted`,
+`a_url_less_gitlab_entry_refuses_another_repo`,
+`a_url_less_custom_remote_still_fails_closed`.
+
 Behaviour change: a destination Master with different content and no lock
 owner is now REFUSED ("different content") instead of reused — by `transfer`
 and by `reconcile --add` alike — and a copy with a carried remote owner
