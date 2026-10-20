@@ -29,9 +29,13 @@ pub fn entry_clone_source(
 /// stripped, so `gitlab.com` is only the likeliest reading. A writer must not
 /// persist that guess as if it were recorded.
 pub fn reconstruction_is_unambiguous(source: &str, source_type: &str) -> bool {
+	let source = source.trim();
 	source_type.eq_ignore_ascii_case("github")
 		|| source_type.eq_ignore_ascii_case("local")
-		|| carries_authority(source.trim())
+		// A bare `@` (`group/repo@v1`) names no host; a URL or an SCP-like
+		// `host:path` does.
+		|| source.contains("://")
+		|| source.contains(':')
 }
 
 /// The clone coordinate when the entry PROVES its host: the recorded URL, else
@@ -180,6 +184,24 @@ mod tests {
 				reconstruct_source_url(source, source_type),
 				expected,
 				"source={source} type={source_type}"
+			);
+		}
+	}
+
+	/// A host is proven only by a provider that has one, a URL, or an SCP-like
+	/// `host:path`; a bare `@` (a ref suffix) names none.
+	#[test]
+	fn only_a_spelled_host_makes_a_gitlab_source_unambiguous() {
+		for (source, expected) in [
+			("group/repo", false),
+			("group/repo@v1", false),
+			("https://gitlab.corp.example/group/repo.git", true),
+			("git@gitlab.corp.example:group/repo.git", true),
+		] {
+			assert_eq!(
+				reconstruction_is_unambiguous(source, "gitlab"),
+				expected,
+				"source={source}"
 			);
 		}
 	}

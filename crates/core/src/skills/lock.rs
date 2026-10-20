@@ -178,8 +178,9 @@ impl EntryIdentity {
 
 	/// [`of_global_entry`](Self::of_global_entry) for a PROJECT entry, whose
 	/// `sourceUrl` is optional (npx writes none for github), so a provable host
-	/// is rebuilt and an ambiguous one keeps the raw `source` — the same rule on
-	/// capture and on verify.
+	/// is rebuilt and an ambiguous one keeps exactly what it recorded (a present
+	/// blank URL stays blank, so `describes` permits rather than guess
+	/// gitlab.com) — the same rule on capture and on verify.
 	pub fn of_project_entry(entry: &skill::LocalSkillLockEntry) -> Self {
 		Self {
 			source: crate::skills::source_coordinate::known_clone_source(
@@ -187,7 +188,12 @@ impl EntryIdentity {
 				entry.source_url.as_deref(),
 				&entry.source_type,
 			)
-			.unwrap_or_else(|| entry.source.clone()),
+			.unwrap_or_else(|| {
+				entry
+					.source_url
+					.clone()
+					.unwrap_or_else(|| entry.source.clone())
+			}),
 			skill_path: entry.skill_path.clone(),
 			ref_name: entry.ref_name.clone(),
 			source_type: entry.source_type.clone(),
@@ -495,5 +501,32 @@ mod tests {
 		assert!(
 			!entry.describes("https://github.com/group/repo.git", "s/SKILL.md")
 		);
+	}
+
+	/// An ambiguous project entry keeps exactly what it recorded: a PRESENT
+	/// blank (or whitespace) `sourceUrl` must stay blank, not fall back to the
+	/// shorthand that `describes` reads as gitlab.com — that rejected a
+	/// legitimate self-hosted sync the baseline permitted.
+	#[test]
+	fn an_ambiguous_project_entry_with_a_blank_url_permits_its_own_host() {
+		for url in ["", "   "] {
+			let entry =
+				EntryIdentity::of_project_entry(&skill::LocalSkillLockEntry {
+					source_url: Some(url.to_string()),
+					source: "group/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "gitlab".to_string(),
+					computed_hash: "h".to_string(),
+					skill_path: Some("s/SKILL.md".to_string()),
+					ref_commit: None,
+				});
+			assert!(
+				entry.describes(
+					"https://gitlab.corp.example/group/repo.git",
+					"s/SKILL.md"
+				),
+				"sourceUrl={url:?}"
+			);
+		}
 	}
 }

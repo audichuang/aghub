@@ -244,7 +244,9 @@ fn known_rename_source(
 	)
 	.ok_or_else(|| {
 		RenameError::NotLocked(format!(
-			"'{old_name}' records no source URL and its '{source_type}' source 			 '{source}' does not name a host, so aghub cannot tell where to 			 fetch the rename from; re-install it from its real URL first"
+			"'{old_name}' records no source URL and its '{source_type}' source \
+			 '{source}' does not name a host, so aghub cannot tell where to \
+			 fetch the rename from; re-install it from its real URL first"
 		))
 	})
 }
@@ -961,7 +963,8 @@ mod tests {
 			&WriteScope::project(project.path()),
 		);
 		assert!(
-			matches!(&refused, Err(RenameError::NotLocked(m)) if m.contains("does not name a host")),
+			matches!(&refused, Err(RenameError::NotLocked(m))
+				if m.contains("does not name a host") && !m.contains('\t')),
 			"{:?}",
 			refused.map(|s| s.source_url)
 		);
@@ -993,7 +996,8 @@ mod tests {
 
 		let refused = rename_source_from_lock("old-skill", &WriteScope::Global);
 		assert!(
-			matches!(&refused, Err(RenameError::NotLocked(m)) if m.contains("does not name a host")),
+			matches!(&refused, Err(RenameError::NotLocked(m))
+				if m.contains("does not name a host") && !m.contains('\t')),
 			"{:?}",
 			refused.map(|s| s.source_url)
 		);
