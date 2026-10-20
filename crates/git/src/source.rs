@@ -170,6 +170,12 @@ fn strip_scp_like_password(source: &str) -> Option<String> {
 	if source.contains("://") {
 		return None;
 	}
+	// No `:` before the first `@` means no password: leave it alone, even when
+	// the path holds `@` and `:` (`git@host:o/r@ref:sub`).
+	let first_at = source.find('@')?;
+	if !source[..first_at].contains(':') {
+		return None;
+	}
 	// The password may itself hold an `@`, and so may the path after
 	// `host:`; the userinfo ends at the LAST `@` that still has `host:path`
 	// after it.
@@ -317,6 +323,13 @@ pub fn strip_source_credentials(source: &str) -> String {
 /// everywhere else anything [`crate::redact::redact_source_credentials`] would
 /// still remove does.
 fn reads_clean(out: &str) -> bool {
+	// Ask the parser for http(s): redact's heuristic mistakes `host:8443/o/r@v1`
+	// for userinfo.
+	if let Ok(url) = Url::parse(out) {
+		if matches!(url.scheme(), "http" | "https") {
+			return url.username().is_empty() && url.password().is_none();
+		}
+	}
 	match out.strip_prefix("ssh://") {
 		Some(rest) => {
 			let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -451,6 +464,11 @@ mod tests {
 				"{leaky} -> {out}"
 			);
 		}
+		assert_eq!(
+			strip_source_credentials("https://u:TOK@host:8443/o/r@v1"),
+			"https://host:8443/o/r@v1"
+		);
+		assert!(strip_scp_like_password("git@host:o/r@ref:sub").is_none());
 		// What resolution PERSISTS into a lock: an `@` in the password or in
 		// the path must not hide the userinfo from the scp strip.
 		for (input, want) in [
