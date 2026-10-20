@@ -33,6 +33,19 @@ impl WriteScope {
 		}
 	}
 
+	/// Do the two scopes write one lock file? Use this, not `==`, which
+	/// compares raw root spellings.
+	pub fn shares_lock_with(&self, other: &WriteScope) -> bool {
+		match (self, other) {
+			(Self::Global, Self::Global) => true,
+			(Self::Project { root: a }, Self::Project { root: b }) => {
+				crate::skills::path_identity::resolved_location(a)
+					== crate::skills::path_identity::resolved_location(b)
+			}
+			_ => false,
+		}
+	}
+
 	pub fn label(&self) -> &'static str {
 		match self {
 			Self::Global => "global",

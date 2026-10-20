@@ -46,41 +46,54 @@ pub struct LocalSkillInstallReport {
 	pub agent_results: Vec<AgentInstallResult>,
 }
 
+/// Everything the lock write needs, decided once from [`LocalInstallLock`].
+struct LockWrite {
+	source: skill::InstallLockSource,
+	skill_path: Option<String>,
+	ref_commit: Option<String>,
+	/// A carried entry's usable stored Source hash. Re-hashing a locally edited
+	/// source would stamp the edit as the upstream baseline and `check` would
+	/// call it current, so the copied folder is hashed only when this is `None`.
+	stored_hash: Option<String>,
+}
+
 fn write_local_install_lock(
 	skill_name: &str,
 	scope: &WriteScope,
-	source: &skill::InstallLockSource,
-	owner: Option<&LockedSourceOwner>,
+	lock: LockWrite,
 	source_dir: &Path,
 ) -> Result<(), ConfigError> {
-	let skill_path = owner.and_then(|o| o.skill_path.clone());
-	let ref_commit = owner.and_then(|o| o.ref_commit.clone());
-	// A carried entry keeps the hash it recorded: re-hashing a locally edited
-	// source would stamp the edit as the upstream baseline and `check` would
-	// call it current. Recompute only when there is nothing usable stored.
-	let stored = owner
-		.and_then(|o| o.stored_hash.clone())
-		.filter(|h| !h.trim().is_empty() && !skill::is_placeholder_digest(h));
-	let hash = match stored {
-		Some(hash) => hash,
-		None => skill::compute_skill_folder_hash(source_dir).map_err(|e| {
-			ConfigError::SkillLock(std::io::Error::other(e.to_string()))
-		})?,
-	};
-	match scope {
-		WriteScope::Global => skill::write_global_install_lock_hashed(
-			skill_name, source, skill_path, hash, ref_commit,
+	let LockWrite {
+		source,
+		skill_path,
+		ref_commit,
+		stored_hash,
+	} = lock;
+	match (scope, stored_hash) {
+		(WriteScope::Global, None) => skill::write_global_install_lock(
+			skill_name, &source, skill_path, source_dir, ref_commit,
 		)
-		.map(|_| ())
-		.map_err(ConfigError::SkillLock),
-		WriteScope::Project { root } => {
-			skill::write_project_install_lock_hashed(
-				skill_name, source, skill_path, hash, root, ref_commit,
+		.map(|_| ()),
+		(WriteScope::Global, Some(hash)) => {
+			skill::write_global_install_lock_hashed(
+				skill_name, &source, skill_path, hash, ref_commit,
 			)
 			.map(|_| ())
-			.map_err(ConfigError::SkillLock)
+		}
+		(WriteScope::Project { root }, None) => {
+			skill::write_project_install_lock(
+				skill_name, &source, skill_path, source_dir, root, ref_commit,
+			)
+			.map(|_| ())
+		}
+		(WriteScope::Project { root }, Some(hash)) => {
+			skill::write_project_install_lock_hashed(
+				skill_name, &source, skill_path, hash, root, ref_commit,
+			)
+			.map(|_| ())
 		}
 	}
+	.map_err(ConfigError::SkillLock)
 }
 
 fn all_targets_already_linked(
@@ -164,23 +177,34 @@ pub fn install_local_skill(
 	)
 	.map_err(ConfigError::Io)?;
 
-	let lock_source = match &req.lock {
-		LocalInstallLock::Carry(owner) => skill::InstallLockSource {
-			source: owner.source.clone(),
-			source_type: owner.source_type.clone(),
-			// A project entry omits a reconstructable URL; readers treat an
-			// empty one as missing.
-			source_url: owner.source_url.clone().unwrap_or_default(),
-			ref_name: owner.ref_name.clone(),
+	let writes_lock = !matches!(req.lock, LocalInstallLock::Untouched);
+	let lock_write = match req.lock {
+		LocalInstallLock::Carry(owner) => LockWrite {
+			source: skill::InstallLockSource {
+				source: owner.source,
+				source_type: owner.source_type,
+				// A project entry omits a reconstructable URL; readers treat
+				// an empty one as missing.
+				source_url: owner.source_url.unwrap_or_default(),
+				ref_name: owner.ref_name,
+			},
+			skill_path: owner.skill_path,
+			ref_commit: owner.ref_commit,
+			stored_hash: owner
+				.stored_hash
+				.filter(|h| !skill::lock_hash_unknown(Some(h))),
 		},
-		LocalInstallLock::Local | LocalInstallLock::Untouched => {
-			skill::InstallLockSource {
+		LocalInstallLock::Local | LocalInstallLock::Untouched => LockWrite {
+			source: skill::InstallLockSource {
 				source: expanded_path.display().to_string(),
 				source_type: "local".to_string(),
 				source_url: expanded_path.display().to_string(),
 				ref_name: None,
-			}
-		}
+			},
+			skill_path: None,
+			ref_commit: None,
+			stored_hash: None,
+		},
 	};
 
 	let canonical_root = if matches!(resource_scope, ResourceScope::ProjectOnly)
@@ -245,9 +269,9 @@ pub fn install_local_skill(
 		effective_name,
 		&source_root,
 		&req.scope,
-		&lock_source,
+		&lock_write.source,
 		is_already_installed,
-		matches!(req.lock, LocalInstallLock::Untouched),
+		!writes_lock,
 	)?;
 
 	let canonical_dir = adoption.canonical.as_ref().ok_or_else(|| {
@@ -272,7 +296,6 @@ pub fn install_local_skill(
 	};
 	let is_adoption = adoption.existing_owner.is_none()
 		&& master_hash.as_deref() == Some(&adoption.installed_hash);
-	let writes_lock = !matches!(req.lock, LocalInstallLock::Untouched);
 	let can_write = writes_lock && (!master_exists || is_adoption);
 
 	if can_write {
@@ -390,11 +413,7 @@ pub fn install_local_skill(
 		if let Err(error) = write_local_install_lock(
 			effective_name,
 			&req.scope,
-			&lock_source,
-			match &req.lock {
-				LocalInstallLock::Carry(owner) => Some(owner),
-				_ => None,
-			},
+			lock_write,
 			lock_source_dir,
 		) {
 			crate::skills::rename::rollback_materialized_install(

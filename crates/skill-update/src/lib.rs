@@ -47,10 +47,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::verdict::{lock_hash_unknown, Verdict};
+use crate::verdict::Verdict;
 use aghub_core::skills::update::{
 	detect_rename, sanitize_skill_path, SkillUpdateStatus, UncheckableReason,
 };
+use skill::lock_hash_unknown;
 
 /// The lock→disk resolver for an installed skill's on-disk roots now lives in
 /// `aghub-core` (next to the containment guards it feeds); re-exported so the

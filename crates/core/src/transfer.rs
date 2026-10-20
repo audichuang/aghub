@@ -954,7 +954,7 @@ fn install_skill_copy(
 	target: &InstallTarget,
 ) -> Result<crate::skills::LocalSkillInstallReport> {
 	use crate::skills::LocalInstallLock;
-	let lock = if same_lock_scope(source_scope, &target.scope) {
+	let lock = if source_scope.shares_lock_with(&target.scope) {
 		LocalInstallLock::Untouched
 	} else {
 		crate::skills::adoption::skill_lock_source(skill_name, source_scope)
@@ -969,19 +969,6 @@ fn install_skill_copy(
 			lock,
 		},
 	)
-}
-
-/// Do two write scopes share one lock file? Project roots compare by resolved
-/// location, so two spellings of one project are one scope.
-fn same_lock_scope(a: &WriteScope, b: &WriteScope) -> bool {
-	match (a, b) {
-		(WriteScope::Global, WriteScope::Global) => true,
-		(WriteScope::Project { root: a }, WriteScope::Project { root: b }) => {
-			crate::skills::path_identity::resolved_location(a)
-				== crate::skills::path_identity::resolved_location(b)
-		}
-		_ => false,
-	}
 }
 
 fn skill_target_dir(target: &InstallTarget) -> Result<PathBuf> {
@@ -5856,61 +5843,6 @@ mod tests {
 		}
 	}
 
-	/// Global -> project carries the SOURCE scope's owner into the destination
-	/// lock, so `check` / `apply-update` still know where the copy came from.
-	#[cfg(unix)]
-	#[test]
-	fn transfer_skill_cross_scope_carries_the_source_lock_owner() {
-		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-		let home = tempdir().unwrap();
-		let _home = EnvVarGuard::set("HOME", home.path());
-		let _config =
-			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
-		let _state = EnvVarGuard::set(
-			"XDG_STATE_HOME",
-			&home.path().join(".local/state"),
-		);
-		let master = home.path().join(".aghub/owned");
-		github_owned_master(
-			&master,
-			&home.path().join(".claude/skills"),
-			"owned",
-		);
-		skill::write_global_install_lock(
-			"owned",
-			&github_source(),
-			Some("skills/owned/SKILL.md".to_string()),
-			&master,
-			Some("abc123".to_string()),
-		)
-		.unwrap();
-		let project = tempdir().unwrap();
-		let root = project.path().to_path_buf();
-
-		let result = transfer_skill(
-			ResourceLocator {
-				agent: AgentType::Claude,
-				scope: WriteScope::Global,
-				name: "owned".to_string(),
-			},
-			vec![InstallTarget {
-				agent: AgentType::Cursor,
-				scope: WriteScope::project(root.clone()),
-			}],
-		)
-		.unwrap();
-
-		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
-		assert!(root.join(".aghub/owned/SKILL.md").is_file());
-		let lock = skill::lock::local::read_local_lock(Some(&root));
-		let entry = lock.skills.get("owned").expect("dest lock entry");
-		assert_eq!(entry.source, "owner/repo");
-		assert_eq!(entry.source_type, "github");
-		assert_eq!(entry.ref_name.as_deref(), Some("main"));
-		assert_eq!(entry.skill_path.as_deref(), Some("skills/owned/SKILL.md"));
-		assert_eq!(entry.ref_commit.as_deref(), Some("abc123"));
-	}
-
 	/// A same-scope copy is a pure regrant: an npx project entry for a
 	/// non-github remote (no `sourceUrl`, which the owner comparison cannot
 	/// match even against itself) is neither compared nor rewritten.
@@ -5999,10 +5931,11 @@ mod tests {
 		);
 	}
 
-	/// A cross-scope copy of a LOCALLY EDITED source carries the source
-	/// entry's stored hash, not the edited content's: otherwise the copy's
-	/// `check` reads the edit as the upstream baseline and reports it current
-	/// while the source scope reports it modified.
+	/// Global -> project carries the SOURCE scope's entry: its owner (so
+	/// `check` / `apply-update` still know where the copy came from) and, for
+	/// a LOCALLY EDITED source, its stored hash rather than the edited
+	/// content's — otherwise the copy's `check` reads the edit as the upstream
+	/// baseline and reports it current while the source reports it modified.
 	#[cfg(unix)]
 	#[test]
 	fn transfer_skill_cross_scope_carries_the_stored_hash_of_an_edited_source()
@@ -6056,6 +5989,11 @@ mod tests {
 		let lock = skill::lock::local::read_local_lock(Some(&root));
 		let entry = lock.skills.get("owned").expect("dest lock entry");
 		assert_eq!(entry.computed_hash, stored);
+		assert_eq!(entry.source, "owner/repo");
+		assert_eq!(entry.source_type, "github");
+		assert_eq!(entry.ref_name.as_deref(), Some("main"));
+		assert_eq!(entry.skill_path.as_deref(), Some("skills/owned/SKILL.md"));
+		assert_eq!(entry.ref_commit.as_deref(), Some("abc123"));
 		assert_eq!(
 			skill::compute_skill_folder_hash(&root.join(".aghub/owned"))
 				.unwrap(),

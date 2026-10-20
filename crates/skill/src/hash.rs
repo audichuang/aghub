@@ -36,6 +36,17 @@ pub fn is_placeholder_digest(hash: &str) -> bool {
 	hash == EMPTY_SKILLS_LOCK_DIGEST
 }
 
+/// Placeholder rule: a lock digest that is missing, empty, or the empty-input
+/// SHA-256 says nothing about the installed content.
+pub fn lock_hash_unknown(stored_hash: Option<&str>) -> bool {
+	match stored_hash {
+		None => true,
+		Some("") => true,
+		Some(hash) if is_placeholder_digest(hash) => true,
+		Some(_) => false,
+	}
+}
+
 /// Reimplements npx `computeSkillFolderHash` as closely as Rust allows.
 /// Returns lowercase hex.
 ///

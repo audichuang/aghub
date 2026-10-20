@@ -437,7 +437,6 @@ refuses a destination Master whose hash differs.
 Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone`,
 `transfer_skill_same_scope_keeps_an_untracked_master_untracked`,
-`transfer_skill_cross_scope_carries_the_source_lock_owner`,
 `transfer_skill_cross_scope_carries_the_stored_hash_of_an_edited_source`,
 `global_rename_source_falls_back_to_source_for_an_empty_url`; the reuse pin
 `add_skill_from_path_universal_does_not_overwrite_existing_canonical` was

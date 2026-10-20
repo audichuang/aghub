@@ -30,7 +30,8 @@ pub use error::SkillError;
 pub use hash::{
 	collect_skill_files, compute_skill_folder_comparison_hash,
 	compute_skill_folder_hash, compute_skill_folder_hashes,
-	is_placeholder_digest, HashError, EMPTY_SKILLS_LOCK_DIGEST,
+	is_placeholder_digest, lock_hash_unknown, HashError,
+	EMPTY_SKILLS_LOCK_DIGEST,
 };
 pub use install::{
 	discover_repo_skills, lock_skill_file_path, select_repo_skills,

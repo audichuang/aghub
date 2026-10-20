@@ -13,6 +13,7 @@ use std::path::Path;
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::removal::skill_root;
 use aghub_core::skills::resync::stored_master_root;
+use skill::lock_hash_unknown;
 
 /// Folder hashes for the installed copies of the locked names, plus the two
 /// counters that make the sweep's cost assertable in a test (a timing-based
@@ -176,17 +177,6 @@ pub(crate) fn local_hashes_with(
 		started.elapsed()
 	);
 	out
-}
-
-/// Placeholder rule: a lock digest that is missing, empty, or the empty-input
-/// SHA-256 says nothing about the installed content.
-pub(crate) fn lock_hash_unknown(stored_hash: Option<&str>) -> bool {
-	match stored_hash {
-		None => true,
-		Some("") => true,
-		Some(hash) if skill::is_placeholder_digest(hash) => true,
-		Some(_) => false,
-	}
 }
 
 /// Surface-neutral answer to "is the installed copy current with upstream?".
