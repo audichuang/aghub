@@ -421,6 +421,10 @@ grant is refused "already owned". So the copy says what to do with the lock
   fast path and called the copy current while the source scope said
   modified. The hash is recomputed only when none is stored (empty or
   placeholder).
+  The source entry is read while BOTH scopes' mutation locks are held, taken
+  in one ordered acquire (`skills::lock::write_scopes_guard`): which scope
+  orders first depends on the paths, so taking them one by one inverts in one
+  direction.
 - Across scopes with no source entry: `Local`, recorded at the source root
   (for a Referrer, the Master discovery resolved it to).
 
@@ -432,12 +436,16 @@ URL, as its project arm always did.
 Behaviour change: a destination Master with different content and no lock
 owner is now REFUSED ("different content") instead of reused — by `transfer`
 and by `reconcile --add` alike — and a copy with a carried remote owner
-refuses a destination Master whose hash differs.
+refuses a destination Master whose hash differs. A same-scope copy onto an
+OWNED Master still grants it as-is (the hash check runs only for an untracked
+Master or a carried remote owner).
 
 Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone`,
 `transfer_skill_same_scope_keeps_an_untracked_master_untracked`,
 `transfer_skill_cross_scope_carries_the_stored_hash_of_an_edited_source`,
+`transfer_skill_cross_scope_untracked_records_the_master_not_the_referrer`,
+`transfer_skill_cross_scope_locks_both_scopes_in_either_direction`,
 `global_rename_source_falls_back_to_source_for_an_empty_url`; the reuse pin
 `add_skill_from_path_universal_does_not_overwrite_existing_canonical` was
 deleted (the refusal is pinned by

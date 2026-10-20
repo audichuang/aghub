@@ -120,8 +120,10 @@ list, or `all`), `-g`/`-p`, `--all`.
   `--add`) is core `install_local_skill`, the `add --from` install. Within one
   scope it never touches the lock (an untracked Master stays untracked);
   across scopes it writes the target's entry carrying the source's owner and
-  STORED Source hash. Both refuse a target Master whose content differs (an
-  untracked one included), and a cross-scope copy refuses a different owner.
+  STORED Source hash. A copy is refused when the target's same-named Master is
+  untracked and differs, or when it carries a remote owner and the Master
+  differs; a cross-scope copy also refuses a different owner. A same-scope copy
+  onto an OWNED Master grants it as-is, stale content included.
   The preview runs the commit's own core plan and per-row preflight
   (`reconcile_{skill,mcp,sub_agent}_preview`), so it refuses what `--yes` would,
   with the same code — including an MCP/sub-agent copy that would lose a field

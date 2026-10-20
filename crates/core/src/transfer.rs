@@ -6046,6 +6046,55 @@ mod tests {
 		}
 	}
 
+	/// A cross-scope copy of an UNTRACKED skill reached through a Referrer
+	/// records a `local` owner at the Master, never at the Referrer: the
+	/// Referrer is a grant that can be unlinked, the Master is the content.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_scope_untracked_records_the_master_not_the_referrer(
+	) {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let master = home.path().join(".aghub/loose");
+		github_owned_master(
+			&master,
+			&home.path().join(".claude/skills"),
+			"loose",
+		);
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "loose".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		let entry = lock.skills.get("loose").expect("dest lock entry");
+		assert_eq!(entry.source_type, "local");
+		assert_eq!(
+			PathBuf::from(&entry.source),
+			fs::canonicalize(&master).unwrap(),
+			"the entry must name the Master, not `~/.claude/skills/loose`"
+		);
+	}
+
 	/// Global -> project carries the SOURCE scope's entry: its owner (so
 	/// `check` / `apply-update` still know where the copy came from) and, for
 	/// a LOCALLY EDITED source, its stored hash rather than the edited
