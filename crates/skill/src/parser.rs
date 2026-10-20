@@ -27,7 +27,7 @@ pub fn parse_skill_file(path: &Path) -> Result<Skill> {
 
 	for i in 0..archive.len() {
 		let mut file = archive.by_index(i)?;
-		let name = file.name().to_string();
+		let name = file.name()?.to_string();
 
 		if name.ends_with("SKILL.md") || name.ends_with("skill.md") {
 			let mut content = String::new();
@@ -79,7 +79,7 @@ fn scan_archive_structure(
 
 	for i in 0..archive.len() {
 		let file = archive.by_index(i)?;
-		let name = file.name();
+		let name = file.name()?;
 
 		// Skip directories and files outside the skill root
 		if !name.starts_with(&root_prefix) || name.ends_with('/') {

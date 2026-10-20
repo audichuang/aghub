@@ -173,9 +173,9 @@ pub fn unpack(skill_file: &Path, output_dir: &Path) -> Result<()> {
 
 	for i in 0..archive.len() {
 		let mut file = archive.by_index(i)?;
-		let outpath = output_dir.join(file.mangled_name());
+		let outpath = output_dir.join(file.mangled_name()?);
 
-		if file.name().ends_with('/') {
+		if file.name()?.ends_with('/') {
 			std::fs::create_dir_all(&outpath)?;
 		} else {
 			if let Some(p) = outpath.parent() {
@@ -207,7 +207,7 @@ pub fn read_skill_md(skill_file: &Path) -> Result<String> {
 
 	for i in 0..archive.len() {
 		let mut file = archive.by_index(i)?;
-		let name = file.name().to_string();
+		let name = file.name()?.to_string();
 		if name.ends_with("SKILL.md") || name.ends_with("skill.md") {
 			let mut content = String::new();
 			file.read_to_string(&mut content)?;
