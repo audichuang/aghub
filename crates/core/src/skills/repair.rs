@@ -906,7 +906,7 @@ mod tests {
 		);
 		assert!(
 			readers.contains(&"cursor"),
-			"fixture premise: cursor must read the shared slot today, got 			 {readers:?}"
+			"fixture premise: cursor must read the shared slot today, got {readers:?}"
 		);
 		let p = plan_repair(
 			ResourceScope::ProjectOnly,
@@ -922,7 +922,7 @@ mod tests {
 		let private = root.join(".cursor").join("skills").join(name);
 		assert!(
 			Linker::is_link(&private),
-			"cursor read the skill through the shared slot, so migration owes 			 it an explicit referrer it can individually revoke"
+			"cursor read the skill through the shared slot, so migration owes it an explicit referrer it can individually revoke"
 		);
 		assert_eq!(
 			fs::canonicalize(&private).unwrap(),

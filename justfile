@@ -57,6 +57,7 @@ lint:
 preflight: && target-cap
     node scripts/check-history-links.mjs
     bash scripts/check-test-tmpdir.sh
+    bash scripts/check-string-tabs.sh
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     # Sync node_modules to the LOCKFILE before any frontend gate runs: CI

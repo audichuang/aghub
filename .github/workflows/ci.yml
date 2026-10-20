@@ -114,6 +114,8 @@ jobs:
               run: bun run format:check
             - name: docs/history links
               run: node scripts/check-history-links.mjs
+            - name: No literal tab inside a string (missing `\` continuation)
+              run: bash scripts/check-string-tabs.sh
 
     # Rust lint (clippy + audit) - 3 OS matrix
     lint-rust:

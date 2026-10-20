@@ -1313,7 +1313,7 @@ mod admission_tests {
 
 		assert!(
 			held,
-			"the phase was free while a blob request was still in flight — 			 another batch could interleave with this one"
+			"the phase was free while a blob request was still in flight — another batch could interleave with this one"
 		);
 	}
 
