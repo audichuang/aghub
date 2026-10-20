@@ -365,9 +365,22 @@ names was affected: `install_local_skill` on `<dir>/skill.md` took the FILE as
 the source root and failed hashing it with "Not a directory".
 
 Rule: `enumerate::SKILL_MARKERS` is the one marker list. `skill_source_root`
-reads it and stays pure (no disk probe; `skill_root_returns_nonexistent_dir_as_is`
-pins that), and `removal::skill_root` is the only model→root resolver, which
-transfer calls.
+reads it, and `removal::skill_root` is the only model→root resolver, which
+transfer calls. A missing path resolves lexically
+(`skill_root_returns_nonexistent_dir_as_is` pins that).
+
+Follow-up (review): stepping up from any `skill.md` name made the resolver
+non-idempotent on a skill FOLDER literally named `skill.md` (`sanitize_name`
+keeps `.`, so the name is reachable). Callers that already hold a root —
+`install_local` on a folder, transfer re-resolving `plan.source_root` inside
+`add_skill_from_path` and `prove_content_landed`, `sources.rs` hashing scanned
+dirs — then copied or hashed the PARENT, and a reconcile move could delete the
+real source after a "proven" copy of the wrong tree. `skill_source_root` now
+steps up only when the path is not an existing directory. Residual: a MISSING
+folder named `skill.md` still resolves to its parent, the same exposure
+`SKILL.md` always had.
 
 Tests: `install_local_skill_from_lowercase_skill_md_installs_its_folder`,
-`skill_source_root_resolves_lowercase_skill_md_to_parent`.
+`skill_source_root_resolves_lowercase_skill_md_to_parent`,
+`skill_source_root_keeps_directory_named_like_a_marker`,
+`install_local_skill_from_folder_named_skill_md_keeps_that_folder`.

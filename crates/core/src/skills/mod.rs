@@ -34,17 +34,20 @@ use std::path::{Path, PathBuf};
 /// A skill on disk is a directory containing `SKILL.md` (plus any assets and
 /// scripts). Callers sometimes hold the directory and sometimes the marker
 /// path itself; this normalizes both to the directory: if `path` names a
-/// marker (`enumerate::SKILL_MARKERS`, so `skill.md` too) we return its
-/// parent, otherwise `path` is already the directory and is returned as-is.
-/// Pure: it never probes the disk. The one "where is this skill's folder"
-/// rule; `removal::skill_root` reads a model through it.
+/// marker (`enumerate::SKILL_MARKERS`, so `skill.md` too) and is not an
+/// existing directory we return its parent, otherwise `path` is already the
+/// directory and is returned as-is. The one disk probe keeps it idempotent on
+/// a skill folder literally named `skill.md`; a missing path still resolves
+/// lexically. The one "where is this skill's folder" rule;
+/// `removal::skill_root` reads a model through it.
 /// See docs/history/core-transfer.md#lowercase-skill-marker-resolved-to-the-file
 pub fn skill_source_root(path: &Path) -> PathBuf {
 	if path.file_name().is_some_and(|name| {
 		enumerate::SKILL_MARKERS
 			.iter()
 			.any(|marker| name == std::ffi::OsStr::new(marker))
-	}) {
+	}) && !path.is_dir()
+	{
 		path.parent()
 			.map(Path::to_path_buf)
 			.unwrap_or_else(|| path.to_path_buf())
@@ -67,6 +70,15 @@ mod tests {
 	fn skill_source_root_resolves_lowercase_skill_md_to_parent() {
 		let dir = PathBuf::from("/tmp/some-skill");
 		assert_eq!(skill_source_root(&dir.join("skill.md")), dir);
+	}
+
+	#[test]
+	fn skill_source_root_keeps_directory_named_like_a_marker() {
+		let tmp = tempfile::tempdir().unwrap();
+		let dir = tmp.path().join("skill.md");
+		std::fs::create_dir(&dir).unwrap();
+		assert_eq!(skill_source_root(&dir), dir);
+		assert_eq!(skill_source_root(&skill_source_root(&dir)), dir);
 	}
 
 	#[test]

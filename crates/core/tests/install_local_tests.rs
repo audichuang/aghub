@@ -146,6 +146,42 @@ fn install_local_skill_from_lowercase_skill_md_installs_its_folder() {
 	});
 }
 
+/// A source FOLDER literally named `skill.md` is the skill itself: it must not
+/// resolve to its parent and drag sibling folders into the Master.
+#[test]
+fn install_local_skill_from_folder_named_skill_md_keeps_that_folder() {
+	with_isolated_env(|home, _data| {
+		let parent = home.join("source-skills");
+		let source_skill = parent.join("skill.md");
+		std::fs::create_dir_all(&source_skill).unwrap();
+		std::fs::write(
+			source_skill.join("SKILL.md"),
+			"---\nname: dotted-skill\ndescription: test\n---\n\n# Body\n",
+		)
+		.unwrap();
+		std::fs::create_dir_all(parent.join("sibling")).unwrap();
+		std::fs::write(parent.join("sibling/marker.txt"), "x\n").unwrap();
+
+		let project = home.join("myproject");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+
+		let req = LocalSkillInstallRequest {
+			source_path: &source_skill,
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+		};
+
+		install_local_skill(req).expect("install_local_skill must succeed");
+		let master = project.join(".aghub/dotted-skill");
+		assert!(master.join("SKILL.md").is_file(), "Master holds the skill");
+		assert!(
+			!master.join("sibling").exists(),
+			"the parent's sibling folders must not be copied"
+		);
+	});
+}
+
 #[test]
 fn install_local_skill_refuses_when_different_owner_lock_entry_exists() {
 	with_isolated_env(|home, _data| {
