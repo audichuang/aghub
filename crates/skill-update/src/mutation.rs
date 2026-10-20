@@ -458,7 +458,7 @@ pub struct LockedSkillsResyncRequest<'a> {
 	/// coordinates from the very Lock read this flow performs has nothing
 	/// independent to assert against.
 	///
-	/// Judged by `sources::source_matches`, the SAME predicate the grouping
+	/// Judged by `source_coordinate::source_matches`, the SAME predicate the grouping
 	/// uses — never a stricter one (see
 	/// docs/history/skill-update.md#source-membership-has-one-definition).
 	pub source_group: Option<&'a str>,
@@ -784,7 +784,7 @@ pub fn resync_locked_skills(
 						source_type,
 					} = entry;
 					if request.source_group.is_some_and(|group| {
-						!crate::sources::source_matches(
+						!aghub_core::skills::source_coordinate::source_matches(
 							group,
 							&grouping_source,
 							Some(&source_ref.source),

@@ -71,7 +71,10 @@ Two drifts produced `sources::source_matches` as the ONE membership predicate:
 
 Rule: grouping, `diff_source` and the bulk resync's `source_group` check all
 call `source_matches`; a caller's `want` is host-blind unless it carries a
-transport or authority.
+transport or authority. The family (`source_origin`, `resolvable_origin`,
+`want_origin`, `source_matches`) now lives in
+`aghub_core::skills::source_coordinate`, because core's cross-scope transfer
+needs the same membership to check the destination's ref cohort.
 
 Pinned by: `two_forges_serving_one_path_are_two_source_rows`,
 `project_two_forges_serving_one_path_are_two_source_rows`
