@@ -22,7 +22,16 @@ remote` is named **`origin`** (NOT `upstream`); our own publish remote is
 - `git remote`: `origin = https://github.com/AkaraChen/aghub.git` (upstream);
   `fork = https://github.com/audichuang/aghub.git` (ours — push here).
 - **merge-base** with upstream: `ca48d93`.
-- **Last full review**: upstream `main` @ `72f296f0` (2026-09-06) — **127 further
+- **Last full review**: upstream `main` @ `2a846f29` (2026-10-20) — **74 further
+  upstream-only commits** since `72f296f0` (37 dependency bumps). Tally: **2
+  ported** (`fac3eaac` lock extensions, `c070f642` Windows `ver` decoding) ·
+  borrowable ideas only from `c922f92e` (repository provenance from an existing
+  checkout/worktree/submodule) and `69d50f2d` (in-place sync from the detail page;
+  our `source sync` already covers the flow) · the rest skipped: a GPUI desktop
+  rewrite (`1919a130` + ~20 `feat:` commits imported from another repo), market
+  and #282-UI fixes, `672490ee` (macOS entitlement for the skill-audit we removed),
+  and `61a7ee79` (release glob we do not have). Upstream shipped `v1.9.1`/`v1.9.2`.
+- **Prior full review**: upstream `main` @ `72f296f0` (2026-09-06) — **127 further
   upstream-only commits** since `c1801ede`. Tally: **1 ported**
   (`bc827425` JetBrains icon) · 1 ported-then-reverted (`1b510d77` skill-audit,
   removed 2026-09-22) · 1 already-present · 1 N/A · **5
@@ -33,7 +42,7 @@ remote` is named **`origin`** (NOT `upstream`); our own publish remote is
       This was the first batch since `ca48d93` with substantial **Rust backend**
       work — four new crates upstream (`skill-audit`, `mcp-catalog`, `prompt`,
       `usage`), of which we took one and later removed it.
-- **Prior full review**: upstream `main` @ `c1801ede` (2026-07-16) — **97 further
+- **Earlier full review**: upstream `main` @ `c1801ede` (2026-07-16) — **97 further
   upstream-only commits** since `01bf2d57`. Tally: **1 ported** (TS7, shipped
   v2.7.0) · ~75 skipped
   (desktop "resource-list interaction v2" + library-page redesign — built on the
@@ -77,6 +86,8 @@ remote` is named **`origin`** (NOT `upstream`); our own publish remote is
 | `PR #209` (open)   | `9b54de54`  | agents     | generic `.md` sub-agent I/O symlink hardening (`sub_agents.rs`: Claude/OpenCode path) — reject symlinked path components + non-regular files on read, staging-temp + `create_new` + rename on write. Ported verbatim (portable `symlink_metadata`, not `a1ee462`'s unix-only O_NOFOLLOW). **Not a main commit** — surfaced by upstream-PR review, so not in the 52-commit tally                                                                                                                                   |
 | `b95e1f61`         | (this sync) | agents     | correct config paths for trae / jetbrains-ai / augmentcode — the descriptors declared MCP/skill files these agents never read (invented home dotfolders). augmentcode → real `~/.augment/settings.json` (global only, no project file, drop `.augmentcode` marker); trae → drop unattested global MCP/skills, keep project `.trae/`, `global_data_dir` = OS config dir; jetbrains-ai → MCP unsupported (GUI-only). Our descriptors were still upstream's pre-fix state; cherry-picked clean with its test updates |
 | `e7628f2a`         | (this sync) | core       | `ConfigManager::validate` spawns the agent CLI via `validate_command`; from the console-less desktop app on Windows that flashed a console window. Set `CREATE_NO_WINDOW` (new `pub(crate)` const in `lib.rs`, `#[cfg(windows)]`), mirroring the api/cc-plugins/skills-linker convention. Cherry-picked clean                                                                                                                                                                                                     |
+| `fac3eaac`         | (this sync) | skill      | shared-lock extensions survive aghub writes — `#[serde(flatten)] extra` on all five lock structs (global + project, root, entry, `dismissed`); a rewritten entry merges the replaced one's `extra`. Re-implemented (our entry has `contentHash`/`refCommit` and ~120 literals), not cherry-picked; tests proven red without the flatten and without the merge                                                                                                                                                     |
+| `c070f642`         | (this sync) | desktop    | Windows `ver` read with `cmd /D /U` and decoded as UTF-16LE — on a localized Windows the OEM-code-page output failed `from_utf8` and the diagnostics' OS version came back empty. The decoder is `cfg(any(windows, test))` so Linux CI tests it                                                                                                                                                                                                                                                                   |
 | `25a18462`         | `2e636c90`  | desktop    | TS7 native compiler — desktop `build`/`typecheck` swap `tsc` → `@typescript/native` (npm alias `typescript@^7`, Go-based tsgo); root peerDep `typescript` → `^7`. Hand-applied (not cherry-picked); parity vs classic tsc verified. Shipped in v2.7.0                                                                                                                                                                                                                                                             |
 
 ## ✅ Already present in this fork (implemented earlier, independent of the v2.1.3/2.1.4 work)

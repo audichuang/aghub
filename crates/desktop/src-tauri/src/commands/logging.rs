@@ -38,12 +38,13 @@ fn os_version() -> String {
 	#[cfg(target_os = "windows")]
 	{
 		Command::new("cmd")
-			.args(["/C", "ver"])
+			// `/U` makes cmd emit UTF-16LE instead of the OEM code page, which
+			// is not UTF-8 on a localized Windows (e.g. "[版本 10.0…]").
+			.args(["/D", "/U", "/C", "ver"])
 			.creation_flags(crate::CREATE_NO_WINDOW)
 			.output()
 			.ok()
-			.and_then(|o| String::from_utf8(o.stdout).ok())
-			.map(|s| s.trim().to_string())
+			.map(|o| decode_utf16le(&o.stdout))
 			.unwrap_or_default()
 	}
 	#[cfg(target_os = "linux")]
@@ -61,6 +62,20 @@ fn os_version() -> String {
 			})
 			.unwrap_or_default()
 	}
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn decode_utf16le(bytes: &[u8]) -> String {
+	let units: Vec<u16> = bytes
+		.as_chunks::<2>()
+		.0
+		.iter()
+		.map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+		.collect();
+	String::from_utf16_lossy(&units)
+		.trim_start_matches('\u{feff}')
+		.trim()
+		.to_string()
 }
 
 fn log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -472,6 +487,16 @@ mod tests {
 		assert!(names.contains(&"aghub_old.log".to_string()));
 		assert!(!names.contains(&"store.json".to_string()));
 		assert!(!names.contains(&"notes.txt".to_string()));
+	}
+
+	#[test]
+	fn decode_utf16le_reads_localized_ver_output() {
+		let expected = "Microsoft Windows [版本 10.0.22631]";
+		let bytes: Vec<u8> = format!("\r\n{expected}\r\n")
+			.encode_utf16()
+			.flat_map(u16::to_le_bytes)
+			.collect();
+		assert_eq!(decode_utf16le(&bytes), expected);
 	}
 
 	#[test]
