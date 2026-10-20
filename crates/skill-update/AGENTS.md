@@ -9,7 +9,10 @@ Also hosts Sources domain (`sources` mod: list/diff/classify + token-first fetch
 for API sources routes and CLI `source`, and the shared **source-mutation seam**
 (`mutation.rs`: fetch → install / resync / accept-rename) used by the API skills
 routes and CLI `apply-update` / `source`. Network/credentials live here;
-`aghub-core` stays pure (hash/compare only).
+`aghub-core` never fetches (it uses `aghub-git` only for pure source
+normalization and redaction). Clone coordinates, host provability, Source
+membership and ref cohorts are core `skills::source_coordinate` — call it,
+never re-derive them here.
 
 ## WHERE TO LOOK
 

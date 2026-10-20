@@ -18,6 +18,10 @@ Terms (Source hash, Master, Referrer, Relink, …) are defined in
 - **Never set these fields by hand.** Use `SkillLockEntry::apply_content_hash`
   / `LocalSkillLockEntry::apply_computed_hash` (idempotent; the global one also
   bumps `updatedAt`) — the one home for the invariant.
+- **A flow that starts writing a lock entry** (or a new shape of one): fill
+  [references/lock-entry-readers.md](references/lock-entry-readers.md)
+  against the fetched-install entry for the same repo, and give the reviewer
+  the same table.
 - Never bump lock versions; hash parity is pinned by
   `crates/skill/tests/hash_parity_golden.rs`. Full round-trip contract:
   [npx-skills-contract](../npx-skills-contract/SKILL.md).

@@ -33,6 +33,10 @@ codegraph — enumerated trees drift):
   `enumerate.rs` (the ONE skill-directory walker and marker rule — root `SKILL.md` or
   `skill.md`, `SkillMarker` three-state; discovery, prune, shape and removal all call it and each
   keeps its own `Unknown` bias), `discovery.rs` (frontmatter names on top of it),
+  `source_coordinate.rs` (the ONE home of a lock entry's clone coordinate,
+  whether its host is provable — `known_clone_source` —, Source membership
+  `source_matches` and a scope's ref cohort `recorded_refs`; skill-update,
+  rename, `EntryIdentity` and transfer all call it),
   `linker/classify.rs` (which
   Referrer each agent needs), `lock.rs` (`EntryIdentity` + the `mutation_guard`
   forward), `rename.rs` (the transactional skill rename — rollback lives here,
