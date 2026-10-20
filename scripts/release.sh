@@ -108,6 +108,10 @@ git diff --quiet && git diff --cached --quiet || {
 	exit 1
 }
 
+# Everything below acts on THIS commit, never on a live `HEAD`: a release waits
+# ~40 min for CI, and another session committing to main in the same clone
+# meanwhile would otherwise get the tag.
+# See docs/history/release.md#the-tag-followed-a-moving-head
 HEAD_SHA="$(git rev-parse HEAD)"
 
 # An existing tag on the remote at HEAD — or at an ANCESTOR of HEAD, because
@@ -150,8 +154,8 @@ fi
 ok "version $TAG validated (latest was ${LATEST:-none})"
 
 # 2. push HEAD and wait for ci.yml to be green -------------------------------
-info "ensuring HEAD ($(git rev-parse --short HEAD)) is on $REMOTE/main..."
-git push "$REMOTE" main
+info "ensuring ${HEAD_SHA:0:8} is on $REMOTE/main..."
+git push "$REMOTE" "$HEAD_SHA:refs/heads/main"
 
 info "waiting for ci.yml on this commit to finish (must be green before tagging)..."
 # Match the fork's main *push* run for THIS sha — not a PR run or an older run
@@ -191,7 +195,7 @@ ok "ci.yml is green for HEAD"
 # 3. confirm -----------------------------------------------------------------
 echo
 info "Commits to ship in $TAG (since ${LATEST:-start}):"
-git log --oneline "${LATEST:+$LATEST..}HEAD"
+git log --oneline "${LATEST:+$LATEST..}$HEAD_SHA"
 echo
 if [ "$ASSUME_YES" != "1" ]; then
 	[ -t 0 ] || {
@@ -219,7 +223,7 @@ fi
 PRIOR_RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 1 \
 	--json databaseId --jq '.[0].databaseId // 0' 2>/dev/null || echo 0)"
 
-git tag "$TAG"
+git tag "$TAG" "$HEAD_SHA"
 git push "$REMOTE" "$TAG"
 ok "pushed $TAG to $REMOTE — release.yml triggered"
 else

@@ -48,3 +48,13 @@ APPLE_ID: ${{ secrets.APPLE_ID }}
 APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
 APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 ```
+
+## The tag followed a moving HEAD
+
+`release.sh` read `HEAD_SHA` once for the CI wait, then ran `git push fork
+main` and `git tag "$TAG"` against whatever `HEAD` was by then. A release waits
+up to 40 minutes for CI, and on 2026-10-21 another session in the same clone
+committed three local, un-pushed, un-CI'd commits onto main during the v2.41.6
+wait. The tag would have landed on them, and `verify-ci` would have refused
+the release. The commits were moved off main by hand in time. The push, the
+"commits to ship" log and the tag now all use the captured `HEAD_SHA`.
