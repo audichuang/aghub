@@ -155,9 +155,12 @@ fn map_summary_to_dto(summary: SourceSummary) -> SourceSummaryResponse {
 		SourceScopeKind::Project => "project",
 	}
 	.to_string();
+	// A recorded `user:token@` must not leave the process. The redacted value
+	// still selects its row: `source_matches` compares origins, and every flow
+	// fetches from the entry's own recorded URL, never from this one.
 	SourceSummaryResponse {
-		source: summary.source,
-		source_url: summary.source_url,
+		source: aghub_git::redact_source_credentials(&summary.source),
+		source_url: aghub_git::redact_source_credentials(&summary.source_url),
 		source_type: summary.source_type,
 		scope,
 		skill_count: summary.skill_count,
@@ -512,6 +515,62 @@ mod tests {
 			value["code"], "SOURCE_AMBIGUOUS",
 			"the merged scope cannot attribute a forge per scope, got {value}"
 		);
+	}
+
+	/// A token a lock recorded inside its source must not reach a response body:
+	/// the Sources list and both raw lock routes hand sources to the webview and,
+	/// over the SSH tunnel, to another machine.
+	#[test]
+	fn listed_sources_and_raw_locks_redact_recorded_credentials() {
+		let _global = GlobalLockGuard::new();
+		let project = tempdir().unwrap();
+
+		let mut global = global_entry("o/r", "alpha/SKILL.md");
+		global.source = "https://u:TOKEN@git.example.com/o/r.git".to_string();
+		global.source_type = "git".to_string();
+		global.source_url = global.source.clone();
+		skill::lock::add_skill_to_lock("alpha", global).unwrap();
+
+		let mut project_lock = skill::LocalSkillLockFile::new();
+		project_lock.skills.insert(
+			"alpha".to_string(),
+			skill::LocalSkillLockEntry {
+				extra: Default::default(),
+				source: "u:TOKEN@git.example.com:o/r.git".to_string(),
+				source_url: Some(
+					"https://u:TOKEN@git.example.com/o/r.git".to_string(),
+				),
+				source_type: "git".to_string(),
+				ref_name: None,
+				skill_path: Some("alpha/SKILL.md".to_string()),
+				computed_hash: "h".to_string(),
+				ref_commit: None,
+			},
+		);
+		skill::write_local_lock(&project_lock, Some(project.path())).unwrap();
+
+		let client = Client::tracked(rocket::build().mount(
+			"/",
+			routes![
+				list_sources,
+				crate::routes::skills::get_global_skill_lock,
+				crate::routes::skills::get_project_skill_lock,
+			],
+		))
+		.expect("client");
+		let root = project.path().display();
+		for path in [
+			"/skills/sources?scope=global".to_string(),
+			format!("/skills/sources?scope=project&project_root={root}"),
+			"/skills/lock/global".to_string(),
+			format!("/skills/lock/project?project_path={root}"),
+		] {
+			let response = client.get(&path).dispatch();
+			assert_eq!(response.status(), Status::Ok, "{path}");
+			let body = response.into_string().expect("body");
+			assert!(body.contains("***@git.example.com"), "{path}: {body}");
+			assert!(!body.contains("TOKEN"), "{path} leaked: {body}");
+		}
 	}
 
 	#[test]

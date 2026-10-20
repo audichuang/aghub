@@ -1254,9 +1254,9 @@ pub fn get_global_skill_lock(
 		.into_iter()
 		.map(|(name, entry)| SkillLockEntryResponse {
 			name,
-			source: entry.source,
+			source: aghub_git::redact_source_credentials(&entry.source),
 			source_type: entry.source_type,
-			source_url: entry.source_url,
+			source_url: aghub_git::redact_source_credentials(&entry.source_url),
 			skill_path: entry.skill_path,
 			skill_folder_hash: entry.skill_folder_hash,
 			content_hash: entry.content_hash,
@@ -1285,7 +1285,7 @@ pub fn get_project_skill_lock(
 		.into_iter()
 		.map(|(name, entry)| LocalSkillLockEntryResponse {
 			name,
-			source: entry.source,
+			source: aghub_git::redact_source_credentials(&entry.source),
 			source_type: entry.source_type,
 			computed_hash: entry.computed_hash,
 		})

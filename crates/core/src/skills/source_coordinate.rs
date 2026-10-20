@@ -499,4 +499,32 @@ mod origin_tests {
 			"a same-path entry on another forge is NOT part of this row"
 		);
 	}
+
+	/// The API hands out sources with credentials redacted, and the desktop
+	/// sends that redacted value back as a row identity; it must still select
+	/// the entry whose recorded URL carries the credential.
+	#[test]
+	fn a_redacted_source_still_selects_its_credentialed_entry() {
+		for (recorded, other) in [
+			(
+				"https://u:TOKEN@git.example.com/o/r.git",
+				"https://u:TOKEN@git.other.com/o/r.git",
+			),
+			(
+				"u:TOKEN@git.example.com:o/r.git",
+				"u:TOKEN@git.other.com:o/r.git",
+			),
+		] {
+			let want = aghub_git::redact_source_credentials(recorded);
+			assert!(!want.contains("TOKEN"));
+			assert!(
+				source_matches(&want, "o/r", Some(recorded), "git"),
+				"{want} must select {recorded}"
+			);
+			assert!(
+				!source_matches(&want, "o/r", Some(other), "git"),
+				"{want} must not select {other}"
+			);
+		}
+	}
 }
