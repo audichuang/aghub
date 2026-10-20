@@ -168,10 +168,11 @@ never widen them to cover a `zip` our own code calls.
 
 ## Literal tabs inside a string literal
 
-A multi-line string whose `\` continuation was missing carried the next line's
-indentation tabs into the text. It shipped in a user-facing rename refusal
+A string whose `\`+newline continuation was removed kept the next line's
+indentation tabs inside the text, on the same line. It shipped in a user-facing rename refusal
 (`source \t\t\t 'o/r' does not name a host`), and three more copies sat in
 test messages. rustfmt and clippy accept it, and the tests only asserted
 `contains(..)`. Because the Rust here is tab-indented, a tab after non-blank
-text on a line is always this bug. `scripts/check-string-tabs.sh` (preflight
+text on a line is this bug in practice (intended tab data uses `\t`; a tab
+aligning a trailing comment would also trip it). `scripts/check-string-tabs.sh` (preflight
 and the CI Format job) fails on it.
