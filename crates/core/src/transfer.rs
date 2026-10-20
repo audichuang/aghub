@@ -954,7 +954,23 @@ fn install_skill_copy(
 	target: &InstallTarget,
 ) -> Result<crate::skills::LocalSkillInstallReport> {
 	use crate::skills::LocalInstallLock;
-	let lock = if source_scope.shares_lock_with(&target.scope) {
+	let same_scope = source_scope.shares_lock_with(&target.scope);
+	// Cross-scope: hold BOTH scopes, taken in one ordered acquire, before the
+	// source entry is read, so the provenance written is the one under the
+	// lock; the install's own destination acquire then re-enters. Same scope
+	// reads no lock at all.
+	let _guard = if same_scope {
+		None
+	} else {
+		Some(
+			crate::skills::lock::write_scopes_guard(
+				"transfer skill",
+				&[source_scope, &target.scope],
+			)
+			.map_err(ConfigError::Io)?,
+		)
+	};
+	let lock = if same_scope {
 		LocalInstallLock::Untouched
 	} else {
 		crate::skills::adoption::skill_lock_source(skill_name, source_scope)
@@ -5929,6 +5945,105 @@ mod tests {
 			!root.join("skills-lock.json").exists(),
 			"no lock entry may be written for an untracked Master"
 		);
+	}
+
+	/// A cross-scope copy holds BOTH scopes' mutation locks while it reads the
+	/// source entry. Which lock orders first depends on the paths (global
+	/// first, then by resolved lock path), so both directions and an aliased
+	/// project root must succeed rather than trip the inversion refusal.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_scope_locks_both_scopes_in_either_direction() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		for to_global in [false, true] {
+			for aliased in [false, true] {
+				let home = tempdir().unwrap();
+				let _home = EnvVarGuard::set("HOME", home.path());
+				let _config = EnvVarGuard::set(
+					"XDG_CONFIG_HOME",
+					&home.path().join(".config"),
+				);
+				let _state = EnvVarGuard::set(
+					"XDG_STATE_HOME",
+					&home.path().join(".local/state"),
+				);
+				let temp = tempdir().unwrap();
+				let real = temp.path().join("real");
+				fs::create_dir_all(&real).unwrap();
+				let root = if aliased {
+					let alias = temp.path().join("alias");
+					std::os::unix::fs::symlink(&real, &alias).unwrap();
+					alias
+				} else {
+					real.clone()
+				};
+				let project = WriteScope::project(root.clone());
+				let (source_scope, dest_scope) = if to_global {
+					let master = real.join(".aghub/owned");
+					github_owned_master(
+						&master,
+						&real.join(".claude/skills"),
+						"owned",
+					);
+					skill::write_project_install_lock(
+						"owned",
+						&github_source(),
+						Some("skills/owned/SKILL.md".to_string()),
+						&master,
+						&real,
+						None,
+					)
+					.unwrap();
+					(project, WriteScope::Global)
+				} else {
+					let master = home.path().join(".aghub/owned");
+					github_owned_master(
+						&master,
+						&home.path().join(".claude/skills"),
+						"owned",
+					);
+					skill::write_global_install_lock(
+						"owned",
+						&github_source(),
+						Some("skills/owned/SKILL.md".to_string()),
+						&master,
+						None,
+					)
+					.unwrap();
+					(WriteScope::Global, project)
+				};
+
+				let result = transfer_skill(
+					ResourceLocator {
+						agent: AgentType::Claude,
+						scope: source_scope,
+						name: "owned".to_string(),
+					},
+					vec![InstallTarget {
+						agent: AgentType::Cursor,
+						scope: dest_scope.clone(),
+					}],
+				)
+				.unwrap();
+
+				assert_eq!(
+					result.failed_count(),
+					0,
+					"to_global={to_global} aliased={aliased}: {:?}",
+					result.results[0].error
+				);
+				let source_type = crate::skills::adoption::skill_lock_source(
+					"owned",
+					&dest_scope,
+				)
+				.map(|owner| owner.source_type);
+				assert_eq!(
+					source_type.as_deref(),
+					Some("github"),
+					"to_global={to_global} aliased={aliased}: the owner rides along"
+				);
+			}
+		}
 	}
 
 	/// Global -> project carries the SOURCE scope's entry: its owner (so

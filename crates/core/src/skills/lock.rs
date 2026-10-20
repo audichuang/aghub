@@ -75,18 +75,46 @@ pub fn mutation_guard(
 				.push(skill::lock::MutationScope::Project(root.to_path_buf()));
 		}
 	}
+	acquire(op, &scopes)
+}
+
+/// [`mutation_guard`] over several WRITE scopes at once — e.g. a cross-scope
+/// copy that reads the source lock and writes the destination. ONE call, so the
+/// lock module orders the scopes itself; acquiring them one by one can invert.
+pub fn write_scopes_guard(
+	op: &str,
+	scopes: &[&crate::scope::WriteScope],
+) -> std::io::Result<skill::lock::MutationGuard> {
+	let scopes: Vec<_> = scopes
+		.iter()
+		.map(|scope| match scope {
+			crate::scope::WriteScope::Global => {
+				skill::lock::MutationScope::Global
+			}
+			crate::scope::WriteScope::Project { root } => {
+				skill::lock::MutationScope::Project(root.clone())
+			}
+		})
+		.collect();
+	acquire(op, &scopes)
+}
+
+fn acquire(
+	op: &str,
+	scopes: &[skill::lock::MutationScope],
+) -> std::io::Result<skill::lock::MutationGuard> {
 	// Debug-only hook used exclusively by the lock-busy CLI smoke test in crates/cli/tests/cli_tests.rs.
 	#[cfg(debug_assertions)]
 	if let Ok(ms) = std::env::var("AGHUB_TEST_MUTATION_LOCK_TIMEOUT_MS") {
 		if let Ok(ms) = ms.parse::<u64>() {
 			return skill::lock::mutation_guard_with_timeout(
 				op,
-				&scopes,
+				scopes,
 				std::time::Duration::from_millis(ms),
 			);
 		}
 	}
-	skill::lock::mutation_guard(op, &scopes)
+	skill::lock::mutation_guard(op, scopes)
 }
 
 /// A snapshot of one lock entry's identity, taken BEFORE a fetch and re-verified
