@@ -13,7 +13,11 @@ just release verify X.Y.Z   # re-check a published release (read-only)
 ```
 
 **Before running it** (the script does neither): run `just preflight` (the
-pre-push hook runs no tests), and if the release includes an upstream
+pre-push hook runs no tests). `preflight` is Linux-only, so while the last
+review round runs, push the branch to `fork` and run
+`gh workflow run ci.yml --repo audichuang/aghub --ref <branch>` to get the
+macOS/Windows test matrix early — a Windows-only test failure otherwise
+surfaces at the tag, one CI cycle later. If the release includes an upstream
 (AkaraChen/aghub) port, add its row to `UPSTREAM.md` and bump "Last full
 review" — that log, not the commit message, is the durable record.
 
@@ -21,12 +25,17 @@ You pick the version and confirm go/no-go — a tag is a real public release
 (Homebrew + the auto-update endpoint). `scripts/release.sh` then: validates the
 version, **pushes to `fork` (origin = upstream AkaraChen — never)**, waits up to
 40 min for HEAD's `ci.yml` to go green, tags `vX.Y.Z`, watches `release.yml`
-(auto-reruns once on a dispatch flake: non-success with no job concluding
-`failure`), then runs `scripts/verify-release.sh` in full mode.
+(when no job concluded `failure` — macOS jobs that no hosted runner acquired
+are cancelled after ~15 min under a capacity squeeze — it reruns the unfinished
+jobs with `--failed`, pausing 15 min between up to 6 tries; tune with
+`RELEASE_FLAKE_RETRIES` / `RELEASE_FLAKE_PAUSE_SECS`), then runs
+`scripts/verify-release.sh` in full mode.
 
 **Interrupted? Re-run the same command.** The release runs on GitHub; killing the
-script only stops the local watch. Once `vX.Y.Z` is on the fork at HEAD,
-`just release X.Y.Z --yes` skips push/CI/tag and resumes at watch + verify.
+script only stops the local watch. Once `vX.Y.Z` is on the fork at HEAD — or at
+an ancestor of HEAD, when main moved on during a long wait (those newer commits
+are not in the release) — `just release X.Y.Z --yes` skips push/CI/tag and
+resumes at watch + verify.
 Never hand-tag to "finish" it.
 
 ## Pipeline

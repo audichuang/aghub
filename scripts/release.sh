@@ -4,7 +4,8 @@
 # automated. Encodes the project-specific gotchas so they can't be fumbled:
 #   - pushes to `fork` (origin = upstream AkaraChen/aghub — NEVER release there)
 #   - refuses to tag unless the HEAD commit's ci.yml is green on the fork
-#   - auto-reruns once on a transient CI dispatch flake (jobs stuck "queued")
+#   - reruns unfinished jobs (`--failed`, with pauses) when no job FAILED —
+#     hosted-runner capacity (macOS jobs no runner acquired) or a dispatch flake
 #   - verifies the published artifacts after the build goes green
 #
 # Usage:
@@ -12,7 +13,7 @@
 #   scripts/release.sh verify <X.Y.Z>       # re-check a published release
 #
 # Re-running the same version after an interruption RESUMES: once the tag is
-# on the fork at HEAD, the push/CI/tag steps are skipped and it goes straight
+# on the fork at HEAD or an ancestor of it, the push/CI/tag steps are skipped and it goes straight
 # to watching the run and verifying. (Killing this script never affects the
 # release itself — release.yml runs on GitHub; only the local watch stops.)
 #
@@ -109,15 +110,22 @@ git diff --quiet && git diff --cached --quiet || {
 
 HEAD_SHA="$(git rev-parse HEAD)"
 
-# An existing tag AT HEAD means this release was already cut and the script
-# was interrupted afterwards: resume at the watch. Anywhere else is a real
-# conflict. (The fetch above brought the fork's tag in locally.)
+# An existing tag on the remote at HEAD — or at an ANCESTOR of HEAD, because
+# main may move on (another session's commits) while a release run waits —
+# means this release was already cut and the script was interrupted
+# afterwards: resume at the watch, against the TAGGED commit. A local-only tag
+# or one off HEAD's history is a real conflict. (The fetch above brought the
+# fork's tag in locally.)
 RESUME=0
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-	if [ "$(git rev-parse "$TAG^{commit}")" = "$HEAD_SHA" ] &&
+	TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+	if git merge-base --is-ancestor "$TAG_SHA" "$HEAD_SHA" &&
 		git ls-remote --tags "$REMOTE" "$TAG" | grep -q "refs/tags/$TAG"; then
 		RESUME=1
-		info "$TAG is already on $REMOTE at HEAD — resuming: watch the release run, then verify"
+		[ "$TAG_SHA" = "$HEAD_SHA" ] ||
+			info "HEAD has moved past $TAG ($(git rev-list --count "$TAG_SHA..$HEAD_SHA") commit(s)); those are NOT in this release"
+		HEAD_SHA="$TAG_SHA"
+		info "$TAG is already on $REMOTE — resuming: watch the release run, then verify"
 	else
 		err "tag $TAG already exists on another commit (or only locally). To re-release a botched tag, delete it first (see releasing-aghub)."
 		exit 1
@@ -219,7 +227,7 @@ else
 	PRIOR_RUN_ID=0
 fi
 
-# 5. watch release.yml; auto-rerun once on a transient dispatch flake --------
+# 5. watch release.yml; rerun unfinished jobs on a runner-capacity flake -----
 # Poll for the run THIS push triggered: same head sha + push event + a newer id
 # than any that existed before the push. Actions can take a while to register
 # under load, so keep polling rather than accepting the first stale match.
@@ -255,16 +263,37 @@ if ! watch_run "$RUN_ID"; then
 		err "Then:    gh run rerun $RUN_ID --repo $REPO --failed   and resume with: just release $VERSION --yes"
 		exit 1
 	else
-		err "release run failed with no job concluding 'failure' (transient dispatch flake) — rerunning once..."
-		gh run rerun "$RUN_ID" --repo "$REPO" || {
-			err "could not rerun $RUN_ID — re-check manually: gh run view $RUN_ID --repo $REPO"
-			exit 1
-		}
-		sleep 8
-		if ! watch_run "$RUN_ID"; then
-			err "rerun failed too. Inspect: gh run view $RUN_ID --repo $REPO --log-failed"
-			exit 1
-		fi
+		# No job FAILED: every non-success job was cancelled or never started.
+		# The usual cause is hosted-runner capacity — a macOS job that no runner
+		# acquired is cancelled after ~15 min ("The job was not acquired by Runner
+		# of type hosted…"), and a capacity squeeze can last hours. Rerun only the
+		# unfinished jobs (`--failed`; finished builds keep their uploads), with a
+		# pause between attempts so the queue can drain.
+		tries="${RELEASE_FLAKE_RETRIES:-6}"
+		pause="${RELEASE_FLAKE_PAUSE_SECS:-900}"
+		n=1
+		while :; do
+			err "release run ended with no job concluding 'failure' (runner capacity / dispatch flake) — rerunning unfinished jobs ($n/$tries)..."
+			gh run rerun "$RUN_ID" --repo "$REPO" --failed || {
+				err "could not rerun $RUN_ID — re-check manually: gh run view $RUN_ID --repo $REPO"
+				exit 1
+			}
+			sleep 8
+			watch_run "$RUN_ID" && break
+			REAL_FAIL="$(gh run view "$RUN_ID" --repo "$REPO" --json jobs \
+				--jq '[.jobs[] | select(.conclusion=="failure") | .name] | join(", ")' 2>/dev/null || echo "")"
+			if [ -n "$REAL_FAIL" ]; then
+				err "rerun failed in: $REAL_FAIL. Inspect: gh run view $RUN_ID --repo $REPO --log-failed"
+				exit 1
+			fi
+			if [ "$n" -ge "$tries" ]; then
+				err "still no runner after $tries reruns. Inspect: gh run view $RUN_ID --repo $REPO; resume later with: just release $VERSION --yes"
+				exit 1
+			fi
+			n=$((n + 1))
+			info "  waiting ${pause}s before the next rerun..."
+			sleep "$pause"
+		done
 	fi
 fi
 ok "release.yml succeeded"
