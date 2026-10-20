@@ -4844,6 +4844,101 @@ mod tests {
 		});
 	}
 
+	/// An AMBIGUOUS global entry (URL-less `gitlab`, maybe self-hosted) keeps
+	/// fork/main's identity: its host cannot be proved, so `describes` permits a
+	/// session from the real self-hosted host instead of guessing gitlab.com.
+	#[test]
+	fn git_sync_permits_its_own_self_hosted_host_for_an_ambiguous_global_entry()
+	{
+		with_isolated_env(|home, _| {
+			let installed = home.join(".claude/skills/sync-me");
+			std::fs::create_dir_all(&installed).unwrap();
+			std::fs::write(
+				installed.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: mine\n---\n\nmine\n",
+			)
+			.unwrap();
+			skill::lock::global::add_skill_to_lock(
+				"sync-me",
+				skill::SkillLockEntry {
+					source: "group/sub/repo".to_string(),
+					source_type: "gitlab".to_string(),
+					source_url: String::new(),
+					ref_name: Some("main".to_string()),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+					skill_folder_hash: String::new(),
+					installed_at: String::new(),
+					updated_at: String::new(),
+					plugin_name: None,
+					content_hash: Some("old".to_string()),
+					ref_commit: None,
+				},
+			)
+			.unwrap();
+
+			let fixture = tempdir().unwrap();
+			let elsewhere = fixture.path().join("sync-me");
+			std::fs::create_dir_all(&elsewhere).unwrap();
+			std::fs::write(
+				elsewhere.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: theirs\n---\n\ntheirs\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("git clone sessions");
+			sessions.insert(
+				"other-repo".to_string(),
+				session_from_fixture(
+					fixture.path(),
+					"https://gitlab.corp.example/group/sub/repo.git",
+					"main",
+				),
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "other-repo",
+					"name": "sync-me",
+					"scope": "global",
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [home
+						.join(".claude/skills")
+						.display()
+						.to_string()],
+				}))
+				.dispatch();
+
+			// npx 1.5.11 records a self-hosted gitlab as URL-less
+			// `gitlab:group/sub/repo`; its host is unprovable, so a session
+			// from that real host must not be refused as a mismatch (it once
+			// was compared against a guessed gitlab.com).
+			let status = response.status();
+			let body = response.into_string().unwrap_or_default();
+			assert!(
+				!body.contains("SKILL_SOURCE_MISMATCH"),
+				"status={status} body={body}"
+			);
+			assert_eq!(status, rocket::http::Status::Ok, "{body}");
+			assert!(
+				std::fs::read_to_string(installed.join("SKILL.md"))
+					.unwrap()
+					.contains("theirs"),
+				"the sync from the entry's own host must land"
+			);
+		});
+	}
+
 	/// Another process installs the skill while this request is fetching: the
 	/// lock entry is written from inside the fetch.
 	struct AppearingEntryBackend {

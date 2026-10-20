@@ -36,7 +36,17 @@ Rule: every consumer goes through `entry_clone_source`. It now lives in
 because core readers and writers of a GLOBAL entry need the same rule: a blank
 `sourceUrl` made `EntryIdentity::describes` accept any repository, made
 accept-rename fetch a hostless `group/repo` as GitHub, and was what a
-project→global transfer wrote. See
+project→global transfer wrote.
+
+Core's readers that compare or fetch (`EntryIdentity::of_*_entry`, the
+accept-rename coordinate) use `known_clone_source` on top of it: a recorded
+URL, else a rebuild only when `reconstruction_is_unambiguous` (github, local, a
+source spelling its host). An AMBIGUOUS entry — a URL-less `gitlab`, which npx
+1.5.11 writes for ANY self-hosted `/-/tree/` host — keeps its raw recorded
+value in the identity (unprovable, so `describes` permits, as before), and
+accept-rename refuses it before fetching instead of fetching a guessed
+gitlab.com repo that could replace the skill. skill-update's own uses of
+`entry_clone_source` (projection, mutation, sources) are unchanged. See
 [core-transfer](core-transfer.md#transfer-and-reconcile-copies-share-the-local-install).
 
 Pinned by: `a_provider_typed_entry_applies_from_the_forge_the_row_advertises`

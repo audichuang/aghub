@@ -948,19 +948,17 @@ fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
 /// no entry is recorded as `local` at its root, which for a Referrer is the
 /// Master discovery resolved it to.
 /// See docs/history/core-transfer.md#transfer-and-reconcile-copies-share-the-local-install
-/// Does the owner name its repository's host — a recorded URL, or a rebuild
-/// that cannot guess (`reconstruction_is_unambiguous`)?
+/// Does the owner name its repository's host
+/// (`source_coordinate::known_clone_source`)?
 fn owner_host_is_known(
 	owner: &crate::skills::adoption::LockedSourceOwner,
 ) -> bool {
-	owner
-		.source_url
-		.as_deref()
-		.is_some_and(|url| !url.trim().is_empty())
-		|| crate::skills::source_coordinate::reconstruction_is_unambiguous(
-			&owner.source,
-			&owner.source_type,
-		)
+	crate::skills::source_coordinate::known_clone_source(
+		&owner.source,
+		owner.source_url.as_deref(),
+		&owner.source_type,
+	)
+	.is_some()
 }
 
 fn install_skill_copy(

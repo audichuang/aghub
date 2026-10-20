@@ -184,15 +184,12 @@ pub fn rename_source_from_lock(
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
-				// A blank URL (an entry carried from a project lock, which
-				// omits reconstructable URLs) is rebuilt by provider; a bare
-				// `source` would read as GitHub for a hostless gitlab entry.
-				source_url:
-					crate::skills::source_coordinate::entry_clone_source(
-						&entry.source,
-						Some(&entry.source_url),
-						&entry.source_type,
-					),
+				source_url: known_rename_source(
+					old_name,
+					&entry.source,
+					Some(&entry.source_url),
+					&entry.source_type,
+				)?,
 				ref_name: entry.ref_name.clone(),
 				skill_path,
 				captured,
@@ -216,20 +213,40 @@ pub fn rename_source_from_lock(
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
-				// The recorded clone URL, else rebuilt by provider: a URL-less
-				// gitlab `group/repo` handed on bare would be fetched as GitHub.
-				source_url:
-					crate::skills::source_coordinate::entry_clone_source(
-						&entry.source,
-						entry.source_url.as_deref(),
-						&entry.source_type,
-					),
+				source_url: known_rename_source(
+					old_name,
+					&entry.source,
+					entry.source_url.as_deref(),
+					&entry.source_type,
+				)?,
 				ref_name: entry.ref_name.clone(),
 				skill_path,
 				captured,
 			})
 		}
 	}
+}
+
+/// The coordinate accept-rename fetches, refused BEFORE any fetch when the
+/// entry does not prove its host: a URL-less `gitlab:group/repo` (npx 1.5.11
+/// records any self-hosted `/-/tree/` host that way) would otherwise fetch an
+/// unrelated gitlab.com repo and, if it holds the new name, replace this skill.
+fn known_rename_source(
+	old_name: &str,
+	source: &str,
+	source_url: Option<&str>,
+	source_type: &str,
+) -> Result<String, RenameError> {
+	crate::skills::source_coordinate::known_clone_source(
+		source,
+		source_url,
+		source_type,
+	)
+	.ok_or_else(|| {
+		RenameError::NotLocked(format!(
+			"'{old_name}' records no source URL and its '{source_type}' source 			 '{source}' does not name a host, so aghub cannot tell where to 			 fetch the rename from; re-install it from its real URL first"
+		))
+	})
 }
 
 /// P0-2 guard (a): reject a degenerate rename whose old/new names sanitize to
@@ -918,10 +935,11 @@ pub fn rollback_materialized_install(
 mod tests {
 	use super::*;
 
-	/// The PROJECT arm under the same rule: npx writes no `sourceUrl` for a
-	/// legacy gitlab entry, and a bare `group/repo` would be fetched as GitHub.
+	/// A URL-less `gitlab` PROJECT entry does not prove its host (npx 1.5.11
+	/// records self-hosted gitlab that way): refused rather than fetched from a
+	/// guessed gitlab.com, or as GitHub from the bare `group/repo`.
 	#[test]
-	fn project_rename_source_rebuilds_a_missing_url_by_provider() {
+	fn project_rename_source_refuses_an_ambiguous_url_less_entry() {
 		let project = tempfile::tempdir().unwrap();
 		skill::lock::local::add_skill_to_local_lock(
 			"old-skill",
@@ -938,19 +956,22 @@ mod tests {
 		)
 		.unwrap();
 
-		let source = rename_source_from_lock(
+		let refused = rename_source_from_lock(
 			"old-skill",
 			&WriteScope::project(project.path()),
-		)
-		.unwrap();
-		assert_eq!(source.source_url, "https://gitlab.com/o/r.git");
+		);
+		assert!(
+			matches!(&refused, Err(RenameError::NotLocked(m)) if m.contains("does not name a host")),
+			"{:?}",
+			refused.map(|s| s.source_url)
+		);
 	}
 
-	/// A global entry with a blank `sourceUrl` (legacy, or carried from a
-	/// project lock) must fetch the provider's coordinate: a hostless gitlab
-	/// `group/repo` handed on bare would be resolved as GitHub.
+	/// A global entry with a blank `sourceUrl` fetches a rebuilt coordinate only
+	/// where the provider proves the host (github); a blank `gitlab` is refused
+	/// — it may be self-hosted.
 	#[test]
-	fn global_rename_source_rebuilds_a_blank_url_by_provider() {
+	fn global_rename_source_rebuilds_only_a_provable_blank_url() {
 		let _guard = crate::skills::prune::test_lock::GlobalLockGuard::new();
 		skill::lock::global::add_skill_to_lock(
 			"old-skill",
@@ -970,9 +991,20 @@ mod tests {
 		)
 		.unwrap();
 
+		let refused = rename_source_from_lock("old-skill", &WriteScope::Global);
+		assert!(
+			matches!(&refused, Err(RenameError::NotLocked(m)) if m.contains("does not name a host")),
+			"{:?}",
+			refused.map(|s| s.source_url)
+		);
+
+		let mut github = skill::lock::global::get_skill_from_lock("old-skill")
+			.expect("entry");
+		github.source_type = "github".to_string();
+		skill::lock::global::add_skill_to_lock("old-skill", github).unwrap();
 		let source =
 			rename_source_from_lock("old-skill", &WriteScope::Global).unwrap();
-		assert_eq!(source.source_url, "https://gitlab.com/o/r.git");
+		assert_eq!(source.source_url, "https://github.com/o/r.git");
 	}
 
 	/// The snapshot must cover everything the removal step will DELETE.

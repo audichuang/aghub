@@ -55,12 +55,15 @@ Across scopes (`-g` source, `-p` target or the reverse) it copies the Master
 and records the source's owner and stored Source hash in the target's lock,
 so a locally edited source still reads as modified there — when the source's
 host is known. A legacy URL-less entry whose host is ambiguous (an old npx
-`gitlab:group/repo`, possibly self-hosted) is copied untracked instead:
-`doctor` shows it untracked; re-install from the real URL to track it. `transfer` and
-`reconcile --add` refuse when the target scope's same-named Master is
+`gitlab:group/repo`, possibly self-hosted) is copied untracked instead and
+compares no owner: `doctor` shows it untracked unless the target already had
+an entry of that name; re-install from the real URL to track it. `transfer`
+and `reconcile --add` refuse when the target scope's same-named Master is
 untracked and differs, or when the copy carries a remote owner and the
-Master differs; a cross-scope copy also refuses a different owner. A
-same-scope copy onto an owned Master grants it as-is.
+Master differs; a carried (host-known) copy also refuses a different owner.
+A same-scope copy onto an owned Master grants it as-is. `source
+accept-rename` refuses an ambiguous entry before fetching: re-install it from
+its real URL first.
 
 ## Publish an edit to a skill you author
 

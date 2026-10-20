@@ -446,6 +446,24 @@ the same GitHub misread, by `of_project_entry` and rename's project arm too
 (capture and verify both use it, so a github project entry still compares
 equal to itself).
 
+Those readers then rebuilt a host for AMBIGUOUS entries too: a URL-less
+`gitlab:group/sub/repo` (self-hosted under npx 1.5.11) made accept-rename
+fetch `gitlab.com/group/sub/repo` — an unrelated repo that, holding the new
+name, would replace the skill — and a valid git-sync from the real
+`gitlab.corp/...` host was refused `SKILL_SOURCE_MISMATCH`. Rule: the readers
+use `source_coordinate::known_clone_source` (the one "is the host known" home,
+also behind transfer's carry decision): recorded URL, else a rebuild only when
+unambiguous, else AMBIGUOUS — `EntryIdentity` keeps the raw recorded value
+(global: the blank URL; project: `source`) and accept-rename refuses before
+fetching. A two-segment URL-less `gitlab:o/r` is ambiguous too, so the earlier
+rename tests flipped to the refusal. Tests:
+`project_rename_source_refuses_an_ambiguous_url_less_entry`,
+`global_rename_source_rebuilds_only_a_provable_blank_url`,
+`rename_refuses_an_ambiguous_url_less_gitlab_entry_before_the_fetch`
+(skill-update),
+`git_sync_permits_its_own_self_hosted_host_for_an_ambiguous_global_entry`
+(api).
+
 A URL-less `gitlab` entry does NOT name gitlab.com. npx `skills` 1.5.11
 records ANY non-github `/-/tree/` host as `type: "gitlab"`, strips the host to
 `group/repo` and writes no `sourceUrl` (newer npx, e.g. 1.5.22, does write
@@ -492,9 +510,9 @@ Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_cross_scope_carries_the_stored_hash_of_an_edited_source`,
 `transfer_skill_cross_scope_untracked_records_the_master_not_the_referrer`,
 `transfer_skill_cross_scope_locks_both_scopes_in_either_direction`,
-`global_rename_source_rebuilds_a_blank_url_by_provider`,
+`global_rename_source_rebuilds_only_a_provable_blank_url`,
 `a_blank_global_url_still_refuses_a_different_repo`,
-`project_rename_source_rebuilds_a_missing_url_by_provider`,
+`project_rename_source_refuses_an_ambiguous_url_less_entry`,
 `git_sync_refuses_a_different_repo_for_a_blank_url_global_entry`; the reuse pin
 `add_skill_from_path_universal_does_not_overwrite_existing_canonical` was
 deleted (the refusal is pinned by

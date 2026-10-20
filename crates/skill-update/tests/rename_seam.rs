@@ -331,3 +331,103 @@ fn a_failed_relink_rolls_back_the_lock_and_disk() {
 		.is_err());
 	});
 }
+
+/// A URL-less `gitlab:group/sub/repo` (npx 1.5.11 records any self-hosted
+/// `/-/tree/` host that way) does not prove its host. Accept-rename must
+/// refuse it BEFORE the fetch — rebuilding gitlab.com would fetch an unrelated
+/// repo and, if that repo holds the new name, replace this skill — in both
+/// scopes, leaving the skill and its lock entry untouched.
+#[test]
+fn rename_refuses_an_ambiguous_url_less_gitlab_entry_before_the_fetch() {
+	with_isolated_env(|| {
+		let temporary = tempfile::tempdir().unwrap();
+		let fetched_root = temporary.path().join("fetched");
+		write_skill(&fetched_root.join("skills/new-skill"), "new-skill", "new");
+		let ambiguous = |mut entry: skill::LocalSkillLockEntry| {
+			entry.source = "group/sub/repo".to_string();
+			entry.source_type = "gitlab".to_string();
+			entry
+		};
+
+		// Project scope.
+		let project = temporary.path().join("project");
+		write_skill(
+			&project.join(".claude/skills/old-skill"),
+			"old-skill",
+			"old",
+		);
+		skill::add_skill_to_local_lock(
+			"old-skill",
+			ambiguous(lock_entry("skills/old-skill/SKILL.md")),
+			Some(&project),
+		)
+		.unwrap();
+		let lock_before =
+			std::fs::read(project.join("skills-lock.json")).unwrap();
+		let fetcher = dir_fetcher(fetched_root.clone(), Box::new(|| {}));
+		let error = rename_locked_skill(request(&project), &fetcher, &NoToken)
+			.expect_err("an ambiguous host must refuse the rename");
+		let skill_update::mutation::RenameMutationError::Rename(error) = error
+		else {
+			panic!("expected the core rename refusal, got {error:?}");
+		};
+		assert!(
+			error.message().contains("does not name a host"),
+			"{error:?}"
+		);
+		assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0, "no fetch");
+		assert_eq!(
+			std::fs::read(project.join("skills-lock.json")).unwrap(),
+			lock_before
+		);
+		assert!(project.join(".claude/skills/old-skill/SKILL.md").is_file());
+
+		// Global scope, blank recorded URL.
+		let home = PathBuf::from(std::env::var("HOME").unwrap());
+		write_skill(&home.join(".claude/skills/old-skill"), "old-skill", "old");
+		skill::lock::global::add_skill_to_lock(
+			"old-skill",
+			skill::SkillLockEntry {
+				source: "group/sub/repo".to_string(),
+				source_type: "gitlab".to_string(),
+				source_url: String::new(),
+				ref_name: Some("main".to_string()),
+				skill_path: Some("skills/old-skill/SKILL.md".to_string()),
+				skill_folder_hash: String::new(),
+				installed_at: String::new(),
+				updated_at: String::new(),
+				plugin_name: None,
+				content_hash: Some("old".to_string()),
+				ref_commit: None,
+			},
+		)
+		.unwrap();
+		let global_before = skill::lock::global::read_skill_lock().skills;
+		let fetcher = dir_fetcher(fetched_root, Box::new(|| {}));
+		let error = rename_locked_skill(
+			LockedRenameRequest {
+				old_name: "old-skill",
+				new_name: "new-skill",
+				scope: WriteScope::Global,
+				git_ref: None,
+			},
+			&fetcher,
+			&NoToken,
+		)
+		.expect_err("an ambiguous host must refuse the rename");
+		let skill_update::mutation::RenameMutationError::Rename(error) = error
+		else {
+			panic!("expected the core rename refusal, got {error:?}");
+		};
+		assert!(
+			error.message().contains("does not name a host"),
+			"{error:?}"
+		);
+		assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0, "no fetch");
+		assert_eq!(
+			skill::lock::global::read_skill_lock().skills,
+			global_before
+		);
+		assert!(home.join(".claude/skills/old-skill/SKILL.md").is_file());
+	});
+}

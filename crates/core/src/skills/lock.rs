@@ -132,7 +132,7 @@ fn acquire(
 ///
 /// - A source derived any other way is not comparable: a PROJECT entry's
 ///   `sourceUrl` is absent on npx-written locks, and only the `of_*_entry`
-///   rule (`entry_clone_source`) is guaranteed to rebuild it the same way on
+///   rule (`known_clone_source`) is guaranteed to rebuild it the same way on
 ///   capture and on verify.
 /// - A flow that OVERRIDES a coordinate (a `--ref`, a rename's moved
 ///   `skillPath`) must still compare the value that was there BEFORE: the
@@ -143,9 +143,9 @@ fn acquire(
 /// passes while the bytes came from the other coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryIdentity {
-	/// Effective source: the entry's clone coordinate
-	/// ([`entry_clone_source`](crate::skills::source_coordinate::entry_clone_source)),
-	/// so a blank or absent `sourceUrl` still names a repository.
+	/// Effective source: the entry's clone coordinate when the entry proves its
+	/// host ([`known_clone_source`](crate::skills::source_coordinate::known_clone_source)),
+	/// else the recorded value (unprovable, so `describes` permits).
 	source: String,
 	skill_path: Option<String>,
 	ref_name: Option<String>,
@@ -160,13 +160,16 @@ impl EntryIdentity {
 	/// docs for the two-read interleaving it rules out.
 	pub fn of_global_entry(entry: &skill::SkillLockEntry) -> Self {
 		Self {
-			// A blank recorded URL (a legacy entry, or one carried from a
-			// project lock) would make `describes` accept ANY repository.
-			source: crate::skills::source_coordinate::entry_clone_source(
+			// A blank recorded URL would make `describes` accept ANY repository,
+			// so a host the entry proves is rebuilt. An ambiguous one (a
+			// URL-less gitlab may be self-hosted) keeps the recorded value:
+			// unprovable, so `describes` permits rather than guess gitlab.com.
+			source: crate::skills::source_coordinate::known_clone_source(
 				&entry.source,
 				Some(&entry.source_url),
 				&entry.source_type,
-			),
+			)
+			.unwrap_or_else(|| entry.source_url.clone()),
 			skill_path: entry.skill_path.clone(),
 			ref_name: entry.ref_name.clone(),
 			source_type: entry.source_type.clone(),
@@ -174,15 +177,17 @@ impl EntryIdentity {
 	}
 
 	/// [`of_global_entry`](Self::of_global_entry) for a PROJECT entry, whose
-	/// `sourceUrl` is optional (npx writes none for github), so the effective
-	/// source is rebuilt by provider — the same rule on capture and on verify.
+	/// `sourceUrl` is optional (npx writes none for github), so a provable host
+	/// is rebuilt and an ambiguous one keeps the raw `source` — the same rule on
+	/// capture and on verify.
 	pub fn of_project_entry(entry: &skill::LocalSkillLockEntry) -> Self {
 		Self {
-			source: crate::skills::source_coordinate::entry_clone_source(
+			source: crate::skills::source_coordinate::known_clone_source(
 				&entry.source,
 				entry.source_url.as_deref(),
 				&entry.source_type,
-			),
+			)
+			.unwrap_or_else(|| entry.source.clone()),
 			skill_path: entry.skill_path.clone(),
 			ref_name: entry.ref_name.clone(),
 			source_type: entry.source_type.clone(),

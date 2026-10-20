@@ -34,6 +34,26 @@ pub fn reconstruction_is_unambiguous(source: &str, source_type: &str) -> bool {
 		|| carries_authority(source.trim())
 }
 
+/// The clone coordinate when the entry PROVES its host: the recorded URL, else
+/// a rebuild that cannot guess ([`reconstruction_is_unambiguous`]). `None` for
+/// an ambiguous legacy entry (a URL-less `gitlab:group/repo` may be
+/// self-hosted) — a caller that fetches, compares or carries an owner must not
+/// invent a host for it.
+pub fn known_clone_source(
+	source: &str,
+	source_url: Option<&str>,
+	source_type: &str,
+) -> Option<String> {
+	let recorded = source_url.map(str::trim).filter(|url| !url.is_empty());
+	match recorded {
+		Some(url) => Some(url.to_string()),
+		None if reconstruction_is_unambiguous(source, source_type) => {
+			Some(reconstruct_source_url(source, source_type))
+		}
+		None => None,
+	}
+}
+
 /// `://`, `@` or `:` means the string carries its own transport/authority.
 fn carries_authority(source: &str) -> bool {
 	source.contains("://") || source.contains('@') || source.contains(':')

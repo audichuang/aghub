@@ -123,10 +123,13 @@ list, or `all`), `-g`/`-p`, `--all`.
   STORED Source hash — only when the source's host is known (a recorded URL,
   github, local, or a source spelling its host); an ambiguous legacy entry
   (npx 1.5.11 `gitlab:group/repo`, which may be self-hosted) is copied
-  untracked: `doctor` shows it untracked, re-install from the real URL to track. A copy is refused when the target's same-named Master is
-  untracked and differs, or when it carries a remote owner and the Master
-  differs; a cross-scope copy also refuses a different owner. A same-scope copy
-  onto an OWNED Master grants it as-is, stale content included.
+  untracked and compares no owner (as before 2.41.5): `doctor` shows it
+  untracked unless the target already had an entry of that name; re-install
+  from the real URL to track. A copy is refused when the target's same-named
+  Master is untracked and differs, or when it carries a remote owner and the
+  Master differs; a CARRIED (host-known) copy also refuses a different owner.
+  A same-scope copy onto an OWNED Master grants it as-is, stale content
+  included. Accept-rename refuses such an ambiguous entry before fetching.
   The preview runs the commit's own core plan and per-row preflight
   (`reconcile_{skill,mcp,sub_agent}_preview`), so it refuses what `--yes` would,
   with the same code — including an MCP/sub-agent copy that would lose a field
