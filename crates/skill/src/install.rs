@@ -231,12 +231,12 @@ fn recordable_source_url(source: &InstallLockSource) -> Option<String> {
 	if url.is_empty() || source.source_type.eq_ignore_ascii_case("local") {
 		return None;
 	}
-	// Exact-host check (NOT substring): `mygithub.com` must still be recorded,
-	// only real github.com / *.github.com is reconstructable from `source`.
+	// Exact-host check (NOT substring): only github.com itself is what the
+	// `owner/repo` shorthand rebuilds to. `mygithub.com` and subdomains such as
+	// `gist.github.com` would be rebuilt as a DIFFERENT github.com repo, so they
+	// are recorded.
 	match host_of_url(url) {
-		Some(host) if host == "github.com" || host.ends_with(".github.com") => {
-			None
-		}
+		Some(host) if host == "github.com" => None,
 		_ => Some(url.to_string()),
 	}
 }
@@ -372,14 +372,20 @@ mod tests {
 			source_url: url.to_string(),
 			ref_name: None,
 		};
-		// Real github (+ subdomain) reconstructs from `source` → omitted.
+		// Real github reconstructs from `source` → omitted.
 		assert_eq!(
 			recordable_source_url(&mk("github", "https://github.com/o/r.git")),
 			None
 		);
+		// A github.com SUBDOMAIN does not: `alice/abcd` would rebuild to
+		// github.com/alice/abcd, a different repository than the gist.
 		assert_eq!(
-			recordable_source_url(&mk("github", "https://raw.github.com/o/r")),
-			None
+			recordable_source_url(&mk(
+				"git",
+				"https://gist.github.com/alice/abcd.git"
+			))
+			.as_deref(),
+			Some("https://gist.github.com/alice/abcd.git")
 		);
 		// Look-alike host must NOT be treated as github (substring bug).
 		assert_eq!(
