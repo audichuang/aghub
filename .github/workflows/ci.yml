@@ -130,6 +130,16 @@ jobs:
                 os: [ubuntu-latest, macos-latest, windows-latest]
         steps:
             - uses: actions/checkout@v6
+            # See the same step in `test`.
+            - name: Exclude test and build dirs from Windows Defender
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'SilentlyContinue'
+                  Add-MpPreference -ExclusionPath $env:TEMP
+                  Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+                  Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+                  exit 0
             - name: Normalize git config (cross-platform line endings)
               run: |
                   git config --global core.autocrlf false
@@ -359,6 +369,16 @@ jobs:
                       target: x86_64-pc-windows-msvc
         steps:
             - uses: actions/checkout@v6
+            # See the same step in `test`.
+            - name: Exclude test and build dirs from Windows Defender
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'SilentlyContinue'
+                  Add-MpPreference -ExclusionPath $env:TEMP
+                  Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+                  Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+                  exit 0
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-22.04'
               run: |
@@ -388,12 +408,14 @@ jobs:
               uses: oven-sh/setup-bun@v2
               with:
                   bun-version: ${{ env.BUN_VERSION }}
-            # The desktop crate embeds ../dist, so every OS builds it.
-            - name: Build frontend (typecheck + Vite)
+            # The desktop crate embeds ../dist, so every OS builds it. Vite
+            # only: Frontend Lint already typechecks, and `bun run build`'s tsc
+            # cost a minute per OS here.
+            - name: Build frontend (Vite)
               run: |
                   cd crates/desktop
                   bun install --frozen-lockfile
-                  bun run build
+                  bunx --bun vite build
             # The sidecar build, what `tauri build` runs, the CLI, and the
             # Linux aghub-api asset — in release.yml's order.
             - name: Build release binaries
