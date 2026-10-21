@@ -59,14 +59,16 @@ pub fn remote_owner_from_url(source_url: &str) -> Option<String> {
 		return None;
 	}
 
+	let mut default_port = None;
 	let (authority, path) =
 		if let Some((scheme, rest)) = source_url.split_once("://") {
-			if !matches!(
-				scheme.to_ascii_lowercase().as_str(),
-				"http" | "https" | "ssh" | "git"
-			) {
-				return None;
-			}
+			default_port = Some(match scheme.to_ascii_lowercase().as_str() {
+				"http" => ":80",
+				"https" => ":443",
+				"ssh" => ":22",
+				"git" => ":9418",
+				_ => return None,
+			});
 			let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
 			(authority, path)
 		} else {
@@ -80,6 +82,10 @@ pub fn remote_owner_from_url(source_url: &str) -> Option<String> {
 		.rsplit_once('@')
 		.map_or(authority, |(_, value)| value)
 		.to_ascii_lowercase();
+	// An explicit default port names the same endpoint as none at all.
+	let authority = default_port
+		.and_then(|port| authority.strip_suffix(port))
+		.map_or(authority.clone(), str::to_string);
 	let path = path
 		.split(['?', '#'])
 		.next()
@@ -321,6 +327,24 @@ mod tests {
 			source_url: url.to_string(),
 			ref_name: None,
 		}
+	}
+
+	#[test]
+	fn an_explicit_default_port_is_the_same_owner_but_another_port_is_not() {
+		let installed =
+			owner("o/r", "github", Some("ssh://git@github.com:22/o/r.git"));
+		assert!(same_source_owner(
+			&installed,
+			&requested("o/r", "github", "ssh://git@github.com/o/r.git")
+		));
+		assert!(same_source_owner(
+			&owner("o/r", "git", Some("https://git.corp:443/o/r.git")),
+			&requested("o/r", "git", "https://git.corp/o/r.git")
+		));
+		assert!(!same_source_owner(
+			&installed,
+			&requested("o/r", "github", "ssh://git@github.com:2222/o/r.git")
+		));
 	}
 
 	/// A URL-less `gitlab` entry does not name gitlab.com: npx 1.5.11 records
