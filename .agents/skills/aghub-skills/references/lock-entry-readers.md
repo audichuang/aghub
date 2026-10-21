@@ -38,9 +38,16 @@ The traps that each cost a round, so check them first:
 - **Hash**: an unknown stored hash stays the placeholder
   (`skill::lock_hash_unknown`). Re-hashing a copied folder turns a local edit
   into the upstream baseline. The copier drops `__pycache__` and the raw hash
-  counts it, so byte-compare a Master only against content fetched from a
-  remote checkout.
+  counts it: byte-compare a Master only against fetched content; local content
+  compares through `linker::master_content_hash` (the copier's own exclusion),
+  and the lock write reuses the guard's `adopts_master` — a second, raw
+  comparison accepts the Master but skips the lock.
 - **Ref cohort**: one source on two refs in one scope makes `source sync` and
   fetched installs refuse that source; refuse the write before it lands.
 - **Source spelling**: `github.com` is the only host the `owner/repo`
   shorthand rebuilds to. Record a subdomain such as `gist.github.com`.
+- **Omitting `sourceUrl`**: the project-lock elision
+  (`source_coordinate::project_lock_source`), the reader's rebuild
+  (`reconstruct_source_url`) and `same_source_owner`'s URL-less arm must agree.
+  Only a github `owner/repo` shorthand survives without a URL; a URL-less
+  gitlab/git or authority-bearing entry no longer matches its own reinstall.

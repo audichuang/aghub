@@ -11,7 +11,7 @@ and transfer's credential check; core never fetches).
 
 - **`inject_credentials` is HTTPS-only** — every other scheme is rejected
   (`credentials.rs`). Do not "fix" SSH by injecting into scp-style URLs.
-- **Tokens never in error strings** — always `redact_url_userinfo` before surfacing.
+- **Tokens never in error strings** — a whole SOURCE string goes through `redact_source_credentials`; `redact_url_userinfo` is for free text and stops at whitespace, so on a source it leaks a password that contains a space.
 - **Ask "does this carry a secret?" via `source_has_credentials`, never `redact_* != input`** — the redactor over-redacts on purpose (any `@` after a `:`). The predicate parses URL forms (an `ssh://` user is not a secret) and keeps the over-detection only for ambiguous scheme-less shapes.
 - **`system_git.rs` shells out to the real `git` binary** so OS credential
   helpers (Windows Credential Manager, TFS/Azure DevOps) work. The gate is
