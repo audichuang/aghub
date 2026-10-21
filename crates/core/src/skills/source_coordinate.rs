@@ -59,13 +59,13 @@ pub fn known_clone_source(
 }
 
 /// `source` as a project lock entry records it: `sourceUrl` is omitted only
-/// when [`reconstruct_source_url`] — what every reader falls back to — rebuilds
-/// exactly that URL AND the rebuild is not a guess
-/// ([`reconstruction_is_unambiguous`]), keeping the common github entry
-/// byte-identical to npx's — the pasted browser form (`…/o/r`, `…/o/r/`)
-/// included, which the same host serves as `…/o/r.git`. Any other spelling
-/// (host case, port, scheme, a doubled `.git`) is recorded, and so is every gitlab URL: a URL-less gitlab
-/// entry reads as host-less, so its owner could no longer be matched.
+/// for a github `owner/repo` shorthand whose [`reconstruct_source_url`] — what
+/// every reader falls back to — rebuilds exactly that URL, keeping the common
+/// github entry byte-identical to npx's (the pasted browser form `…/o/r`,
+/// `…/o/r/` included; the same host serves it as `…/o/r.git`). Everything else
+/// is recorded: another spelling (host case, port, scheme, a doubled `.git`),
+/// and every gitlab/git or authority-bearing source, since a URL-less one of
+/// those no longer matches its own owner on reinstall (`same_source_owner`).
 pub fn project_lock_source(
 	source: &skill::InstallLockSource,
 ) -> skill::InstallLockSource {
@@ -76,7 +76,8 @@ pub fn project_lock_source(
 		|| (!url.ends_with(".git")
 			&& rebuilt == format!("{}.git", url.trim_end_matches('/')));
 	if same
-		&& reconstruction_is_unambiguous(&source.source, &source.source_type)
+		&& source.source_type.eq_ignore_ascii_case("github")
+		&& !carries_authority(&source.source)
 	{
 		source.source_url.clear();
 	}
@@ -327,6 +328,25 @@ mod tests {
 			("o/r", "git", "https://github.com/o/r.git", false),
 			("g/r", "gitlab", "https://gitlab.com/g/r.git", false),
 			("g/sub/r", "gitlab", "https://gitlab.com/g/sub/r.git", false),
+			(
+				"git@gitlab.com:g/r.git",
+				"gitlab",
+				"git@gitlab.com:g/r.git",
+				false,
+			),
+			("git@git.corp:g/r.git", "git", "git@git.corp:g/r.git", false),
+			(
+				"https://git.corp/skills.git",
+				"git",
+				"https://git.corp/skills.git",
+				false,
+			),
+			(
+				"git@github.com:o/r.git",
+				"github",
+				"git@github.com:o/r.git",
+				false,
+			),
 		] {
 			let requested = skill::InstallLockSource {
 				source: source.to_string(),
