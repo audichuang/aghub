@@ -258,6 +258,8 @@ jobs:
                   # features "Build Tauri" will ask for and is not compiled a
                   # second time there (it was ~445 crates). --bin keeps this
                   # step to the api binary; the desktop crate needs ../dist.
+                  # Mirrored by ci.yml `build`, which warms this job's cache:
+                  # change one, change both, or the restore misses.
                   cargo build --release --target "$TARGET" -p aghub -p aghub-api \
                       --bin aghub-api --features tauri/custom-protocol
                   cp "target/$TARGET/release/$BIN" "$STAGE/$BIN"
@@ -442,6 +444,7 @@ jobs:
                   # sed dirties the tree and `git describe --dirty=-dev` stamps
                   # the release binary "X.Y.Z-dev".
                   export AGHUB_RELEASE_VERSION="${RELEASE_TAG#v}"
+                  # Mirrored by ci.yml `build` (see build-tauri's sidecar step).
                   cargo build --release -p aghub-cli --target ${{ matrix.target }}
 
             - name: Smoke test CLI (verifies the released binary works)
