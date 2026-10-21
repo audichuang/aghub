@@ -951,12 +951,12 @@ fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
 /// May the owner be written into another scope's lock? Only when it names its
 /// repository's host (`source_coordinate::known_clone_source`) AND carries no
 /// credentials: a global entry may record `https://user:TOKEN@…`, and a
-/// project lock is a file people commit.
+/// project lock is a file people commit. An ssh username is an account, not
+/// a secret.
 fn owner_is_carriable(
 	owner: &crate::skills::adoption::LockedSourceOwner,
 ) -> bool {
-	let has_credentials =
-		|s: &str| aghub_git::redact_source_credentials(s) != s;
+	let has_credentials = aghub_git::source_has_credentials;
 	crate::skills::source_coordinate::known_clone_source(
 		&owner.source,
 		owner.source_url.as_deref(),
@@ -6611,6 +6611,127 @@ mod tests {
 			!lock_text.contains("SECRET-TOKEN"),
 			"a credential reached the project lock: {lock_text}"
 		);
+	}
+
+	/// An ssh user is an account, not a secret: the owner rides along.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_cross_scope_carries_a_user_only_ssh_owner() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let master = home.path().join(".aghub/ssh");
+		github_owned_master(
+			&master,
+			&home.path().join(".claude/skills"),
+			"ssh",
+		);
+		let url = "ssh://git@gitlab.corp/group/repo.git";
+		skill::write_global_install_lock(
+			"ssh",
+			&skill::InstallLockSource {
+				source: "group/repo".to_string(),
+				source_type: "git".to_string(),
+				source_url: url.to_string(),
+				ref_name: Some("main".to_string()),
+			},
+			Some("ssh/SKILL.md".to_string()),
+			&master,
+			Some("abc123".to_string()),
+		)
+		.unwrap();
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "ssh".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		let entry = lock.skills.get("ssh").expect("dest lock entry");
+		assert_eq!(entry.source, "group/repo");
+		assert_eq!(entry.source_type, "git");
+		assert_eq!(entry.ref_name.as_deref(), Some("main"));
+		assert_eq!(entry.skill_path.as_deref(), Some("ssh/SKILL.md"));
+		assert_eq!(entry.source_url.as_deref(), Some(url));
+	}
+
+	/// An ssh URL with a password stays out of the project lock.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_never_carries_an_ssh_password_into_a_project_lock() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let master = home.path().join(".aghub/ssh");
+		github_owned_master(
+			&master,
+			&home.path().join(".claude/skills"),
+			"ssh",
+		);
+		let url = "ssh://git:PW-SECRET@gitlab.corp/group/repo.git";
+		skill::write_global_install_lock(
+			"ssh",
+			&skill::InstallLockSource {
+				source: "group/repo".to_string(),
+				source_type: "git".to_string(),
+				source_url: url.to_string(),
+				ref_name: Some("main".to_string()),
+			},
+			Some("ssh/SKILL.md".to_string()),
+			&master,
+			Some("abc123".to_string()),
+		)
+		.unwrap();
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "ssh".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		assert!(root.join(".aghub/ssh/SKILL.md").is_file());
+		let lock_text = fs::read_to_string(root.join("skills-lock.json"))
+			.unwrap_or_default();
+		assert!(
+			!lock_text.contains("PW-SECRET"),
+			"a password reached the project lock: {lock_text}"
+		);
+		assert!(!skill::lock::local::read_local_lock(Some(&root))
+			.skills
+			.contains_key("ssh"));
 	}
 
 	/// The other direction: a clean carried owner meeting a DESTINATION entry

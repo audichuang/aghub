@@ -523,6 +523,11 @@ credential-free coordinate. Such an owner is now not carriable and the copy is
 untracked; pinned by
 `transfer_skill_never_carries_a_credential_into_a_project_lock`.
 
+Only a password/token counts: a user-only `ssh://` (an account, not a secret) is
+carried like scp `git@host:o/r.git`; pinned by
+`transfer_skill_cross_scope_carries_a_user_only_ssh_owner` and
+`transfer_skill_never_carries_an_ssh_password_into_a_project_lock`.
+
 Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone`,
 `transfer_skill_same_scope_keeps_an_untracked_master_untracked`,

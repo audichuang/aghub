@@ -298,47 +298,98 @@ pub fn resolve_remote_source(
 	})
 }
 
+/// Does `source` carry a secret (password/token) in its userinfo? Never laxer
+/// than the log redactor, which over-redacts on purpose (any `@` after a `:`):
+/// it starts from the redactor's answer and only lets off shapes proven to
+/// hold no secret.
+pub fn source_has_credentials(source: &str) -> bool {
+	let s = source.trim();
+	crate::redact::redact_source_credentials(s) != s && !provably_secret_free(s)
+}
+
+/// Shapes the redactor flags that provably hold no secret. Ambiguous ones
+/// stay flagged: scheme-less `git@host:o/r@v1` (scp + ref) reads the same as
+/// `me@corp.com:TOK@host`.
+/// ponytail: a clean scp source with an `@ref` still hands out `***@ref`.
+/// Two shapes no parse tells apart stay let off: `git://u:12/PW@host` reads
+/// like a clean `git://host:9418/repo@v1`, and `u:\PW@host\x` like
+/// `C:\Users\a@b\skills`.
+fn provably_secret_free(s: &str) -> bool {
+	// Windows drive path (`C:\Users\a@b\skills`): the path goes on with `\`
+	// after the last `@`, and no later `:` could be userinfo (`u:\PW@host/o/r`
+	// is a password).
+	if let [d, b':', b'\\', rest @ ..] = s.as_bytes() {
+		return d.is_ascii_alphabetic()
+			&& !rest.contains(&b':')
+			&& s.rsplit_once('@')
+				.is_some_and(|(_, tail)| tail.contains('\\'));
+	}
+	let Some((scheme, rest)) = s.split_once("://") else {
+		return false;
+	};
+	// A remote-helper address (`codecommit::https://…`) is not parsed here,
+	// and `Url` reads `\` as `/`, hiding `https://DOMAIN\user:PW@host`.
+	let plain_scheme = !scheme.is_empty()
+		&& scheme
+			.chars()
+			.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+	if !plain_scheme || rest.contains('\\') {
+		return false;
+	}
+	if scheme.eq_ignore_ascii_case("ssh") {
+		// An ssh user names an account. Everything before the last `@` must be
+		// a bare user; `Url::parse` would reject `ssh://git@host:org/repo`.
+		return rest
+			.rsplit_once('@')
+			.is_some_and(|(user, _)| !user.contains([':', '/', '?', '#']));
+	}
+	// The parser puts `host:8443/o/r@v1`'s `@` in the path. Only a single `@`
+	// in the last path segment (a ref) is let off: `u:12/PW@host/o/r` reads as
+	// port 12 too. An empty port (`u:/PW@host`) is a password, not a port.
+	let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+	!authority.ends_with(':')
+		&& rest.matches('@').count() == 1
+		&& rest
+			.rsplit_once('@')
+			.is_none_or(|(_, tail)| !tail.contains('/'))
+		&& Url::parse(s).is_ok_and(|url| {
+			url.username().is_empty() && url.password().is_none()
+		})
+}
+
+/// Raw text between the userinfo's `:` and the first `@` after it. The
+/// shortest fragment on purpose: a short needle can only over-reject.
+fn password_fragment(source: &str) -> Option<&str> {
+	let s = source.trim();
+	let body = s.split_once("://").map_or(s, |(_, rest)| rest);
+	let userinfo = &body[..body.find('@')?];
+	let pw = userinfo.split_once(':')?.1;
+	(!pw.is_empty()).then_some(pw)
+}
+
 /// A recorded source safe to HAND OUT and still usable as one: the clean
 /// `source_url` [`resolve_remote_source`] would persist (no https userinfo, no
-/// password, an ssh user kept). A source carrying no secret comes back as is,
-/// so a lock identifier is never rewritten into a URL; an unresolvable one
-/// falls back to [`crate::redact::redact_source_credentials`].
+/// password, an ssh user kept). A source carrying no secret (decided by
+/// [`source_has_credentials`], not by comparing against the redactor) comes
+/// back as is, so a lock identifier is never rewritten into a URL; an
+/// unresolvable one falls back to [`crate::redact::redact_source_credentials`].
 pub fn strip_source_credentials(source: &str) -> String {
-	let redacted = crate::redact::redact_source_credentials(source);
-	if redacted == source {
-		return redacted;
+	if !source_has_credentials(source) {
+		return source.to_string();
 	}
-	// Resolution can hand a secret back (a scheme-less `user:tok@host/path`
-	// reads as scp with host `user`, a remote-helper address passes through);
-	// only a result that changed AND reads clean is trusted.
+	// Resolution can hand the secret back: a scheme-less `:TOK@host:o/r` falls
+	// through to GitHub shorthand and lands in the PATH. Accept the resolved
+	// value only when it carries no userinfo secret AND not the input's
+	// password.
+	let secret = password_fragment(source);
 	resolve_remote_source(source)
 		.ok()
 		.map(|resolved| resolved.source_url)
-		.filter(|out| reads_clean(out))
-		.unwrap_or(redacted)
-}
-
-/// No secret left in a resolved source. An `ssh://` user names an account, not
-/// a secret (resolution keeps it on purpose), so there only a password counts;
-/// everywhere else anything [`crate::redact::redact_source_credentials`] would
-/// still remove does.
-fn reads_clean(out: &str) -> bool {
-	// Ask the parser for http(s): redact's heuristic mistakes `host:8443/o/r@v1`
-	// for userinfo.
-	if let Ok(url) = Url::parse(out) {
-		if matches!(url.scheme(), "http" | "https") {
-			return url.username().is_empty() && url.password().is_none();
-		}
-	}
-	match out.strip_prefix("ssh://") {
-		Some(rest) => {
-			let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-			authority
-				.rsplit_once('@')
-				.is_none_or(|(userinfo, _)| !userinfo.contains(':'))
-		}
-		None => crate::redact::redact_source_credentials(out) == out,
-	}
+		.filter(|out| {
+			!source_has_credentials(out)
+				&& secret.is_none_or(|s| !out.contains(s))
+		})
+		.unwrap_or_else(|| crate::redact::redact_source_credentials(source))
 }
 
 #[cfg(test)]
@@ -423,6 +474,97 @@ mod tests {
 		);
 		assert_eq!(r.clone_url, r.source_url);
 		assert!(!r.source_url.contains("SECRET"));
+	}
+
+	#[test]
+	fn source_has_credentials_reads_userinfo_not_at_signs() {
+		for (input, want) in [
+			("ssh://git@gitlab.corp/group/repo.git", false),
+			("ssh://git@host:org/repo", false),
+			("git@github.com:o/r.git", false),
+			("git://host:9418/o/r@v1", false),
+			("https://host:8443/o/r@v1", false),
+			("https://github.com/o/r.git", false),
+			("o/r", false),
+			("github:o/r", false),
+			("gitlab:group/repo", false),
+			("C:\\Users\\a@b\\skills", false),
+			("/home/a@b/skills", false),
+			("https://u:TOK@h/o/r", true),
+			("https://TOK@github.com/o/r.git", true),
+			("git://u:S@h/o/r", true),
+			("ssh://git:PW@h/o/r", true),
+			("u:TOK@git.example.com:o/r.git", true),
+			("git:tok/part@github.com:o/r.git", true),
+			("git:tok@part@github.com:o/r.git", true),
+			("alice:TOK@host/o/r", true),
+			("alice:tok@host", true),
+			(":TOK@host:o/r", true),
+			("codecommit::https://u:TOK@host/r", true),
+			("https://u:p/a?b#c@host/x", true),
+			("ssh://git:SEC/RET@gitlab.corp/group/repo.git", true),
+			("ssh://git:p?w@h/o/r", true),
+			("ssh://u:p/w@host/x", true),
+			("u:/TOK@host:o/r", true),
+			("me@corp.com:TOK@host:o/r", true),
+			("me@corp.com:TOK@host/o/r", true),
+			("me@corp.com:TOK@host", true),
+			("u:tok/part@host", true),
+			("u:tok\\part@host", true),
+			("u:/TOK@host", true),
+			("u:tok/a@b@host", true),
+			// Ambiguous scheme-less shapes over-detect (safe direction).
+			("git@github.com:o/r@v1", true),
+			("git.example.com:o/r@v1", true),
+			("C:/Users/a@b/skills", true),
+			// Leaks a parse-first predicate let through.
+			("https://CORP\\alice:PW@tfs.corp/tfs/coll/_git/repo", true),
+			("HTTPS://SEK\\RT@host/o/r", true),
+			("ssh://me@corp.com:PW/SECRET@host/o/r", true),
+			("ssh://me@corp.com:PW#SECRET@host/o/r", true),
+			("https://u:/PW@host/o/r", true),
+			("git://u:/PW@host/o/r", true),
+			("file://u:/PW@host/o/r", true),
+			("a:\\PW@host:o/r.git", true),
+			("C:\\x:PW@host:o/r.git", true),
+			("codecommit::ssh://u:S@h/r", true),
+			("git://u:12/PW@host/o/r", true),
+			("u:\\PW@host/o/r", true),
+		] {
+			assert_eq!(source_has_credentials(input), want, "{input}");
+		}
+	}
+
+	#[test]
+	fn strip_keeps_clean_sources_that_hold_an_at_sign() {
+		for input in [
+			"git://host:9418/o/r@v1",
+			"https://host:8443/o/r@v1",
+			"C:\\Users\\a@b\\skills",
+			"ssh://git@gitlab.corp/group/repo.git",
+		] {
+			assert_eq!(strip_source_credentials(input), input);
+		}
+	}
+
+	#[test]
+	fn strip_never_returns_a_secret_the_input_carried() {
+		assert_eq!(strip_source_credentials(":TOK@host:o/r"), "***@host:o/r");
+		for (input, secret) in [
+			(":TOK@host:o/r", "TOK"),
+			("https://u:TOK@h/o/r", "TOK"),
+			("ssh://git:PW@h/o/r", "PW"),
+			("u:TOK@git.example.com:o/r.git", "TOK"),
+			("alice:TOK@host/o/r", "TOK"),
+			("codecommit::https://u:TOK@host/r", "TOK"),
+			("me@corp.com:TOK@host/o/r", "TOK"),
+			("me@corp.com:TOK@host", "TOK"),
+			("u:tok/part@host", "tok/part"),
+			("u:/TOK@host", "TOK"),
+		] {
+			let out = strip_source_credentials(input);
+			assert!(!out.contains(secret), "{input} -> {out}");
+		}
 	}
 
 	#[test]
