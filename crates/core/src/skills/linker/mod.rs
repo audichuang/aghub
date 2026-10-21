@@ -227,6 +227,27 @@ fn relative_path(from_dir: &Path, to_path: &Path) -> PathBuf {
 const EXCLUDE_FILES: &[&str] = &["metadata.json"];
 const EXCLUDE_DIRS: &[&str] = &[".git", "__pycache__", "__pypackages__"];
 
+/// Does the Master copier leave this entry out? The ONE answer for anything
+/// that compares local content against a Master the copier made.
+pub(crate) fn excluded_from_master(name: &str, is_dir: bool) -> bool {
+	EXCLUDE_FILES.contains(&name) || (is_dir && EXCLUDE_DIRS.contains(&name))
+}
+
+/// Folder hash of `dir` over only what the copier would carry into a Master.
+pub(crate) fn master_content_hash(
+	dir: &Path,
+) -> Result<String, skill::HashError> {
+	skill::compute_skill_folder_hash_where(dir, |rel| {
+		let mut parts = rel.split('/').peekable();
+		while let Some(part) = parts.next() {
+			if excluded_from_master(part, parts.peek().is_some()) {
+				return false;
+			}
+		}
+		true
+	})
+}
+
 /// Recursively copy a skill source tree into the canonical Master directory,
 /// applying the npx exclude lists and skipping symlinks.
 ///
@@ -244,9 +265,7 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 		if Linker::is_link(&from_path) {
 			continue;
 		}
-		if EXCLUDE_FILES.contains(&name.as_ref())
-			|| (file_type.is_dir() && EXCLUDE_DIRS.contains(&name.as_ref()))
-		{
+		if excluded_from_master(&name, file_type.is_dir()) {
 			continue;
 		}
 		let to_path = to.join(&file_name);

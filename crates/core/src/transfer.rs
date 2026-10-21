@@ -6284,6 +6284,98 @@ mod tests {
 		);
 	}
 
+	/// Seed a `__pycache__` the Master copier drops into a skill folder.
+	#[cfg(unix)]
+	fn seed_python_cache(dir: &Path) {
+		fs::create_dir_all(dir.join("scripts/__pycache__")).unwrap();
+		fs::write(dir.join("scripts/helper.py"), b"x = 1\n").unwrap();
+		fs::write(dir.join("scripts/__pycache__/x.pyc"), b"\x00cache").unwrap();
+	}
+
+	/// An untracked (Uncarried) copy writes no lock, so the second agent's
+	/// grant meets the Master as an adoption: comparing the source's raw hash
+	/// against the Master the copier made (no `__pycache__`) refused it.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_uncarried_owner_with_python_cache_grants_a_second_agent()
+	{
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let (source, dest) = (temp.path().join("s"), temp.path().join("d"));
+		url_less_gitlab_skill(&source, "gl");
+		seed_python_cache(&source.join(".aghub/gl"));
+		fs::create_dir_all(&dest).unwrap();
+
+		let first =
+			transfer_between_projects(&source, &dest, AgentType::Cursor, "gl");
+		assert_eq!(first.failed_count(), 0, "{:?}", first.results[0].error);
+		let master = dest.join(".aghub/gl");
+		let before = skill::compute_skill_folder_hash(&master).unwrap();
+
+		let second = transfer_between_projects(
+			&source,
+			&dest,
+			AgentType::Windsurf,
+			"gl",
+		);
+
+		assert_eq!(second.failed_count(), 0, "{:?}", second.results[0].error);
+		assert!(crate::skills::linker::Linker::is_link(
+			&dest.join(".windsurf/skills/gl")
+		));
+		assert_eq!(skill::compute_skill_folder_hash(&master).unwrap(), before);
+		assert!(!master.join("scripts/__pycache__").exists());
+		assert!(!dest.join("skills-lock.json").exists());
+	}
+
+	/// The same for a same-scope (Untouched) copy of an untracked private
+	/// folder: Claude -> Cursor makes the Master, Claude -> Windsurf must reuse
+	/// it rather than refuse it as "different content".
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_untracked_private_folder_with_python_cache_grants_a_second_agent(
+	) {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		let private = root.join(".claude/skills/pv");
+		fs::create_dir_all(&private).unwrap();
+		fs::write(
+			private.join("SKILL.md"),
+			"---\nname: pv\ndescription: Private\n---\n\n# Pv\n",
+		)
+		.unwrap();
+		seed_python_cache(&private);
+		let grant = |agent| {
+			transfer_skill(
+				ResourceLocator {
+					agent: AgentType::Claude,
+					scope: WriteScope::project(root.clone()),
+					name: "pv".to_string(),
+				},
+				vec![InstallTarget {
+					agent,
+					scope: WriteScope::project(root.clone()),
+				}],
+			)
+			.unwrap()
+		};
+
+		let first = grant(AgentType::Cursor);
+		assert_eq!(first.failed_count(), 0, "{:?}", first.results[0].error);
+		let master = root.join(".aghub/pv");
+		let before = skill::compute_skill_folder_hash(&master).unwrap();
+
+		let second = grant(AgentType::Windsurf);
+
+		assert_eq!(second.failed_count(), 0, "{:?}", second.results[0].error);
+		assert!(crate::skills::linker::Linker::is_link(
+			&root.join(".windsurf/skills/pv")
+		));
+		assert_eq!(skill::compute_skill_folder_hash(&master).unwrap(), before);
+		assert!(!root.join("skills-lock.json").exists());
+	}
+
 	/// An owner copied untracked still answers to the target's entry: one
 	/// owned by another source refuses the copy (the agent would be granted
 	/// that source's Master, or the copy would sit under its lock entry). A

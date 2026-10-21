@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::ConfigError;
 use crate::scope::WriteScope;
-use crate::skills::linker::{master_store_dir, Linker};
+use crate::skills::linker::{master_content_hash, master_store_dir, Linker};
 use skill::sanitize::sanitize_name;
 
 #[derive(Clone, Debug)]
@@ -246,11 +246,23 @@ pub fn adoption_guard(
 			// `fetched`: the content came from a remote checkout, so an existing
 			// Master must match it byte for byte. Local-disk content (an import,
 			// or a transfer carrying a remote OWNER) is only compared on
-			// adoption: the copier drops caches the raw hash still counts.
+			// adoption, and only over what the copier carries: a Master it made
+			// lacks the caches (`__pycache__`, …) the raw hash still counts.
 			let is_fetched = fetched;
 			if is_fetched || (is_adoption && !is_already_installed) {
-				let master_hash = hash_master(name, canonical)?;
-				if master_hash != installed_hash {
+				let (master_hash, source_hash) = if is_fetched {
+					(hash_master(name, canonical)?, installed_hash.clone())
+				} else {
+					let hash = |dir: &Path| {
+						master_content_hash(dir).map_err(|error| {
+							ConfigError::ValidationFailed(format!(
+								"Skill '{name}' could not be verified: {error}",
+							))
+						})
+					};
+					(hash(canonical)?, hash(source_root)?)
+				};
+				if master_hash != source_hash {
 					let kind = if is_fetched { "fetched " } else { "" };
 					return Err(ConfigError::ValidationFailed(format!(
 						"Pre-existing Master for skill '{name}' has different content; \

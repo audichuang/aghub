@@ -59,6 +59,18 @@ pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 	hash_files(collect_skill_files(dir)?)
 }
 
+/// [`compute_skill_folder_hash`] over only the files `keep` accepts, by
+/// relative `/`-separated path.
+pub fn compute_skill_folder_hash_where(
+	dir: &Path,
+	keep: impl FnMut(&str) -> bool,
+) -> Result<String, HashError> {
+	let mut keep = keep;
+	let mut files = collect_skill_files(dir)?;
+	files.retain(|(rel, _)| keep(rel));
+	hash_files(files)
+}
+
 /// [`compute_skill_folder_hash`], but [`HashError::Uncovered`] when the walk
 /// skipped anything — for callers that treat digest equality as proof the
 /// trees are identical. The SAME traversal reports the skips, so what the
