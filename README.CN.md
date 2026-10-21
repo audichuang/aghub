@@ -37,7 +37,6 @@ brew install --cask audichuang/tap/aghub
 | 平台                  | 下载                                                                                              |
 | --------------------- | ------------------------------------------------------------------------------------------------- |
 | Windows (实验性)      | [setup.exe](https://github.com/audichuang/aghub/releases/latest/download/aghub-windows-setup.exe) |
-| macOS (Intel)         | [dmg](https://github.com/audichuang/aghub/releases/latest/download/aghub_mac_intel.dmg)           |
 | macOS (Apple Silicon) | [dmg](https://github.com/audichuang/aghub/releases/latest/download/aghub_mac_arm.dmg)             |
 | Linux                 | [AppImage](https://github.com/audichuang/aghub/releases/latest/download/aghub-linux.AppImage)     |
 
