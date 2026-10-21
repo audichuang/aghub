@@ -60,14 +60,19 @@ pub fn known_clone_source(
 
 /// `source` as a project lock entry records it: `sourceUrl` is omitted only
 /// when [`reconstruct_source_url`] — what every reader falls back to — rebuilds
-/// exactly that URL, keeping the common github entry byte-identical to npx's.
-/// Any other spelling (host case, port, scheme, a doubled `.git`) is recorded.
+/// exactly that URL AND the rebuild is not a guess
+/// ([`reconstruction_is_unambiguous`]), keeping the common github entry
+/// byte-identical to npx's. Any other spelling (host case, port, scheme, a
+/// doubled `.git`) is recorded, and so is every gitlab URL: a URL-less gitlab
+/// entry reads as host-less, so its owner could no longer be matched.
 pub fn project_lock_source(
 	source: &skill::InstallLockSource,
 ) -> skill::InstallLockSource {
 	let mut source = source.clone();
 	let url = source.source_url.trim();
-	if reconstruct_source_url(&source.source, &source.source_type) == url {
+	if reconstruction_is_unambiguous(&source.source, &source.source_type)
+		&& reconstruct_source_url(&source.source, &source.source_type) == url
+	{
 		source.source_url.clear();
 	}
 	source
@@ -313,13 +318,16 @@ mod tests {
 			("o/r", "github", "https://github.com:8443/o/r.git", false),
 			("o/r", "github", "http://github.com/o/r.git", false),
 			("o/r", "git", "https://github.com/o/r.git", false),
+			("g/r", "gitlab", "https://gitlab.com/g/r.git", false),
+			("g/sub/r", "gitlab", "https://gitlab.com/g/sub/r.git", false),
 		] {
-			let written = project_lock_source(&skill::InstallLockSource {
+			let requested = skill::InstallLockSource {
 				source: source.to_string(),
 				source_type: source_type.to_string(),
 				source_url: url.to_string(),
 				ref_name: None,
-			});
+			};
+			let written = project_lock_source(&requested);
 			skill::write_project_install_lock_hashed(
 				"s",
 				&written,
@@ -342,6 +350,19 @@ mod tests {
 				"{source} {source_type}"
 			);
 			assert_eq!(entry.source_url.is_none(), elided, "{url}");
+			// Reinstalling the very same source must still be recognised as
+			// the entry's owner, not refused as a reassignment.
+			let owner = crate::skills::adoption::skill_lock_source(
+				"s",
+				&crate::scope::WriteScope::Project {
+					root: project.path().to_path_buf(),
+				},
+			)
+			.unwrap();
+			assert!(
+				crate::skills::adoption::same_source_owner(&owner, &requested),
+				"{url}"
+			);
 		}
 	}
 
