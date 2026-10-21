@@ -224,36 +224,43 @@ pub fn write_global_install_lock_hashed(
 }
 
 /// The `sourceUrl` to persist in a project lock entry, or `None` to omit it.
-/// Only a non-github remote host carries recovery info the host-stripped
-/// `source` lacks; github shorthand and local sources reconstruct fine and are
-/// left out to keep the lock byte-identical and npx-invisible.
+/// Omitted only when the entry's `source` + `sourceType` rebuild exactly the
+/// same clone coordinate (a `github` `owner/repo` → `https://github.com/owner/repo.git`),
+/// keeping the common lock byte-identical and npx-invisible. Anything else —
+/// another type on github.com (a URL-less `git` entry names no host), a port,
+/// another scheme or path — keeps its URL. Local sources are never recorded.
 fn recordable_source_url(source: &InstallLockSource) -> Option<String> {
 	let url = source.source_url.trim();
 	if url.is_empty() || source.source_type.eq_ignore_ascii_case("local") {
 		return None;
 	}
-	// Exact-host check (NOT substring): only github.com itself is what the
-	// `owner/repo` shorthand rebuilds to. `mygithub.com` and subdomains such as
-	// `gist.github.com` would be rebuilt as a DIFFERENT github.com repo, so they
-	// are recorded.
-	match host_of_url(url) {
-		Some(host) if host == "github.com" => None,
-		_ => Some(url.to_string()),
-	}
+	(!github_shorthand_rebuilds(source, url)).then(|| url.to_string())
 }
 
-/// Lowercased host of an `scheme://[user@]host[:port]/…` URL (userinfo/port
-/// stripped); `None` when there is no `://` authority.
-fn host_of_url(url: &str) -> Option<String> {
-	let after_scheme = url.split_once("://")?.1;
-	let authority = after_scheme.split(['/', '?', '#']).next()?;
-	let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-	let host = if let Some(rest) = authority.strip_prefix('[') {
-		rest.split_once(']')?.0
-	} else {
-		authority.split(':').next()?
+/// Does a `github` entry's `owner/repo` rebuild to `url`? Host compared
+/// case-insensitively (exact, not substring), userinfo ignored, no port.
+fn github_shorthand_rebuilds(source: &InstallLockSource, url: &str) -> bool {
+	let strip = |path: &str| -> String {
+		let path = path.trim_matches('/');
+		path.strip_suffix(".git").unwrap_or(path).to_string()
 	};
-	(!host.is_empty()).then(|| host.to_ascii_lowercase())
+	let shorthand = strip(source.source.trim());
+	if !source.source_type.eq_ignore_ascii_case("github")
+		|| shorthand.is_empty()
+		|| shorthand.contains([':', '@'])
+	{
+		return false;
+	}
+	let Some(rest) = url
+		.get(..8)
+		.filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+		.map(|_| &url[8..])
+	else {
+		return false;
+	};
+	let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+	let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+	host.eq_ignore_ascii_case("github.com") && strip(path) == shorthand
 }
 
 pub fn write_project_install_lock(
@@ -294,11 +301,8 @@ pub fn write_project_install_lock_hashed(
 			source_type: source.source_type.clone(),
 			computed_hash,
 			skill_path,
-			// Record the full clone URL ONLY for a non-github remote host
-			// (TFS/Azure DevOps/on-prem GitLab), where the host-stripped
-			// `source` can't be reconstructed. github and local sources
-			// reconstruct fine from `source`, so leave them None — keeping the
-			// lock byte-identical and npx-invisible for the common case.
+			// Omitted only where `source` + `sourceType` rebuild the same
+			// coordinate (github shorthand, local) — see `recordable_source_url`.
 			source_url: recordable_source_url(source),
 		},
 		Some(cwd),
@@ -406,6 +410,38 @@ mod tests {
 		);
 		// Local source → never recorded.
 		assert_eq!(recordable_source_url(&mk("local", "file:///tmp/x")), None);
+		// Host case does not matter; a URL without `.git` rebuilds too.
+		assert_eq!(
+			recordable_source_url(&mk("github", "https://GITHUB.COM/o/r.git")),
+			None
+		);
+		assert_eq!(
+			recordable_source_url(&mk("github", "https://github.com/o/r")),
+			None
+		);
+		// A URL-less `git` entry names no host: its github.com URL is kept.
+		assert_eq!(
+			recordable_source_url(&mk("git", "https://GITHUB.COM/o/r.git"))
+				.as_deref(),
+			Some("https://GITHUB.COM/o/r.git")
+		);
+		// A port, or another path, does not rebuild from `o/r`.
+		assert_eq!(
+			recordable_source_url(&mk(
+				"github",
+				"https://github.com:8443/o/r.git"
+			))
+			.as_deref(),
+			Some("https://github.com:8443/o/r.git")
+		);
+		assert_eq!(
+			recordable_source_url(&mk(
+				"github",
+				"https://github.com/o/other.git"
+			))
+			.as_deref(),
+			Some("https://github.com/o/other.git")
+		);
 	}
 
 	#[test]

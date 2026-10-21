@@ -6961,6 +6961,223 @@ mod tests {
 		assert!(!error.contains("SECRET-TOKEN"), "token echoed: {error}");
 	}
 
+	/// Isolated HOME/XDG for a global-scope test; drop order restores them.
+	#[cfg(unix)]
+	fn isolated_home(home: &Path) -> [EnvVarGuard; 3] {
+		[
+			EnvVarGuard::set("HOME", home),
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.join(".config")),
+			EnvVarGuard::set("XDG_STATE_HOME", &home.join(".local/state")),
+		]
+	}
+
+	/// A carried `git` owner on github.com keeps its `sourceUrl` in the project
+	/// lock: a URL-less `git:o/r` names no host, so dropping it (the old
+	/// host-only elision) left an entry accept-rename refuses.
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_carries_a_git_owner_on_github_with_its_url() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _env = isolated_home(home.path());
+		let master = home.path().join(".aghub/rt");
+		github_owned_master(&master, &home.path().join(".claude/skills"), "rt");
+		let url = "https://GITHUB.COM/o/r.git";
+		skill::write_global_install_lock(
+			"rt",
+			&skill::InstallLockSource {
+				source: "o/r".to_string(),
+				source_type: "git".to_string(),
+				source_url: url.to_string(),
+				ref_name: None,
+			},
+			Some("rt/SKILL.md".to_string()),
+			&master,
+			None,
+		)
+		.unwrap();
+		let project = tempdir().unwrap();
+		let root = project.path().to_path_buf();
+
+		let result = transfer_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "rt".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: WriteScope::project(root.clone()),
+			}],
+		)
+		.unwrap();
+
+		assert_eq!(result.failed_count(), 0, "{:?}", result.results[0].error);
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		let entry = lock.skills.get("rt").expect("owner carried");
+		assert_eq!(entry.source_type, "git");
+		assert_eq!(entry.source_url.as_deref(), Some(url));
+		let renamed = crate::skills::rename::rename_source_from_lock(
+			"rt",
+			&WriteScope::project(root.clone()),
+		);
+		assert!(renamed.is_ok(), "project entry lost its host");
+	}
+
+	/// The Uncarried refusals redact the REQUESTED (source-side) credential:
+	/// the target owned by another source ("already owned"), and an untracked
+	/// target Master with other content ("different content").
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_refusal_never_echoes_a_requested_credential() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		for owned in [true, false] {
+			let home = tempdir().unwrap();
+			let _env = isolated_home(home.path());
+			let master = home.path().join(".aghub/tok");
+			github_owned_master(
+				&master,
+				&home.path().join(".claude/skills"),
+				"tok",
+			);
+			let tokened =
+				"https://user:SECRET-TOKEN@git.example/acme/skills.git";
+			skill::write_global_install_lock(
+				"tok",
+				&skill::InstallLockSource {
+					source: tokened.to_string(),
+					source_type: "git".to_string(),
+					source_url: tokened.to_string(),
+					ref_name: Some("main".to_string()),
+				},
+				Some("tok/SKILL.md".to_string()),
+				&master,
+				None,
+			)
+			.unwrap();
+			let project = tempdir().unwrap();
+			let root = project.path().to_path_buf();
+			let dest_master = root.join(".aghub/tok");
+			github_owned_master(
+				&dest_master,
+				&root.join(".claude/skills"),
+				"tok",
+			);
+			fs::write(
+				dest_master.join("SKILL.md"),
+				"---\nname: tok\ndescription: theirs\n---\n",
+			)
+			.unwrap();
+			if owned {
+				skill::add_skill_to_local_lock(
+					"tok",
+					skill::LocalSkillLockEntry {
+						extra: Default::default(),
+						source_url: None,
+						ref_commit: None,
+						source: "other/x".to_string(),
+						ref_name: None,
+						source_type: "github".to_string(),
+						computed_hash: "h".to_string(),
+						skill_path: Some("tok/SKILL.md".to_string()),
+					},
+					Some(&root),
+				)
+				.unwrap();
+			}
+
+			let result = transfer_skill(
+				ResourceLocator {
+					agent: AgentType::Claude,
+					scope: WriteScope::Global,
+					name: "tok".to_string(),
+				},
+				vec![InstallTarget {
+					agent: AgentType::Cursor,
+					scope: WriteScope::project(root.clone()),
+				}],
+			)
+			.unwrap();
+
+			let error = result.results[0].error.clone().expect("refusal");
+			let want = if owned {
+				"already owned"
+			} else {
+				"different content"
+			};
+			assert!(error.contains(want), "{owned}: {error}");
+			assert!(!error.contains("SECRET-TOKEN"), "token echoed: {error}");
+			assert!(
+				root.join(".cursor/skills/tok").symlink_metadata().is_err(),
+				"{owned}: no grant"
+			);
+		}
+	}
+
+	/// A reconcile that REMOVES the source must prove the copy carried the
+	/// content: gemini already links a same-named Master with other content,
+	/// so the copy writes nothing and the removal of claude's ONLY copy is
+	/// refused (`ContentProof::Differs`).
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_remove_refuses_when_the_target_master_differs() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let _env = isolated_home(home.path());
+		let master = home.path().join(".aghub/collide2");
+		fs::create_dir_all(&master).unwrap();
+		let master_md =
+			"---\nname: collide2\ndescription: x\n---\n\nMASTER-CONTENT\n";
+		fs::write(master.join("SKILL.md"), master_md).unwrap();
+		fs::create_dir_all(home.path().join(".gemini/skills")).unwrap();
+		std::os::unix::fs::symlink(
+			&master,
+			home.path().join(".gemini/skills/collide2"),
+		)
+		.unwrap();
+		let private = home.path().join(".claude/skills/collide2");
+		fs::create_dir_all(&private).unwrap();
+		let private_md =
+			"---\nname: collide2\ndescription: x\n---\n\nONLY-COPY-OF-THIS\n";
+		fs::write(private.join("SKILL.md"), private_md).unwrap();
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: WriteScope::Global,
+				name: "collide2".to_string(),
+			},
+			vec![AgentType::Gemini],
+			vec![AgentType::Claude],
+			true,
+		);
+
+		let error = match result {
+			Ok(batch) => batch
+				.results
+				.iter()
+				.filter_map(|row| row.error.clone())
+				.collect::<Vec<_>>()
+				.join("\n"),
+			Err(error) => error.to_string(),
+		};
+		assert!(
+			error.contains("did not carry the source content over"),
+			"{error}"
+		);
+		assert_eq!(
+			fs::read_to_string(private.join("SKILL.md")).unwrap(),
+			private_md
+		);
+		assert_eq!(
+			fs::read_to_string(master.join("SKILL.md")).unwrap(),
+			master_md
+		);
+		assert!(crate::skills::linker::Linker::is_link(
+			&home.path().join(".gemini/skills/collide2")
+		));
+	}
+
 	#[test]
 	fn reconcile_skill_adds_multiple_agents_to_same_dir() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
