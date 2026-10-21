@@ -1,3 +1,4 @@
+// ci: warm-cache timing probe (throwaway PR, never merged)
 //! Generic YAML-frontmatter markdown parser and renderer.
 //!
 //! Frontmatter is delimited by `---` lines at the top of the document:
