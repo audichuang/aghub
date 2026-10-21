@@ -234,14 +234,14 @@ pub fn resolve_remote_source(
 	if let Ok(parsed) = Url::parse(parse_input) {
 		match parsed.scheme() {
 			"http" | "https" => {
-				let source = normalize_repo_source_from_url(parsed.as_str())
-					.unwrap_or_else(|| parsed.to_string());
 				// Strip URL userinfo (user:token@) so credentials are never
-				// persisted into source_url / clone_url.
+				// persisted into source / source_url / clone_url.
 				let mut clean = parsed.clone();
 				let _ = clean.set_username("");
 				let _ = clean.set_password(None);
 				let clean_str = clean.to_string();
+				let source = normalize_repo_source_from_url(&clean_str)
+					.unwrap_or_else(|| clean_str.clone());
 				return Ok(ResolvedRemoteSource {
 					source,
 					source_type: source_type_from_host(parsed.host_str()),
@@ -267,15 +267,26 @@ pub fn resolve_remote_source(
 
 	if let Ok(mut parsed) = gix::url::parse(parse_input.as_bytes().as_bstr()) {
 		if !matches!(parsed.scheme, gix::url::Scheme::File) {
-			let normalized = normalize_repo_source_from_url(parse_input)
-				.unwrap_or_else(|| parse_input.into());
+			let is_ssh = matches!(parsed.scheme, gix::url::Scheme::Ssh);
+			let had_secret =
+				parsed.password.is_some() || (!is_ssh && parsed.user.is_some());
 			parsed.password = None;
-			if !matches!(parsed.scheme, gix::url::Scheme::Ssh) {
+			if !is_ssh {
 				parsed.user = None;
 			}
 			let source_url =
 				String::from_utf8_lossy(parsed.to_bstring().as_ref())
 					.into_owned();
+			// The fallback must not hand the password back (it lands in a
+			// lock's `source`); a clean input stays as typed.
+			let normalized = normalize_repo_source_from_url(parse_input)
+				.unwrap_or_else(|| {
+					if had_secret {
+						source_url.clone()
+					} else {
+						parse_input.into()
+					}
+				});
 
 			return Ok(ResolvedRemoteSource {
 				source: normalized,
@@ -530,6 +541,16 @@ mod tests {
 			("codecommit::ssh://u:S@h/r", true),
 			("git://u:12/PW@host/o/r", true),
 			("u:\\PW@host/o/r", true),
+			// Whitespace inside a password must not end the userinfo.
+			(
+				"https://user:SECRET TOKEN@git.example/acme/skills.git",
+				true,
+			),
+			(
+				"https://user:SECRET\tTOKEN@git.example/acme/skills.git",
+				true,
+			),
+			("ssh://git:SECRET TOKEN@host/o/r", true),
 		] {
 			assert_eq!(source_has_credentials(input), want, "{input}");
 		}
@@ -561,6 +582,14 @@ mod tests {
 			("me@corp.com:TOK@host", "TOK"),
 			("u:tok/part@host", "tok/part"),
 			("u:/TOK@host", "TOK"),
+			(
+				"https://user:SECRET TOKEN@git.example/acme/skills.git",
+				"SECRET",
+			),
+			(
+				"https://user:SECRET\tTOKEN@git.example/acme/skills.git",
+				"SECRET",
+			),
 		] {
 			let out = strip_source_credentials(input);
 			assert!(!out.contains(secret), "{input} -> {out}");
@@ -624,6 +653,30 @@ mod tests {
 			);
 			assert!(url.contains(want), "{input} -> {url}");
 		}
+	}
+
+	#[test]
+	fn resolve_fallback_source_never_carries_the_password() {
+		// No owner/repo to normalize: `source` falls back to the URL itself,
+		// and `lock_source()` persists it.
+		for input in [
+			"https://u:SECRET@git.corp/skills.git",
+			"https://u:SECRET@git.corp",
+			"https://u:SECRET@git.corp/o/.git",
+			"https://SECRET@git.corp/skills.git",
+			"ssh://u:SECRET@host/repo",
+			"git://u:SECRET@host/repo",
+		] {
+			let r = resolve_remote_source(input).unwrap();
+			for out in [&r.source, &r.source_url, &r.lock_source()] {
+				assert!(!out.contains("SECRET"), "{input} -> {out}");
+			}
+		}
+		let r = resolve_remote_source("ssh://u:SECRET@host/repo").unwrap();
+		assert_eq!(r.source, "ssh://u@host/repo");
+		// A clean fallback stays as typed.
+		let r = resolve_remote_source("ssh://u@host/repo").unwrap();
+		assert_eq!(r.source, "ssh://u@host/repo");
 	}
 
 	#[test]

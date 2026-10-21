@@ -10,6 +10,13 @@ use url::Url;
 /// before the next path/query/fragment/whitespace boundary. When found, the
 /// userinfo segment is replaced with `***`.
 pub fn redact_url_userinfo(s: &str) -> String {
+	redact_userinfo(s, true)
+}
+
+/// `stop_at_whitespace` is for free-form text, where whitespace ends a URL. A
+/// SOURCE is one token, so there a password may itself hold a space or tab
+/// (`https://u:SECRET TOKEN@host/o/r`) and whitespace must not hide it.
+fn redact_userinfo(s: &str, stop_at_whitespace: bool) -> String {
 	let mut out = String::with_capacity(s.len());
 	let mut rest = s;
 
@@ -18,7 +25,9 @@ pub fn redact_url_userinfo(s: &str) -> String {
 		out.push_str(&rest[..rel + 3]);
 		rest = &rest[rel + 3..];
 
-		let whitespace = rest.find(char::is_whitespace).unwrap_or(rest.len());
+		let whitespace = rest
+			.find(|c: char| stop_at_whitespace && c.is_whitespace())
+			.unwrap_or(rest.len());
 		let token = &rest[..whitespace];
 		let authority_end = token.find(['/', '?', '#']).unwrap_or(token.len());
 		let authority = &token[..authority_end];
@@ -52,7 +61,7 @@ pub fn redact_url_userinfo(s: &str) -> String {
 /// reason) must come through HERE; reach for [`redact_url_userinfo`] only for
 /// free-form text that merely happens to contain a URL.
 pub fn redact_source_credentials(source: &str) -> String {
-	redact_schemeless_userinfo(&redact_url_userinfo(source))
+	redact_schemeless_userinfo(&redact_userinfo(source, false))
 }
 
 /// Redact `user:secret@` from a scheme-less source.
@@ -265,6 +274,22 @@ mod tests {
 		);
 		// A colon in a PATH segment, past the authority, is not userinfo.
 		assert_eq!(redact_source_credentials("host/a:b@c"), "host/a:b@c");
+	}
+
+	#[test]
+	fn source_redaction_covers_a_password_containing_whitespace() {
+		for source in [
+			"https://user:SECRET TOKEN@git.example/acme/skills.git",
+			"https://user:SECRET\tTOKEN@git.example/acme/skills.git",
+		] {
+			assert_eq!(
+				redact_source_credentials(source),
+				"https://***@git.example/acme/skills.git"
+			);
+		}
+		// Free-form text still ends a URL at whitespace.
+		let s = "see https://h/x and a:b@c";
+		assert_eq!(redact_url_userinfo(s), s);
 	}
 
 	#[test]
