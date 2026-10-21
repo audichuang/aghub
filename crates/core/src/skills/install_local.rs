@@ -36,6 +36,10 @@ pub enum LocalInstallLock {
 	/// Same-scope copy: a pure regrant. The lock is never compared nor written
 	/// (an untracked Master stays untracked); the Master content guards still run.
 	Untouched,
+	/// Cross-scope copy whose owner must not be written (host unknown, or it
+	/// carries credentials): no lock write, but a target entry naming a
+	/// different owner still refuses the copy, as for [`Self::Carry`].
+	Uncarried(LockedSourceOwner),
 }
 
 /// Report of a local skill install.
@@ -219,8 +223,24 @@ pub fn install_local_skill(
 		ensure_one_ref_cohort(effective_name, &req.scope, owner)?;
 	}
 
-	let writes_lock = !matches!(req.lock, LocalInstallLock::Untouched);
+	let writes_lock = matches!(
+		req.lock,
+		LocalInstallLock::Local | LocalInstallLock::Carry(_)
+	);
+	let keep_owner = matches!(req.lock, LocalInstallLock::Untouched);
 	let lock_write = match req.lock {
+		// Only `source` is read (by the owner comparison); nothing is written.
+		LocalInstallLock::Uncarried(owner) => LockWrite {
+			source: skill::InstallLockSource {
+				source_url: owner.source_url.unwrap_or_default(),
+				source: owner.source,
+				source_type: owner.source_type,
+				ref_name: owner.ref_name,
+			},
+			skill_path: None,
+			ref_commit: None,
+			stored_hash: None,
+		},
 		LocalInstallLock::Carry(owner) => LockWrite {
 			source: skill::InstallLockSource {
 				// A global entry records a clone coordinate (npx and a fetched
@@ -336,7 +356,7 @@ pub fn install_local_skill(
 		&req.scope,
 		&lock_write.source,
 		is_already_installed,
-		!writes_lock,
+		keep_owner,
 		false,
 	)?;
 

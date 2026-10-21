@@ -324,8 +324,8 @@ mod tests {
 	}
 
 	/// Two URL-less non-github entries with the same spelling may still be two
-	/// self-hosted hosts: refused. Transfer never asks this (it copies an
-	/// ambiguous owner untracked).
+	/// self-hosted hosts: refused. Transfer asks this of an ambiguous owner it
+	/// copies untracked, so such a copy onto a same-spelled entry is refused.
 	#[test]
 	fn url_less_gitlab_entries_with_one_spelling_are_not_one_owner() {
 		assert!(!same_source_owner(
