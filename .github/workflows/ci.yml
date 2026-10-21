@@ -145,6 +145,7 @@ jobs:
               with:
                   tool: just,cargo-audit
             - name: Rust Cache
+              id: cache
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: ${{ runner.os }}-lint
@@ -154,6 +155,15 @@ jobs:
                   # rust-cache never overwrites an exact key hit, so that empty
                   # cache would stick until Cargo.lock changes.
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+            # A key miss restores the closest older entry, and rust-cache saves
+            # all of target/ without dropping superseded versions of a crate:
+            # every Cargo.lock or profile change carried the old artifacts into
+            # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
+            # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            - name: Drop a partially restored target (main only)
+              if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+              shell: bash
+              run: rm -rf target
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
@@ -241,6 +251,7 @@ jobs:
               with:
                   tool: just,cargo-nextest
             - name: Rust Cache
+              id: cache
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: ${{ runner.os }}-test
@@ -250,6 +261,15 @@ jobs:
                   # rust-cache never overwrites an exact key hit, so that empty
                   # cache would stick until Cargo.lock changes.
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+            # A key miss restores the closest older entry, and rust-cache saves
+            # all of target/ without dropping superseded versions of a crate:
+            # every Cargo.lock or profile change carried the old artifacts into
+            # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
+            # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            - name: Drop a partially restored target (main only)
+              if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+              shell: bash
+              run: rm -rf target
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
@@ -349,11 +369,21 @@ jobs:
               with:
                   targets: ${{ matrix.target }}
             - name: Rust Cache
+              id: cache
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: release-${{ matrix.os }}-${{ matrix.target }}
                   # Save only from main, see lint-rust.
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+            # A key miss restores the closest older entry, and rust-cache saves
+            # all of target/ without dropping superseded versions of a crate:
+            # every Cargo.lock or profile change carried the old artifacts into
+            # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
+            # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            - name: Drop a partially restored target (main only)
+              if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+              shell: bash
+              run: rm -rf target
             - name: Setup Bun
               uses: oven-sh/setup-bun@v2
               with:

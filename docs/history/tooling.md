@@ -181,6 +181,19 @@ runs the migrations on every call, so each test's new database is ~20-30
 committed transactions, each creating and deleting a journal file that
 Defender scans. The CLI `inference_*` tests took 13-37s each (0.07s on Linux).
 
+## CI cache bloat
+
+`.github/workflows/ci.yml` "Drop a partially restored target (main only)".
+rust-cache prunes workspace crates and packages no longer in the lockfile
+when it saves, but keeps every fingerprint of a crate that is still in it. A
+key miss restores the closest older entry, so a Cargo.lock or profile change
+compiled the new artifacts next to the old ones and saved both: after the
+2026-10-21 `.cargo/config.toml` change, test caches went 1.2 -> 1.8GB and
+lint 0.8 -> 1.1GB, the repo hit 11.1GB of its 10GB, and GitHub's LRU evicted
+the superseded keys before `prune-caches` could. Main now drops `target/` on
+any non-exact hit and saves a clean entry; PRs keep the partial restore. The
+cost is one cold main run per lockfile change.
+
 ## cargo audit ignores the updater's zip 4
 
 On 2026-10-20 three `zip` advisories (RUSTSEC-2026-0367, -0368, -0369: an
