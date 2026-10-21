@@ -125,11 +125,11 @@ list, or `all`), `-g`/`-p`, `--all`.
   an ambiguous legacy entry (npx 1.5.11 `gitlab:group/repo`, which may be
   self-hosted) or a credential-bearing one (`https://user:TOKEN@…` — a project
   lock gets committed) is copied
-  untracked and compares no owner (as before 2.41.5): `doctor` shows it
-  untracked unless the target already had an entry of that name; re-install
-  from the real URL to track. A copy is refused when the target's same-named
-  Master is untracked and differs; a CARRIED (host-known) copy also refuses a
-  different owner, and refuses when the target scope tracks that source on
+  untracked: `doctor` shows it untracked unless the target already had an
+  entry of that name; re-install from the real URL to track. A copy is refused
+  when the target's same-named Master is untracked and differs, and when the
+  target's entry names a different owner (an untracked copy still compares it,
+  and an ambiguous URL-less owner matches no entry, not even its own spelling); a CARRIED copy also refuses when the target scope tracks that source on
   another ref (it would leave a mixed cohort `source sync` refuses; run
   `source sync --ref` there first). A copy onto an OWNED Master grants it as-is, stale content
   included (a carried owner does not make the copied content remote, so the

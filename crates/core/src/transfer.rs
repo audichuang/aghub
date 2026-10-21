@@ -1004,8 +1004,9 @@ fn install_skill_copy(
 			// A URL-less owner whose host cannot be derived (npx 1.5.11 records
 			// a self-hosted gitlab as `gitlab:group/repo`) would let the update
 			// flow fetch from a guessed host; a credential-bearing one would
-			// publish its token. Copy untracked.
-			Some(_) => LocalInstallLock::Untouched,
+			// publish its token. Copy untracked, still refusing a target entry
+			// owned by another source.
+			Some(owner) => LocalInstallLock::Uncarried(owner),
 		}
 	};
 	crate::skills::install_local_skill(
@@ -6281,6 +6282,74 @@ mod tests {
 			!dest.join("skills-lock.json").exists(),
 			"an ambiguous owner must not be carried into the destination lock"
 		);
+	}
+
+	/// An owner copied untracked still answers to the target's entry: one
+	/// owned by another source refuses the copy (the agent would be granted
+	/// that source's Master, or the copy would sit under its lock entry). A
+	/// same-spelled URL-less gitlab entry may be another self-hosted host, so
+	/// it cannot prove the same owner either (`same_source_owner` fails closed).
+	#[cfg(unix)]
+	#[test]
+	fn transfer_skill_untracked_copy_refuses_a_target_owned_by_another_source()
+	{
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		for other_owner in [true, false] {
+			let temp = tempdir().unwrap();
+			let (source, dest) = (temp.path().join("s"), temp.path().join("d"));
+			url_less_gitlab_skill(&source, "gl");
+			let dest_master = dest.join(".aghub/gl");
+			if other_owner {
+				github_owned_master(
+					&dest_master,
+					&dest.join(".claude/skills"),
+					"gl",
+				);
+				fs::write(
+					dest_master.join("SKILL.md"),
+					"---\nname: gl\ndescription: theirs\n---\n",
+				)
+				.unwrap();
+				skill::add_skill_to_local_lock(
+					"gl",
+					skill::LocalSkillLockEntry {
+						extra: Default::default(),
+						source_url: None,
+						ref_commit: None,
+						source: "other/x".to_string(),
+						ref_name: None,
+						source_type: "github".to_string(),
+						computed_hash: "h".to_string(),
+						skill_path: Some("gl/SKILL.md".to_string()),
+					},
+					Some(&dest),
+				)
+				.unwrap();
+			} else {
+				url_less_gitlab_skill(&dest, "gl");
+			}
+			let theirs =
+				fs::read_to_string(dest_master.join("SKILL.md")).unwrap();
+
+			let result = transfer_between_projects(
+				&source,
+				&dest,
+				AgentType::Cursor,
+				"gl",
+			);
+
+			let error = result.results[0].error.clone().unwrap_or_default();
+			assert!(error.contains("already owned"), "{other_owner}: {error}");
+			assert!(
+				dest.join(".cursor/skills/gl").symlink_metadata().is_err(),
+				"{other_owner}: no grant"
+			);
+			assert_eq!(
+				fs::read_to_string(dest_master.join("SKILL.md")).unwrap(),
+				theirs,
+				"{other_owner}: the target's Master is left alone"
+			);
+		}
 	}
 
 	/// The same population carried to GLOBAL: the global lock gets no entry,

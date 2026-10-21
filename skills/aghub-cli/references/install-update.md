@@ -56,12 +56,13 @@ and records the source's owner and stored Source hash in the target's lock,
 so a locally edited source still reads as modified there — when the source's
 host is known and its URL carries no credentials. A legacy URL-less entry
 whose host is ambiguous (an old npx `gitlab:group/repo`, possibly
-self-hosted), or one whose URL embeds a token, is copied untracked instead and
-compares no owner: `doctor` shows it untracked unless the target already had
-an entry of that name; re-install from the real URL to track it. `transfer`
-and `reconcile --add` refuse when the target scope's same-named Master is
-untracked and differs; a carried (host-known) copy also refuses a different
-owner, and refuses when the target scope already tracks that source on a
+self-hosted), or one whose URL embeds a token, is copied untracked instead:
+`doctor` shows it untracked unless the target already had an entry of that
+name; re-install from the real URL to track it. `transfer` and
+`reconcile --add` refuse when the target scope's same-named Master is
+untracked and differs, and when the target's entry names a different owner
+(untracked copies included; an ambiguous URL-less owner matches no entry,
+not even its own spelling); a carried (host-known) copy also refuses when the target scope already tracks that source on a
 different ref (a mixed cohort `source sync` would then refuse) — run `source
 sync --ref` in the target scope first. A copy onto an owned Master grants it as-is. `source
 accept-rename` refuses an ambiguous entry before fetching: re-install it from

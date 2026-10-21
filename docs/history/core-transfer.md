@@ -528,6 +528,15 @@ carried like scp `git@host:o/r.git`; pinned by
 `transfer_skill_cross_scope_carries_a_user_only_ssh_owner` and
 `transfer_skill_never_carries_an_ssh_password_into_a_project_lock`.
 
+An untracked cross-scope copy (`LocalInstallLock::Uncarried`) used to skip the
+owner comparison like a same-scope regrant: with the target scope already
+tracking that name under another source, it granted that source's Master (or
+left the copy under its entry) and reported success. It now compares owners
+like a carried copy; an ambiguous URL-less owner matches no entry, not even
+its own spelling (`same_source_owner` fails closed: two self-hosted hosts).
+Pinned by
+`transfer_skill_untracked_copy_refuses_a_target_owned_by_another_source`.
+
 Tests: `transfer_skill_same_scope_regrant_keeps_the_lock_owner`,
 `transfer_skill_same_scope_leaves_a_url_less_remote_owner_alone`,
 `transfer_skill_same_scope_keeps_an_untracked_master_untracked`,
