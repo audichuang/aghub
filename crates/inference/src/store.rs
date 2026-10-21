@@ -5,7 +5,10 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
+use sqlx::sqlite::{
+	SqliteConnectOptions, SqliteConnection, SqliteJournalMode,
+	SqliteSynchronous,
+};
 use sqlx::{ConnectOptions, Row};
 
 use crate::agent::{
@@ -155,9 +158,17 @@ impl<C: CredentialStore> InferenceProviderStore<C> {
 		if let Some(parent) = db_path.parent() {
 			std::fs::create_dir_all(parent)?;
 		}
+		// WAL + NORMAL: a commit appends to the -wal file instead of
+		// creating, syncing and deleting a rollback journal. Every call opens
+		// a fresh connection and runs the migrations, so with the defaults
+		// (DELETE + FULL) each call paid several fsyncs — ~2s per test on
+		// Windows. NORMAL can lose the last commit on power loss, never
+		// corrupt the file; the API keys are in the keyring, not here.
 		let mut conn = SqliteConnectOptions::new()
 			.filename(&db_path)
 			.create_if_missing(true)
+			.journal_mode(SqliteJournalMode::Wal)
+			.synchronous(SqliteSynchronous::Normal)
 			.connect()
 			.await?;
 		sqlx::query("PRAGMA foreign_keys = ON")
@@ -1030,6 +1041,26 @@ mod tests {
 				models: Vec::new(),
 			})
 			.unwrap()
+	}
+
+	#[test]
+	fn database_is_left_in_wal_mode() {
+		let (temp, store) = store();
+		create_provider(&store, "acme");
+		// A fresh connection with default options reads the mode the file
+		// was left in, which is what every later open inherits.
+		let mode: String = store.block_on(async {
+			let mut conn = SqliteConnectOptions::new()
+				.filename(temp.path().join(INFERENCE_PROVIDERS_FILE))
+				.connect()
+				.await
+				.unwrap();
+			sqlx::query_scalar("PRAGMA journal_mode")
+				.fetch_one(&mut conn)
+				.await
+				.unwrap()
+		});
+		assert_eq!(mode, "wal");
 	}
 
 	#[test]
