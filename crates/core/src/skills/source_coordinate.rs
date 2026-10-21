@@ -62,16 +62,21 @@ pub fn known_clone_source(
 /// when [`reconstruct_source_url`] — what every reader falls back to — rebuilds
 /// exactly that URL AND the rebuild is not a guess
 /// ([`reconstruction_is_unambiguous`]), keeping the common github entry
-/// byte-identical to npx's. Any other spelling (host case, port, scheme, a
-/// doubled `.git`) is recorded, and so is every gitlab URL: a URL-less gitlab
+/// byte-identical to npx's — the pasted browser form (`…/o/r`, `…/o/r/`)
+/// included, which the same host serves as `…/o/r.git`. Any other spelling
+/// (host case, port, scheme, a doubled `.git`) is recorded, and so is every gitlab URL: a URL-less gitlab
 /// entry reads as host-less, so its owner could no longer be matched.
 pub fn project_lock_source(
 	source: &skill::InstallLockSource,
 ) -> skill::InstallLockSource {
 	let mut source = source.clone();
 	let url = source.source_url.trim();
-	if reconstruction_is_unambiguous(&source.source, &source.source_type)
-		&& reconstruct_source_url(&source.source, &source.source_type) == url
+	let rebuilt = reconstruct_source_url(&source.source, &source.source_type);
+	let same = rebuilt == url
+		|| (!url.ends_with(".git")
+			&& rebuilt == format!("{}.git", url.trim_end_matches('/')));
+	if same
+		&& reconstruction_is_unambiguous(&source.source, &source.source_type)
 	{
 		source.source_url.clear();
 	}
@@ -308,6 +313,8 @@ mod tests {
 		let project = tempfile::tempdir().unwrap();
 		for (source, source_type, url, elided) in [
 			("o/r", "github", "https://github.com/o/r.git", true),
+			("o/r", "github", "https://github.com/o/r", true),
+			("o/r", "github", "https://github.com/o/r/", true),
 			(
 				"o/r.git.git",
 				"github",
@@ -346,7 +353,11 @@ mod tests {
 					entry.source_url.as_deref(),
 					&entry.source_type
 				),
-				url,
+				if elided {
+					"https://github.com/o/r.git"
+				} else {
+					url
+				},
 				"{source} {source_type}"
 			);
 			assert_eq!(entry.source_url.is_none(), elided, "{url}");
