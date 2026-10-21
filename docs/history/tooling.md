@@ -139,9 +139,21 @@ Cold desktop job, before → after: macOS arm64 1006s → 588s, Linux 1177s →
 638s. Windows 1163s → 808–1106s: Windows runners swung ±300s between
 identical runs, which is larger than any knob tried.
 
-Release also drops sccache and rust-cache (`RUSTC_WRAPPER: ""`). A tag run's
-caches are scoped to that tag, so no later release can read them; v2.40.1
-alone left 1179 such entries that only evicted main's CI caches.
+Release drops sccache (`RUSTC_WRAPPER: ""`). A tag run's caches are scoped to
+that tag, so no later release can read them; v2.40.1 alone left 1179 such
+entries that only evicted main's CI caches.
+
+2026-10-21: the release jobs restore (never save) a rust-cache entry that
+`.github/workflows/release-cache.yml` builds on main, one per target, because
+every ref can read the default branch's caches. Before it, v2.41.8 took 19.5
+min with the Windows desktop job at 18.5 (9.7 sidecar + 6.1 Tauri step, ~600
+crates compiled cold); a run on a busy day took 40 min because its macOS jobs
+queued ~24 min for the free plan's macOS concurrency. The same change dropped
+the Intel Mac legs (0 downloads), which removed two of the four macOS jobs.
+rust-cache strips workspace versions from the key, so `just bump` and the
+release's version sed do not miss it; a toolchain change does, hence the
+weekly run, which also refreshes the entries against LRU eviction in the
+10GB repo cache.
 
 Rejected (two Windows samples each, within noise): a Dev Drive (ReFS) for
 target/cargo/rustup; building the desktop crate in the same cargo pass after

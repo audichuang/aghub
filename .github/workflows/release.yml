@@ -122,10 +122,9 @@ jobs:
         name: Build Desktop (${{ matrix.target }})
         runs-on: ${{ matrix.os }}
         env:
-            # No compile cache: a tag run's GHA caches are scoped to that tag,
-            # so the next release can never read them; they only evicted
-            # main's CI caches. The empty value overrides the rustc-wrapper in
-            # .cargo/config.toml. docs/history/tooling.md#release-build-speed
+            # No sccache. The empty value overrides the rustc-wrapper in
+            # .cargo/config.toml, and must match release-cache.yml's env, which
+            # rust-cache hashes into the key. docs/history/tooling.md#release-build-speed
             RUSTC_WRAPPER: ""
         permissions:
             contents: write
@@ -171,6 +170,15 @@ jobs:
               with:
                   targets: ${{ matrix.target }}
 
+            # Restore-only: the dependency graph warmed on main by
+            # release-cache.yml. A tag run's own save would be scoped to the
+            # tag and readable by no later release.
+            - name: Rust Cache (warmed on main)
+              uses: Swatinem/rust-cache@v2
+              with:
+                  shared-key: release-${{ matrix.os }}-${{ matrix.target }}
+                  save-if: false
+
             - name: Cargo Fetch
               run: cargo fetch
 
@@ -179,6 +187,8 @@ jobs:
               with:
                   # Pinned for reproducibility — keep in sync with ci.yml
                   bun-version: 1.3.14
+                  # A tag-scoped cache no later release can read.
+                  no-cache: true
 
             - name: Install frontend dependencies (frozen)
               run: |
@@ -349,10 +359,9 @@ jobs:
         name: Build CLI (${{ matrix.target }})
         runs-on: ${{ matrix.os }}
         env:
-            # No compile cache: a tag run's GHA caches are scoped to that tag,
-            # so the next release can never read them; they only evicted
-            # main's CI caches. The empty value overrides the rustc-wrapper in
-            # .cargo/config.toml. docs/history/tooling.md#release-build-speed
+            # No sccache. The empty value overrides the rustc-wrapper in
+            # .cargo/config.toml, and must match release-cache.yml's env, which
+            # rust-cache hashes into the key. docs/history/tooling.md#release-build-speed
             RUSTC_WRAPPER: ""
         permissions:
             contents: write
@@ -388,6 +397,15 @@ jobs:
               uses: dtolnay/rust-toolchain@stable
               with:
                   targets: ${{ matrix.target }}
+
+            # Restore-only: the dependency graph warmed on main by
+            # release-cache.yml. A tag run's own save would be scoped to the
+            # tag and readable by no later release.
+            - name: Rust Cache (warmed on main)
+              uses: Swatinem/rust-cache@v2
+              with:
+                  shared-key: release-${{ matrix.os }}-${{ matrix.target }}
+                  save-if: false
 
             - name: Cargo Fetch
               run: cargo fetch
