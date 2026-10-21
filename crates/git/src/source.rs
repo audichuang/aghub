@@ -53,7 +53,8 @@ pub enum SourceError {
 
 impl SourceError {
 	/// Build an `InvalidGithubShorthand` error. The source is run through
-	/// [`crate::redact::redact_url_userinfo`] first, so a `user:token@` a
+	/// [`crate::redact::redact_source_credentials`] first (a whole source
+	/// string, so a password with whitespace is still covered), so a `user:token@` a
 	/// caller embedded in the URL can never survive into the error string —
 	/// the same contract `GitError`'s constructors already hold. Construct
 	/// this variant through here, never directly.
@@ -61,7 +62,7 @@ impl SourceError {
 	/// `Unsupported` has no constructor because nothing in the workspace
 	/// builds it; add one (redacting, like this) if that changes.
 	pub fn invalid_github_shorthand(source: impl Into<String>) -> Self {
-		Self::InvalidGithubShorthand(crate::redact::redact_url_userinfo(
+		Self::InvalidGithubShorthand(crate::redact::redact_source_credentials(
 			&source.into(),
 		))
 	}
@@ -677,6 +678,17 @@ mod tests {
 		// A clean fallback stays as typed.
 		let r = resolve_remote_source("ssh://u@host/repo").unwrap();
 		assert_eq!(r.source, "ssh://u@host/repo");
+	}
+
+	#[test]
+	fn rejected_source_error_never_carries_a_password_with_whitespace() {
+		for input in [
+			"ssh://u:SECRET TOKEN@host/repo",
+			"https://u:SECRET\tTOKEN@ho st/o/r",
+		] {
+			let err = resolve_remote_source(input).unwrap_err().to_string();
+			assert!(!err.contains("SECRET"), "{input} -> {err}");
+		}
 	}
 
 	#[test]
