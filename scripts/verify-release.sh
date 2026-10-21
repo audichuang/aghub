@@ -61,9 +61,7 @@ digest_of() {
 need=(
 	latest.json
 	"aghub_${VERSION}_aarch64.dmg"
-	"aghub_${VERSION}_x64.dmg"
 	aghub-cli-aarch64-apple-darwin.tar.gz
-	aghub-cli-x86_64-apple-darwin.tar.gz
 	aghub-cli-x86_64-unknown-linux-gnu.tar.gz
 	aghub-cli-x86_64-pc-windows-msvc.zip
 	aghub-api-x86_64-unknown-linux-gnu.tar.gz
@@ -84,10 +82,10 @@ if [ -n "$LJ_ID" ]; then
 	LJ="$(gh api -H 'Accept: application/octet-stream' "repos/$REPO/releases/assets/$LJ_ID")"
 	jq -e --arg v "$VERSION" '.version == $v' >/dev/null <<<"$LJ" ||
 		fail "latest.json version is $(jq -r .version <<<"$LJ"), want $VERSION"
-	# The four desktop jobs each read-modify-write this one file; two that
+	# The three desktop jobs each read-modify-write this one file; two that
 	# interleave drop a platform with every job still green. A missing key is
 	# an updater told "no update" forever, so it blocks the publish.
-	for plat in darwin-aarch64 darwin-x86_64 linux-x86_64 windows-x86_64; do
+	for plat in darwin-aarch64 linux-x86_64 windows-x86_64; do
 		jq -e --arg p "$plat" '(.platforms[$p].signature // "") | length > 0' \
 			>/dev/null <<<"$LJ" ||
 			fail "latest.json has no signed '$plat' entry — rerun that platform's Build Desktop job"
@@ -97,7 +95,7 @@ if [ -n "$LJ_ID" ]; then
 	bad="$(jq -r --arg p "https://github.com/$REPO/releases/download/$TAG/" \
 		'.platforms[].url | select(startswith($p) | not)' <<<"$LJ")"
 	[ -z "$bad" ] || fail "latest.json URLs outside $TAG: $bad"
-	[ "$FAILED" = 0 ] && ok "latest.json: $VERSION, 4 platforms signed, URLs on $TAG"
+	[ "$FAILED" = 0 ] && ok "latest.json: $VERSION, 3 platforms signed, URLs on $TAG"
 fi
 
 if [ "$MODE" = "--pre-publish" ]; then
@@ -147,8 +145,7 @@ for label in cask formula; do
 	if grep -q "$EMPTY_SHA" <<<"$text"; then fail "tap $label carries the empty-file sha256"; fi
 done
 check_sha "$CASK" cask "aghub_${VERSION}_aarch64.dmg"
-check_sha "$CASK" cask "aghub_${VERSION}_x64.dmg"
-for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+for t in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
 	check_sha "$FORMULA" formula "aghub-cli-$t.tar.gz"
 done
 

@@ -295,62 +295,111 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: cargo test --workspace --test skill_repository -- --ignored real_github_rest
 
-    # Build + smoke test - 3 OS matrix
+    # Release build + smoke test - the 3 release targets. Runs release.yml's
+    # exact cargo commands, so a PR proves the tag would build, and on main it
+    # saves the dependency cache release.yml restores (a tag run cannot save
+    # one a later tag can read). The matrix strings, the cargo commands and
+    # the CARGO*/RUST* env (hashed into the key) MUST match release.yml's
+    # build-tauri / build-cli. docs/history/tooling.md#release-build-speed
     build:
-        name: Build (${{ matrix.os }})
+        name: Build (${{ matrix.target }})
         needs: changes
+        # ALWAYS on push to main: the bump commit is what refreshes the cache
+        # the following tag restores.
         if: |
+            github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
             needs.changes.outputs.rust == 'true' ||
             needs.changes.outputs.desktop == 'true' ||
             needs.changes.outputs.workflows == 'true'
         runs-on: ${{ matrix.os }}
-        timeout-minutes: 40
+        timeout-minutes: 60
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-latest, macos-latest, windows-latest]
+                include:
+                    - os: macos-latest
+                      target: aarch64-apple-darwin
+                    - os: ubuntu-22.04
+                      target: x86_64-unknown-linux-gnu
+                    - os: windows-latest
+                      target: x86_64-pc-windows-msvc
         steps:
             - uses: actions/checkout@v6
+            - name: Install Linux system dependencies (GTK/webkit for Tauri)
+              if: matrix.os == 'ubuntu-22.04'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
-            # The frontend bundle is platform-independent: build it once.
-            - name: Setup Bun
-              if: matrix.os == 'ubuntu-latest'
-              uses: oven-sh/setup-bun@v2
               with:
-                  bun-version: ${{ env.BUN_VERSION }}
-            - name: Install just
-              uses: taiki-e/install-action@v2
-              with:
-                  tool: just
+                  targets: ${{ matrix.target }}
             - name: Rust Cache
               uses: Swatinem/rust-cache@v2
               with:
-                  shared-key: ${{ runner.os }}-build
-                  # Save only from main: a PR-scoped cache is invisible to every
-                  # other ref and only crowds the 10GB quota. No cache-on-failure:
-                  # a run that fails before compiling saves an EMPTY target, and
-                  # rust-cache never overwrites an exact key hit, so that empty
-                  # cache would stick until Cargo.lock changes.
+                  shared-key: release-${{ matrix.os }}-${{ matrix.target }}
+                  # Save only from main, see lint-rust.
                   save-if: ${{ github.ref == 'refs/heads/main' }}
-            - name: Install root deps (frozen)
-              if: matrix.os == 'ubuntu-latest'
-              run: bun install --frozen-lockfile
-            - name: Install desktop deps (frozen)
-              if: matrix.os == 'ubuntu-latest'
-              run: cd crates/desktop && bun install --frozen-lockfile
-            - name: Build CLI (release)
-              run: just build
-            - name: Smoke test CLI binary (verifies cross-platform build works)
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: ${{ env.BUN_VERSION }}
+            # The desktop crate embeds ../dist, so every OS builds it.
+            - name: Build frontend (typecheck + Vite)
+              run: |
+                  cd crates/desktop
+                  bun install --frozen-lockfile
+                  bun run build
+            # The sidecar build, what `tauri build` runs, the CLI, and the
+            # Linux aghub-api asset — in release.yml's order.
+            - name: Build release binaries
               shell: bash
               run: |
-                  if [ "$RUNNER_OS" = "Windows" ]; then
-                      ./target/release/aghub-cli.exe --version
-                      ./target/release/aghub-cli.exe --help > /dev/null
-                  else
-                      ./target/release/aghub-cli --version
-                      ./target/release/aghub-cli --help > /dev/null
+                  set -euo pipefail
+                  T="${{ matrix.target }}"
+                  cargo build --release --target "$T" -p aghub -p aghub-api \
+                      --bin aghub-api --features tauri/custom-protocol
+                  cargo build --release --target "$T" -p aghub --bins \
+                      --features tauri/custom-protocol
+                  cargo build --release -p aghub-cli --target "$T"
+                  if [ "$T" = "x86_64-unknown-linux-gnu" ]; then
+                      cargo build --release -p aghub-api --target "$T"
                   fi
-            - name: Build frontend (typecheck + Vite)
-              if: matrix.os == 'ubuntu-latest'
-              run: cd crates/desktop && bun run build
+            - name: Smoke test CLI binary
+              shell: bash
+              run: |
+                  BIN="target/${{ matrix.target }}/release/aghub-cli"
+                  "$BIN" --version
+                  "$BIN" --help > /dev/null
+
+    # Repo cache is 10GB. A Cargo.lock or toolchain change saves a new key per
+    # job and leaves the old one until LRU eviction, which then picks live
+    # entries too; tag-scoped caches are readable by no later run (their ref reads
+    # "refs/heads/refs/tags/…", hence `contains`). Main only.
+    prune-caches:
+        name: Prune stale caches
+        needs: [lint-rust, test, build]
+        if: always() && github.event_name == 'push'
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        permissions:
+            actions: write
+        steps:
+            - name: Delete superseded rust-cache keys and tag-scoped caches
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  REPO: ${{ github.repository }}
+              run: |
+                  set -euo pipefail
+                  # rust-cache keys end in -<env hash>-<lockfile hash>; the env
+                  # hash carries the rustc version, so group on what precedes
+                  # both and keep the newest entry of each group.
+                  gh cache list -R "$REPO" -L 500 --json id,key,ref,createdAt --jq '
+                    [.[] | select(.ref | contains("refs/tags/"))]
+                    + ([.[] | select(.ref == "refs/heads/main" and (.key | startswith("v0-rust-")))]
+                       | group_by(.key | sub("-[0-9a-f]{8}-[0-9a-f]{8}$"; ""))
+                       | map(sort_by(.createdAt) | .[:-1]) | add // [])
+                    | .[] | "\(.id)\t\(.ref)\t\(.key)"' > stale.tsv
+                  cat stale.tsv
+                  cut -f1 stale.tsv | xargs -r -n1 gh cache delete -R "$REPO"
