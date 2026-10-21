@@ -181,6 +181,12 @@ runs the migrations on every call, so each test's new database is ~20-30
 committed transactions, each creating and deleting a journal file that
 Defender scans. The CLI `inference_*` tests took 13-37s each (0.07s on Linux).
 
+Excluding the temp dir from Defender took the suite to 83s but left
+aghub-inference at 165 test-seconds: the cost was the journal's fsyncs, not
+the scan. `open_db` now opens with `journal_mode = WAL` and
+`synchronous = NORMAL` (pinned by `database_is_left_in_wal_mode`), which also
+speeds every desktop and CLI inference call on Windows.
+
 ## CI cache bloat
 
 `.github/workflows/ci.yml` "Drop a partially restored target (main only)".
