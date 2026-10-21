@@ -58,6 +58,21 @@ pub fn known_clone_source(
 	}
 }
 
+/// `source` as a project lock entry records it: `sourceUrl` is omitted only
+/// when [`reconstruct_source_url`] — what every reader falls back to — rebuilds
+/// exactly that URL, keeping the common github entry byte-identical to npx's.
+/// Any other spelling (host case, port, scheme, a doubled `.git`) is recorded.
+pub fn project_lock_source(
+	source: &skill::InstallLockSource,
+) -> skill::InstallLockSource {
+	let mut source = source.clone();
+	let url = source.source_url.trim();
+	if reconstruct_source_url(&source.source, &source.source_type) == url {
+		source.source_url.clear();
+	}
+	source
+}
+
 /// `://`, `@` or `:` means the string carries its own transport/authority.
 fn carries_authority(source: &str) -> bool {
 	source.contains("://") || source.contains('@') || source.contains(':')
@@ -279,6 +294,56 @@ pub fn recorded_refs(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Writer -> reader: whatever the project lock records (or omits), the
+	/// reader must name the URL the install came from. Only the canonical
+	/// github coordinate is omitted.
+	#[test]
+	fn project_lock_source_round_trips_through_the_reader() {
+		let project = tempfile::tempdir().unwrap();
+		for (source, source_type, url, elided) in [
+			("o/r", "github", "https://github.com/o/r.git", true),
+			(
+				"o/r.git.git",
+				"github",
+				"https://github.com/o/r.git.git",
+				false,
+			),
+			("o/r", "github", "https://GITHUB.COM/o/r.git", false),
+			("o/r", "github", "https://github.com:8443/o/r.git", false),
+			("o/r", "github", "http://github.com/o/r.git", false),
+			("o/r", "git", "https://github.com/o/r.git", false),
+		] {
+			let written = project_lock_source(&skill::InstallLockSource {
+				source: source.to_string(),
+				source_type: source_type.to_string(),
+				source_url: url.to_string(),
+				ref_name: None,
+			});
+			skill::write_project_install_lock_hashed(
+				"s",
+				&written,
+				None,
+				"0".repeat(64),
+				project.path(),
+				None,
+			)
+			.unwrap();
+			let lock =
+				skill::lock::local::read_local_lock(Some(project.path()));
+			let entry = &lock.skills["s"];
+			assert_eq!(
+				entry_clone_source(
+					&entry.source,
+					entry.source_url.as_deref(),
+					&entry.source_type
+				),
+				url,
+				"{source} {source_type}"
+			);
+			assert_eq!(entry.source_url.is_none(), elided, "{url}");
+		}
+	}
 
 	/// Reconstruction may only produce a coordinate that names the SAME
 	/// repository the entry records. A shape it cannot place must keep its own

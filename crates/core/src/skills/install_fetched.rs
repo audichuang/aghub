@@ -142,7 +142,7 @@ fn write_install_lock(
 		.map_err(crate::ConfigError::Io),
 		WriteScope::Project { root } => skill::write_project_install_lock(
 			skill_name,
-			source,
+			&crate::skills::source_coordinate::project_lock_source(source),
 			Some(lock_skill_path),
 			source_dir,
 			root,

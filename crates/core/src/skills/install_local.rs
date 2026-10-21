@@ -90,13 +90,23 @@ fn write_local_install_lock(
 		}
 		(WriteScope::Project { root }, None) => {
 			skill::write_project_install_lock(
-				skill_name, &source, skill_path, source_dir, root, ref_commit,
+				skill_name,
+				&crate::skills::source_coordinate::project_lock_source(&source),
+				skill_path,
+				source_dir,
+				root,
+				ref_commit,
 			)
 			.map(|_| ())
 		}
 		(WriteScope::Project { root }, Some(hash)) => {
 			skill::write_project_install_lock_hashed(
-				skill_name, &source, skill_path, hash, root, ref_commit,
+				skill_name,
+				&crate::skills::source_coordinate::project_lock_source(&source),
+				skill_path,
+				hash,
+				root,
+				ref_commit,
 			)
 			.map(|_| ())
 		}
@@ -248,7 +258,7 @@ pub fn install_local_skill(
 				// (github byte-identical to a fetched install). Only an owner
 				// whose host is known is carried — transfer copies an ambiguous
 				// one untracked — so this rebuild is never a guess. The project
-				// writer drops reconstructable URLs itself.
+				// write drops a URL the reader rebuilds (`project_lock_source`).
 				source_url: match req.scope {
 					WriteScope::Global => {
 						crate::skills::source_coordinate::entry_clone_source(
