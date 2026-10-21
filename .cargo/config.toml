@@ -18,3 +18,7 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 # Faster compilation for dependencies in dev builds
 opt-level = 1
+# Dependencies carry no line tables: smaller target/ and CI caches, faster
+# links. Workspace crates keep theirs (profile.dev), so our frames still
+# print file:line.
+debug = false

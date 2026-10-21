@@ -144,16 +144,26 @@ that tag, so no later release can read them; v2.40.1 alone left 1179 such
 entries that only evicted main's CI caches.
 
 2026-10-21: the release jobs restore (never save) a rust-cache entry that
-`.github/workflows/release-cache.yml` builds on main, one per target, because
-every ref can read the default branch's caches. Before it, v2.41.8 took 19.5
+ci.yml's `build` job saves on main, one per target, because every ref can read
+the default branch's caches. That job runs release.yml's own cargo commands
+(so a PR also proves the release build) and replaced CI's separate
+release-CLI caches. Before it, v2.41.8 took 19.5
 min with the Windows desktop job at 18.5 (9.7 sidecar + 6.1 Tauri step, ~600
 crates compiled cold); a run on a busy day took 40 min because its macOS jobs
 queued ~24 min for the free plan's macOS concurrency. The same change dropped
 the Intel Mac legs (0 downloads), which removed two of the four macOS jobs.
 rust-cache strips workspace versions from the key, so `just bump` and the
-release's version sed do not miss it; a toolchain change does, hence the
-weekly run, which also refreshes the entries against LRU eviction in the
-10GB repo cache.
+release's version sed do not miss it, and the bump commit's own CI run
+refreshes it. It also hashes every non-empty `CARGO*`/`RUST*` env var, which
+is why release.yml's build jobs repeat ci.yml's workflow env.
+
+The 10GB repo cache had reached 10.3GB, 3.1GB of it keys superseded by a
+Cargo.lock change and kept until LRU eviction, which also takes live entries.
+ci.yml's `prune-caches` job deletes those and every tag-scoped cache after
+each main run. `[profile.dev.package."*"] debug = false` drops dependency
+line tables from test builds (smaller caches, faster links) while workspace
+crates keep theirs, which is what the `CARGO_PROFILE_DEV_DEBUG=0` attempt
+above lost.
 
 Rejected (two Windows samples each, within noise): a Dev Drive (ReFS) for
 target/cargo/rustup; building the desktop crate in the same cargo pass after
