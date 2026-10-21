@@ -257,6 +257,19 @@ jobs:
                   sudo apt-get update
                   # gnome-keyring + dbus-x11: the native keyring smoke test.
                   sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
+            # Defender scanned every file the tests create (temp dirs, SQLite
+            # journals): aghub-inference's tests ran ~60x slower on Windows
+            # than elsewhere. Non-fatal, like release.yml's exclusions.
+            # docs/history/tooling.md#windows-test-speed
+            - name: Exclude test and build dirs from Windows Defender
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'SilentlyContinue'
+                  Add-MpPreference -ExclusionPath $env:TEMP
+                  Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+                  Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+                  exit 0
             - name: Cargo fetch (lockfile must be in sync)
               run: cargo fetch --locked
             - name: Unit + integration tests

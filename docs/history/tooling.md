@@ -171,6 +171,16 @@ an early `bun run build`; `rust-lld` as the MSVC linker; a Defender exclusion
 in CI. `CARGO_PROFILE_DEV_DEBUG=0` cut one macOS CI test build 593s → 397s
 but was within noise on Windows and drops line numbers from CI backtraces.
 
+## Windows test speed
+
+`.github/workflows/ci.yml` `test`, "Exclude test and build dirs from Windows
+Defender". On 2026-10-21 (PR #69, warm cache) Windows ran the suite in 147s
+against 23s on Linux. aghub-inference's 94 tests took 186 test-seconds there
+(2.8 on Linux): `InferenceProviderStore::open_db` opens a fresh connection and
+runs the migrations on every call, so each test's new database is ~20-30
+committed transactions, each creating and deleting a journal file that
+Defender scans. The CLI `inference_*` tests took 13-37s each (0.07s on Linux).
+
 ## cargo audit ignores the updater's zip 4
 
 On 2026-10-20 three `zip` advisories (RUSTSEC-2026-0367, -0368, -0369: an
