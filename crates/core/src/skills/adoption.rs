@@ -184,6 +184,9 @@ pub struct AdoptionCheck {
 	pub installed_hash: String,
 	pub canonical: Option<PathBuf>,
 	pub existing_owner: Option<LockedSourceOwner>,
+	/// An untracked Master exists and holds the source's content (as the
+	/// guard compares it): the ONE answer to "may the lock adopt it?".
+	pub adopts_master: bool,
 }
 
 pub fn adoption_guard(
@@ -227,6 +230,7 @@ pub fn adoption_guard(
 			)));
 		}
 	}
+	let mut adopts_master = false;
 	if let Some(canonical) = canonical.as_ref() {
 		if Linker::is_link(canonical) {
 			return Err(ConfigError::ValidationFailed(format!(
@@ -249,7 +253,7 @@ pub fn adoption_guard(
 			// adoption, and only over what the copier carries: a Master it made
 			// lacks the caches (`__pycache__`, …) the raw hash still counts.
 			let is_fetched = fetched;
-			if is_fetched || (is_adoption && !is_already_installed) {
+			if is_fetched || is_adoption {
 				let (master_hash, source_hash) = if is_fetched {
 					(hash_master(name, canonical)?, installed_hash.clone())
 				} else {
@@ -262,7 +266,10 @@ pub fn adoption_guard(
 					};
 					(hash(canonical)?, hash(source_root)?)
 				};
-				if master_hash != source_hash {
+				let equal = master_hash == source_hash;
+				adopts_master = is_adoption && equal;
+				// An already-linked regrant keeps its Master; it just is not adopted.
+				if !equal && (is_fetched || !is_already_installed) {
 					let kind = if is_fetched { "fetched " } else { "" };
 					return Err(ConfigError::ValidationFailed(format!(
 						"Pre-existing Master for skill '{name}' has different content; \
@@ -279,6 +286,7 @@ pub fn adoption_guard(
 		installed_hash,
 		canonical,
 		existing_owner,
+		adopts_master,
 	})
 }
 

@@ -1099,3 +1099,101 @@ fn install_local_skill_refuses_to_rename_onto_a_foreign_master() {
 		);
 	});
 }
+
+/// Seed a source with a `__pycache__` the Master copier drops, and an
+/// untracked Master holding exactly what the copier would have carried.
+fn seed_cached_source_and_equal_master(
+	home: &Path,
+	project: &Path,
+	name: &str,
+) -> std::path::PathBuf {
+	let source_skill = home.join("source-skills").join(name);
+	let skill_md = format!("---\nname: {name}\ndescription: d\n---\n\nbody\n");
+	for dir in [&source_skill, &project.join(".aghub").join(name)] {
+		std::fs::create_dir_all(dir.join("scripts")).unwrap();
+		std::fs::write(dir.join("SKILL.md"), &skill_md).unwrap();
+		std::fs::write(dir.join("scripts/helper.py"), "x = 1\n").unwrap();
+	}
+	std::fs::create_dir_all(source_skill.join("scripts/__pycache__")).unwrap();
+	std::fs::write(source_skill.join("scripts/__pycache__/x.pyc"), "cache")
+		.unwrap();
+	std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+	source_skill
+}
+
+/// The guard accepts an equal untracked Master over what the copier carries;
+/// the lock-write decision must reuse that answer, not a raw-hash recompute
+/// that counts the source's `__pycache__`.
+#[test]
+fn install_local_skill_adopting_an_equal_master_despite_python_cache_writes_the_local_lock(
+) {
+	with_isolated_env(|home, _data| {
+		let project = home.join("adopt-project");
+		let source_skill =
+			seed_cached_source_and_equal_master(home, &project, "cached");
+
+		let report = install_local_skill(LocalSkillInstallRequest {
+			source_path: &source_skill.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+			lock: Default::default(),
+		})
+		.expect("adoption must succeed");
+
+		assert!(!report.wrote_master);
+		assert!(report.wrote_lock, "an adoption must stamp the lock");
+		let lock = skill::lock::local::read_local_lock(Some(&project));
+		let entry = lock.skills.get("cached").expect("entry must exist");
+		assert_eq!(entry.source_type, "local");
+		assert_eq!(
+			entry.source,
+			source_skill.join("SKILL.md").display().to_string()
+		);
+	});
+}
+
+/// The same for a carried owner: owner, ref and baseline must survive.
+#[test]
+fn install_local_skill_carrying_an_owner_onto_an_equal_master_despite_python_cache_writes_the_owner(
+) {
+	with_isolated_env(|home, _data| {
+		let project = home.join("carry-project");
+		let source_skill =
+			seed_cached_source_and_equal_master(home, &project, "carried");
+		let owner = aghub_core::skills::adoption::LockedSourceOwner {
+			source: "o/r".to_string(),
+			source_type: "github".to_string(),
+			source_url: None,
+			ref_name: Some("v1".to_string()),
+			skill_path: Some("skills/carried/SKILL.md".to_string()),
+			ref_commit: Some("abc123".to_string()),
+			stored_hash: Some("f".repeat(64)),
+		};
+
+		let report = install_local_skill(LocalSkillInstallRequest {
+			source_path: &source_skill.join("SKILL.md"),
+			scope: WriteScope::project(&project),
+			target_agents: &[AgentType::Claude],
+			install_name: None,
+			lock: aghub_core::skills::install_local::LocalInstallLock::Carry(
+				owner,
+			),
+		})
+		.expect("carried adoption must succeed");
+
+		assert!(!report.wrote_master);
+		assert!(report.wrote_lock, "a carried adoption must stamp the lock");
+		let lock = skill::lock::local::read_local_lock(Some(&project));
+		let entry = lock.skills.get("carried").expect("entry must exist");
+		assert_eq!(entry.source, "o/r");
+		assert_eq!(entry.source_type, "github");
+		assert_eq!(entry.ref_name.as_deref(), Some("v1"));
+		assert_eq!(
+			entry.skill_path.as_deref(),
+			Some("skills/carried/SKILL.md")
+		);
+		assert_eq!(entry.ref_commit.as_deref(), Some("abc123"));
+		assert_eq!(entry.computed_hash, "f".repeat(64));
+	});
+}

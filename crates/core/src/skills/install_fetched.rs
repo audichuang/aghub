@@ -235,6 +235,7 @@ pub fn install_fetched_skill_and_lock(
 		installed_hash,
 		canonical,
 		existing_owner,
+		..
 	} = adoption_guard(&name, &req)?;
 
 	// LAST preflight before the first write: an unreadable lock refused at

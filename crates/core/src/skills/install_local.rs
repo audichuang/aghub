@@ -372,16 +372,7 @@ pub fn install_local_skill(
 		return Err(ConfigError::resource_exists("skill", effective_name));
 	}
 	let master_exists = canonical_dir.exists();
-	let master_hash = if master_exists {
-		Some(crate::skills::adoption::hash_master(
-			effective_name,
-			canonical_dir,
-		)?)
-	} else {
-		None
-	};
-	let is_adoption = adoption.existing_owner.is_none()
-		&& master_hash.as_deref() == Some(&adoption.installed_hash);
+	let is_adoption = adoption.adopts_master;
 	let can_write = writes_lock && (!master_exists || is_adoption);
 
 	if can_write {
@@ -490,7 +481,7 @@ pub fn install_local_skill(
 			effective_name,
 			canonical_dir,
 		)?;
-		// No re-hash here: a fresh Master is the copier's output of source_root (which drops npx-excluded files), and an adopted Master was already hash-matched above under the same guard.
+		// No re-hash here: a fresh Master is the copier's output of source_root (which drops npx-excluded files), and an adopted Master was matched by the guard (`adopts_master`).
 		let lock_source_dir = if effective_name != source_name {
 			canonical_dir.as_path()
 		} else {
