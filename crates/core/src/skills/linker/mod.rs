@@ -238,9 +238,10 @@ pub(crate) fn master_content_hash(
 	dir: &Path,
 ) -> Result<String, skill::HashError> {
 	skill::compute_skill_folder_hash_where(dir, |rel| {
-		let mut parts = rel.split('/').peekable();
+		let mut parts = rel.components().peekable();
 		while let Some(part) = parts.next() {
-			if excluded_from_master(part, parts.peek().is_some()) {
+			let name = part.as_os_str().to_string_lossy();
+			if excluded_from_master(&name, parts.peek().is_some()) {
 				return false;
 			}
 		}
@@ -1078,6 +1079,34 @@ mod tests {
 		assert!(
 			!dest.join("metadata.json").exists(),
 			"metadata.json must be excluded"
+		);
+	}
+
+	/// On Unix `__pycache__\payload` is ONE file name the copier carries, so
+	/// the content comparison must count it rather than read it as a cache dir.
+	#[cfg(unix)]
+	#[test]
+	fn master_content_hash_counts_backslash_named_file() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let src = tmp.path().join("src");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(src.join("SKILL.md"), "real").unwrap();
+		std::fs::write(src.join("__pycache__\\payload"), "source").unwrap();
+		let master = tmp.path().join("master");
+		copy_dir_recursive(&src, &master).unwrap();
+		assert!(master.join("__pycache__\\payload").is_file());
+		assert_eq!(
+			master_content_hash(&src).unwrap(),
+			master_content_hash(&master).unwrap()
+		);
+
+		std::fs::write(master.join("__pycache__\\payload"), "tampered")
+			.unwrap();
+		assert_ne!(
+			master_content_hash(&src).unwrap(),
+			master_content_hash(&master).unwrap(),
+			"a differing carried file must make the contents differ"
 		);
 	}
 

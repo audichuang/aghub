@@ -60,14 +60,16 @@ pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 }
 
 /// [`compute_skill_folder_hash`] over only the files `keep` accepts, by
-/// relative `/`-separated path.
+/// NATIVE relative path: on Unix a `\` is part of a file name, not a
+/// separator, so the predicate must see components before the hash's `/`
+/// normalization folds them.
 pub fn compute_skill_folder_hash_where(
 	dir: &Path,
-	keep: impl FnMut(&str) -> bool,
+	keep: impl FnMut(&Path) -> bool,
 ) -> Result<String, HashError> {
 	let mut keep = keep;
 	let mut files = collect_skill_files(dir)?;
-	files.retain(|(rel, _)| keep(rel));
+	files.retain(|(_, abs)| keep(abs.strip_prefix(dir).unwrap_or(abs)));
 	hash_files(files)
 }
 
