@@ -66,7 +66,7 @@ asked for. **For a requested agent, `linked` is the only pass.**
 aghub-cli --version
 ```
 
-This file is written against the 2.40 line; on an older build trust `--help`
+This file is written against the 2.41 line; on an older build trust `--help`
 over it. Below 2.18.0 the Master lived in `.agents/skills` and agents read it
 without a Referrer — none of the model above applies. Upgrade before mutating.
 `X.Y.Z-N-gSHA` is a clean source build N commits past the tag; a `-dev` suffix
