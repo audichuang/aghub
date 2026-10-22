@@ -29,7 +29,7 @@ export type SourceSkillDiff = {
 	/**
 	 * For `uncheckable`/`removed`: redacted reason, aligned with
 	 * `SkillUpdateStatusResponse` (`auth`/`network`/`local`/`ssh`/
-	 * `unsupportedScheme`/`noPath`/`timeout`).
+	 * `unsupportedScheme`/`noPath`/`timeout`/`ambiguousHost`).
 	 */
 	reason?: string;
 	/**

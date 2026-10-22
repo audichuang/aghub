@@ -240,6 +240,12 @@ pub fn global_lock_entries_with(
 				name.clone(),
 				HealPrecondition::of_global_entry(&entry),
 			);
+			let ambiguous_host =
+				aghub_core::skills::source_coordinate::host_is_guessed(
+					&entry.source,
+					Some(&entry.source_url),
+					&entry.source_type,
+				);
 			EntryInput {
 				local_hash: local_hashes.hashes.get(&name).cloned(),
 				local_comparison_hash: local_hashes
@@ -261,6 +267,7 @@ pub fn global_lock_entries_with(
 				skill_path: entry.skill_path,
 				stored_hash: entry.content_hash,
 				ref_commit: entry.ref_commit,
+				ambiguous_host,
 			}
 		})
 		.collect();
@@ -285,6 +292,12 @@ fn project_lock_entries_with(
 				name.clone(),
 				HealPrecondition::of_project_entry(&entry),
 			);
+			let ambiguous_host =
+				aghub_core::skills::source_coordinate::host_is_guessed(
+					&entry.source,
+					entry.source_url.as_deref(),
+					&entry.source_type,
+				);
 			EntryInput {
 				local_hash: local_hashes.hashes.get(&name).cloned(),
 				local_comparison_hash: local_hashes
@@ -309,6 +322,7 @@ fn project_lock_entries_with(
 				skill_path: entry.skill_path,
 				stored_hash: Some(entry.computed_hash),
 				ref_commit: entry.ref_commit,
+				ambiguous_host,
 			}
 		})
 		.collect();
@@ -512,5 +526,77 @@ mod tests {
 			"an offline check hashes nothing — it has no upstream to compare \
 			 against"
 		);
+	}
+
+	/// npx records any self-hosted `/-/tree/` host as URL-less `gitlab`, so the
+	/// host is unprovable: the projection must flag it (never fetch a guessed
+	/// `gitlab.com`) and must not flag an entry that proves its host.
+	#[test]
+	fn a_url_less_gitlab_entry_is_flagged_ambiguous_by_both_projections() {
+		let project_entry = |source_url: Option<&str>, source_type: &str| {
+			skill::LocalSkillLockEntry {
+				extra: Default::default(),
+				source: "group/repo".to_string(),
+				source_type: source_type.to_string(),
+				source_url: source_url.map(str::to_string),
+				ref_name: Some("main".to_string()),
+				skill_path: Some("SKILL.md".to_string()),
+				computed_hash: "h".to_string(),
+				ref_commit: None,
+			}
+		};
+		let mut lock = skill::lock::local::LocalSkillLockFile::new();
+		lock.skills
+			.insert("bare".to_string(), project_entry(None, "gitlab"));
+		lock.skills.insert(
+			"recorded".to_string(),
+			project_entry(Some("https://gitlab.com/group/repo.git"), "gitlab"),
+		);
+		lock.skills
+			.insert("gh".to_string(), project_entry(None, "github"));
+		let (entries, _) =
+			project_lock_entries_with(|| lock, |_| LocalHashes::default());
+		let flagged = |name: &str| {
+			entries
+				.iter()
+				.find(|e| e.name == name)
+				.unwrap()
+				.ambiguous_host
+		};
+		assert!(flagged("bare"));
+		assert!(!flagged("recorded"));
+		assert!(!flagged("gh"));
+
+		let global_entry = |source_url: &str| skill::SkillLockEntry {
+			extra: Default::default(),
+			source: "group/repo".to_string(),
+			source_type: "gitlab".to_string(),
+			source_url: source_url.to_string(),
+			ref_name: Some("main".to_string()),
+			skill_path: Some("SKILL.md".to_string()),
+			skill_folder_hash: String::new(),
+			content_hash: None,
+			ref_commit: None,
+			installed_at: "t".to_string(),
+			updated_at: "t".to_string(),
+			plugin_name: None,
+		};
+		let mut global = skill::SkillLockFile::default();
+		global.skills.insert("bare".to_string(), global_entry(""));
+		global.skills.insert(
+			"recorded".to_string(),
+			global_entry("https://gitlab.com/group/repo.git"),
+		);
+		let (entries, _) =
+			global_lock_entries_with(|| global, |_| LocalHashes::default());
+		let flagged = |name: &str| {
+			entries
+				.iter()
+				.find(|e| e.name == name)
+				.unwrap()
+				.ambiguous_host
+		};
+		assert!(flagged("bare"));
+		assert!(!flagged("recorded"));
 	}
 }

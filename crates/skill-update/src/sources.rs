@@ -12,7 +12,7 @@ use crate::{
 };
 use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::source_coordinate::{
-	entry_clone_source, source_matches, source_origin,
+	entry_clone_source, host_is_guessed, source_matches, source_origin,
 };
 use aghub_core::skills::update::{
 	detect_rename, precheck_source, UncheckableReason,
@@ -578,8 +578,10 @@ pub(crate) fn baseline_for_scope(
 fn recorded_meta_from(
 	locks: &[ScopeLock],
 	source: &str,
-) -> (String, Option<String>, Option<String>, Vec<String>) {
+) -> (String, Option<String>, Option<String>, Vec<String>, bool) {
 	let mut source_type = String::new();
+	// The chosen `recorded_source_url` is a guess (URL-less `gitlab`).
+	let mut recorded_ambiguous = false;
 	let mut recorded_ref: Option<String> = None;
 	let mut recorded_source_url: Option<String> = None;
 	let mut recorded_origin: Option<String> = None;
@@ -606,6 +608,12 @@ fn recorded_meta_from(
 			entry_source_url,
 			entry_source_type,
 		);
+		let ambiguous =
+			host_is_guessed(entry_source, entry_source_url, entry_source_type);
+		// OR across EVERY matched entry, not just the chosen one: a guessed
+		// sibling sharing the origin must refuse the source whatever the
+		// visit order (#68).
+		recorded_ambiguous |= ambiguous;
 		// Same origin, but the first spelling is ssh and this one is https:
 		// take the fetchable coordinate (url + type together).
 		if recorded_origin.as_deref() == Some(origin.as_str())
@@ -653,6 +661,7 @@ fn recorded_meta_from(
 		recorded_ref,
 		recorded_source_url,
 		matched_origins.into_iter().collect(),
+		recorded_ambiguous,
 	)
 }
 
@@ -677,6 +686,9 @@ pub(crate) struct ResolvedSourceMeta {
 	/// URL". A matching entry always yields `Some`, so the diff resolves the same
 	/// repository the row advertises and the apply installs from.
 	pub(crate) effective_source: Option<String>,
+	/// `effective_source` is a guess (a URL-less `gitlab` entry's host is
+	/// unprovable): refused as `Uncheckable{AmbiguousHost}` before any fetch.
+	pub(crate) ambiguous_host: bool,
 	/// Every DISTINCT origin the caller's source selected, sorted. More than one
 	/// means the caller named something host-blind that spans forges — see
 	/// [`ResolvedSourceMeta::ambiguous_origins`].
@@ -713,8 +725,13 @@ fn resolve_source_meta_from(
 	locks: &[ScopeLock],
 	explicit_ref: Option<&str>,
 ) -> ResolvedSourceMeta {
-	let (mut source_type, recorded_ref, recorded_source_url, matched_origins) =
-		recorded_meta_from(locks, source);
+	let (
+		mut source_type,
+		recorded_ref,
+		recorded_source_url,
+		matched_origins,
+		ambiguous_host,
+	) = recorded_meta_from(locks, source);
 	if source_type.is_empty() {
 		source_type = "github".to_string();
 	}
@@ -724,6 +741,7 @@ fn resolve_source_meta_from(
 		effective_ref,
 		effective_source: recorded_source_url,
 		matched_origins,
+		ambiguous_host,
 	}
 }
 
@@ -1222,6 +1240,12 @@ fn prepare_from(
 		});
 	}
 	let git_ref = meta.effective_ref;
+	if meta.ambiguous_host {
+		return Err(PrepareRefusal::Uncheckable {
+			git_ref,
+			reason: UncheckableReason::AmbiguousHost,
+		});
+	}
 	let fetch_source =
 		meta.effective_source.unwrap_or_else(|| source.to_string());
 	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
@@ -3607,6 +3631,90 @@ mod snapshot_tests {
 			other => panic!(
 				"the permanent reason must win over MultipleRefs, got {other:?}"
 			),
+		}
+	}
+
+	/// `source sync` / `source diff` share `prepare_from`: a URL-less `gitlab`
+	/// entry proves no host, so it is refused before any fetch rather than
+	/// fetched from a guessed `gitlab.com`.
+	#[test]
+	fn a_url_less_gitlab_source_is_refused_as_an_ambiguous_host() {
+		let project = TempDir::new().unwrap();
+		write_lock(
+			project.path(),
+			&[(
+				"alpha",
+				entry("group/repo", "gitlab", Some("main"), "alpha/SKILL.md"),
+			)],
+		);
+		let outcome = plan_source_sync(
+			SourceSyncInput {
+				source: "group/repo".to_string(),
+				git_ref: None,
+				scope: WriteScope::Project {
+					root: project.path().to_path_buf(),
+				},
+			},
+			SourceDiffDeps {
+				fetcher: &PanicFetcher,
+				resolver: &NoToken,
+			},
+		);
+		match outcome {
+			SourceSyncOutcome::UncheckableSource { reason, .. } => {
+				assert_eq!(reason, UncheckableReason::AmbiguousHost)
+			}
+			other => panic!("expected AmbiguousHost, got {other:?}"),
+		}
+	}
+
+	/// A URL-less `gitlab` entry and a sibling recording gitlab.com share one
+	/// origin; the source must be refused whatever the name order (#68).
+	#[test]
+	fn a_guessed_sibling_refuses_the_source_in_either_name_order() {
+		for (guessed, recorded) in [("a", "b"), ("b", "a")] {
+			let project = TempDir::new().unwrap();
+			let mut url = entry(
+				"group/repo",
+				"gitlab",
+				Some("main"),
+				&format!("{recorded}/SKILL.md"),
+			);
+			url.source_url = Some("https://gitlab.com/group/repo.git".into());
+			write_lock(
+				project.path(),
+				&[
+					(
+						guessed,
+						entry(
+							"group/repo",
+							"gitlab",
+							Some("main"),
+							&format!("{guessed}/SKILL.md"),
+						),
+					),
+					(recorded, url),
+				],
+			);
+			let outcome = plan_source_sync(
+				SourceSyncInput {
+					source: "group/repo".to_string(),
+					git_ref: None,
+					scope: WriteScope::Project {
+						root: project.path().to_path_buf(),
+					},
+				},
+				SourceDiffDeps {
+					fetcher: &PanicFetcher,
+					resolver: &NoToken,
+				},
+			);
+			match outcome {
+				SourceSyncOutcome::UncheckableSource { reason, .. } => {
+					assert_eq!(reason, UncheckableReason::AmbiguousHost)
+				}
+				other => panic!("order {guessed}/{recorded}: got {other:?}"),
+			}
 		}
 	}
 

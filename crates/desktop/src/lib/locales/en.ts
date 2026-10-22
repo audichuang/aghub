@@ -464,6 +464,8 @@ export default {
 		"Can't check: reinstall the skill to record its source path.",
 	skillUncheckableGeneric: "Can't check this skill's source.",
 	skillUncheckableTimeout: "Can't check: the source check timed out.",
+	skillUncheckableAmbiguousHost:
+		"Can't check: the source host is unknown. Reinstall from the real URL.",
 	skillNeedsCredential: "Add credential",
 	skillNeedsCredentialTooltip:
 		"This private source needs a credential. Add one and retry.",

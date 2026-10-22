@@ -441,6 +441,8 @@ const zhHant: typeof en = {
 	skillUncheckableNoPath: "無法檢查：請重新安裝技能以記錄來源路徑。",
 	skillUncheckableGeneric: "無法檢查此技能的來源。",
 	skillUncheckableTimeout: "無法檢查：來源檢查逾時。",
+	skillUncheckableAmbiguousHost:
+		"無法檢查：來源主機不明，請從真正的網址重新安裝。",
 	skillNeedsCredential: "新增憑證",
 	skillNeedsCredentialTooltip: "此私有來源需要憑證。新增後重試。",
 	skillUpdateCheckError: "無法檢查技能更新。",

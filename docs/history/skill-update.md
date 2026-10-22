@@ -45,12 +45,20 @@ source spelling its host). An AMBIGUOUS entry — a URL-less `gitlab`, which npx
 1.5.11 writes for ANY self-hosted `/-/tree/` host — keeps its raw recorded
 value in the identity (unprovable, so `describes` permits, as before), and
 accept-rename refuses it before fetching instead of fetching a guessed
-gitlab.com repo that could replace the skill. skill-update's own uses of
-`entry_clone_source` (projection, mutation, sources) are unchanged. See
+gitlab.com repo that could replace the skill. skill-update's fetch
+coordinates (projection, `prepare_locked_resync`, `recorded_meta_from`) refuse
+the same entry through `host_is_guessed` as `UncheckableReason::AmbiguousHost`
+(`"ambiguousHost"` on the CLI/API/desktop), before `precheck_source` and the
+offline branch; only the `list_sources` display still reconstructs it. A legacy
+`git` shorthand is not guessed onto a provider host and stays fetchable (#68).
+See
 [core-transfer](core-transfer.md#transfer-and-reconcile-copies-share-the-local-install).
 
 Pinned by: `a_provider_typed_entry_applies_from_the_forge_the_row_advertises`
-(`tests/source_bulk_sync.rs`), `two_forges_serving_one_path_are_two_source_rows`,
+and `a_url_less_gitlab_entry_is_not_fetched_from_a_guessed_gitlab_com`
+(`tests/source_bulk_sync.rs`), `an_ambiguous_host_is_uncheckable_online_and_offline`,
+`a_url_less_gitlab_entry_is_flagged_ambiguous_by_both_projections`,
+`a_url_less_gitlab_source_is_refused_as_an_ambiguous_host`, `two_forges_serving_one_path_are_two_source_rows`,
 `source_type_selects_forge_when_project_source_url_is_missing`
 (`tests/source_bulk_sync_global.rs`).
 Commit: df8321a3.

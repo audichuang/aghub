@@ -702,6 +702,7 @@ pub(crate) fn uncheckable_reason_code(
 		UncheckableReason::UnsupportedScheme => "unsupportedScheme",
 		UncheckableReason::NoPath => "noPath",
 		UncheckableReason::Timeout => "timeout",
+		UncheckableReason::AmbiguousHost => "ambiguousHost",
 	}
 }
 

@@ -58,6 +58,22 @@ pub fn known_clone_source(
 	}
 }
 
+/// Would fetching this entry mean GUESSING a forge host? True only for a
+/// URL-less `gitlab` entry ([`reconstruction_is_unambiguous`]): npx strips a
+/// self-hosted host, and [`reconstruct_source_url`] then invents `gitlab.com`.
+/// Every skill-update fetch coordinate refuses such an entry
+/// (`UncheckableReason::AmbiguousHost`) instead of fetching the guess. A legacy
+/// `git` shorthand also lacks a provable host but is not rebuilt onto a
+/// provider host, so it stays fetchable as before.
+pub fn host_is_guessed(
+	source: &str,
+	source_url: Option<&str>,
+	source_type: &str,
+) -> bool {
+	source_type.eq_ignore_ascii_case("gitlab")
+		&& known_clone_source(source, source_url, source_type).is_none()
+}
+
 /// `source` as a project lock entry records it: `sourceUrl` is omitted only
 /// for a github `owner/repo` shorthand whose [`reconstruct_source_url`] — what
 /// every reader falls back to — rebuilds exactly that URL, keeping the common

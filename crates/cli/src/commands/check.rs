@@ -169,6 +169,7 @@ fn uncheckable_reason_str(reason: UncheckableReason) -> &'static str {
 		UncheckableReason::UnsupportedScheme => "unsupportedScheme",
 		UncheckableReason::NoPath => "noPath",
 		UncheckableReason::Timeout => "timeout",
+		UncheckableReason::AmbiguousHost => "ambiguousHost",
 	}
 }
 

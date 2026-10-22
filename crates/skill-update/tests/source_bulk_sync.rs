@@ -438,7 +438,7 @@ fn a_provider_typed_entry_applies_from_the_forge_the_row_advertises() {
 		"alpha",
 		skill::LocalSkillLockEntry {
 			extra: Default::default(),
-			source_url: None,
+			source_url: Some("https://gitlab.com/group/repo.git".to_string()),
 			source: "group/repo".to_string(),
 			ref_name: Some("main".to_string()),
 			source_type: "gitlab".to_string(),
@@ -484,6 +484,70 @@ fn a_provider_typed_entry_applies_from_the_forge_the_row_advertises() {
 		fetcher.seen.lock().unwrap()[0].0.source,
 		"https://gitlab.com/group/repo.git",
 		"apply must not resolve group/repo as GitHub shorthand"
+	);
+}
+
+/// A URL-less `gitlab` entry (npx strips a self-hosted host) proves no host, so
+/// apply must refuse before any fetch instead of guessing `gitlab.com` and
+/// overwriting local content from whoever owns that namespace there.
+#[test]
+fn a_url_less_gitlab_entry_is_not_fetched_from_a_guessed_gitlab_com() {
+	let temporary = tempfile::tempdir().unwrap();
+	let project = temporary.path().join("project");
+	let fetched_root = temporary.path().join("fetched");
+	write_skill(&project.join(".claude/skills/alpha"), "alpha", "old");
+	write_skill(&fetched_root.join("skills/alpha"), "alpha", "new");
+	skill::add_skill_to_local_lock(
+		"alpha",
+		skill::LocalSkillLockEntry {
+			extra: Default::default(),
+			source_url: None,
+			source: "group/repo".to_string(),
+			ref_name: Some("main".to_string()),
+			source_type: "gitlab".to_string(),
+			computed_hash: "old".to_string(),
+			skill_path: Some("skills/alpha/SKILL.md".to_string()),
+			ref_commit: None,
+		},
+		Some(&project),
+	)
+	.unwrap();
+	let names = vec!["alpha".to_string()];
+	let fetcher = RecordingFetcher {
+		root: fetched_root,
+		seen: Mutex::new(Vec::new()),
+	};
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source_group: None,
+			names: &names,
+			scope: aghub_core::WriteScope::project(&project),
+		},
+		&fetcher,
+		&Token,
+	)
+	.expect("the request itself is well formed");
+	assert!(
+		matches!(
+			results[0].outcome,
+			Err(skill_update::mutation::LockedResyncError::AmbiguousHost)
+		),
+		"{:?}",
+		results[0].outcome
+	);
+	assert!(
+		fetcher.seen.lock().unwrap().is_empty(),
+		"nothing is fetched"
+	);
+	let lock = skill::read_local_lock(Some(&project));
+	assert_eq!(lock.skills["alpha"].computed_hash, "old");
+	assert_eq!(lock.skills["alpha"].source_url, None);
+	let installed =
+		std::fs::read_to_string(project.join(".claude/skills/alpha/SKILL.md"))
+			.unwrap();
+	assert!(
+		installed.contains("old"),
+		"installed copy untouched: {installed}"
 	);
 }
 

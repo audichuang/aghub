@@ -299,6 +299,10 @@ fn locked_resync_error_message(
 		LockedResyncError::MissingSkillPath => {
 			"locked skill has no skillPath".to_string()
 		}
+		LockedResyncError::AmbiguousHost => format!(
+			"skill '{name}' was recorded without its host (a self-hosted \
+			 GitLab?); reinstall it from the real URL"
+		),
 		LockedResyncError::NotInstalled
 		| LockedResyncError::Resync(ResyncError::NotInstalled) => {
 			format!("skill '{name}' is locked but no installed copy was found")

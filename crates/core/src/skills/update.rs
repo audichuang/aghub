@@ -13,6 +13,10 @@ pub enum UncheckableReason {
 	UnsupportedScheme,
 	NoPath,
 	Timeout,
+	/// A URL-less `gitlab` lock entry: npx records any non-github
+	/// `/-/tree/` host this way with the host stripped, so the repository
+	/// cannot be named without guessing `gitlab.com`.
+	AmbiguousHost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

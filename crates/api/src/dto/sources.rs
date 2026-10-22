@@ -117,7 +117,7 @@ pub struct SourceSkillDiff {
 	pub previous_name: Option<String>,
 	/// For `uncheckable`/`removed`: redacted reason, aligned with
 	/// `SkillUpdateStatusResponse` (`auth`/`network`/`local`/`ssh`/
-	/// `unsupportedScheme`/`noPath`/`timeout`).
+	/// `unsupportedScheme`/`noPath`/`timeout`/`ambiguousHost`).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub reason: Option<String>,

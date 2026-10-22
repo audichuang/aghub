@@ -189,6 +189,10 @@ fn apply_locked_resync_error(
 		LockedResyncError::MissingSkillPath => {
 			"Locked skill has no skillPath".to_string()
 		}
+		LockedResyncError::AmbiguousHost => {
+			"Skill source host is unknown; reinstall it from the real URL"
+				.to_string()
+		}
 		LockedResyncError::NotInstalled => {
 			"Skill is locked but no installed copy was found".to_string()
 		}
@@ -1741,6 +1745,7 @@ mod tests {
 			local_comparison_hash: None,
 			local_ambiguous: false,
 			ref_commit: None,
+			ambiguous_host: false,
 		}];
 		let git_fetcher = GitFetcher::new();
 		let ref_resolver: Arc<dyn RefResolver> =
@@ -2007,6 +2012,7 @@ mod tests {
 			local_comparison_hash: None,
 			local_ambiguous: false,
 			ref_commit: None,
+			ambiguous_host: false,
 		}];
 		let git_fetcher = GitFetcher::new();
 		let ref_resolver: Arc<dyn RefResolver> =
@@ -2041,6 +2047,7 @@ mod tests {
 			local_comparison_hash: None,
 			local_ambiguous: false,
 			ref_commit: None,
+			ambiguous_host: false,
 		}];
 		let git_fetcher = GitFetcher::new();
 		let ref_resolver: Arc<dyn RefResolver> =

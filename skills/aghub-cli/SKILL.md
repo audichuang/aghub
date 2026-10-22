@@ -252,7 +252,10 @@ Read rather than retry:
 - `uncheckable` is never a pass, and `checked: true` only says the run was
   allowed online, not that this row was fetched. By `reason`: `auth` = missing
   or rejected credential (fix it, do not reinstall); `ssh`, `local`,
-  `unsupportedScheme`, `noPath` = permanent for that source; `network` with
+  `unsupportedScheme`, `noPath` = permanent for that source; `ambiguousHost` =
+  a URL-less `gitlab` lock entry (npx strips a self-hosted host), never fetched
+  from a guessed gitlab.com — reinstall from the real URL (`apply-update` and
+  `source diff`/`sync` refuse it too); `network` with
   `checked: false` = you omitted `--online`; `network`/`timeout` online =
   transient, retry.
 - `source diff` and `check --online` share one verdict and agree row for row on

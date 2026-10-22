@@ -93,6 +93,10 @@ pub struct EntryInput {
 	/// Drives the tip preflight: an unchanged tip lets the group skip the
 	/// fetch. `None` (project lock / npx / legacy) → never a preflight skip.
 	pub ref_commit: Option<String>,
+	/// The lock entry's host is unprovable (URL-less `gitlab`): `source_ref`
+	/// holds a guessed `gitlab.com`, so the entry is `Uncheckable{AmbiguousHost}`
+	/// and never fetched.
+	pub ambiguous_host: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -643,10 +647,17 @@ pub(crate) async fn check_updates(
 		//    `offline_keeps_a_local_sources_permanent_reason`).
 		let mut fetch_members = Vec::new();
 		for member in members {
-			if let Some(reason) = aghub_core::skills::update::precheck_source(
-				&member.source_type,
-				&sr.source,
-			) {
+			// An unprovable host wins over everything: `sr.source` is a guessed
+			// `gitlab.com` that must never be fetched.
+			let reason = if member.ambiguous_host {
+				Some(UncheckableReason::AmbiguousHost)
+			} else {
+				aghub_core::skills::update::precheck_source(
+					&member.source_type,
+					&sr.source,
+				)
+			};
+			if let Some(reason) = reason {
 				out.push(terminal_output(
 					&member,
 					&SkillUpdateStatus::Uncheckable { reason },
@@ -1134,6 +1145,7 @@ mod tests {
 			local_comparison_hash: None,
 			local_ambiguous: false,
 			ref_commit: None,
+			ambiguous_host: false,
 		}
 	}
 
@@ -1838,6 +1850,26 @@ mod tests {
 				reason: UncheckableReason::Local
 			}
 		);
+	}
+
+	/// A URL-less `gitlab` entry's host is unprovable, so it is permanently
+	/// `ambiguousHost` — online or off, and never fetched (`check_one` asserts
+	/// zero fetches). Like `local`, it must beat the offline `network` answer:
+	/// `--online` cannot help.
+	#[tokio::test]
+	async fn an_ambiguous_host_is_uncheckable_online_and_offline() {
+		let mut e =
+			entry("a", "https://gitlab.com/group/repo.git", Some("main"));
+		e.source_type = "gitlab".into();
+		e.ambiguous_host = true;
+		for offline in [false, true] {
+			assert_eq!(
+				check_one(e.clone(), offline).await,
+				SkillUpdateStatus::Uncheckable {
+					reason: UncheckableReason::AmbiguousHost
+				}
+			);
+		}
 	}
 
 	/// Same rule for a transport this surface cannot use at all: ssh is

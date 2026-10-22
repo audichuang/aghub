@@ -63,6 +63,8 @@ export function uncheckableTooltipKey(reason: string): string {
 			return "skillUncheckableNoPath";
 		case "timeout":
 			return "skillUncheckableTimeout";
+		case "ambiguousHost":
+			return "skillUncheckableAmbiguousHost";
 		default:
 			return "skillUncheckableGeneric";
 	}

@@ -475,8 +475,13 @@ pub struct LockedSkillResyncResult {
 
 #[derive(Debug)]
 pub enum LockedResyncError {
-	LockEntryNotFound { scope: ResourceScope },
+	LockEntryNotFound {
+		scope: ResourceScope,
+	},
 	MissingSkillPath,
+	/// The entry's host is unprovable (URL-less `gitlab`); refused before any
+	/// fetch.
+	AmbiguousHost,
 	NotInstalled,
 	InvalidSkillPath,
 	SourceSkillNotFound,
@@ -493,6 +498,7 @@ impl LockedResyncError {
 			Self::MissingSkillPath
 			| Self::InvalidSkillPath
 			| Self::SourceSkillNotFound => SKILL_PATH_NOT_FOUND_CODE,
+			Self::AmbiguousHost => SOURCE_FETCH_FAILED_CODE,
 			Self::NotInstalled => {
 				aghub_core::skills::resync::ResyncError::NotInstalled.code()
 			}
@@ -656,6 +662,13 @@ fn prepare_locked_resync(
 					scope: ResourceScope::GlobalOnly,
 				},
 			)?;
+			if aghub_core::skills::source_coordinate::host_is_guessed(
+				&entry.source,
+				Some(&entry.source_url),
+				&entry.source_type,
+			) {
+				return Err(LockedResyncError::AmbiguousHost);
+			}
 			let expected =
 				aghub_core::skills::lock::EntryIdentity::of_global_entry(
 					&entry,
@@ -685,6 +698,13 @@ fn prepare_locked_resync(
 					scope: ResourceScope::ProjectOnly,
 				},
 			)?;
+			if aghub_core::skills::source_coordinate::host_is_guessed(
+				&entry.source,
+				entry.source_url.as_deref(),
+				&entry.source_type,
+			) {
+				return Err(LockedResyncError::AmbiguousHost);
+			}
 			let expected =
 				aghub_core::skills::lock::EntryIdentity::of_project_entry(
 					&entry,
@@ -1373,6 +1393,11 @@ mod tests {
 			(
 				LockedResyncError::MissingSkillPath,
 				SKILL_PATH_NOT_FOUND_CODE,
+				false,
+			),
+			(
+				LockedResyncError::AmbiguousHost,
+				SOURCE_FETCH_FAILED_CODE,
 				false,
 			),
 			(

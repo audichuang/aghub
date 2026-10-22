@@ -145,6 +145,10 @@ test("uncheckableTooltipKey maps known reasons and falls back for unknown ones",
 	assert.equal(uncheckableTooltipKey("noPath"), "skillUncheckableNoPath");
 	assert.equal(uncheckableTooltipKey("timeout"), "skillUncheckableTimeout");
 	assert.equal(
+		uncheckableTooltipKey("ambiguousHost"),
+		"skillUncheckableAmbiguousHost",
+	);
+	assert.equal(
 		uncheckableTooltipKey("something-else"),
 		"skillUncheckableGeneric",
 	);

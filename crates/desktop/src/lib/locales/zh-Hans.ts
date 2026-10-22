@@ -442,6 +442,8 @@ const zhHans: typeof en = {
 	skillUncheckableNoPath: "无法检查：请重新安装技能以记录来源路径。",
 	skillUncheckableGeneric: "无法检查此技能的来源。",
 	skillUncheckableTimeout: "无法检查：来源检查超时。",
+	skillUncheckableAmbiguousHost:
+		"无法检查：来源主机不明，请从真正的网址重新安装。",
 	skillNeedsCredential: "添加凭证",
 	skillNeedsCredentialTooltip: "此私有来源需要凭证。添加后重试。",
 	skillUpdateCheckError: "无法检查技能更新。",
