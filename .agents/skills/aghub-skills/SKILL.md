@@ -55,7 +55,7 @@ Terms (Source hash, Master, Referrer, Relink, …) are defined in
 - Skill mutations persist to disk and the lock, **not** via `save_current()` —
   `save()` serializes MCPs only and rewriting them drops fields aghub does not
   model ([history](../../../docs/history/core-manager.md#skill-mutations-rewrote-mcp-config)).
-- Adding an agent: root `AGENTS.md` "Adding / Removing an Agent".
+- Adding an agent: `crates/agents/AGENTS.md` "ADDING / REMOVING AN AGENT".
 
 ## Testing
 

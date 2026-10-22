@@ -45,9 +45,6 @@ and requires explicit opt-in for changes.
   keep a catalog of them here. Exception: when a session's skill list overflows
   its budget, a skill that has never been used loses its description and cannot
   trigger, so the per-crate `AGENTS.md` names such a skill where its task happens
-- `.impeccable.md` — the desktop frontend's design context (users, brand voice,
-  aesthetic direction, type and color strategy), NOT Rust style; `cliff.toml` —
-  git-cliff for releases
 
 ## Structure
 
@@ -75,9 +72,7 @@ crates/
 
 Also at the repo root: `.agents/skills/` (this repo's own hand-edited skills, a
 real-directory layout lazy migration leaves alone — it moves only the one skill
-it mutates) and `justfile` (task runner). `repair` still moves a real directory there into the
-store when git does NOT track it; a tracked one is refused, and the refusal
-prints the escape (`git rm -r --cached <path>`).
+it mutates) and `justfile` (task runner).
 
 **`skills/aghub-cli/` is the skill users install, and it is part of the CLI's
 contract.** It is not dev tooling — that is `.agents/skills/`; keep the two apart.
@@ -85,7 +80,7 @@ A change to CLI semantics (flags, `-a` parsing, `source sync`, `repair`, `doctor
 lock behaviour) edits `skills/aghub-cli/` in the SAME commit, or the skill
 teaches the old behaviour. It reaches a machine only after the commit is on
 `fork/main` and `aghub-cli source sync audichuang/aghub --update` runs; editing
-the installed copy under `~/.agents` is overwritten by that sync.
+the installed copy under `~/.aghub` is overwritten by that sync.
 
 Cargo graph (depends-on): `agents` ← `core` ← `{cli, api}`; `desktop` → `api`
 (+ `remote`), not core directly. Tool crates used laterally.
@@ -106,24 +101,13 @@ hand-rolled `$XDG_DATA_HOME` guess, or Tauri's identifier-scoped
 `app_data_dir()` (`<data>/com.akrc.aghub`), agrees on Linux and diverges on
 macOS/Windows, so the split never shows up locally. Parity is pinned by
 `aghub_api::tests::default_app_data_dir_matches_core_seam` and the CLI's
-`commands::tests::app_data_dir_matches_core_seam`. A desktop upgrading from
-before the unification keeps its inference db in the legacy Tauri dir and
-**aghub does not move it** — `crates/desktop/src-tauri/src/commands/server.rs` `legacy_inference_db_hint`
-only warns, keyed on the LEGACY FILE EXISTING so a copy does not silence it.
-Do not "fix" that. Why:
-[`docs/history/desktop-tauri.md#legacy-inference-db-migration-removed`](docs/history/desktop-tauri.md#legacy-inference-db-migration-removed)
-and knowledge page `推論供應商與 app data root`.
+`commands::tests::app_data_dir_matches_core_seam`. Why: knowledge page `推論供應商與 app data root`.
 
 ## Key Design Patterns
 
 - **Adapter pattern**: `create_adapter(agent_type)` → `registry::get` →
   `&'static AgentDescriptor` implements `AgentAdapter`. **No hand-wired adapter
   structs** — behavior is function pointers on each descriptor.
-- **Normalized model**: `AgentConfig` — `Vec<Skill>` + `Vec<McpServer>` +
-  `Vec<SubAgent>` with `McpTransport` (`Stdio` | `Sse` | `StreamableHttp`).
-- **ConfigManager**: CRUD for resources. MCP delete (`remove_mcp_planned`)
-  rewrites shared config and deletes **no** disk path — `RemovalPlan.paths` is
-  deliberately empty.
 
 ## Agent-Specific Behavior
 
@@ -188,7 +172,10 @@ implementing and verifying.
   short name under `--exact` runs ZERO tests and exits 0 — check the test count.
 - **Before push or tag**: `just preflight` AND `bun run format:check` from the
   REPO ROOT. Neither alone is a pushable tree — preflight runs no
-  oxfmt/oxlint, and the pre-push hook runs no tests.
+  oxfmt/oxlint, and the pre-push hook runs no tests. A push whose diff is
+  Markdown only (`*.md`: AGENTS.md, `docs/`, skills) needs just
+  `bun run format:check` + `node scripts/check-history-links.mjs`; any other
+  file in the diff takes the full gate.
 - **Before tagging a release**: tag `v*` only after green CI.
 - **Bump a dependency in its OWN commit**, never inside a feature or fix commit.
   A bump reviewed as a bump gets the question that catches a breaking change
@@ -224,80 +211,12 @@ Two cross-surface invariants that neither file owns alone:
   `removal::read_effect_after`, asked of discovery — `delete`, the API delete
   route and `reconcile skill` must not answer it differently.
 
-## Skills Discovery
+## Skill mutations
 
 **Mutation lock**: every mutating skill flow holds ONE interprocess lock across
 its whole check→write→rollback span; read paths are deliberately unlocked, and it
 serializes aghub against aghub only. Invariants and the call-site rule:
 `crates/core/AGENTS.md` "Mutation attribution".
-
-**Link decision**: `classify_agent` / `agent_link_need`
-(`crates/core/src/skills/linker/classify.rs`). Every supported agent takes a
-Referrer — there is no "reads the Master directly" case; `LinkNeed` has no such
-variant, and none is to be added. Every install path must use it — CLI
-`add_skill_universal`, local `install_local_skill` (`add --from`, API import,
-transfer/reconcile copies) and fetched `install_universal`.
-
-**Shape classification**: `skills::shape` — `classify_shape` (one
-`(referrer, master)` pair), `candidate_referrers` (each agent's Referrer PATH,
-derived from its write dir, never from what is on disk) and `plan_repair`.
-`repair`, `doctor --verify-links`, the pre-mutation guard and migration all read
-that ONE classification; none may derive its own. The shape order, the three
-traps with their own tests, the four compat-unlink guards and doctor's two axes:
-knowledge page `技能連結形狀與 repair 鏈` — read it before touching any of them.
-
-## Adding / Removing an Agent
-
-One agent = one **descriptor** file plus six registration and contract spots. A
-step-2 row naming a module with no `pub mod`, and a missing step-6 row, fail the
-BUILD. A missing step-7 asset fails no build, lint or typecheck — only
-`just preflight`'s desktop unit tests catch it.
-
-1. `crates/agents/src/agents/<name>.rs` — descriptor — declares the MCP binding
-   (two paths + parse/serialize; all `None` when the agent has no MCP) and
-   writes no MCP load/save fns. Scope support is NOT declared: it is derived from
-   which bindings are `Some` (MCP paths, skill write slots, sub-agent dirs), pinned by
-   `descriptor_regression::scope_support_matches_bindings` (naming gotchas: `crates/agents/AGENTS.md`)
-2. `crates/agents/src/agents/mod.rs` — `pub mod`, **and ONE `agent_roster!`
-   row**: `Variant => "id", module, ["alias", …];`. That macro emits the
-   `AgentType` enum, `ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and
-   `ALL_DESCRIPTORS` — there is no second list, and no `AgentType` edit in
-   `models.rs` (it re-exports). **Row position is the order of everything**: the
-   desktop agent list, `-a all` expansion, batch row order and first-error
-3. `crates/core/tests/mcp_dialect_golden.rs` — a `row!` naming what the agent
-   writes and how it reads a config aghub did not write. REQUIRED for any agent
-   claiming MCP support
-4. `crates/core/tests/mcp_dialect_decisions.rs` — a second `row!`: a mixed entry,
-   an unknown transport tag, a field the model does not own, a value that does
-   not fit, an SSE server it cannot spell. Required even for a `json_map` agent
-   that introduces no new dialect
-5. `crates/core/tests/mcp_dialect_roundtrip.rs` — `NATIVE_TOGGLE`, if the agent
-   has a native enabled/disabled flag. Exhaustive BOTH ways: a listed agent that
-   drops a disabled server fails, an unlisted one that keeps it fails too
-6. `crates/agents/tests/descriptor_regression.rs` — a row in **every** table.
-   Lengths are derived from `AgentType::ALL.len()`, so a missing row is a COMPILE
-   error and a row naming the WRONG agent is a runtime panic.
-   `test_global_data_dirs` is the one table an agent may sit out, and only by
-   joining `OS_CONFIG_DIR_AGENTS` **and getting its own arm after the loop** —
-   membership alone is a `panic!`, because an agent added to the exception list
-   and never asserted was how that table stopped checking anything
-7. `crates/desktop/src/assets/agent/<id>.svg` — `src/lib/agent-icons.tsx` globs
-   `../assets/agent/*.svg` and keys it by `${id}.svg`; a missing file silently
-   falls back to a first-letter avatar. `crates/desktop/src/lib/agent-icons.test.ts`
-   closes that (it parses `agent_roster!` and asserts the asset exists) and
-   `just preflight` runs it. An id with a dash may ship either spelling — the
-   lookup has an `id.replaceAll("-", "_")` fallback
-
-`crates/core/tests/registry_bijection.rs` covers the three row mistakes the
-compiler cannot: a row naming the wrong MODULE, two rows sharing an ID, and a
-row whose id literal drifts from the `id:` field inside `agents/<module>.rs`.
-
-**Opening a capability on an EXISTING agent has a hidden blast radius**: tests
-across `cli`, `core` and `api` pick some agent that does not support skills as
-their "unsupported target" sentinel. Give that agent the capability and those
-tests stop testing anything. Grep the agent's id across `crates/*/tests/` and
-`crates/api/src/routes/` BEFORE changing its capabilities, and move the sentinel
-rather than deleting the assertion.
 
 ## Testing
 
@@ -335,11 +254,23 @@ from an existing test. Worked example:
 
 Reasons are given so you can generalize to the case not listed here.
 
-| Tier                                                     | What                                                                                                                                                                                                                                                                                                                                                                                    | Why                                                                                                                                                 |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Free — do it, do not ask**                             | Editing code; `just fmt` / `just lint`; `cargo build`; `bun run typecheck` / `lint:check` / `format:check`; the Rust test suite at any scope, `just preflight` included; reading and writing under a temp dir, `$AGHUB_DATA_DIR`, or a tempdir project root                                                                                                                             | Run it, fix the failures your change caused, and rerun. Stop and ask only if a test would need the real `~/.agents`, the OS keyring, or the network |
-| **Ask first — legitimate, but external or irreversible** | Pushing to someone else's upstream (`origin` = AkaraChen; committing and pushing to `fork` is Free), force-push, amending published history; release tags, `just bump`, the Homebrew tap unless the user asked for the release; touching the developer's REAL `~/.aghub`, `~/.agents`, agent skill dirs or the system keyring; adding any new workspace dependency without a clear need | These leave the machine or cannot be undone; the dependency budget is the maintainer's call                                                         |
-| **Never — no task reaches these**                        | Changing the shipped `tauri.conf.json` updater `pubkey`, or pointing its `endpoints` elsewhere. Committing secrets                                                                                                                                                                                                                                                                      | It bricks auto-update for every installed user                                                                                                      |
+- **Free — do it, do not ask**: editing code; `just fmt` / `just lint`;
+  `cargo build`; `bun run typecheck` / `lint:check` / `format:check`; the Rust
+  test suite at any scope, `just preflight` included; reading and writing under
+  a temp dir, `$AGHUB_DATA_DIR`, or a tempdir project root; committing and
+  pushing to `fork`. Run it, fix the failures your change caused, and rerun.
+  Stop and ask only if a test would need the real `~/.agents`, the OS keyring,
+  or the network.
+- **Ask first — legitimate, but external or irreversible**: pushing to someone
+  else's upstream (`origin` = AkaraChen), force-push, amending published
+  history; release tags, `just bump`, the Homebrew tap unless the user asked
+  for the release; touching the developer's REAL `~/.aghub`, `~/.agents`, agent
+  skill dirs or the system keyring; adding any new workspace dependency without
+  a clear need. These leave the machine or cannot be undone; the dependency
+  budget is the maintainer's call.
+- **Never — no task reaches these**: changing the shipped `tauri.conf.json`
+  updater `pubkey`, or pointing its `endpoints` elsewhere (it bricks
+  auto-update for every installed user); committing secrets.
 
 ## Anti-Patterns
 
@@ -373,11 +304,6 @@ Reasons are given so you can generalize to the case not listed here.
 Runbook (versioning, `just bump`, signing secrets, Homebrew tap, workflow
 failures): project skill **`releasing-aghub`** + `.github/workflows/release.yml`.
 The two release rules that are also approval boundaries are in the table above.
-
-## Project Root Detection
-
-Walk up for agent markers (`.claude/`, `.opencode/`, `.cursor/`, `.mcp.json`,
-`skills-lock.json`, …) — `core/src/paths.rs`. **`.git` alone is not enough.**
 
 ## Agent workflows
 

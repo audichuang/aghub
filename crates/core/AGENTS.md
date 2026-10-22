@@ -64,7 +64,7 @@ Acquiring the guard BLOCKS the thread (unbounded in-process queue, then up to 10
 
 It serializes aghub against aghub only — `npx skills` takes no lock of ours, so `rename`'s report-less blanket rollback can still remove an npx install of the same name. Read paths are deliberately unlocked. The remaining holes are listed in `docs/specs/2026-07-29-skill-mutation-interprocess-lock.md`; don't re-derive them.
 
-**MCP removal contract**: root AGENTS.md states the invariant (`RemovalPlan.paths` deliberately empty). The why: a non-empty path once made the desktop preview claim it would delete `~/.claude.json`.
+**MCP removal contract**: MCP delete (`remove_mcp_planned`) rewrites shared config and deletes **no** disk path — `RemovalPlan.paths` is deliberately empty. The why: a non-empty path once made the desktop preview claim it would delete `~/.claude.json`.
 
 **Disabled agents** (`agent_settings.rs`, persisted under `paths::app_data_dir()`, set via the API's `/agents/disabled`): aghub does not manage them. Stored as an ALLOW-list, so an agent the saved choice never named (a later release's) is off by default. A missing file means "never chose" and manages everything; the desktop's first run seeds it with only the agents detected then. Lib unit tests read a per-thread override (`agent_settings::test_override::disable`), never the real file.
 
@@ -95,6 +95,24 @@ Naming every enabled reader deletes it, and since no Master backs it the content
 root `SKILL.md` or `skill.md`, links followed). Never add a second `read_dir` walker or marker
 probe. `skill::scan::scan_skills` is NOT one of these: it scans a fetched source repo, lives
 below core and already uses the same marker rule. Records `source_path` with `~` prefix.
+
+**Link decision**: `classify_agent` / `agent_link_need`
+(`crates/core/src/skills/linker/classify.rs`). Every supported agent takes a
+Referrer — there is no "reads the Master directly" case; `LinkNeed` has no such
+variant, and none is to be added. Every install path must use it — CLI
+`add_skill_universal`, local `install_local_skill` (`add --from`, API import,
+transfer/reconcile copies) and fetched `install_universal`.
+
+**Shape classification**: `skills::shape` — `classify_shape` (one
+`(referrer, master)` pair), `candidate_referrers` (each agent's Referrer PATH,
+derived from its write dir, never from what is on disk) and `plan_repair`.
+`repair`, `doctor --verify-links`, the pre-mutation guard and migration all read
+that ONE classification; none may derive its own. The shape order, the three
+traps with their own tests, the four compat-unlink guards and doctor's two axes:
+knowledge page `技能連結形狀與 repair 鏈` — read it before touching any of them.
+
+**Project root detection**: Walk up for agent markers (`.claude/`, `.opencode/`, `.cursor/`, `.mcp.json`,
+`skills-lock.json`, …) — `paths.rs`. **`.git` alone is not enough.**
 
 ## CONVENTIONS
 

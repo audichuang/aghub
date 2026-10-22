@@ -9,10 +9,12 @@
 Role map (not a full tree):
 
 - `src/` — React frontend (`pages/`, `components/`, `lib/`, generated DTOs under `src/generated/`)
-- `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI), commands under `src/commands/`. Embeds `aghub-api` on localhost and uses `aghub-remote` for SSH; it depends on **neither** `aghub-core` nor `aghub-inference` — the app data root reaches it through the api re-export (root AGENTS.md "Where to Look"). It never opens the inference db: the provider list comes over HTTP from the embedded API. The credential wrapper it imports (`resolve_git_token_for_source`) DOES read the OS keyring in-process.
+- `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI), commands under `src/commands/`. Embeds `aghub-api` on localhost and uses `aghub-remote` for SSH; it depends on **neither** `aghub-core` nor `aghub-inference` — the app data root reaches it through the api re-export (root AGENTS.md "Where to Look"). It never opens the inference db: the provider list comes over HTTP from the embedded API. The credential wrapper it imports (`resolve_git_token_for_source`) DOES read the OS keyring in-process. A desktop upgrading from before the app-data-root unification keeps its inference db in the legacy Tauri dir and **aghub does not move it** — `src-tauri/src/commands/server.rs` `legacy_inference_db_hint` only warns, keyed on the LEGACY FILE EXISTING so a copy does not silence it. Do not "fix" that. Why: [`docs/history/desktop-tauri.md#legacy-inference-db-migration-removed`](../../docs/history/desktop-tauri.md#legacy-inference-db-migration-removed).
 - `src-tauri/capabilities/` — permission manifests (read `default.json`; don't restate the list here)
 
 Page-level frontend notes: `src/AGENTS.md`.
+
+`.impeccable.md` at the repo root is the frontend's design context (users, brand voice, aesthetic direction, type and color strategy).
 
 ## CRITICAL: HEROUI V3
 

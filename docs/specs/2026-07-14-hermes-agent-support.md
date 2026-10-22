@@ -234,8 +234,8 @@ Descriptor const:
    `AgentType::Hermes` variant plus `ALL` / `as_str()` / `from_str()`. Those
    four lists are now one `agent_roster!` row in
    `crates/agents/src/agents/mod.rs` (step 1's file), and `models.rs` only
-   re-exports `AgentType`. Current procedure: root `AGENTS.md`
-   "Adding / Removing an Agent".
+   re-exports `AgentType`. Current procedure: `crates/agents/AGENTS.md`
+   "ADDING / REMOVING AN AGENT".
 3. `crates/core/src/registry/mod.rs` — add `&agents::hermes::DESCRIPTOR` to
    `ALL_AGENTS`.
 
