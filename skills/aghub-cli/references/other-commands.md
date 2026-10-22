@@ -73,7 +73,7 @@ Both copy normalized resources between agents; neither manages git provenance.
 Claude Code plugins and marketplaces (`list`, `install`, `uninstall`, `update`,
 `enable`, `disable`, `prune`, `validate`, `marketplace list|add|remove|update`).
 
-- Ignores `-g`/`-p`/`--all` and `-a`: one shared store. Mutations write at once; only `prune` has a `--dry-run` preview.
+- Ignores `-g`/`-p`/`--all`; Claude-only, so `-a` must be `claude` (the default) and anything else is refused. One shared store. Mutations write at once; only `prune` has a `--dry-run` preview.
 - Only `plugin list [--available]` and `plugin marketplace list` emit JSON. Every
   other action REJECTS `--json` (error, non-zero) instead of printing prose.
 - `install <PLUGIN_ID>` takes `name@marketplace`; `--scope` is one of `global`
