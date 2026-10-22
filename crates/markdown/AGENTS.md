@@ -29,6 +29,4 @@ string-only validation) lives in the descriptor/parser layers, **not** here.
 
 ## ANTI-PATTERNS
 
-- **NEVER** bake skill-specific field rules into this crate — it stays generic;
-  callers supply the `T` they deserialize into and enforce their own invariants.
 - **NEVER** assume frontmatter exists — use `parse_opt` when a missing block is valid.
