@@ -49,7 +49,7 @@ is in `package.json`; **bun only**.
 
 ### Frontend
 
-- NEVER use string template for className concat — use `cn` from `@/lib/utils`
+- NEVER use string template for className concat — use `cn` from `lib/utils` (relative import — there is no `@/` alias)
 - NEVER use `useEffect` for data fetching or to sync state — `useQuery` /
   `useMemo` / `handleXXX` instead
 - NEVER surface errors as `{error && <div>{error.message}</div>}` — use HeroUI's
