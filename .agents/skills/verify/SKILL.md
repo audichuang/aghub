@@ -16,7 +16,7 @@ export PATH=$PWD/target/debug:$PATH   # else bare aghub-cli is the installed (br
 export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
 
 # NEVER run against the real environment — HOME alone is NOT enough. The global
-# lock prefers $XDG_STATE_HOME, universal skills read $XDG_CONFIG_HOME/agents/skills,
+# lock prefers $XDG_STATE_HOME, kimi/amp read the home-relative ~/.config/agents/skills,
 # and per-agent overrides (CODEX_HOME, OPENCODE_CONFIG_DIR — Orca exports that one
 # into every shell — …) outrank both. Unset the ONE list from its source of truth
 # (run from the repo root; never hand-copy it — docs/history/agents.md
