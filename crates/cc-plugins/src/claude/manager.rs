@@ -151,7 +151,7 @@ impl ClaudePluginManager {
 
 type Roots = Vec<(String, PathBuf)>;
 /// Registry path plus its `(mtime, len)` (`None` = file missing). The path is
-/// part of the key so a different `CLAUDE_CONFIG_DIR`/home never reuses roots.
+/// part of the key so a different home never reuses roots.
 type RegistryKey = (PathBuf, Option<(SystemTime, u64)>);
 
 /// Backstop expiry for cached roots. `claude plugin list` also merges sources
@@ -182,13 +182,14 @@ impl RootsCache {
 	}
 }
 
+// `~/.claude` only, like `new()`'s settings path. Honouring
+// `CLAUDE_CONFIG_DIR` here would let every test with its own `$HOME` share one
+// key (and its cached roots) whenever the developer has that variable set; a
+// user who relocates the dir just falls back to the TTL.
 fn registry_path() -> PathBuf {
-	let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-		.filter(|v| !v.is_empty())
-		.map(PathBuf::from)
-		.or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
-		.unwrap_or_default();
-	dir.join("plugins/installed_plugins.json")
+	dirs::home_dir()
+		.unwrap_or_default()
+		.join(".claude/plugins/installed_plugins.json")
 }
 
 fn registry_key(path: &Path) -> RegistryKey {
