@@ -2,6 +2,21 @@
 
 Incidents behind the rules in the desktop React frontend, `crates/desktop/src`.
 
+## HeroUI 3.2 moved the interactive element to Content
+
+`@heroui/react` 3.0.1 → 3.2.5 made `Checkbox`/`Switch`'s root a plain
+`CheckboxField`/`SwitchField` div and moved the `<label>` + hidden `<input>`
+into `.Content`. Every compound call site in the app broke at once (a
+`.Control` outside `.Content` rendered but was dead to mouse, keyboard and
+screen readers), and nothing caught it: `children` is `ReactNode`, so
+typecheck and lint cannot see a missing sub-component, and pre-push runs no
+tests. The same release moved `gap-3` off the root, invalidating the old
+`size-4 shrink-0` / `w-10` root-width recipe measured on 3.0.x. A `min-w-0`
+on the inner fields was tried against the `Fieldset` min-content floor and
+measured useless, and screenshot inspection picked the wrong layer twice
+before the ancestor-width walk found it. Guard:
+`src/lib/heroui-control-structure.test.ts`.
+
 ## MCP search matched nothing
 
 `lib/mcp-search.ts` — commit `b79aeeb9`.
