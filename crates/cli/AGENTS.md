@@ -117,8 +117,9 @@ list, or `all`), `-g`/`-p`, `--all`.
   `reconcile skill` refuses BEFORE the first write so the disk is untouched;
   `reconcile skill --remove` refuses a plugin-owned skill with `MANAGED_RESOURCE`
   like `delete`, in preview and commit alike. A SKILL copy (transfer, reconcile
-  `--add`) is core `install_local_skill`, the `add --from` install. Within one
-  scope it never touches the lock (an untracked Master stays untracked);
+  `--add`) is core `install_local_skill`, the `add --from` install. The CLI always
+  passes ONE scope (the cross-scope case below is reached only from the
+  API/desktop route). Within one scope it never touches the lock (an untracked Master stays untracked);
   across scopes it writes the target's entry carrying the source's owner and
   STORED Source hash — only when the source's host is known (a recorded URL,
   github, local, or a source spelling its host) and it carries no credentials;

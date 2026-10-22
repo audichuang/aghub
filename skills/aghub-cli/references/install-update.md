@@ -51,20 +51,11 @@ a local `add --from` skill, which `source sync` cannot grant — `transfer skill
 the EXISTING Master. It writes at once (no preview), never fetches (so the
 outdated trap does not apply), and grants the Master as-is, stale content
 included, and never touches the lock: an untracked Master stays untracked.
-Across scopes (`-g` source, `-p` target or the reverse) it copies the Master
-and records the source's owner and stored Source hash in the target's lock,
-so a locally edited source still reads as modified there — when the source's
-host is known and its URL carries no credentials. A legacy URL-less entry
-whose host is ambiguous (an old npx `gitlab:group/repo`, possibly
-self-hosted), or one whose URL embeds a token, is copied untracked instead:
-`doctor` shows it untracked unless the target already had an entry of that
-name; re-install from the real URL to track it. `transfer` and
-`reconcile --add` refuse when the target scope's same-named Master is
-untracked and differs, and when the target's entry names a different owner
-(untracked copies included; an ambiguous URL-less owner matches no entry,
-not even its own spelling); a carried (host-known) copy also refuses when the target scope already tracks that source on a
-different ref (a mixed cohort `source sync` would then refuse) — run `source
-sync --ref` in the target scope first. A copy onto an owned Master grants it as-is. `source
+`transfer` and `reconcile` work inside the ONE scope you pass (`-g` or `-p`);
+copying a skill from global to a project (or back) is a desktop/API action,
+not a CLI one. `transfer` and `reconcile --add` refuse when the scope's
+same-named Master is untracked and differs, or when its lock entry names a
+different owner. A copy onto an owned Master grants it as-is. `source
 accept-rename` refuses an ambiguous entry before fetching: re-install it from
 its real URL first.
 
