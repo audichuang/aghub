@@ -7,8 +7,57 @@
 
 use crate::models::Skill;
 use crate::skills::linker::Linker;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+type SkillsAnswer = (Vec<Skill>, Option<(std::io::ErrorKind, String)>, bool);
+
+/// Per-thread memo behind [`ListingSnapshot`]. `depth == 0` means no snapshot.
+#[derive(Default)]
+struct SnapshotCache {
+	depth: usize,
+	entries: HashMap<(PathBuf, bool), (Vec<PathBuf>, bool)>,
+	skills: HashMap<(PathBuf, bool), SkillsAnswer>,
+}
+
+thread_local! {
+	static SNAPSHOT: RefCell<SnapshotCache> = RefCell::new(SnapshotCache::default());
+	/// Real (uncached) walks on this thread; lets a test pin that a
+	/// planning pass walks each dir once, independent of target count.
+	#[cfg(test)]
+	pub(crate) static REAL_WALKS: std::cell::Cell<usize> =
+		const { std::cell::Cell::new(0) };
+}
+
+/// One consistent read of the skill dirs for a read-only planning pass.
+///
+/// While alive, [`entries`] and [`skills`] on this thread answer each
+/// `(dir, mode)` from the first walk. Rule: a snapshot is one consistent read
+/// per pass and must NEVER be alive across a write; drop it, then re-read.
+/// Nested `begin()` reuses the outer snapshot; only the outermost drop clears.
+pub(crate) struct ListingSnapshot(());
+
+impl ListingSnapshot {
+	pub(crate) fn begin() -> Self {
+		SNAPSHOT.with(|c| c.borrow_mut().depth += 1);
+		Self(())
+	}
+}
+
+impl Drop for ListingSnapshot {
+	fn drop(&mut self) {
+		SNAPSHOT.with(|c| {
+			let mut c = c.borrow_mut();
+			c.depth -= 1;
+			if c.depth == 0 {
+				c.entries.clear();
+				c.skills.clear();
+			}
+		});
+	}
+}
 
 /// The answer to "does `entry` hold a root skill marker" — three states, not a
 /// bool. Each caller picks its own conservative answer for [`SkillMarker::Unknown`]:
@@ -64,6 +113,24 @@ pub(crate) fn skill_marker(entry: &Path) -> SkillMarker {
 /// is one level (prune); `true` descends into every REAL directory, reporting
 /// links but never following them (removal's identity question).
 pub(crate) fn entries(dir: &Path, recurse: bool) -> (Vec<PathBuf>, bool) {
+	let key = (dir.to_path_buf(), recurse);
+	let hit = SNAPSHOT.with(|c| {
+		let c = c.borrow();
+		(c.depth > 0).then(|| c.entries.get(&key).cloned())
+	});
+	if let Some(Some(answer)) = hit {
+		return answer;
+	}
+	let answer = walk_entries(dir, recurse);
+	if hit.is_some() {
+		SNAPSHOT.with(|c| c.borrow_mut().entries.insert(key, answer.clone()));
+	}
+	answer
+}
+
+fn walk_entries(dir: &Path, recurse: bool) -> (Vec<PathBuf>, bool) {
+	#[cfg(test)]
+	REAL_WALKS.with(|n| n.set(n.get() + 1));
 	let mut out = Vec::new();
 	let mut unlisted = false;
 	collect_entry_paths(dir, recurse, &mut out, &mut unlisted);
@@ -124,6 +191,34 @@ pub(crate) fn skills(
 	dir: &Path,
 	store: bool,
 ) -> (Vec<Skill>, Option<std::io::Error>, bool) {
+	let key = (dir.to_path_buf(), store);
+	let hit = SNAPSHOT.with(|c| {
+		let c = c.borrow();
+		(c.depth > 0).then(|| c.skills.get(&key).cloned())
+	});
+	if let Some(Some((skills, failure, unlisted))) = hit {
+		// `io::Error` is not Clone: rebuild the same kind and text.
+		let failure = failure.map(|(kind, msg)| std::io::Error::new(kind, msg));
+		return (skills, failure, unlisted);
+	}
+	let (skills, failure, unlisted) = walk_skills(dir, store);
+	if hit.is_some() {
+		let stored = failure.as_ref().map(|e| (e.kind(), e.to_string()));
+		SNAPSHOT.with(|c| {
+			c.borrow_mut()
+				.skills
+				.insert(key, (skills.clone(), stored, unlisted))
+		});
+	}
+	(skills, failure, unlisted)
+}
+
+fn walk_skills(
+	dir: &Path,
+	store: bool,
+) -> (Vec<Skill>, Option<std::io::Error>, bool) {
+	#[cfg(test)]
+	REAL_WALKS.with(|n| n.set(n.get() + 1));
 	let mut skills = Vec::new();
 	let mut failure = None;
 	let mut unlisted = false;

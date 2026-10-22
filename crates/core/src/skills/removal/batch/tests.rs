@@ -3559,3 +3559,54 @@ fn delete_by_path_rejects_dotdot_into_aghub_store() {
 	let err = msg.as_str();
 	assert!(err.contains("'..'"), "error must mention '..': {err}");
 }
+
+/// Real directory walks of a by-name dry-run must not scale with the number
+/// of target agents: the whole planning pass shares one listing snapshot.
+#[cfg(unix)]
+#[test]
+fn test_by_name_dry_run_walk_count_independent_of_target_count() {
+	let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+	let temp = tempdir().unwrap();
+	let _env = isolate_env(&temp);
+	let root = temp.path().join("project");
+	fs::create_dir_all(&root).unwrap();
+	setup_master_and_referrers(
+		&root,
+		"walkme",
+		&[
+			"claude", "opencode", "cursor", "pi", "grok", "omp", "codex",
+			"gemini",
+		],
+	);
+	// Two holders stay untargeted, so both runs are non-exhaustive.
+
+	let walks = |agents: Vec<AgentType>| {
+		let req = SkillRemovalRequest {
+			target: SkillRemovalTarget::ByName("walkme".to_string()),
+			scope: WriteScope::project(&root),
+			agents,
+			dry_run: true,
+			all_agents: false,
+			prior_removed_paths: Vec::new(),
+			keeps_master: false,
+		};
+		crate::skills::enumerate::REAL_WALKS.with(|n| n.set(0));
+		let res = remove_skill_batch(&req).unwrap();
+		let count = crate::skills::enumerate::REAL_WALKS.with(|n| n.get());
+		(res.rows.len(), count)
+	};
+
+	let (rows_few, few) = walks(vec![AgentType::Claude, AgentType::OpenCode]);
+	let (rows_many, many) = walks(vec![
+		AgentType::Claude,
+		AgentType::OpenCode,
+		AgentType::Cursor,
+		AgentType::Pi,
+		AgentType::Grok,
+		AgentType::Omp,
+	]);
+	assert_eq!((rows_few, rows_many), (2, 6));
+	eprintln!("real walks: 2 targets = {few}, 6 targets = {many}");
+	assert!(few > 0, "counter must see the walks");
+	assert_eq!(few, many, "walks must not scale with target agents");
+}

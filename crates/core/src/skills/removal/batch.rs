@@ -1463,6 +1463,11 @@ fn remove_skill_by_name(
 	let scope = request.scope.resource_scope();
 	let project_root = request.scope.project_root();
 
+	// Listing snapshot: one consistent read of the skill dirs per planning
+	// pass. It must never be alive across a write; dropped below before the
+	// commit path, which re-reads the disk under the lock.
+	let preflight_snapshot = crate::skills::enumerate::ListingSnapshot::begin();
+
 	let (holders, unreadable, target_agents, is_exhaustive) =
 		resolve_name_targets(request, name);
 
@@ -1579,6 +1584,8 @@ fn remove_skill_by_name(
 		});
 	}
 
+	drop(preflight_snapshot);
+
 	// Commit path: if predictable failures occurred, reject the WHOLE batch before any write!
 	if !preflight_failures.is_empty() {
 		let all_unsupported = preflight_failures.iter().all(|(_, err)| {
@@ -1648,6 +1655,9 @@ fn remove_skill_by_name(
 	let master_p = crate::skills::shape::master_path(scope, project_root, name);
 	let had_master = master_p.as_ref().map(|p| p.exists()).unwrap_or(false);
 
+	// Fresh snapshot: the in-lock replan re-reads the disk once (the preflight
+	// one is long gone), then is dropped before any write.
+	let in_lock_snapshot = crate::skills::enumerate::ListingSnapshot::begin();
 	let (holders, unreadable, in_lock_target_agents, is_exhaustive) =
 		resolve_name_targets(request, name);
 	let execution_order =
@@ -1683,6 +1693,8 @@ fn remove_skill_by_name(
 		scope,
 		project_root,
 	)?;
+
+	drop(in_lock_snapshot);
 
 	let mut credits =
 		RemovalCredits::new(in_lock_target_agents.clone(), |agent| {
