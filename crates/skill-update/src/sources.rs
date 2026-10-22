@@ -182,6 +182,19 @@ pub fn list_sources(input: SourceListInput) -> Vec<SourceSummary> {
 	sources
 }
 
+/// Within ONE origin, an entry whose coordinate can be fetched beats one that
+/// cannot (an ssh spelling sorts first but is refused before any fetch). The
+/// single rule behind the Sources row and the diff/sync fetch metadata.
+fn fetchable_beats(
+	cur_type: &str,
+	cur_url: &str,
+	cand_type: &str,
+	cand_url: &str,
+) -> bool {
+	precheck_source(cur_type, cur_url).is_some()
+		&& precheck_source(cand_type, cand_url).is_none()
+}
+
 /// Group the global lock's skills by source (the global lock carries
 /// `sourceUrl`).
 fn global_sources() -> Vec<SourceSummary> {
@@ -223,6 +236,16 @@ fn global_sources() -> Vec<SourceSummary> {
 				0,
 			)
 		});
+		let cand_url = entry_clone_source(
+			&entry.source,
+			Some(&entry.source_url),
+			&entry.source_type,
+		);
+		if fetchable_beats(&agg.2, &agg.1, &entry.source_type, &cand_url) {
+			agg.0 = entry.source.clone();
+			agg.1 = cand_url;
+			agg.2 = entry.source_type.clone();
+		}
 		agg.3 += 1;
 	}
 	by_origin
@@ -264,6 +287,17 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 				0,
 			)
 		});
+		let cur_url = entry_clone_source(&agg.0, agg.1.as_deref(), &agg.2);
+		let cand_url = entry_clone_source(
+			&entry.source,
+			entry.source_url.as_deref(),
+			&entry.source_type,
+		);
+		if fetchable_beats(&agg.2, &cur_url, &entry.source_type, &cand_url) {
+			agg.0 = entry.source.clone();
+			agg.1 = entry.source_url.clone();
+			agg.2 = entry.source_type.clone();
+		}
 		agg.3 += 1;
 	}
 	by_origin
@@ -548,6 +582,7 @@ fn recorded_meta_from(
 	let mut source_type = String::new();
 	let mut recorded_ref: Option<String> = None;
 	let mut recorded_source_url: Option<String> = None;
+	let mut recorded_origin: Option<String> = None;
 	let mut matched_origins: std::collections::BTreeSet<String> =
 		std::collections::BTreeSet::new();
 	let want = source.trim();
@@ -563,11 +598,28 @@ fn recorded_meta_from(
 		) {
 			return;
 		}
-		matched_origins.insert(source_origin(
+		let origin =
+			source_origin(entry_source, entry_source_url, entry_source_type);
+		matched_origins.insert(origin.clone());
+		let candidate = entry_clone_source(
 			entry_source,
 			entry_source_url,
 			entry_source_type,
-		));
+		);
+		// Same origin, but the first spelling is ssh and this one is https:
+		// take the fetchable coordinate (url + type together).
+		if recorded_origin.as_deref() == Some(origin.as_str())
+			&& recorded_source_url.as_deref().is_some_and(|cur| {
+				fetchable_beats(
+					&source_type,
+					cur,
+					entry_source_type,
+					&candidate,
+				)
+			}) {
+			source_type = entry_source_type.to_string();
+			recorded_source_url = Some(candidate.clone());
+		}
 		if source_type.is_empty() {
 			source_type = entry_source_type.to_string();
 		}
@@ -579,11 +631,8 @@ fn recorded_meta_from(
 			// `source diff`/`sync` fetch this, and falling back to the caller's
 			// raw `group/repo` would send them to GitHub while `list_sources` and
 			// apply went to the entry's real forge.
-			recorded_source_url = Some(entry_clone_source(
-				entry_source,
-				entry_source_url,
-				entry_source_type,
-			));
+			recorded_source_url = Some(candidate);
+			recorded_origin = Some(origin);
 		}
 	};
 	// Global first, then project — same order as `merged_baseline_for_source`,
@@ -3222,6 +3271,92 @@ mod diff_tests {
 			assert_eq!(exact.ambiguous_origins(), None, "{url}");
 			assert_eq!(exact.effective_source.as_deref(), Some(url));
 		}
+	}
+
+	/// One origin spelled over ssh AND https: the ssh spelling sorts first, but
+	/// only the https one can be fetched. The row, the meta and the diff must all
+	/// pick the https coordinate, not whichever entry came first.
+	#[test]
+	fn ssh_and_https_entries_of_one_origin_resolve_to_the_https_coordinate() {
+		let project = TempDir::new().unwrap();
+		let mut lock = skill::LocalSkillLockFile::new();
+		for (name, source_url, source_type) in [
+			("a-ssh", "ssh://git@github.com/o/r.git", "git"),
+			("z-https", "https://github.com/o/r.git", "github"),
+		] {
+			lock.skills.insert(
+				name.to_string(),
+				skill::LocalSkillLockEntry {
+					extra: Default::default(),
+					source: "o/r".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: source_type.to_string(),
+					skill_path: Some(format!("{name}/SKILL.md")),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+					source_url: Some(source_url.to_string()),
+				},
+			);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+		let scopes = [WriteScope::Project {
+			root: project.path().to_path_buf(),
+		}];
+
+		for want in [
+			"https://github.com/o/r.git",
+			"ssh://git@github.com:22/o/r.git",
+		] {
+			let meta = resolve_source_meta(want, &scopes, None);
+			assert_eq!(
+				meta.effective_source.as_deref(),
+				Some("https://github.com/o/r.git"),
+				"want={want}"
+			);
+			assert_eq!(meta.source_type, "github", "want={want}");
+		}
+
+		let rows = list_sources(SourceListInput {
+			scopes: scopes.to_vec(),
+		});
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].source_url, "https://github.com/o/r.git");
+		assert_eq!(rows[0].source_type, "github");
+
+		// The diff reaches the fetcher (and fetches https) instead of being
+		// refused as an ssh source.
+		struct SeenFetcher(std::sync::Mutex<Vec<String>>);
+		impl Fetcher for SeenFetcher {
+			fn fetch(
+				&self,
+				sr: &SourceRef,
+				_token: Option<&str>,
+				_selection: FetchSelection<'_>,
+			) -> Result<crate::FetchedRepo, FetchError> {
+				self.0.lock().unwrap().push(sr.source.clone());
+				Err(FetchError::network("stub"))
+			}
+		}
+		let fetcher = SeenFetcher(Default::default());
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: "https://github.com/o/r.git".to_string(),
+				git_ref: None,
+				scopes: scopes.to_vec(),
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &NoToken,
+			},
+		);
+		assert!(
+			matches!(outcome, SourceDiffOutcome::FetchFailed { .. }),
+			"must reach the fetch, got {outcome:?}"
+		);
+		assert_eq!(
+			*fetcher.0.lock().unwrap(),
+			vec!["https://github.com/o/r.git".to_string()]
+		);
 	}
 
 	#[test]
