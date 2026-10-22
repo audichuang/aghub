@@ -35,7 +35,7 @@ is in `package.json`; **bun only**.
 
 ### HeroUI
 
-- Use the **secondary** variant in `Modal` / `Card` — better contrast
+- Use the **secondary** variant on `Card` — better contrast
 - **`Checkbox` / `Switch`: the interactive element is `.Content`, NOT the root. `.Control` MUST be nested inside `.Content`.** Since `@heroui/react` 3.2.x the root renders React Aria's `CheckboxField`/`SwitchField` — a plain context `div` — and the `<label>` + hidden `<input>` live in `CheckboxButton`/`SwitchButton`, which HeroUI exposes as `.Content`. The component's own source says so: _"`Switch.Content` — the **clickable** `SwitchButton` label wrapping the control + `Label`"_. Consequences, each verified by `renderToStaticMarkup` against the installed 3.2.5:
     - `.Control` only, no `.Content` → **no `<input>`, no `<label>`, no role**. Dead to mouse, keyboard and screen readers, while still looking correct (`data-selected` is set on the root, so the tick/thumb still renders). `aria-label` lands on a role-less div.
     - `.Control` as a SIBLING of `.Content` → the `<input>` exists, but the visible control sits OUTSIDE the clickable `<label>`: clicking the box does nothing, and hover/focus/press feedback is gone (3.2.x rewrote those selectors to `.checkbox:has([data-slot="checkbox-content"][data-hovered="true"])`).
