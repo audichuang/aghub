@@ -159,7 +159,7 @@ The distinctions that change what you do next:
   `coverage` if you need agent names.
 - `fused[]` names agents left sharing one directory afterwards, but it only
   recognises the `.agents/skills` slot — amp and kimi sharing
-  `$XDG_CONFIG_HOME/agents/skills` at global scope are not listed.
+  `~/.config/agents/skills` at global scope are not listed.
 - A folder whose only marker is lowercase `skill.md` is a skill to `repair` (as it already is to
   discovery and `prune-lock`): beside a Master it is a forked copy, without one an un-migrated
   copy — not "a directory that is not a skill" left alone.
