@@ -231,8 +231,8 @@ serializes aghub against aghub only. Invariants and the call-site rule:
 
 **Link decision**: `classify_agent` / `agent_link_need`
 (`crates/core/src/skills/linker/classify.rs`). Every supported agent takes a
-Referrer — there is no "reads the Master directly" case, and `LinkNeed::NativeReader`
-was DELETED rather than left unreachable. Every install path must use it — CLI
+Referrer — there is no "reads the Master directly" case; `LinkNeed` has no such
+variant, and none is to be added. Every install path must use it — CLI
 `add_skill_universal`, local `install_local_skill` (`add --from`, API import,
 transfer/reconcile copies) and fetched `install_universal`.
 
