@@ -46,6 +46,11 @@ impl GitFetcher {
 		}
 	}
 
+	/// Coarse code when REST declined and gix served this fetcher's requests.
+	pub fn rest_fallback(&self) -> Option<&'static str> {
+		self.repo.rest_fallback()
+	}
+
 	/// A [`RefResolver`] over THIS fetcher's repository, so the tip the preflight
 	/// reads is resolved by the same composite (and the same token context) that
 	/// a following fetch would use. Callers that want the preflight must build it

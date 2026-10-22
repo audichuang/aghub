@@ -141,6 +141,12 @@ pub struct SourceDiffResponse {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub used_credential: Option<bool>,
+	/// Coarse reason (`rateLimited` / `unavailable`) when the REST API declined
+	/// and a full git fetch served this check instead; omitted when REST served
+	/// it. Never carries the raw backend message.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub fetch_fallback: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub git_ref: Option<String>,

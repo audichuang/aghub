@@ -902,13 +902,19 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 					{row.sourceType === "github" &&
 						!isFetching &&
 						!isError &&
-						data?.usedCredential === false &&
+						(data?.usedCredential === false ||
+							data?.fetchFallback) &&
 						!data.needsCredential && (
 							<p
 								className="mt-2 text-xs text-muted"
 								role="status"
 							>
-								{t("sourceAccessAnonymous")}{" "}
+								{data.fetchFallback === "rateLimited" &&
+								data.usedCredential === false
+									? t("sourceFetchFallback")
+									: data.fetchFallback
+										? t("sourceFetchFallbackNeutral")
+										: t("sourceAccessAnonymous")}{" "}
 								<button
 									type="button"
 									className="text-accent underline"

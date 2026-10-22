@@ -112,6 +112,21 @@ pub fn skill_repo_to_fetch_error(e: SkillRepoError) -> FetchError {
 pub struct SkillRepository {
 	rest: Option<Arc<dyn RepoFetchBackend>>,
 	gix: Arc<dyn RepoFetchBackend>,
+	/// Coarse reason code of the first REST decline this repository served over
+	/// gix; never the raw backend message (it can name internal detail).
+	rest_fallback: std::sync::Mutex<Option<&'static str>>,
+}
+
+/// Collapse a REST decline message to a coarse, wire-safe code.
+fn rest_fallback_code(msg: &str) -> &'static str {
+	if msg.contains("HTTP 403")
+		|| msg.contains("HTTP 429")
+		|| msg.contains("blob admission")
+	{
+		"rateLimited"
+	} else {
+		"unavailable"
+	}
 }
 
 /// A backend operation's outcome, keeping REST's "declined" apart from real
@@ -217,7 +232,24 @@ impl SkillRepository {
 		rest: Option<Arc<dyn RepoFetchBackend>>,
 		gix: Arc<dyn RepoFetchBackend>,
 	) -> Self {
-		Self { rest, gix }
+		Self {
+			rest,
+			gix,
+			rest_fallback: std::sync::Mutex::new(None),
+		}
+	}
+
+	/// Coarse code (`rateLimited` / `unavailable`) when REST declined and gix
+	/// served the request instead; `None` when REST never declined.
+	pub fn rest_fallback(&self) -> Option<&'static str> {
+		*self.rest_fallback.lock().unwrap_or_else(|e| e.into_inner())
+	}
+
+	fn note_rest_fallback(&self, msg: &str) {
+		self.rest_fallback
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.get_or_insert(rest_fallback_code(msg));
 	}
 
 	/// Resolve the tip to an immutable snapshot and return the CLAIM: snapshot +
@@ -251,7 +283,8 @@ impl SkillRepository {
 						origin: (git_sr.clone(), auth.clone()),
 					});
 				}
-				Err(GitError::RestFallback(_)) => {
+				Err(GitError::RestFallback(msg)) => {
+					self.note_rest_fallback(&msg);
 					// Single fall-through to gix; never re-decided later.
 					log::info!(
 						"skill repo resolve: rest declined after {:?}, \
@@ -566,6 +599,7 @@ impl SkillRepository {
 		let Some((git_sr, auth)) = origin else {
 			return Err(SkillRepoError::Network(reason));
 		};
+		self.note_rest_fallback(&reason);
 		log::info!(
 			"skill repo fetch: rest declined after resolve ({reason}), \
 			 re-resolving over gix"
@@ -853,6 +887,68 @@ mod tests {
 		) -> aghub_git::Result<()> {
 			Ok(())
 		}
+	}
+
+	/// REST slot that always declines, like an exhausted anonymous quota.
+	struct DecliningRest;
+
+	impl RepoFetchBackend for DecliningRest {
+		fn resolve(
+			&self,
+			_s: &aghub_git::SourceRef,
+			_a: Option<&Credentials>,
+		) -> aghub_git::Result<RepoSnapshot> {
+			Err(GitError::rest_fallback("HTTP 403"))
+		}
+		fn read_tree(
+			&self,
+			_s: &RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			Err(GitError::rest_fallback("HTTP 403"))
+		}
+		fn read_blobs(
+			&self,
+			_s: &RepoSnapshot,
+			_o: &[String],
+		) -> aghub_git::Result<Vec<Blob>> {
+			Err(GitError::rest_fallback("HTTP 403"))
+		}
+		fn materialize(
+			&self,
+			_s: &RepoSnapshot,
+			_p: &[&str],
+			_d: &Path,
+		) -> aghub_git::Result<()> {
+			Err(GitError::rest_fallback("HTTP 403"))
+		}
+	}
+
+	fn fixture() -> Arc<dyn RepoFetchBackend> {
+		Arc::new(ListFixtureBackend {
+			skill_md: Vec::new(),
+			read_tree_calls: AtomicUsize::new(0),
+		})
+	}
+
+	fn github_sr() -> SourceRef {
+		SourceRef {
+			source: "https://github.com/o/r.git".into(),
+			ref_: None,
+		}
+	}
+
+	#[test]
+	fn rest_fallback_is_reported_only_after_rest_declines() {
+		let declined = SkillRepository::with_backends(
+			Some(Arc::new(DecliningRest)),
+			fixture(),
+		);
+		declined.resolve_pinned(&github_sr(), None).unwrap();
+		assert_eq!(declined.rest_fallback(), Some("rateLimited"));
+
+		let served = SkillRepository::with_backends(Some(fixture()), fixture());
+		served.resolve_pinned(&github_sr(), None).unwrap();
+		assert_eq!(served.rest_fallback(), None);
 	}
 
 	#[test]

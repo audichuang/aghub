@@ -11,6 +11,12 @@ export type SourceDiffResponse = {
 	 * ran or cohorts used mixed authentication; never inferred from storage.
 	 */
 	usedCredential?: boolean;
+	/**
+	 * Coarse reason (`rateLimited` / `unavailable`) when the REST API declined
+	 * and a full git fetch served this check instead; omitted when REST served
+	 * it. Never carries the raw backend message.
+	 */
+	fetchFallback?: string;
 	gitRef?: string;
 	/**
 	 * A fresh git-clone session id usable with `POST /skills/git/install` to

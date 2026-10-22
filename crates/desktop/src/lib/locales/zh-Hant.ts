@@ -1323,6 +1323,9 @@ const zhHant: typeof en = {
 	sourceViewSkillFailed: "無法開啟技能文件。",
 	sourceAccessAnonymous: "尚未使用 GitHub 憑證。",
 	sourceAccessConfigure: "設定憑證",
+	sourceFetchFallback:
+		"GitHub 匿名 API 額度已用盡，已改用完整 git 抓取。設定 github.com 憑證可加速檢查。",
+	sourceFetchFallbackNeutral: "GitHub API 無法使用，已改用完整 git 抓取。",
 	sourceConfirmInstallTitle: "安裝 {{count}} 個技能？",
 	sourceConfirmInstallAction: "確認安裝",
 	sourceChooseAgents: "請勾選至少一個要使用此技能的 AI 工具。",

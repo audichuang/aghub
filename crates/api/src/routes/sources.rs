@@ -68,12 +68,29 @@ struct ApiFetcher {
 	authentication: std::sync::atomic::AtomicU8,
 }
 
+/// Test-only seam: build the real fetch composite over injected backends.
+#[cfg(test)]
+static TEST_GIT_FETCHER: std::sync::Mutex<Option<fn() -> GitFetcher>> =
+	std::sync::Mutex::new(None);
+
 impl ApiFetcher {
 	fn new() -> Self {
+		#[cfg(test)]
+		let inner = match *TEST_GIT_FETCHER.lock().unwrap_or_else(|e| e.into_inner())
+		{
+			Some(build) => build(),
+			None => GitFetcher::new(),
+		};
+		#[cfg(not(test))]
+		let inner = GitFetcher::new();
 		Self {
-			inner: GitFetcher::new(),
+			inner,
 			authentication: std::sync::atomic::AtomicU8::new(0),
 		}
+	}
+
+	fn fetch_fallback(&self) -> Option<String> {
+		self.inner.rest_fallback().map(str::to_string)
 	}
 
 	fn used_credential(&self) -> Option<bool> {
@@ -214,7 +231,7 @@ pub async fn diff_source(
 		aghub_git::redact_source_credentials(&source),
 		auth_started.elapsed()
 	);
-	let (outcome, used_credential) =
+	let (outcome, used_credential, fetch_fallback) =
 		rocket::tokio::task::spawn_blocking(move || {
 			// ONE fetcher for this diff's whole cohort loop — that is what lets a
 			// second cohort resolving to the same commit reuse the first one's
@@ -227,7 +244,7 @@ pub async fn diff_source(
 					resolver: &resolver,
 				},
 			);
-			(outcome, fetcher.used_credential())
+			(outcome, fetcher.used_credential(), fetcher.fetch_fallback())
 		})
 		.await
 		.map_err(|e| {
@@ -246,6 +263,7 @@ pub async fn diff_source(
 		} => Ok(Json(SourceDiffResponse {
 			source,
 			used_credential,
+			fetch_fallback,
 			git_ref,
 			session_id: None,
 			needs_credential: false,
@@ -256,6 +274,7 @@ pub async fn diff_source(
 			Ok(Json(SourceDiffResponse {
 				source,
 				used_credential,
+				fetch_fallback,
 				git_ref,
 				session_id: None,
 				needs_credential: true,
@@ -288,6 +307,7 @@ pub async fn diff_source(
 			Ok(Json(SourceDiffResponse {
 				source,
 				used_credential,
+				fetch_fallback,
 				git_ref,
 				session_id: None,
 				needs_credential: false,
@@ -416,6 +436,100 @@ mod tests {
 			format!("---\nname: {name}\ndescription: {name} skill\n---\n"),
 		)
 		.unwrap();
+	}
+
+	/// Backend whose REST slot declines (quota exhausted) or serves, and whose
+	/// gix slot serves one skill folder.
+	struct StubBackend {
+		decline: bool,
+	}
+
+	impl aghub_git::RepoFetchBackend for StubBackend {
+		fn resolve(
+			&self,
+			_s: &aghub_git::SourceRef,
+			_a: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+			if self.decline {
+				return Err(aghub_git::GitError::rest_fallback("HTTP 403"));
+			}
+			Ok(aghub_git::RepoSnapshot {
+				commit_oid: "c".into(),
+				tree_oid: "t".into(),
+				commit_time: None,
+			})
+		}
+		fn read_tree(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			Ok(aghub_git::RepoTree {
+				entries: Vec::new(),
+			})
+		}
+		fn read_blobs(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_o: &[String],
+		) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+			Ok(Vec::new())
+		}
+		fn materialize(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_p: &[&str],
+			d: &Path,
+		) -> aghub_git::Result<()> {
+			write_skill(d, "skills/demo", "demo");
+			Ok(())
+		}
+	}
+
+	fn declining_fetcher() -> GitFetcher {
+		GitFetcher::with_repository(
+			skill_update::SkillRepository::with_backends(
+				Some(std::sync::Arc::new(StubBackend { decline: true })),
+				std::sync::Arc::new(StubBackend { decline: false }),
+			),
+		)
+	}
+
+	fn serving_fetcher() -> GitFetcher {
+		GitFetcher::with_repository(
+			skill_update::SkillRepository::with_backends(
+				Some(std::sync::Arc::new(StubBackend { decline: false })),
+				std::sync::Arc::new(StubBackend { decline: true }),
+			),
+		)
+	}
+
+	fn diff_body_with(build: fn() -> GitFetcher) -> Value {
+		let _global = GlobalLockGuard::new();
+		let _keyring =
+			crate::credentials::test_hooks::MockKeyringBackend::new();
+		let source = "owner/repo";
+		let _upstream = seed_source(source);
+		*TEST_GIT_FETCHER.lock().unwrap() = Some(build);
+		let client =
+			Client::tracked(rocket::build().mount("/", routes![diff_source]))
+				.expect("client");
+		let response = client
+			.get(format!("/skills/sources/diff?scope=global&source={source}"))
+			.dispatch();
+		*TEST_GIT_FETCHER.lock().unwrap() = None;
+		assert_eq!(response.status(), Status::Ok);
+		serde_json::from_str(&response.into_string().expect("body"))
+			.expect("valid JSON")
+	}
+
+	#[test]
+	fn diff_reports_fetch_fallback_only_when_rest_declined() {
+		let declined = diff_body_with(declining_fetcher);
+		assert_eq!(declined["fetchFallback"], "rateLimited", "{declined}");
+		assert!(!declined.to_string().contains("HTTP 403"));
+
+		let served = diff_body_with(serving_fetcher);
+		assert!(served.get("fetchFallback").is_none(), "{served}");
 	}
 
 	/// A source nothing could be checked against must not answer with a plain

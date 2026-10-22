@@ -1394,6 +1394,10 @@ export default {
 	sourceViewSkillFailed: "Could not open the skill document.",
 	sourceAccessAnonymous: "No GitHub credential in use.",
 	sourceAccessConfigure: "Configure credential",
+	sourceFetchFallback:
+		"GitHub's anonymous API quota ran out, so a full git fetch was used. A github.com credential makes checks faster.",
+	sourceFetchFallbackNeutral:
+		"The GitHub API was unavailable, so a full git fetch was used.",
 	sourceConfirmInstallTitle: "Install {{count}} skill(s)?",
 	sourceConfirmInstallAction: "Confirm installation",
 	sourceChooseAgents: "Select at least one AI tool.",
