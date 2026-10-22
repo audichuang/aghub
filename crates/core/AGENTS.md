@@ -23,7 +23,7 @@ codegraph — enumerated trees drift):
   `/mcps/batch`, transfer/reconcile, and shared Source-to-Master installs are
   thin maps over it — extend it here, never per surface
 - `manager/` — `ConfigManager` CRUD, split per resource: `mod.rs` / `skill.rs` / `mcp.rs` / `sub_agent.rs`
-- `dto/` — CLI/API shared wire views (`removal.rs` `RemovalView`, `skill.rs` `SkillView`) — single source for both surfaces
+- `dto/` — CLI/API shared wire views (`RemovalView`, `SkillView`, `McpView`, `SubAgentView`) — single source for both surfaces
 - `paths.rs` — project-root detection (agent-marker walk-up) AND
   `app_data_dir()`, the one app data root every surface delegates to; `registry/` — `get()` + `ALL_AGENTS`, which is just `aghub_agents::agents::ALL_DESCRIPTORS`; add agents THERE
 - `skills/` — the skill subsystem (`ls` for the full list). Load-bearing, and
