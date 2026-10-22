@@ -44,7 +44,7 @@ Never hand-tag to "finish" it.
 ## Pipeline
 
 `v*` tag → `verify-ci` → `changelog` (creates the Release as a **draft**) →
-`build-tauri` + `build-cli` (4 targets each, upload into the draft) → `publish`
+`build-tauri` + `build-cli` (3 targets each: macOS arm64, Linux x64, Windows x64; upload into the draft) → `publish`
 (`verify-release.sh --pre-publish` on the draft, then makes it public/latest) →
 `publish-homebrew` (bumps the `aghub` cask and `aghub-cli` formula together).
 
