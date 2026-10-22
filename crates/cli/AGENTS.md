@@ -17,7 +17,7 @@ list, or `all`), `-g`/`-p`, `--all`.
   `McpTransport::apply_edit`, applied under the lock): an absent flag keeps the
   old value, `--header`/`--env` REPLACE the whole map, `-t` switches the remote
   kind (url and headers kept), and `-t`/`--header` on a stdio server without
-  `-u` is refused (it used to be a silent no-op). The API PUT replaces the
+  `-u` is refused. The API PUT replaces the
   transport on purpose, because the GUI sends the whole pre-filled form and
   omits `headers` to clear them.
 - **`source accept-rename`** removes the old name's `.aghub/<old>` Master in the
