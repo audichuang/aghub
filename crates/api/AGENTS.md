@@ -111,7 +111,7 @@ line** — don't reword it). Pass `--port N` to pin one.
 - Batch routes answer HTTP 200 for a handled batch whose rows failed — the row's
   `error` is the answer, and failed rows are also logged (never the source URL
   or a forwarded token).
-- `POST /skills/updates/check` deliberately reads the lock fail-OPEN (a corrupted
+- `GET /skills/check-updates` deliberately reads the lock fail-OPEN (a corrupted
   or unreadable lock is treated as empty/missing; the CLI `check` is fail-closed,
   because CLI check presents lock contents as its answer and probes first).
 - Codes that legitimately remain API-only (request-shape/policy checks owned by the HTTP surface, not outcomes of a Resync):
