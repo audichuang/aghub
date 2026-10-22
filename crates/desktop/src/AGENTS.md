@@ -24,6 +24,8 @@ Role map:
 | API response/request shapes  | `generated/` (regenerate from Rust; never edit by hand)                      |
 | Shared transform/util        | `lib/` (check before writing a new one)                                      |
 | Add a screen                 | `pages/` + a route in `App.tsx`                                              |
+| Build or change a form       | read the `project-form-patterns` project skill first                         |
+| Redesign a whole page        | read the `plan-desktop-ui` project skill first                               |
 
 ## GOTCHAS / ANTI-PATTERNS
 

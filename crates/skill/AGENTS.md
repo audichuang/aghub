@@ -24,7 +24,9 @@ npx-compatible lock files with content hashes. Extends external `skills-ref`.
 
 The `npx skills` round-trip contract — frozen versions (global v3 / project
 v1), empty global `skill_folder_hash`, atomic writes — is owned by the project
-skill **`npx-skills-contract`**; read it before touching lock read/write.
+skill **`npx-skills-contract`**; read it before touching lock read/write. To
+find which upstream `npx skills` function an aghub step mirrors, read
+**`upstream-skills-flow`**.
 
 ## ANTI-PATTERNS
 

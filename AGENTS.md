@@ -42,7 +42,9 @@ and requires explicit opt-in for changes.
 - **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — port / skip from `AkaraChen/aghub`
 - **Deep domain playbooks**: project skills under `.agents/skills/`, mirrored as
   symlinks in `.claude/skills/`. They trigger on their own `description` — never
-  keep a catalog of them here
+  keep a catalog of them here. Exception: when a session's skill list overflows
+  its budget, a skill that has never been used loses its description and cannot
+  trigger, so the per-crate `AGENTS.md` names such a skill where its task happens
 - `.impeccable.md` — the desktop frontend's design context (users, brand voice,
   aesthetic direction, type and color strategy), NOT Rust style; `cliff.toml` —
   git-cliff for releases

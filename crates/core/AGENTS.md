@@ -105,6 +105,8 @@ below core and already uses the same marker rule. Records `source_path` with `~`
 
 ## TESTING
 
+To make a filesystem op fail on purpose (error, rollback and cleanup paths), read the `testing-fs-failures` project skill before inventing a fixture.
+
 `--features agent-validation` additionally runs the tests that need the real
 agent CLIs installed; the `testing` feature (`TestConfig`, isolated temp dirs)
 is on by default. Per-agent path overrides via
