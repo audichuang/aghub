@@ -191,7 +191,7 @@ before every dispatch (a clap `ArgGroup` does not propagate to `global = true`
 args), so that rejection is exit **1**, not clap's exit 2. ONE table
 (`scope_policy`), ONE resolver (`resolve_scope`), ONE resolved value (`Scope`). `scope_policy` is **exhaustive** over `Commands` and
 over `SourceAction`, so a new subcommand does not COMPILE until it is
-classified — it used to end in `_ => AllowBoth` and rely on a comment. `None`
+classified. `None`
 means the command ignores scope entirely (`inference`, `plugin`, `agents`) and
 must not reach the resolver.
 
