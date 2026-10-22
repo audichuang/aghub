@@ -29,9 +29,6 @@ env:
     # rust-cache overflowed the 10GB repo cache and evicted rust-cache's own
     # entries (docs/history/tooling.md#ci-cache-thrash-and-redundant-steps).
     CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-    # .cargo/config.toml sets rustc-wrapper = "sccache" for local builds; an
-    # empty RUSTC_WRAPPER overrides it, since these runners do not install it.
-    RUSTC_WRAPPER: ""
 
 jobs:
     # Path filter: skip unrelated jobs to save CI minutes

@@ -83,7 +83,8 @@ target-cap:
     dir="${CARGO_TARGET_DIR:-target}"
     cap_gb="${AGHUB_TARGET_CAP_GB:-60}"
     [ -d "$dir" ] || exit 0
-    size_kb=$(du -sk "$dir" | cut -f1)
+    # -L: under mbx, target is a symlink into its managed target root.
+    size_kb=$(du -skL "$dir" | cut -f1)
     if [ "$size_kb" -gt $((cap_gb * 1024 * 1024)) ]; then
         echo "target is $((size_kb / 1024 / 1024))G, over the ${cap_gb}G cap: cargo clean"
         cargo clean

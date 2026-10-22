@@ -1,8 +1,5 @@
-[build]
-# Enable sccache for faster rebuilds after clean. Runners do not install it:
-# ci.yml and release.yml override this with RUSTC_WRAPPER="".
-rustc-wrapper = "sccache"
-
+# No rustc-wrapper here: a compiler cache is a per-machine choice, and mbx
+# caches nothing when one is configured (docs/history/tooling.md#target-dir-filled-the-disk).
 [profile.dev]
 # Faster debug builds with minimal optimization
 opt-level = 0

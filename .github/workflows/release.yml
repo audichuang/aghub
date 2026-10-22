@@ -128,8 +128,6 @@ jobs:
             CARGO_TERM_COLOR: always
             CARGO_NET_GIT_FETCH_WITH_CLI: "true"
             RUST_BACKTRACE: short
-            # No sccache: overrides the rustc-wrapper in .cargo/config.toml.
-            RUSTC_WRAPPER: ""
         permissions:
             contents: write
         strategy:
@@ -371,8 +369,6 @@ jobs:
             CARGO_TERM_COLOR: always
             CARGO_NET_GIT_FETCH_WITH_CLI: "true"
             RUST_BACKTRACE: short
-            # No sccache: overrides the rustc-wrapper in .cargo/config.toml.
-            RUSTC_WRAPPER: ""
         permissions:
             contents: write
         strategy:

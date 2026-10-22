@@ -39,6 +39,17 @@ is 30 days stale on an active repo) and was moved to daily `--time 3`.
 Also observed: on this 31G machine a cold `aghub-api` lib-test build under
 `-j8` or more is OOM-killed (signal 9); `CARGO_BUILD_JOBS=4..6` passes.
 
+2026-10-22: the tracked `.cargo/config.toml` no longer names a
+`rustc-wrapper` (it was `sccache`). The maintainer's machine builds through
+mbx (mr-boxington), a shared cross-worktree cache with a disk budget, and mbx
+silently defers to any configured wrapper and caches nothing. A wrapper is a
+per-machine choice; set it in `~/.cargo/config.toml` or `RUSTC_WRAPPER`, never
+in the tracked file. Under mbx `target` is a symlink into its managed root, so
+`target-cap` measures with `du -L`. mbx needs `build_script_execution = false`
+(mbx 1.26.0): its build-script cache drops `links` metadata whose key holds a
+`:`, which is how tauri passes `DEP_TAURI_CORE:<plugin>__…` to the desktop
+build script, so every `core:*` capability failed with `Permission … not found`.
+
 ## Preflight tested a stale node_modules
 
 `justfile` `preflight` — the two `bun install --frozen-lockfile` lines and
