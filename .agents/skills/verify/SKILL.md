@@ -86,8 +86,8 @@ curl -fs --max-time 30 -X POST "http://127.0.0.1:$API_PORT/api/v1/skills/install
 Observe: lock at `$XDG_STATE_HOME/skills/.skill-lock.json` (or `$VHOME/.agents/.skill-lock.json`
 when XDG_STATE_HOME is unset) — v3; `refCommit` must equal `git ls-remote <url> HEAD`;
 `contentHash` set, `skillFolderHash` empty per npx contract; **master dir
-`$VHOME/.aghub/<name>/`** (a real directory in the store NO agent reads — since
-v2.18.0; `.agents/skills` is now just another, shared, Referrer slot); symlink
+`$VHOME/.aghub/<name>/`** (a real directory in the store no agent reads;
+`.agents/skills` is an ordinary shared Referrer slot); symlink
 `$VHOME/.claude/skills/<name>` resolving to that master in one hop.
 
 ## gix shallow path + update chain (controllable upstream)
