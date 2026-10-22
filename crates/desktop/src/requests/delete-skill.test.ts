@@ -964,13 +964,32 @@ test("scopeTargetsFor orders global before project and treats a missing source a
 // Timeout: the server may have finished, so decide by actual state (#78)
 // =========================================================================
 
-function timeoutApi(remaining: Array<{ name: string; agent: string }>) {
+const notFound = () =>
+	new HTTPError(
+		new Response(null, { status: 404 }),
+		new Request("http://api.test/skills/x"),
+		{} as any,
+	);
+
+function timeoutApi(opts: {
+	listed?: Array<{ name: string; agent?: string }>;
+	withheld?: Array<{ name: string }>;
+	get?: (agent: string) => unknown;
+}) {
+	const boom = async () => {
+		throw new TimeoutError(new Request("http://api.test/skills"));
+	};
 	return {
 		skills: {
-			deleteByName: async () => {
-				throw new TimeoutError(new Request("http://api.test/skills"));
+			deleteByName: boom,
+			delete: boom,
+			listAll: async () => opts.listed ?? [],
+			withheld: async () => opts.withheld ?? [],
+			get: async (agent: string) => {
+				const r = opts.get ? opts.get(agent) : notFound();
+				if (r instanceof Error) throw r;
+				return r;
 			},
-			listAll: async () => remaining,
 		},
 	} as any;
 }
@@ -984,18 +1003,77 @@ const timeoutOpts = {
 	t,
 };
 
-test("deleteSkill: timeout with the skill gone is success, not refused", async () => {
-	const result = await deleteSkill({ api: timeoutApi([]), ...timeoutOpts });
+test("deleteSkill: timeout with every targeted agent 404 is success, not refused", async () => {
+	const result = await deleteSkill({ api: timeoutApi({}), ...timeoutOpts });
 	assert.equal(result.verdict, "removed");
 	assert.equal(result.success, true);
 	assert.equal(result.error, undefined);
 });
 
-test("deleteSkill: timeout with the skill still present keeps the error path", async () => {
+test("deleteSkill: timeout with the skill still readable keeps the error path", async () => {
 	const result = await deleteSkill({
-		api: timeoutApi([{ name: "slow", agent: "claude" }]),
+		api: timeoutApi({ get: () => ({ name: "slow" }) }),
 		...timeoutOpts,
 	});
 	assert.equal(result.verdict, "refused");
 	assert.equal(result.success, false);
+});
+
+test("deleteSkill: a non-404 on one agent read is uncertain, not gone", async () => {
+	const result = await deleteSkill({
+		api: timeoutApi({
+			get: (agent) =>
+				agent === "codex"
+					? new HTTPError(
+							new Response(null, { status: 500 }),
+							new Request("http://api.test/skills/x"),
+							{} as any,
+						)
+					: notFound(),
+		}),
+		...timeoutOpts,
+		scopes: [
+			{
+				scope: "global",
+				projectRoot: null,
+				agents: ["claude", "codex"],
+			},
+		],
+	});
+	assert.equal(result.verdict, "refused");
+});
+
+test("deleteSkill: timeout with no agent list and a withheld Master left is not removed", async () => {
+	const result = await deleteSkill({
+		api: timeoutApi({ withheld: [{ name: "slow" }] }),
+		...timeoutOpts,
+		scopes: [{ scope: "global", projectRoot: null, agents: [] }],
+	});
+	assert.notEqual(result.verdict, "removed");
+	assert.equal(result.success, false);
+});
+
+test("deleteSkill: timeout with no agent list, nothing listed or withheld, is removed", async () => {
+	const result = await deleteSkill({
+		api: timeoutApi({}),
+		...timeoutOpts,
+		scopes: [{ scope: "global", projectRoot: null, agents: [] }],
+	});
+	assert.equal(result.verdict, "removed");
+});
+
+test("single-scope deleteSkill timeout is decided by per-agent reads", async () => {
+	const base = {
+		skillName: "slow",
+		agent: "claude",
+		intent: { kind: "from-agents" as const, agents: ["claude"] },
+		t,
+	};
+	const gone = await deleteSkill({ api: timeoutApi({}), ...base });
+	assert.equal(gone.verdict, "removed");
+	const still = await deleteSkill({
+		api: timeoutApi({ get: () => ({ name: "slow" }) }),
+		...base,
+	});
+	assert.equal(still.verdict, "refused");
 });

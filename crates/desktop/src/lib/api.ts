@@ -349,6 +349,24 @@ export function createApi(baseUrl: string) {
 					.post("skills/install", { json: data, timeout: 300000 })
 					.json();
 			},
+			/** One agent's view of one skill; a missing skill is a 404. */
+			get(
+				agent: string,
+				name: string,
+				scope: "global" | "project",
+				projectRoot?: string | null,
+			): Promise<SkillResponse> {
+				return client
+					.get(`agents/${agent}/skills/${encodeURIComponent(name)}`, {
+						searchParams: {
+							scope,
+							...(projectRoot
+								? { project_root: projectRoot }
+								: {}),
+						},
+					})
+					.json();
+			},
 			delete(
 				agent: string,
 				name: string,
@@ -361,6 +379,7 @@ export function createApi(baseUrl: string) {
 			): Promise<DeleteSkillByPathResponse> {
 				return client
 					.delete(`agents/${agent}/skills/${name}`, {
+						timeout: SKILL_MUTATION_TIMEOUT_MS,
 						searchParams: {
 							scope,
 							confirm: "true",
@@ -487,7 +506,12 @@ export function createApi(baseUrl: string) {
 					.json();
 			},
 			pruneLock(body: PruneLockRequest): Promise<PruneLockResponse> {
-				return client.post("skills/prune-lock", { json: body }).json();
+				return client
+					.post("skills/prune-lock", {
+						json: body,
+						timeout: SKILL_MUTATION_TIMEOUT_MS,
+					})
+					.json();
 			},
 			gitCredentialStatus(
 				url: string,
