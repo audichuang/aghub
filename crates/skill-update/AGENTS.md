@@ -93,7 +93,7 @@ clock before REST took over the github path.
 
 ## Deliberate surface differences
 
-CLI and API call the same entries; these are the ONLY intended divergences.
+CLI and API call the same entries; these are the divergences this crate owns (the API's fail-open lock read and `source diff ?scope=all` are in `crates/api/AGENTS.md`).
 
 - **check auto-heal**: `GET /skills/check-updates` calls
   `projection::write_auto_healed_hashes` after the check; `aghub-cli check` never
