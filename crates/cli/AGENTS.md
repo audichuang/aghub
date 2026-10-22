@@ -224,9 +224,8 @@ ERRORS on anything else. Core's skill mutation entries take that `WriteScope`
 and carry no `Both` / missing-root rejection of their own — this resolver is
 where they are refused.
 `source`'s `write_scope`, `accept-rename`'s `WriteScope` and `transfer`'s
-`install_scope` each used to close that match with `_ => …::Global`, so a scope
-the table let through became a silent write to the GLOBAL lock. Never reopen
-one of those matches with a catch-all.
+`install_scope` stay exhaustive matches: a `_ => …::Global` catch-all turns any
+scope the table lets through into a silent write to the GLOBAL lock.
 
 The classification itself is compile-forced but not compile-CHECKED: only review
 catches a command classified under the wrong policy. What the test suite adds is
