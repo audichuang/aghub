@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { isHTTPError } from "ky";
+import { isHTTPError, isTimeoutError } from "ky";
 import type {
 	DeleteSkillByNameResponse,
 	DeleteSkillByPathResponse,
@@ -561,6 +561,39 @@ export interface DeleteSkillOptions {
 }
 
 /**
+ * A timed-out delete proves nothing: the server keeps going and may have
+ * finished. Re-read the list (read-only, no repair) and report success only
+ * when the skill is really gone from every targeted agent; any doubt returns
+ * false and the caller keeps its normal error path.
+ */
+async function goneAfterTimeout(
+	error: unknown,
+	api: ApiClient,
+	name: string,
+	targets: readonly ScopeTarget[],
+): Promise<boolean> {
+	if (!isTimeoutError(error)) return false;
+	try {
+		for (const { scope, projectRoot, agents } of targets) {
+			const list = await api.skills.listAll(
+				scope,
+				scope === "project" ? (projectRoot ?? undefined) : undefined,
+			);
+			const left = list.some(
+				(s) =>
+					s.name === name &&
+					(!agents?.length ||
+						(!!s.agent && agents.includes(s.agent))),
+			);
+			if (left) return false;
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Unified request layer entry point for deleting skills.
  * Handles single-agent, all-agents, by-path, cross-scope, and clean-lock operations,
  * interprets backend Verdicts, and centralizes non-blocking cache invalidation.
@@ -648,6 +681,13 @@ export async function deleteSkill(
 		} catch (error) {
 			await invalidate();
 
+			if (
+				await goneAfterTimeout(error, api, name, [
+					{ scope, projectRoot, agents },
+				])
+			)
+				return { verdict: "removed", success: true };
+
 			const refusal = interpretRefusal(error, {
 				intent,
 				skillName: name,
@@ -689,6 +729,8 @@ export async function deleteSkill(
 			});
 		} catch (error) {
 			await invalidate();
+			if (await goneAfterTimeout(error, api, name, options.scopes))
+				return { verdict: "removed", success: true };
 			const refusal = interpretRefusal(error, {
 				intent,
 				skillName: name,
@@ -845,6 +887,18 @@ export async function deleteSkill(
 		};
 	} catch (error) {
 		await invalidate();
+
+		if (
+			intent.kind !== "clean-lock" &&
+			(await goneAfterTimeout(error, api, name, [
+				{
+					scope,
+					projectRoot,
+					agents: intent.kind === "from-agents" ? agents : [],
+				},
+			]))
+		)
+			return { verdict: "removed", success: true };
 
 		const refusal = interpretRefusal(error, {
 			intent,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { HTTPError } from "ky";
+import { HTTPError, TimeoutError } from "ky";
 import {
 	buildBulkDeleteRequests,
 	deleteSkill,
@@ -958,4 +958,44 @@ test("scopeTargetsFor orders global before project and treats a missing source a
 		{ scope: "global", projectRoot: null, agents: ["claude", "cursor"] },
 		{ scope: "project", projectRoot: "/p", agents: ["codex"] },
 	]);
+});
+
+// =========================================================================
+// Timeout: the server may have finished, so decide by actual state (#78)
+// =========================================================================
+
+function timeoutApi(remaining: Array<{ name: string; agent: string }>) {
+	return {
+		skills: {
+			deleteByName: async () => {
+				throw new TimeoutError(new Request("http://api.test/skills"));
+			},
+			listAll: async () => remaining,
+		},
+	} as any;
+}
+
+const timeoutOpts = {
+	skillName: "slow",
+	scopes: [
+		{ scope: "global" as const, projectRoot: null, agents: ["claude"] },
+	],
+	intent: { kind: "all-agents" as const },
+	t,
+};
+
+test("deleteSkill: timeout with the skill gone is success, not refused", async () => {
+	const result = await deleteSkill({ api: timeoutApi([]), ...timeoutOpts });
+	assert.equal(result.verdict, "removed");
+	assert.equal(result.success, true);
+	assert.equal(result.error, undefined);
+});
+
+test("deleteSkill: timeout with the skill still present keeps the error path", async () => {
+	const result = await deleteSkill({
+		api: timeoutApi([{ name: "slow", agent: "claude" }]),
+		...timeoutOpts,
+	});
+	assert.equal(result.verdict, "refused");
+	assert.equal(result.success, false);
 });

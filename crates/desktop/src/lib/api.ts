@@ -102,6 +102,15 @@ export function bulkApplyTimeoutMs(count: number): number {
 	return Math.min(120_000 + count * 30_000, 900_000);
 }
 
+/**
+ * Client budget for a skill mutation that takes the server's mutation lock.
+ * That lock waits up to 10s on a foreign process before the work even starts,
+ * so ky's default 10s would abort a healthy request. Still finite: aborting
+ * does not stop the server, so the caller reads a timeout as "couldn't
+ * confirm" and re-reads state, never as failure.
+ */
+export const SKILL_MUTATION_TIMEOUT_MS = 120_000;
+
 export interface RejectedTargetReader {
 	agent: string;
 	managed: boolean;
@@ -442,20 +451,40 @@ export function createApi(baseUrl: string) {
 					.json();
 			},
 			transfer(body: TransferRequest): Promise<OperationBatchResponse> {
-				return client.post("skills/transfer", { json: body }).json();
+				return client
+					.post("skills/transfer", {
+						json: body,
+						timeout: SKILL_MUTATION_TIMEOUT_MS,
+					})
+					.json();
 			},
 			reconcile(body: ReconcileRequest): Promise<OperationBatchResponse> {
-				return client.post("skills/reconcile", { json: body }).json();
+				return client
+					.post("skills/reconcile", {
+						json: body,
+						timeout: SKILL_MUTATION_TIMEOUT_MS,
+					})
+					.json();
 			},
 			deleteByPath(
 				body: DeleteSkillByPathRequest,
 			): Promise<DeleteSkillByPathResponse> {
-				return client.delete("skills/by-path", { json: body }).json();
+				return client
+					.delete("skills/by-path", {
+						json: body,
+						timeout: SKILL_MUTATION_TIMEOUT_MS,
+					})
+					.json();
 			},
 			deleteByName(
 				body: DeleteSkillByNameRequest,
 			): Promise<DeleteSkillByNameResponse> {
-				return client.delete("skills/by-name", { json: body }).json();
+				return client
+					.delete("skills/by-name", {
+						json: body,
+						timeout: SKILL_MUTATION_TIMEOUT_MS,
+					})
+					.json();
 			},
 			pruneLock(body: PruneLockRequest): Promise<PruneLockResponse> {
 				return client.post("skills/prune-lock", { json: body }).json();
@@ -486,12 +515,22 @@ export function createApi(baseUrl: string) {
 			gitInstall(data: GitInstallRequest): Promise<GitInstallResponse> {
 				// No forward header: install reuses the scan session's
 				// server-side cached token and does NOT read X-Aghub-Git-Tokens.
-				return client.post("skills/git/install", { json: data }).json();
+				return client
+					.post("skills/git/install", {
+						json: data,
+						timeout: SKILL_MUTATION_TIMEOUT_MS,
+					})
+					.json();
 			},
 			gitSync(data: GitSyncRequest): Promise<GitSyncResponse> {
 				// No forward header: sync reuses the scan session's server-side
 				// cached token and does NOT read X-Aghub-Git-Tokens.
-				return client.post("skills/git/sync", { json: data }).json();
+				return client
+					.post("skills/git/sync", {
+						json: data,
+						timeout: SKILL_MUTATION_TIMEOUT_MS,
+					})
+					.json();
 			},
 			checkUpdates(
 				{
