@@ -658,6 +658,14 @@ fn refusal_error(
 			reason: UncheckableReason::Network,
 			..
 		} => anyhow::anyhow!("Credential backend is unavailable; retry later."),
+		O::UncheckableSource {
+			reason: UncheckableReason::AmbiguousHost,
+			..
+		} => anyhow::anyhow!(
+			"source '{}' has a skill recorded without its host (a self-hosted \
+			 GitLab?); reinstall that skill from the real URL",
+			safe_source(source)
+		),
 		O::UncheckableSource { reason, .. } => anyhow::anyhow!(
 			"source '{}' cannot be fetched ({reason:?}); only HTTPS / \
 			 owner/repo git sources are supported",
