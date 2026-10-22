@@ -66,7 +66,7 @@ there is no commit-oid-keyed memo to consult, so list/fetch need no prior `resol
 **Anything that answers without looking upstream must still verify the local
 copy** (`locally_intact`): the preflight skip, the pinned-SHA shortcut, and the
 `UpToDate` verdict itself. "Upstream has not moved" is not "your copy is fine" —
-each of those used to report `UpToDate` for a skill whose folder was gone.
+skipping the check reports `UpToDate` for a skill whose folder is gone.
 
 **It must never download objects** (`SkillRepository::resolve_tip`): REST
 `/commits/<ref>` on github hosts — ONE request on the pooled client — else a git
