@@ -566,10 +566,10 @@ export interface DeleteSkillOptions {
  * and it fails closed: any doubt (non-404 error, unreadable request) returns
  * false and the caller keeps its normal error path.
  *
- * Explicit agents: each one's own read must 404 (the all-agents list fails
- * open — it silently drops agents whose config failed to load). No agent
- * list: the list AND the withheld Masters (which no agent reads, so the list
- * never shows them) must both lack the name.
+ * Only explicit agents can be proven: each one's own read must 404. With no
+ * agent list nothing on the client can prove absence — the all-agents list
+ * fails open (drops agents whose config failed to load) and a private copy has
+ * no withheld Master — so that case stays uncertain.
  */
 async function goneAfterTimeout(
 	error: unknown,
@@ -582,22 +582,14 @@ async function goneAfterTimeout(
 		for (const { scope, projectRoot, agents } of targets) {
 			const root =
 				scope === "project" ? (projectRoot ?? undefined) : undefined;
-			if (agents?.length) {
-				for (const agent of agents) {
-					try {
-						await api.skills.get(agent, name, scope, root);
-						return false;
-					} catch (e) {
-						if (!isGoneSkillPath(e)) return false;
-					}
-				}
-			} else {
-				const [list, withheld] = await Promise.all([
-					api.skills.listAll(scope, root),
-					api.skills.withheld(scope, root),
-				]);
-				if ([...list, ...withheld].some((s) => s.name === name))
+			if (!agents?.length) return false;
+			for (const agent of agents) {
+				try {
+					await api.skills.get(agent, name, scope, root);
 					return false;
+				} catch (e) {
+					if (!isGoneSkillPath(e)) return false;
+				}
 			}
 		}
 		return true;

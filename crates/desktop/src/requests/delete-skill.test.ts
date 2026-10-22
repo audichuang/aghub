@@ -1053,13 +1053,16 @@ test("deleteSkill: timeout with no agent list and a withheld Master left is not 
 	assert.equal(result.success, false);
 });
 
-test("deleteSkill: timeout with no agent list, nothing listed or withheld, is removed", async () => {
+test("deleteSkill: timeout with no agent list is never proven removed", async () => {
+	// listAll fails open and a private copy has no withheld Master, so an
+	// empty pair of reads proves nothing.
 	const result = await deleteSkill({
 		api: timeoutApi({}),
 		...timeoutOpts,
 		scopes: [{ scope: "global", projectRoot: null, agents: [] }],
 	});
-	assert.equal(result.verdict, "removed");
+	assert.notEqual(result.verdict, "removed");
+	assert.equal(result.success, false);
 });
 
 test("single-scope deleteSkill timeout is decided by per-agent reads", async () => {
