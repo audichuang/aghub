@@ -112,8 +112,7 @@ for macOS `/var` → `/private`).
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `HOMEBREW_TAP_TOKEN` (PAT with
   Contents:write on `audichuang/homebrew-tap`; `GITHUB_TOKEN` can't reach it).
 - **Tap layout: `Formula/aghub-cli.rb`, `Casks/aghub.rb`.** Homebrew ignores a
-  formula at the tap root and silently keeps users on their installed version
-  (Macs were stuck on 2.3.11 until v2.5.4).
+  formula at the tap root and silently keeps users on their installed version.
 
 ## When something fails
 
