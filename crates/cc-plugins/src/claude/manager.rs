@@ -5,7 +5,10 @@ use crate::cli::ClaudeCli;
 use crate::{PluginId, PluginSource};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 pub struct ClaudePluginManager {
 	pub(super) settings: settings::ClaudeSettings,
@@ -42,20 +45,32 @@ impl ClaudePluginManager {
 	/// list core's skill mutation entries take (same roots `owns_path` checks).
 	/// Fails open: when the plugin list cannot be read (no `claude` CLI, bad
 	/// settings) it returns an empty list, which refuses nothing.
+	///
+	/// Cached process-wide (see `RootsCache`): the long-lived API otherwise
+	/// spawns `claude plugin list` (~0.5s) on every mutation.
 	pub async fn owned_roots() -> Vec<(String, PathBuf)> {
-		let Ok(manager) = Self::new().await else {
-			return Vec::new();
-		};
-		manager
-			.installed
-			.iter()
-			.flat_map(|plugin| {
-				plugin
-					.all_install_paths()
-					.into_iter()
-					.map(|root| (plugin.display_name.clone(), root))
-			})
-			.collect()
+		static CACHE: Mutex<RootsCache> = Mutex::new(RootsCache::new());
+		cached_roots(
+			&CACHE,
+			registry_key(&registry_path()),
+			Instant::now(),
+			|| async {
+				let manager = Self::new().await.ok()?;
+				Some(
+					manager
+						.installed
+						.iter()
+						.flat_map(|plugin| {
+							plugin
+								.all_install_paths()
+								.into_iter()
+								.map(|root| (plugin.display_name.clone(), root))
+						})
+						.collect(),
+				)
+			},
+		)
+		.await
 	}
 
 	/// Blocking `owned_roots` for core's injected provider. Runs on its own
@@ -131,6 +146,84 @@ impl ClaudePluginManager {
 		})?;
 		self.settings.remove_plugin_config(id);
 		Ok(())
+	}
+}
+
+type Roots = Vec<(String, PathBuf)>;
+/// Registry path plus its `(mtime, len)` (`None` = file missing). The path is
+/// part of the key so a different `CLAUDE_CONFIG_DIR`/home never reuses roots.
+type RegistryKey = (PathBuf, Option<(SystemTime, u64)>);
+
+/// Backstop expiry for cached roots. `claude plugin list` also merges sources
+/// that never touch `installed_plugins.json` (`~/.claude/plugins/synced/`, and
+/// `~/.claude/skills/<dir>` carrying `.claude-plugin/`); a change there is only
+/// picked up once this TTL elapses.
+const ROOTS_TTL: Duration = Duration::from_secs(10);
+
+/// Decision state for the owned-roots cache. Pure (clock passed in) so it is
+/// testable without spawning `claude`.
+struct RootsCache {
+	entry: Option<(RegistryKey, Instant, Roots)>,
+}
+
+impl RootsCache {
+	const fn new() -> Self {
+		Self { entry: None }
+	}
+
+	fn get(&self, key: &RegistryKey, now: Instant) -> Option<Roots> {
+		let (k, at, roots) = self.entry.as_ref()?;
+		(k == key && now.saturating_duration_since(*at) < ROOTS_TTL)
+			.then(|| roots.clone())
+	}
+
+	fn put(&mut self, key: RegistryKey, now: Instant, roots: Roots) {
+		self.entry = Some((key, now, roots));
+	}
+}
+
+fn registry_path() -> PathBuf {
+	let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+		.filter(|v| !v.is_empty())
+		.map(PathBuf::from)
+		.or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+		.unwrap_or_default();
+	dir.join("plugins/installed_plugins.json")
+}
+
+fn registry_key(path: &Path) -> RegistryKey {
+	let stat = std::fs::metadata(path)
+		.ok()
+		.and_then(|m| Some((m.modified().ok()?, m.len())));
+	(path.to_path_buf(), stat)
+}
+
+/// Return the cached roots for `key`, else run `load` and store its result
+/// under that same pre-load `key` (a write landing mid-load then misses on the
+/// next call). A failed load (`None`) is not stored and yields an empty list
+/// (fail-open). The lock is never held across `.await`; concurrent misses may
+/// both load.
+async fn cached_roots<F, Fut>(
+	cache: &Mutex<RootsCache>,
+	key: RegistryKey,
+	now: Instant,
+	load: F,
+) -> Roots
+where
+	F: FnOnce() -> Fut,
+	Fut: Future<Output = Option<Roots>>,
+{
+	if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key, now)) {
+		return hit;
+	}
+	match load().await {
+		Some(roots) => {
+			if let Ok(mut c) = cache.lock() {
+				c.put(key, now, roots.clone());
+			}
+			roots
+		}
+		None => Vec::new(),
 	}
 }
 
@@ -260,5 +353,97 @@ mod tests {
 		)
 		.expect("plugin info");
 		assert!(!info.enabled);
+	}
+}
+
+#[cfg(test)]
+mod roots_cache_tests {
+	use super::*;
+	use std::cell::Cell;
+
+	fn roots(n: &str) -> Roots {
+		vec![(n.to_string(), PathBuf::from(format!("/p/{n}")))]
+	}
+
+	fn nokey() -> RegistryKey {
+		(PathBuf::from("/none"), None)
+	}
+
+	fn run(
+		cache: &Mutex<RootsCache>,
+		key: RegistryKey,
+		now: Instant,
+		calls: &Cell<u32>,
+		result: Option<Roots>,
+	) -> Roots {
+		tokio::runtime::Builder::new_current_thread()
+			.build()
+			.unwrap()
+			.block_on(cached_roots(cache, key, now, || async {
+				calls.set(calls.get() + 1);
+				result
+			}))
+	}
+
+	#[test]
+	fn same_key_within_ttl_returns_cached() {
+		let cache = Mutex::new(RootsCache::new());
+		let calls = Cell::new(0);
+		let t = Instant::now();
+		assert_eq!(
+			run(&cache, nokey(), t, &calls, Some(roots("a"))),
+			roots("a")
+		);
+		let again = run(&cache, nokey(), t, &calls, Some(roots("b")));
+		assert_eq!(again, roots("a"));
+		assert_eq!(calls.get(), 1);
+	}
+
+	#[test]
+	fn changed_registry_file_reloads_within_ttl() {
+		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("installed_plugins.json");
+		std::fs::write(&file, "{}").unwrap();
+		let cache = Mutex::new(RootsCache::new());
+		let calls = Cell::new(0);
+		let t = Instant::now();
+		let k1 = registry_key(&file);
+		assert!(k1.1.is_some());
+		assert_eq!(
+			run(&cache, k1.clone(), t, &calls, Some(roots("a"))),
+			roots("a")
+		);
+		std::fs::write(&file, r#"{"version":2}"#).unwrap();
+		let k2 = registry_key(&file);
+		assert_ne!(k1, k2);
+		assert_eq!(run(&cache, k2, t, &calls, Some(roots("b"))), roots("b"));
+		assert_eq!(calls.get(), 2);
+	}
+
+	#[test]
+	fn ttl_elapsed_reloads() {
+		let cache = Mutex::new(RootsCache::new());
+		let calls = Cell::new(0);
+		let t = Instant::now();
+		run(&cache, nokey(), t, &calls, Some(roots("a")));
+		let later = t + ROOTS_TTL;
+		assert_eq!(
+			run(&cache, nokey(), later, &calls, Some(roots("b"))),
+			roots("b")
+		);
+		assert_eq!(calls.get(), 2);
+	}
+
+	#[test]
+	fn failed_load_is_not_cached() {
+		let cache = Mutex::new(RootsCache::new());
+		let calls = Cell::new(0);
+		let t = Instant::now();
+		assert!(run(&cache, nokey(), t, &calls, None).is_empty());
+		assert_eq!(
+			run(&cache, nokey(), t, &calls, Some(roots("a"))),
+			roots("a")
+		);
+		assert_eq!(calls.get(), 2);
 	}
 }

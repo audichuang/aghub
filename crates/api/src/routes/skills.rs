@@ -839,7 +839,7 @@ pub async fn disable_skill(
 
 fn is_plugin_managed_skill(
 	skill: &Skill,
-	plugins: &[aghub_cc_plugins::claude::ClaudePluginInfo],
+	roots: &[(String, std::path::PathBuf)],
 ) -> bool {
 	let source_path = skill
 		.canonical_path
@@ -849,7 +849,7 @@ fn is_plugin_managed_skill(
 		return false;
 	};
 	let full_path = expand_tilde_path(path);
-	plugins.iter().any(|plugin| plugin.owns_path(&full_path))
+	roots.iter().any(|(_, root)| full_path.starts_with(root))
 }
 
 #[get("/agents/all/skills?<params..>")]
@@ -860,15 +860,12 @@ pub(crate) async fn list_all_agents_skills(
 	let include_managed = params.include_managed();
 	let resolved = params.resolve_scope()?;
 	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
-	let detected_plugins = ClaudePluginManager::new()
-		.await
-		.map(|manager| manager.list_plugins().to_vec())
-		.unwrap_or_default();
+	let plugin_roots = ClaudePluginManager::owned_roots().await;
 	let items = load_all_agents(resource_scope, project_root.as_deref())
 		.into_iter()
 		.flat_map(|ar| {
 			let agent_id = ar.agent_id;
-			let plugins = &detected_plugins;
+			let plugins = &plugin_roots;
 			ar.skills.into_iter().filter_map(move |skill| {
 				if !include_managed && is_plugin_managed_skill(&skill, plugins)
 				{
