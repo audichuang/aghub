@@ -54,7 +54,7 @@ chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
   `~/.agents/skills`; project write slot `.github/skills` + also-read
   `.agents/skills`.
   `.claude/skills` is documented by the vendor but deliberately NOT read
-  (decision #11). Sub-agents at both scopes: `~/.copilot/agents/<name>.agent.md`
+  (decision #11 in `docs/specs/2026-08-30-skills-hub-borrow-path.md`). Sub-agents at both scopes: `~/.copilot/agents/<name>.agent.md`
   and `.github/agents/<name>.agent.md` — the `.agent.md` suffix is load-bearing
   (`SubAgentLayout::Flat`); a bare `<name>.md` round-trips green with aghub and
   is invisible to Copilot

@@ -44,8 +44,8 @@ The traps that each cost a round, so check them first:
   comparison accepts the Master but skips the lock.
 - **Ref cohort**: one source on two refs in one scope makes `source sync` and
   fetched installs refuse that source; refuse the write before it lands.
-- **Source spelling**: `github.com` is the only host the `owner/repo`
-  shorthand rebuilds to. Record a subdomain such as `gist.github.com`.
+- **Source spelling**: a github-type `owner/repo` shorthand rebuilds only to
+  `github.com`. Record a subdomain such as `gist.github.com`.
 - **Omitting `sourceUrl`**: the project-lock elision
   (`source_coordinate::project_lock_source`), the reader's rebuild
   (`reconstruct_source_url`) and `same_source_owner`'s URL-less arm must agree.

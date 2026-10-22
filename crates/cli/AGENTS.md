@@ -5,7 +5,7 @@ this one**; this crate is `-p aghub-cli`.
 
 `src/main.rs` holds `Cli`/`Commands` + dispatch; `src/commands/` is one file per
 subcommand. Authoritative surface: clap (`just start -- --help`). This crate
-OWNS the user-facing semantics below — the root AGENTS.md no longer repeats
+OWNS the user-facing semantics below — the root AGENTS.md does not repeat
 them, and the WHY behind each flow is in the knowledge pages named per section.
 
 ## Surface semantics (this crate is where they are written down)
@@ -203,7 +203,7 @@ module, so a `Scope` declared in the crate root would still let
 (`aghub_core::paths::find_project_root` stays re-importable by anyone — the
 seal is on CONSTRUCTING a resolved scope, not on finding a root.) That is what
 stops `source`/`coverage`/`transfer` regrowing private resolvers with their own
-wording of the project-root bail (there were five). The bail covers reads too
+wording of the project-root bail. The bail covers reads too
 (`-p get skills` must not answer `[]` from a non-project dir) and every
 rejection runs BEFORE the cwd is touched — `-g` and the plain global default
 resolve no project root at all, because a deleted cwd must not kill a

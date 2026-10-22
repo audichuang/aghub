@@ -106,7 +106,7 @@ macOS/Windows, so the split never shows up locally. Parity is pinned by
 `aghub_api::tests::default_app_data_dir_matches_core_seam` and the CLI's
 `commands::tests::app_data_dir_matches_core_seam`. A desktop upgrading from
 before the unification keeps its inference db in the legacy Tauri dir and
-**aghub does not move it** — `commands/server.rs` `legacy_inference_db_hint`
+**aghub does not move it** — `crates/desktop/src-tauri/src/commands/server.rs` `legacy_inference_db_hint`
 only warns, keyed on the LEGACY FILE EXISTING so a copy does not silence it.
 Do not "fix" that. Why:
 [`docs/history/desktop-tauri.md#legacy-inference-db-migration-removed`](docs/history/desktop-tauri.md#legacy-inference-db-migration-removed)
@@ -279,7 +279,7 @@ BUILD. A missing step-7 asset fails no build, lint or typecheck — only
    joining `OS_CONFIG_DIR_AGENTS` **and getting its own arm after the loop** —
    membership alone is a `panic!`, because an agent added to the exception list
    and never asserted was how that table stopped checking anything
-7. `crates/desktop/src/assets/agent/<id>.svg` — `agent-icons.tsx` globs
+7. `crates/desktop/src/assets/agent/<id>.svg` — `src/lib/agent-icons.tsx` globs
    `../assets/agent/*.svg` and keys it by `${id}.svg`; a missing file silently
    falls back to a first-letter avatar. `crates/desktop/src/lib/agent-icons.test.ts`
    closes that (it parses `agent_roster!` and asserts the asset exists) and
@@ -333,11 +333,11 @@ from an existing test. Worked example:
 
 Reasons are given so you can generalize to the case not listed here.
 
-| Tier                                                     | What                                                                                                                                                                                                                                                        | Why                                                                                                                                                 |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Free — do it, do not ask**                             | Editing code; `just fmt` / `just lint`; `cargo build`; `bun run typecheck` / `lint:check` / `format:check`; the Rust test suite at any scope, `just preflight` included; reading and writing under a temp dir, `$AGHUB_DATA_DIR`, or a tempdir project root | Run it, fix the failures your change caused, and rerun. Stop and ask only if a test would need the real `~/.agents`, the OS keyring, or the network |
-| **Ask first — legitimate, but external or irreversible** | `git push`, force-push, amending published history; release tags, `just bump`, the Homebrew tap; touching the developer's REAL `~/.aghub`, `~/.agents`, agent skill dirs or the system keyring; adding any new workspace dependency without a clear need    | These leave the machine or cannot be undone; the dependency budget is the maintainer's call                                                         |
-| **Never — no task reaches these**                        | Changing the shipped `tauri.conf.json` updater `pubkey`, or pointing its `endpoints` elsewhere. Committing secrets                                                                                                                                          | It bricks auto-update for every installed user                                                                                                      |
+| Tier                                                     | What                                                                                                                                                                                                                                                                                                                                                                                    | Why                                                                                                                                                 |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Free — do it, do not ask**                             | Editing code; `just fmt` / `just lint`; `cargo build`; `bun run typecheck` / `lint:check` / `format:check`; the Rust test suite at any scope, `just preflight` included; reading and writing under a temp dir, `$AGHUB_DATA_DIR`, or a tempdir project root                                                                                                                             | Run it, fix the failures your change caused, and rerun. Stop and ask only if a test would need the real `~/.agents`, the OS keyring, or the network |
+| **Ask first — legitimate, but external or irreversible** | Pushing to someone else's upstream (`origin` = AkaraChen; committing and pushing to `fork` is Free), force-push, amending published history; release tags, `just bump`, the Homebrew tap unless the user asked for the release; touching the developer's REAL `~/.aghub`, `~/.agents`, agent skill dirs or the system keyring; adding any new workspace dependency without a clear need | These leave the machine or cannot be undone; the dependency budget is the maintainer's call                                                         |
+| **Never — no task reaches these**                        | Changing the shipped `tauri.conf.json` updater `pubkey`, or pointing its `endpoints` elsewhere. Committing secrets                                                                                                                                                                                                                                                                      | It bricks auto-update for every installed user                                                                                                      |
 
 ## Anti-Patterns
 

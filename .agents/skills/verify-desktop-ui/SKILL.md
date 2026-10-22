@@ -40,7 +40,7 @@ sleep 5 && grep -q "ready in" /tmp/vite.log || { cat /tmp/vite.log; exit 1; }
 curl -sf localhost:8899/api/v1/agents > /dev/null || { echo "api down"; exit 1; }
 
 # Write your scenarios first (shape below), then:
-node .claude/skills/verify-desktop-ui/scripts/run-scenarios.mjs \
+node .agents/skills/verify-desktop-ui/scripts/run-scenarios.mjs \
   /tmp/scenarios.json --out /tmp/aghub-shots
 ```
 

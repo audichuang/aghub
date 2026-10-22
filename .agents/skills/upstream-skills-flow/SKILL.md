@@ -33,7 +33,7 @@ upstream (npx):
   project install: agents whose root dir (.windsurf/, .kiro/ …) is absent are
     skipped (claude-code exempt); symlink failure falls back to a COPY
 
-aghub (symlink-only, since v2.18):
+aghub (symlink-only):
   Master    ~/.aghub/<sanitized-name>/  |  <root>/.aghub/<sanitized-name>/
             (a dir NO agent reads — storing is not granting)
   Referrer  EVERY agent gets a symlink, .agents/skills included (it is just a

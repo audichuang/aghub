@@ -84,7 +84,7 @@ is in `package.json`; **bun only**.
 
 ### Desktop Integration
 
-- NEVER modify Tauri capabilities without security review
+- Tauri capabilities grant webview JS access to OS APIs: add the narrowest permission, scoped to the command that needs it, and name that command in the commit message
 - NEVER expose system APIs without explicit permissions in `capabilities/`
 - NEVER do blocking I/O in a sync `#[tauri::command]` — it runs on the main
   thread and freezes the UI (beachball). Make the command `async fn` and wrap

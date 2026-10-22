@@ -12,7 +12,7 @@ Role map (`lib.rs` mounts the real route set — do not hardcode route counts):
 - `state.rs` / `error.rs` / `extractors.rs` — `AppState`, `ApiError`, `AgentParam` / `ScopeParams` / `TrustedLocalOrigin`
 - `credentials/` — token resolve + remote forwarding; host-scoped source→credential bindings (never in lock files)
 - `skills/` — rename-guard + resync helpers for skill routes (scan/lock
-  orchestration moved to the `skill-update` crate)
+  orchestration lives in the `skill-update` crate)
 - `source_sessions.rs` — TTL'd `PinnedSourceSession` cache pairing a
   `SkillRepository` + `RepoSnapshot` so git scan→install flows reuse one fetch
 - `editor_detection.rs` — code-editor discovery for the integrations surface
@@ -114,7 +114,7 @@ line** — don't reword it). Pass `--port N` to pin one.
 - `GET /skills/check-updates` deliberately reads the lock fail-OPEN (a corrupted
   or unreadable lock is treated as empty/missing; the CLI `check` is fail-closed,
   because CLI check presents lock contents as its answer and probes first).
-- Codes that legitimately remain API-only (request-shape/policy checks owned by the HTTP surface, not outcomes of a Resync):
+- Examples of API-only codes (request-shape/policy checks owned by the HTTP surface, not outcomes of a Resync; not an exhaustive list):
     - `PROJECT_ROOT_REQUIRED`: `project_root` is required when `scope` is project; request-shape validation owned by the HTTP boundary.
     - `INVALID_SCOPE`: scope must be global or project; request-shape validation owned by the HTTP boundary.
     - `confirm=true` requirement: safety gate requiring explicit confirmation to overwrite installed skills or accept renames; policy check owned by the HTTP surface. There is no dedicated code: batch `apply-updates` answers 400 `INVALID_PARAM`, while single apply / accept-rename answer 200 with an error row and no `code`.
@@ -135,6 +135,8 @@ line** — don't reword it). Pass `--port N` to pin one.
   so no route passes it in.
 - NEVER orchestrate two or more core mutation steps within a handler to form a
   single action — orchestration belongs in core behind one entry point.
-- NEVER write an error-code string literal in API route code — error codes come
-  directly from core errors via `aghub_core::error_codes` (or `ApiError::from`).
+- Never re-spell in a route a code that core already owns
+  (`aghub_core::error_codes`) — map the core error through `ApiError::from`, so
+  the CLI and API cannot drift apart on it. A string literal is only for a code
+  no core error produces (request-shape and HTTP-boundary checks).
 - (path/ConfigManager rules: see root AGENTS.md Anti-Patterns — errors here use machine codes + safe messages)
