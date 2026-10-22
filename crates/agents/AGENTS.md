@@ -71,8 +71,8 @@ chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
 - **Antigravity**: global skills write slot `~/.gemini/config/skills` + also-reads
   the legacy `.gemini/antigravity/skills` and `.gemini/antigravity-cli/skills`.
   Project write slot `.agent/skills` + also-read `.agents/skills`. A skill an
-  older release left in a compat dir is migrated with `aghub repair`, never
-  `aghub add` (which refuses `resource_exists` — the skill already loads);
+  older release left in a compat dir is migrated with `aghub-cli repair`, never
+  `aghub-cli add` (which refuses `RESOURCE_EXISTS` — the skill already loads);
   `repair` plans WRITE dirs but `readers_of` asks the READ paths, which is the
   only reason the stranded agent reaches `grant_to`. Sub-agents
   are a DIRECTORY per agent (`SubAgentLayout::Nested`):
