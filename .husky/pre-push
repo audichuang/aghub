@@ -1,7 +1,10 @@
 #!/usr/bin/env sh
 set -e
 
-export PATH="$HOME/.cargo/bin:$PATH"
+# Fallback only (GUI git clients may lack cargo): forcing ~/.cargo/bin first would
+# skip a cargo wrapper earlier on PATH (mbx), and plain cargo then fails on its
+# read-only restored outputs (docs/history/tooling.md#target-dir-filled-the-disk).
+command -v cargo >/dev/null 2>&1 || export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "Running format checks..."
 cargo fmt --all -- --check
