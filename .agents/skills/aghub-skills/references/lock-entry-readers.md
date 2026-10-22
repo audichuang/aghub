@@ -18,7 +18,7 @@ justify before review.
 | API git-sync / `EntryIdentity`                      | core `skills::lock` (`of_global_entry`, `of_project_entry`, `describes`)          | source / URL / type, `skillPath`                               |
 | ownership on install                                | core `skills::adoption` (`same_source_owner`, `adoption_guard`)                   | owner fields; Master hash on adoption                          |
 | delete lock-prune, `prune-lock`, `repair`, `doctor` | core `skills::removal`, `prune`, `repair`, `health`                               | membership by name; Master presence and health                 |
-| transfer / reconcile copy, `add --from`             | core `skills::transfer` (`owner_is_carriable`), `skills::install_local`           | owner, ref, hash carried into the other scope's lock           |
+| transfer / reconcile copy, `add --from`             | core `transfer` (`owner_is_carriable`), `skills::install_local`                   | owner, ref, hash carried into the other scope's lock           |
 | API raw lock routes                                 | api `GET /skills/lock/global`, `/skills/lock/project`                             | every field, sources through `strip_source_credentials`        |
 | desktop skill detail / check-updates                | `crates/desktop` via the api DTOs and the raw lock routes                         | the API's projection of the same entry                         |
 | npx `skills`                                        | global v3 / project v1 (see npx-skills-contract)                                  | every field; unknown ones must round-trip                      |
