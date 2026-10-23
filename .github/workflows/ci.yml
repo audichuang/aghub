@@ -346,7 +346,7 @@ jobs:
     # the CARGO*/RUST* env (hashed into the key) MUST match release.yml's
     # build-tauri / build-cli. docs/history/tooling.md#release-build-speed
     build:
-        name: Build (${{ matrix.target }})
+        name: Build (${{ matrix.target }}, ${{ matrix.part }})
         needs: changes
         # ALWAYS on push to main: PRs build Linux only, so main is the only
         # place Windows/macOS release builds run, and verify-ci trusts any
@@ -367,12 +367,15 @@ jobs:
             # the same on every OS, and Test/Clippy already compile the desktop
             # crate on Windows and macOS. Main builds all three before any tag
             # (verify-ci needs that run green) and saves their caches. Cut the
-            # PR critical path from Build Windows (~8.5 min) to ~5.
+            # PR critical path from Build Windows (~8.5 min) to ~5. On a PR the
+            # Linux build is also split in two parallel legs, `app` (sidecar +
+            # desktop) and `bins` (standalone CLI + api); they restore the same
+            # cache and save nothing. Main runs `all` so one job saves it.
             # docs/history/tooling.md#pr-builds-linux-only
             matrix:
                 include: ${{ fromJSON(github.event_name == 'pull_request'
-                    && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]'
-                    || '[{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+                    && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","part":"app"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","part":"bins"}]'
+                    || '[{"os":"macos-latest","target":"aarch64-apple-darwin","part":"all"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","part":"all"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","part":"all"}]') }}
         steps:
             - uses: actions/checkout@v6
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
@@ -408,11 +411,13 @@ jobs:
               shell: bash
               run: rm -rf target
             - name: Setup Bun
+              if: matrix.part != 'bins'
               uses: oven-sh/setup-bun@v2
               with:
                   bun-version: ${{ env.BUN_VERSION }}
             # The desktop crate embeds ../dist, so every OS builds it.
             - name: Build frontend (typecheck + Vite)
+              if: matrix.part != 'bins'
               run: |
                   cd crates/desktop
                   bun install --frozen-lockfile
@@ -424,15 +429,21 @@ jobs:
               run: |
                   set -euo pipefail
                   T="${{ matrix.target }}"
-                  cargo build --release --target "$T" -p aghub -p aghub-api \
-                      --bin aghub-api --features tauri/custom-protocol
-                  cargo build --release --target "$T" -p aghub --bins \
-                      --features tauri/custom-protocol
-                  cargo build --release -p aghub-cli --target "$T"
-                  if [ "$T" = "x86_64-unknown-linux-gnu" ]; then
-                      cargo build --release -p aghub-api --target "$T"
+                  P="${{ matrix.part }}"
+                  if [ "$P" != bins ]; then
+                      cargo build --release --target "$T" -p aghub -p aghub-api \
+                          --bin aghub-api --features tauri/custom-protocol
+                      cargo build --release --target "$T" -p aghub --bins \
+                          --features tauri/custom-protocol
+                  fi
+                  if [ "$P" != app ]; then
+                      cargo build --release -p aghub-cli --target "$T"
+                      if [ "$T" = "x86_64-unknown-linux-gnu" ]; then
+                          cargo build --release -p aghub-api --target "$T"
+                      fi
                   fi
             - name: Smoke test CLI binary
+              if: matrix.part != 'app'
               shell: bash
               run: |
                   BIN="target/${{ matrix.target }}/release/aghub-cli"
