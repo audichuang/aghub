@@ -418,6 +418,8 @@ pub(crate) mod test_hooks {
 
 	/// Make the next install on this thread write a stray file into its
 	/// freshly materialized Master.
+	// Only the unix-gated `nocopy_tests` call it.
+	#[cfg(unix)]
 	pub(crate) fn corrupt_next_master() {
 		CORRUPT_MASTER.with(|flag| flag.set(true));
 	}
