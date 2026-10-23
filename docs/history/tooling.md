@@ -259,8 +259,13 @@ with `no matching package named dirs`. A separate cache of
 `~/.cargo/registry/index`, keyed on Cargo.lock and restored after rust-cache,
 gives cargo the whole index.
 
-Windows `bun install` (~58s against ~5s on the other runners) now restores
-bun's package cache from `runner.temp`, on the same drive as the checkout.
+Warm PR rerun, Windows: `cargo fetch` 44s -> 34s (no index download; the rest
+is unpacking `.crate` sources, which rust-cache does not keep), the Build job's
+gap before the first compile 51s -> 36s.
+
+Rejected: a Windows bun package cache. `bun install` fell 58s -> 10s, but the
+cache restore took 14s and the following `tsc` paid ~20s more reading the
+freshly linked node_modules, so the step went 68s -> 63s.
 
 Not changed: the three release cargo builds in `build` recompile the
 workspace crates under two feature sets on purpose (see Release build speed);

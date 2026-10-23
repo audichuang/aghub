@@ -407,19 +407,8 @@ jobs:
               uses: oven-sh/setup-bun@v2
               with:
                   bun-version: ${{ env.BUN_VERSION }}
-            # bun install takes ~58s on Windows against ~5s elsewhere; a warm
-            # package cache on the workspace drive lets it link instead of fetch.
-            - name: Bun package cache (Windows)
-              if: runner.os == 'Windows'
-              uses: actions/cache@v6
-              with:
-                  path: ${{ runner.temp }}/bun-cache
-                  key: bun-install-${{ runner.os }}-${{ hashFiles('crates/desktop/bun.lock') }}
-                  restore-keys: bun-install-${{ runner.os }}-
             # The desktop crate embeds ../dist, so every OS builds it.
             - name: Build frontend (typecheck + Vite)
-              env:
-                  BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-cache
               run: |
                   cd crates/desktop
                   bun install --frozen-lockfile
