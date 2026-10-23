@@ -157,6 +157,11 @@ The two rules that span crates stay here:
   `cargo test`; doc tests stay `cargo test --workspace --doc`. Plain
   `cargo test` must still pass, so the env-mutex rule still binds. Why:
   [`docs/history/tooling.md`](docs/history/tooling.md#cargo-test-serialized-on-the-env-mutex)
+- **Before tuning CI or test speed, read `docs/history/tooling.md`**: it records
+  every attempt with its numbers, the rejected ones too (merging the
+  integration-test binaries, splitting the `aghub-api` lib's unit tests, a
+  Windows bun cache, offline cargo on a cache hit), so re-trying one starts from
+  its measurement, not from scratch
 - Prefer file-scoped over the full suite:
   `cargo test -p aghub-core <full::module::path::name> -- --exact`
 - Desktop frontend commands run from `crates/desktop` via `bun run …`

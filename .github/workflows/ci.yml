@@ -1,5 +1,8 @@
 name: CI
 
+# Before a speed change here: docs/history/tooling.md records every measured
+# attempt on this workflow, kept and rejected.
+
 on:
     push:
         branches: ["main"]
