@@ -270,3 +270,19 @@ freshly linked node_modules, so the step went 68s -> 63s.
 Not changed: the three release cargo builds in `build` recompile the
 workspace crates under two feature sets on purpose (see Release build speed);
 merging them would leave release.yml's `build-cli` cold.
+
+## PR builds Linux only
+
+`.github/workflows/ci.yml` `build` matrix. On 2026-10-23 the warm PR wall
+clock was ~8.5 min, all of it Build Windows (three release cargo builds,
+~6 min, kept for release-cache parity, see Release build speed); every other
+PR job finished within ~5 min.
+
+What only `build` proves is the release shape: `tauri/custom-protocol` and
+the embedded `../dist` (Test runs debug, which serves `devUrl` and never
+embeds the frontend). That is the same code on every OS, and the
+Windows/macOS-specific parts (`tauri-build` resources, `cfg` code) already
+compile in Test and Rust Lint on those runners. PRs therefore build Linux
+only; main still builds all three targets, saves their caches, and must be
+green for `verify-ci` before any tag, so a Windows/macOS-only release break
+surfaces on main after merge instead of on the PR.

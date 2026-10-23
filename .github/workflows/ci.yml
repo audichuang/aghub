@@ -340,7 +340,7 @@ jobs:
               run: cargo test --workspace --test skill_repository -- --ignored real_github_rest
 
     # Release build + smoke test - the 3 release targets. Runs release.yml's
-    # exact cargo commands, so a PR proves the tag would build, and on main it
+    # exact cargo commands, so main proves the tag would build, and there it
     # saves the dependency cache release.yml restores (a tag run cannot save
     # one a later tag can read). The matrix strings, the cargo commands and
     # the CARGO*/RUST* env (hashed into the key) MUST match release.yml's
@@ -363,14 +363,16 @@ jobs:
         timeout-minutes: 60
         strategy:
             fail-fast: false
+            # PRs build Linux only: custom-protocol and the embedded dist are
+            # the same on every OS, and Test/Clippy already compile the desktop
+            # crate on Windows and macOS. Main builds all three before any tag
+            # (verify-ci needs that run green) and saves their caches. Cut the
+            # PR critical path from Build Windows (~8.5 min) to ~5.
+            # docs/history/tooling.md#pr-builds-linux-only
             matrix:
-                include:
-                    - os: macos-latest
-                      target: aarch64-apple-darwin
-                    - os: ubuntu-22.04
-                      target: x86_64-unknown-linux-gnu
-                    - os: windows-latest
-                      target: x86_64-pc-windows-msvc
+                include: ${{ fromJSON(github.event_name == 'pull_request'
+                    && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]'
+                    || '[{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
         steps:
             - uses: actions/checkout@v6
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
