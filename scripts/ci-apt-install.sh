@@ -12,9 +12,11 @@ for attempt in 1 2 3; do
 		sudo apt-get install -y "$@"
 		exit 0
 	fi
+	[ "$attempt" -eq 3 ] && break
 	echo "::warning::apt download attempt $attempt failed or timed out; switching off the azure mirror"
 	sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' \
 		/etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
-	sudo apt-get update
+	# A failed refresh must not end the loop: the next download is the real check.
+	sudo apt-get update || true
 done
 exit 1

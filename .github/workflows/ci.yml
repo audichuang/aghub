@@ -351,7 +351,9 @@ jobs:
         # Path-filtered on main too: an unchanged Cargo.lock is an exact key
         # hit, which rust-cache never re-saves, so a docs-only push built three
         # release targets for nothing. The bump commit touches Cargo.toml and
-        # still refreshes the cache the following tag restores.
+        # still refreshes the cache the following tag restores. A new stable
+        # rustc changes the key, so a tag on a commit that skipped `build`
+        # after one restores nothing; run CI via workflow_dispatch first.
         if: |
             github.event_name == 'workflow_dispatch' ||
             needs.changes.outputs.rust == 'true' ||
@@ -456,11 +458,16 @@ jobs:
                   set -euo pipefail
                   # rust-cache keys end in -<env hash>-<lockfile hash>; the env
                   # hash carries the rustc version, so group on what precedes
-                  # both and keep the newest entry of each group.
+                  # both and keep the newest entry of each group. cargo-index-* keys
+                  # end in the Cargo.lock hash: keep main's newest, drop PR copies.
                   gh cache list -R "$REPO" -L 500 --json id,key,ref,createdAt --jq '
                     [.[] | select(.ref | contains("refs/tags/"))]
                     + ([.[] | select(.ref == "refs/heads/main" and (.key | startswith("v0-rust-")))]
                        | group_by(.key | sub("-[0-9a-f]{8}-[0-9a-f]{8}$"; ""))
+                       | map(sort_by(.createdAt) | .[:-1]) | add // [])
+                    + [.[] | select((.key | startswith("cargo-index-")) and .ref != "refs/heads/main")]
+                    + ([.[] | select(.ref == "refs/heads/main" and (.key | startswith("cargo-index-")))]
+                       | group_by(.key | sub("-[0-9a-f]{64}$"; ""))
                        | map(sort_by(.createdAt) | .[:-1]) | add // [])
                     | .[] | "\(.id)\t\(.ref)\t\(.key)"' > stale.tsv
                   cat stale.tsv
