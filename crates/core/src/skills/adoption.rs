@@ -254,25 +254,21 @@ pub fn adoption_guard(
 			}
 			let is_adoption = existing_owner.is_none();
 			// `fetched`: the content came from a remote checkout, so an existing
-			// Master must match it byte for byte. Local-disk content (an import,
-			// or a transfer carrying a remote OWNER) is only compared on
-			// adoption, and only over what the copier carries: a Master it made
-			// lacks the caches (`__pycache__`, …) the raw hash still counts.
+			// Master must match it on every compare. Local-disk content (an
+			// import, or a transfer carrying a remote OWNER) is only compared
+			// on adoption. Either way the compare covers only what the copier
+			// carries: a Master it made lacks the files npx `copyDirectory`
+			// drops (`metadata.json`, `__pycache__`, …) that the raw hash counts.
 			let is_fetched = fetched;
 			if is_fetched || is_adoption {
-				let (master_hash, source_hash) = if is_fetched {
-					(hash_master(name, canonical)?, installed_hash.clone())
-				} else {
-					let hash = |dir: &Path| {
-						master_content_hash(dir).map_err(|error| {
-							ConfigError::ValidationFailed(format!(
-								"Skill '{name}' could not be verified: {error}",
-							))
-						})
-					};
-					(hash(canonical)?, hash(source_root)?)
+				let hash = |dir: &Path| {
+					master_content_hash(dir).map_err(|error| {
+						ConfigError::ValidationFailed(format!(
+							"Skill '{name}' could not be verified: {error}",
+						))
+					})
 				};
-				let equal = master_hash == source_hash;
+				let equal = hash(canonical)? == hash(source_root)?;
 				adopts_master = is_adoption && equal;
 				// An already-linked regrant keeps its Master; it just is not adopted.
 				if !equal && (is_fetched || !is_already_installed) {

@@ -47,8 +47,10 @@ pub enum ResyncError {
 	/// Only `WouldBlock` is contention; any other kind is a permanent acquisition
 	/// failure.
 	Locked(std::io::Error),
-	/// The lock entry changed source/skillPath while this resync was fetching, so
-	/// it is no longer the entry that was fetched (nothing was mutated).
+	/// What was fetched is no longer what this resync was asked to apply, so
+	/// nothing was mutated: the lock entry changed source/skillPath (or
+	/// appeared) during the fetch, or the fetched commit is not the one a prior
+	/// check judged (`skill_update::mutation::resync_judged_skills`).
 	StaleFetch(String),
 	/// The skill has no installed copy on disk in this scope.
 	NotInstalled,

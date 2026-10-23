@@ -253,7 +253,9 @@ pub(crate) fn master_content_hash(
 /// applying the npx exclude lists and skipping symlinks.
 ///
 /// Materializes the single Master only — copy is never a per-agent outcome.
-fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
+/// Resync's staged swap (`update::DirSwapTransaction`) uses this same copier,
+/// so an install and an update of the same content write the same Master.
+pub(crate) fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 	std::fs::create_dir_all(to)?;
 	for entry in std::fs::read_dir(from)? {
 		let entry = entry?;

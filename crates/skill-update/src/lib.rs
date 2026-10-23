@@ -123,6 +123,11 @@ pub struct CheckOutput {
 	/// Resolved tip OID to write back into the GLOBAL lock's `refCommit` after a
 	/// fresh fetch, so the next check can preflight. `None` outside global fetches.
 	pub heal_oid: Option<String>,
+	/// The commit whose content this row's verdict was judged against: set for
+	/// every member of a freshly fetched group, whatever its status. An update
+	/// applied on the strength of this row must install THIS commit or refuse
+	/// (`mutation::resync_judged_skills`), never a tip that moved since.
+	pub judged_commit: Option<String>,
 }
 
 /// Group lock entries by [`SourceRef`] so each upstream is fetched once.
@@ -630,6 +635,7 @@ fn classify_member_from_probe(
 			},
 			heal_hash: None,
 			heal_oid: None,
+			judged_commit: None,
 		},
 		HashProbe::Fresh {
 			hash: fresh_hash,
@@ -644,6 +650,7 @@ fn classify_member_from_probe(
 						status: SkillUpdateStatus::Renamed { new_name },
 						heal_hash: None,
 						heal_oid: None,
+						judged_commit: None,
 					};
 				}
 			}
@@ -678,6 +685,7 @@ fn classify_member_from_probe(
 					.then(|| member.local_hash.clone())
 					.flatten(),
 				heal_oid: None,
+				judged_commit: None,
 			}
 		}
 	}
@@ -695,6 +703,7 @@ fn terminal_output(
 		status: status.clone(),
 		heal_hash: None,
 		heal_oid: None,
+		judged_commit: None,
 	}
 }
 
@@ -993,6 +1002,7 @@ pub(crate) async fn check_updates(
 					// unchanged, no local drift) and report UpToDate — the
 					// pending update would vanish until upstream moved again.
 					for (output, member) in group_out.iter_mut().zip(&members) {
+						output.judged_commit = Some(repo.oid().to_string());
 						if member.scope == "global"
 							&& output.status == SkillUpdateStatus::UpToDate
 						{
