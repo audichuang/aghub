@@ -52,12 +52,15 @@ pub use source::{
 	resolve_remote_source, source_has_credentials, strip_source_credentials,
 	RemoteSourceType, ResolvedRemoteSource, SourceError,
 };
-pub use stage::{stage_tree_entries, StageError, StagedEntry, StagedEntryMode};
+pub use stage::{
+	is_valid_entry_path, stage_tree_entries, StageError, StagedEntry,
+	StagedEntryMode,
+};
 pub use system_git::{
 	clone_to_temp_system_git, credential_fill_password,
 	list_remote_branches_system_git, probe_credential, system_git_available,
 };
-pub use tree::{is_safe_tree_entry_name, materialize_tree};
+pub use tree::{is_safe_tree_entry_name, materialize_tree, BlobHasher};
 
 /// An immutable pin of a resolved repository state: the three OIDs kept
 /// deliberately distinct. `commit_oid` is the ONLY value a lock's `refCommit`
