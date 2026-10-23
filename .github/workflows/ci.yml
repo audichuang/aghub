@@ -164,13 +164,17 @@ jobs:
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Cargo audit (vulnerabilities fail the job)
               if: matrix.os == 'ubuntu-latest'
               run: cargo audit
             - name: Cargo clippy (warnings as errors, all targets)
+              # Exact key hit = same Cargo.lock: the restored registry holds every
+              # locked crate, so skip the index refresh (44-48s on Windows).
+              # Step-level, not job env: rust-cache hashes CARGO_* into its key.
+              # docs/history/tooling.md#ci-apt-tail-and-offline-cargo
+              env:
+                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
     # Frontend lint (oxlint: type-aware + type-check, warnings as errors) + the frontend unit tests
@@ -270,10 +274,8 @@ jobs:
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
-              run: |
-                  sudo apt-get update
-                  # gnome-keyring + dbus-x11: the native keyring smoke test.
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
+              # gnome-keyring + dbus-x11: the native keyring smoke test.
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
             # Defender scanned every file the tests create (temp dirs, SQLite
             # journals): aghub-inference's tests ran ~60x slower on Windows
             # than elsewhere. Non-fatal, like release.yml's exclusions.
@@ -288,13 +290,22 @@ jobs:
                   Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
                   exit 0
             - name: Cargo fetch (lockfile must be in sync)
+              # Offline on an exact cache hit, see lint-rust's clippy step.
+              env:
+                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: cargo fetch --locked
             - name: Unit + integration tests
+              env:
+                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: just test
             - name: Doc tests
+              env:
+                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: cargo test --workspace --doc
             # The only test against the REAL OS keyring; everything else mocks it.
             - name: Native keyring smoke test
+              env:
+                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               shell: bash
               run: |
                   if [ "$RUNNER_OS" = "Linux" ]; then
@@ -323,6 +334,7 @@ jobs:
               if: matrix.os == 'ubuntu-latest' && github.event_name != 'push'
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: cargo test --workspace --test skill_repository -- --ignored real_github_rest
 
     # Release build + smoke test - the 3 release targets. Runs release.yml's
@@ -334,10 +346,11 @@ jobs:
     build:
         name: Build (${{ matrix.target }})
         needs: changes
-        # ALWAYS on push to main: the bump commit is what refreshes the cache
-        # the following tag restores.
+        # Path-filtered on main too: an unchanged Cargo.lock is an exact key
+        # hit, which rust-cache never re-saves, so a docs-only push built three
+        # release targets for nothing. The bump commit touches Cargo.toml and
+        # still refreshes the cache the following tag restores.
         if: |
-            github.event_name == 'push' ||
             github.event_name == 'workflow_dispatch' ||
             needs.changes.outputs.rust == 'true' ||
             needs.changes.outputs.desktop == 'true' ||
@@ -358,9 +371,7 @@ jobs:
             - uses: actions/checkout@v6
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-22.04'
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
               with:
@@ -385,8 +396,19 @@ jobs:
               uses: oven-sh/setup-bun@v2
               with:
                   bun-version: ${{ env.BUN_VERSION }}
+            # bun install takes ~58s on Windows against ~5s elsewhere; a warm
+            # package cache on the workspace drive lets it link instead of fetch.
+            - name: Bun package cache (Windows)
+              if: runner.os == 'Windows'
+              uses: actions/cache@v6
+              with:
+                  path: ${{ runner.temp }}/bun-cache
+                  key: bun-install-${{ runner.os }}-${{ hashFiles('crates/desktop/bun.lock') }}
+                  restore-keys: bun-install-${{ runner.os }}-
             # The desktop crate embeds ../dist, so every OS builds it.
             - name: Build frontend (typecheck + Vite)
+              env:
+                  BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-cache
               run: |
                   cd crates/desktop
                   bun install --frozen-lockfile
@@ -394,6 +416,9 @@ jobs:
             # The sidecar build, what `tauri build` runs, the CLI, and the
             # Linux aghub-api asset — in release.yml's order.
             - name: Build release binaries
+              # Offline on an exact cache hit, see lint-rust's clippy step.
+              env:
+                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               shell: bash
               run: |
                   set -euo pipefail
