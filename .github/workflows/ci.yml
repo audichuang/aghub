@@ -469,6 +469,6 @@ jobs:
                     + ([.[] | select(.ref == "refs/heads/main" and (.key | startswith("cargo-index-")))]
                        | group_by(.key | sub("-[0-9a-f]{64}$"; ""))
                        | map(sort_by(.createdAt) | .[:-1]) | add // [])
-                    | .[] | "\(.id)\t\(.ref)\t\(.key)"' > stale.tsv
+                    | unique_by(.id) | .[] | "\(.id)\t\(.ref)\t\(.key)"' > stale.tsv
                   cat stale.tsv
                   cut -f1 stale.tsv | xargs -r -n1 gh cache delete -R "$REPO"
