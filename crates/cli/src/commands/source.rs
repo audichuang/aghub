@@ -270,6 +270,9 @@ impl skill_update::Fetcher for MemoFetcher<'_> {
 		// so it serves only callers whose installed folders it already judged
 		// (each scope's `source diff` asks about its own); anything else
 		// fetches again rather than misjudge an absent folder.
+		// ponytail: a later scope that installs a folder the first did not
+		// fetches a second time; merge every scope's installed folders before
+		// the first fetch if that case ever matters.
 		let served_by = |hit: &skill_update::FetchedRepo| match selection {
 			FetchSelection::CatalogSnapshot => hit.is_complete(),
 			FetchSelection::Verify {
