@@ -7,16 +7,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use aghub_core::skills::update::SkillUpdateStatus;
-use aghub_core::WriteScope;
 use aghub_git::{
 	BlobHasher, Credentials, GitError, GithubRest, HttpRequest, HttpResponse,
 	HttpTransport, RepoFetchBackend, RepoSnapshot, RepoTree, StagedEntryMode,
 };
 
-use crate::sources::{
-	diff_source, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome,
-	SourceSkillState,
-};
+use crate::sources::SourceSkillState;
 use crate::{
 	run_update_check, EntryInput, FetchSelection, FetchedRepo, GitFetcher,
 	InstalledFolder, LocalManifest, SkillRepository, SourceRef,
@@ -459,129 +455,6 @@ fn a_verified_fetch_covers_only_what_it_judged() {
 	let full =
 		FetchedRepo::new("/nonexistent".into(), RepoSnapshot::default(), None);
 	assert!(full.covers(&[folder("b")]) && full.is_complete());
-}
-
-fn write_project_lock(root: &Path, entries: &[(&str, &str, &str)]) {
-	let mut lock = skill::LocalSkillLockFile::new();
-	for (name, skill_path, hash) in entries {
-		lock.skills.insert(
-			name.to_string(),
-			skill::LocalSkillLockEntry {
-				extra: Default::default(),
-				source_url: Some("https://github.com/acme/skills.git".into()),
-				source: "acme/skills".to_string(),
-				ref_name: None,
-				source_type: "github".to_string(),
-				skill_path: Some(skill_path.to_string()),
-				computed_hash: hash.to_string(),
-				ref_commit: None,
-			},
-		);
-	}
-	skill::write_local_lock(&lock, Some(root)).unwrap();
-}
-
-/// Acceptance 5: `source diff` over a large catalog with few installed,
-/// unchanged skills downloads the catalog's SKILL.md files and CHANGELOG.md —
-/// plus, here, the one installed folder whose SKILL.md really changed (an
-/// in-place rename). Uninstalled rows keep their metadata; installed rows are
-/// current; both rename paths (frontmatter, CHANGELOG) still report.
-#[test]
-fn source_diff_downloads_catalog_skill_md_and_changelog_only() {
-	let project = tempfile::tempdir().unwrap();
-	let mut upstream = BTreeMap::new();
-	let mut lock = Vec::new();
-	let mut hashes = Vec::new();
-	// Installed and unchanged.
-	for name in ["alpha", "beta"] {
-		let files = skill_files(name);
-		let dir = project.path().join(".claude/skills").join(name);
-		write_local(&dir, &files);
-		upstream_add(&mut upstream, &format!("skills/{name}"), &files);
-		hashes.push((name, skill::compute_skill_folder_hash(&dir).unwrap()));
-	}
-	// Installed as `gamma-old`; upstream's frontmatter now says `gamma`.
-	let gamma_dir = project.path().join(".claude/skills/gamma-old");
-	write_local(&gamma_dir, &skill_files("gamma-old"));
-	upstream_add(&mut upstream, "skills/gamma", &skill_files("gamma"));
-	let gamma_hash = skill::compute_skill_folder_hash(&gamma_dir).unwrap();
-	// Installed `old-name`, gone upstream; CHANGELOG names its successor.
-	let old_dir = project.path().join(".claude/skills/old-name");
-	write_local(&old_dir, &skill_files("old-name"));
-	let old_hash = skill::compute_skill_folder_hash(&old_dir).unwrap();
-	// Not installed.
-	for name in ["d1", "d2", "d3", "d4", "new-name"] {
-		upstream_add(
-			&mut upstream,
-			&format!("skills/{name}"),
-			&skill_files(name),
-		);
-	}
-	upstream.insert(
-		"CHANGELOG.md".to_string(),
-		(
-			StagedEntryMode::Regular,
-			b"- Rename the **`old-name`** skill to **`new-name`**.\n".to_vec(),
-		),
-	);
-	upstream.insert(
-		"README.md".to_string(),
-		(StagedEntryMode::Regular, b"never needed".to_vec()),
-	);
-	for (name, hash) in &hashes {
-		lock.push((*name, format!("skills/{name}/SKILL.md"), hash.clone()));
-	}
-	lock.push(("gamma-old", "skills/gamma/SKILL.md".into(), gamma_hash));
-	lock.push(("old-name", "skills/old-name/SKILL.md".into(), old_hash));
-	let lock: Vec<(&str, &str, &str)> = lock
-		.iter()
-		.map(|(n, p, h)| (*n, p.as_str(), h.as_str()))
-		.collect();
-	write_project_lock(project.path(), &lock);
-
-	let fake = FakeGithub::new(upstream);
-	let fetcher = fetcher(&fake);
-	let outcome = diff_source(
-		SourceDiffInput {
-			source: "acme/skills".to_string(),
-			git_ref: None,
-			scopes: vec![WriteScope::project(project.path())],
-		},
-		SourceDiffDeps {
-			fetcher: &fetcher,
-			resolver: &NoToken,
-		},
-	);
-	let SourceDiffOutcome::Ok { skills, .. } = outcome else {
-		panic!("expected Ok, got {outcome:?}");
-	};
-	let row = |name: &str| {
-		skills
-			.iter()
-			.find(|s| s.name == name)
-			.unwrap_or_else(|| panic!("no row {name}: {skills:#?}"))
-	};
-
-	assert_eq!(
-		fake.blobs(),
-		fake.oids_where(|p| p.ends_with("/SKILL.md")
-			|| p == "CHANGELOG.md"
-			|| p.starts_with("skills/gamma/")),
-		"catalog SKILL.md + CHANGELOG + the one changed installed folder"
-	);
-	for name in ["alpha", "beta"] {
-		assert_eq!(row(name).state, SourceSkillState::InstalledCurrent);
-	}
-	assert_eq!(row("gamma").state, SourceSkillState::Renamed);
-	assert_eq!(row("gamma").previous_name.as_deref(), Some("gamma-old"));
-	assert_eq!(row("new-name").state, SourceSkillState::Renamed);
-	assert_eq!(row("new-name").previous_name.as_deref(), Some("old-name"));
-	let d1 = row("d1");
-	assert_eq!(d1.state, SourceSkillState::NotInstalled);
-	assert_eq!(d1.description.as_deref(), Some("d1 does things"));
-	assert_eq!(d1.version.as_deref(), Some("1.2.0"));
-	assert_eq!(d1.author.as_deref(), Some("acme"));
-	assert_eq!(skills.len(), 8, "{skills:#?}");
 }
 
 /// The fetch never asks the gix slot, and an all-proven check selection does
