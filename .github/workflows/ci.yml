@@ -157,6 +157,15 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
@@ -169,12 +178,6 @@ jobs:
               if: matrix.os == 'ubuntu-latest'
               run: cargo audit
             - name: Cargo clippy (warnings as errors, all targets)
-              # Exact key hit = same Cargo.lock: the restored registry holds every
-              # locked crate, so skip the index refresh (44-48s on Windows).
-              # Step-level, not job env: rust-cache hashes CARGO_* into its key.
-              # docs/history/tooling.md#ci-apt-tail-and-offline-cargo
-              env:
-                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
     # Frontend lint (oxlint: type-aware + type-check, warnings as errors) + the frontend unit tests
@@ -267,6 +270,15 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
@@ -290,22 +302,13 @@ jobs:
                   Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
                   exit 0
             - name: Cargo fetch (lockfile must be in sync)
-              # Offline on an exact cache hit, see lint-rust's clippy step.
-              env:
-                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: cargo fetch --locked
             - name: Unit + integration tests
-              env:
-                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: just test
             - name: Doc tests
-              env:
-                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: cargo test --workspace --doc
             # The only test against the REAL OS keyring; everything else mocks it.
             - name: Native keyring smoke test
-              env:
-                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               shell: bash
               run: |
                   if [ "$RUNNER_OS" = "Linux" ]; then
@@ -334,7 +337,6 @@ jobs:
               if: matrix.os == 'ubuntu-latest' && github.event_name != 'push'
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               run: cargo test --workspace --test skill_repository -- --ignored real_github_rest
 
     # Release build + smoke test - the 3 release targets. Runs release.yml's
@@ -388,6 +390,15 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
@@ -416,9 +427,6 @@ jobs:
             # The sidecar build, what `tauri build` runs, the CLI, and the
             # Linux aghub-api asset — in release.yml's order.
             - name: Build release binaries
-              # Offline on an exact cache hit, see lint-rust's clippy step.
-              env:
-                  CARGO_NET_OFFLINE: ${{ steps.cache.outputs.cache-hit == 'true' }}
               shell: bash
               run: |
                   set -euo pipefail

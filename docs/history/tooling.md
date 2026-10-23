@@ -239,23 +239,25 @@ text on a line is this bug in practice (intended tab data uses `\t`; a tab
 aligning a trailing comment would also trip it). `scripts/check-string-tabs.sh` (preflight
 and the CI Format job) fails on it.
 
-## CI apt tail and offline cargo
+## CI apt tail and cargo index
 
-`scripts/ci-apt-install.sh` and the `CARGO_NET_OFFLINE` step env in
+`scripts/ci-apt-install.sh` and the "Cargo index cache" steps in
 `.github/workflows/ci.yml`. Measured over the 60 CI runs up to 2026-10-23.
 
 The GTK/webkit install is ~36s at the median on each of the three Linux jobs,
 but 5 of 138 took 8-23 minutes: the runner's azure mirror served the 73MB
 download at ~60 kB/s, so one slow leg set the whole run's wall clock. The
-script downloads with a 180s timeout (download only, so dpkg is never
-interrupted) and retries against `archive.ubuntu.com`.
+script downloads with a 90s timeout (download only, so dpkg is never
+interrupted) and retries against `archive.ubuntu.com`. Its first PR run hit
+the slow mirror once; the retry finished in 13s.
 
 Every cargo job printed `Updating crates.io index` even on an exact rust-cache
 hit: 3s on Linux, 17s on macOS, 44-48s on each Windows job, one of them on the
-PR critical path (Build Windows). An exact hit means the same Cargo.lock and a
-registry holding every locked crate, so those steps run with
-`CARGO_NET_OFFLINE`; a key miss stays online. The env is step-level because
-rust-cache hashes every non-empty `CARGO*` variable into its key.
+PR critical path (Build Windows). rust-cache prunes the index before saving it,
+and the pruned copy is incomplete: `CARGO_NET_OFFLINE` on an exact hit failed
+with `no matching package named dirs`. A separate cache of
+`~/.cargo/registry/index`, keyed on Cargo.lock and restored after rust-cache,
+gives cargo the whole index.
 
 Windows `bun install` (~58s against ~5s on the other runners) now restores
 bun's package cache from `runner.temp`, on the same drive as the checkout.
