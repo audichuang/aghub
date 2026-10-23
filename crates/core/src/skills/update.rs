@@ -203,7 +203,7 @@ pub fn stage_and_swap_dir(
 
 	let staging_root = unique_temp_dir(parent, ".aghub-stage")?;
 	let staged = staging_root.join("skill");
-	copy_dir_recursive_skip_symlinks(source_dir, &staged)?;
+	crate::skills::linker::copy_dir_recursive(source_dir, &staged)?;
 
 	let backup_root = unique_temp_dir(parent, ".aghub-backup")?;
 	let backup = backup_root.join("target");
@@ -266,7 +266,7 @@ impl PreparedDirSwap {
 		let staging_root = unique_temp_dir(parent, ".aghub-stage")?;
 		let staged = staging_root.join("skill");
 		if let Err(error) =
-			copy_dir_recursive_skip_symlinks(source_dir, &staged)
+			crate::skills::linker::copy_dir_recursive(source_dir, &staged)
 		{
 			warn_on_cleanup_failure(&staging_root);
 			return Err(error);
@@ -469,28 +469,6 @@ fn warn_on_cleanup_failure(path: &Path) {
 	if let Err(e) = remove_path_any(path) {
 		log::warn!("failed to remove skill-swap temp {}: {e}", path.display());
 	}
-}
-
-fn copy_dir_recursive_skip_symlinks(
-	from: &Path,
-	to: &Path,
-) -> std::io::Result<()> {
-	std::fs::create_dir_all(to)?;
-	for entry in std::fs::read_dir(from)? {
-		let entry = entry?;
-		let file_type = entry.file_type()?;
-		if file_type.is_symlink() {
-			continue;
-		}
-		let from_path = entry.path();
-		let to_path = to.join(entry.file_name());
-		if file_type.is_dir() {
-			copy_dir_recursive_skip_symlinks(&from_path, &to_path)?;
-		} else if file_type.is_file() {
-			std::fs::copy(&from_path, &to_path)?;
-		}
-	}
-	Ok(())
 }
 
 fn unique_temp_dir(parent: &Path, prefix: &str) -> std::io::Result<PathBuf> {

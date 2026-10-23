@@ -284,7 +284,7 @@ fn outdated_resync_installs_the_judged_commit() {
 /// `copyDirectory` parity). The next check against the SAME upstream must
 /// read `UpToDate`, or `apply-update` can never converge.
 #[test]
-#[ignore = "known bug, two halves: fetched install refuses (raw Master hash != raw source hash), and even once installed the comparison hash still counts what the Master copier drops"]
+#[ignore = "known bug (T5): the comparison hash still counts what the Master copier drops, so the check never reads UpToDate"]
 fn metadata_json_upstream_converges_after_install() {
 	with_isolated_env(|| {
 		let tmp = tempfile::tempdir().unwrap();
@@ -311,7 +311,7 @@ fn metadata_json_upstream_converges_after_install() {
 /// Upstream commits `__pycache__/x.cpython-312.pyc` with no source `.py`; the
 /// copier drops the whole `__pycache__` directory.
 #[test]
-#[ignore = "known bug, two halves: fetched install refuses (raw Master hash != raw source hash), and even once installed the comparison hash still counts what the Master copier drops"]
+#[ignore = "known bug (T5): the comparison hash still counts what the Master copier drops, so the check never reads UpToDate"]
 fn orphan_pycache_upstream_converges_after_install() {
 	with_isolated_env(|| {
 		let tmp = tempfile::tempdir().unwrap();
@@ -362,5 +362,52 @@ fn suffixless_lock_skill_path_hashes_the_skill_folder() {
 			Arc::new(SequenceFetcher::new(vec![(upstream, "c0")])),
 		);
 		assert_eq!(only_status(&out), &SkillUpdateStatus::UpToDate);
+	});
+}
+
+/// Install and resync are two Master materializers; fed the same upstream
+/// (with files npx `copyDirectory` drops) they must write the same Master.
+#[test]
+fn install_and_resync_write_the_same_master() {
+	with_isolated_env(|| {
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		std::fs::create_dir_all(&project).unwrap();
+		let upstream = tmp.path().join("upstream");
+		let folder = upstream.join("skills/alpha");
+		write_skill(&folder, "alpha", "body");
+		std::fs::write(folder.join("metadata.json"), "{}").unwrap();
+		std::fs::create_dir_all(folder.join("__pycache__")).unwrap();
+		std::fs::write(folder.join("__pycache__/x.cpython-312.pyc"), "bc")
+			.unwrap();
+		install(&project, &upstream, "c0", "alpha");
+		let master = project.join(".aghub/alpha");
+		let installed = skill::compute_skill_folder_hash(&master).unwrap();
+
+		let names = vec!["alpha".to_string()];
+		let results = skill_update::mutation::resync_locked_skills(
+			skill_update::mutation::LockedSkillsResyncRequest {
+				source_group: None,
+				names: &names,
+				scope: WriteScope::project(&project),
+			},
+			&SequenceFetcher::new(vec![(upstream, "c0")]),
+			&NoToken,
+		)
+		.unwrap();
+		assert!(results[0].outcome.is_ok(), "{results:?}");
+
+		assert!(!master.join("metadata.json").exists());
+		assert!(!master.join("__pycache__").exists());
+		assert_eq!(
+			skill::compute_skill_folder_hash(&master).unwrap(),
+			installed
+		);
+		let lock = skill::lock::local::read_local_lock(Some(&project));
+		assert_eq!(
+			lock.skills["alpha"].computed_hash,
+			skill::compute_skill_folder_hash(&folder).unwrap(),
+			"the lock keeps the raw source hash (npx parity)"
+		);
 	});
 }
