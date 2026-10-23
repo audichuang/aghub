@@ -222,31 +222,15 @@ fn relative_path(from_dir: &Path, to_path: &Path) -> PathBuf {
 	}
 }
 
-/// Names excluded when materializing a Master, mirroring upstream npx
-/// `copyDirectory` (installer.ts) so the Master hashes identically to npx.
-const EXCLUDE_FILES: &[&str] = &["metadata.json"];
-const EXCLUDE_DIRS: &[&str] = &[".git", "__pycache__", "__pypackages__"];
-
-/// Does the Master copier leave this entry out? The ONE answer for anything
-/// that compares local content against a Master the copier made.
-pub(crate) fn excluded_from_master(name: &str, is_dir: bool) -> bool {
-	EXCLUDE_FILES.contains(&name) || (is_dir && EXCLUDE_DIRS.contains(&name))
-}
+/// The copier's exclusion list lives in `skill` (one definition shared with
+/// the update-check comparison hash), so the two can never drift.
+pub(crate) use skill::excluded_from_master;
 
 /// Folder hash of `dir` over only what the copier would carry into a Master.
 pub(crate) fn master_content_hash(
 	dir: &Path,
 ) -> Result<String, skill::HashError> {
-	skill::compute_skill_folder_hash_where(dir, |rel| {
-		let mut parts = rel.components().peekable();
-		while let Some(part) = parts.next() {
-			let name = part.as_os_str().to_string_lossy();
-			if excluded_from_master(&name, parts.peek().is_some()) {
-				return false;
-			}
-		}
-		true
-	})
+	skill::compute_skill_folder_comparison_hash(dir)
 }
 
 /// Recursively copy a skill source tree into the canonical Master directory,

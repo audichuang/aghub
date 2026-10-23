@@ -41,9 +41,11 @@ never re-derive them here.
 `check` 與 `source diff` 對可讀的本機副本採同一個內容比較基準。
 「可更新」也包含本機修改而上游未變，並不只表示上游有新版本；
 `apply-update --yes` 會用來源內容覆蓋本機修改。不要改回只比較 lock。
-`UpdateAvailable.current` / `available` 是 comparison hash，排除有來源 `.py`
-的標準 CPython 快取；它們不必等於 lock 的 raw hash。所有 lock 寫入、
-healing 與安全稽核仍使用 raw 內容。只有快取不同可判最新，但 preflight
+`UpdateAvailable.current` / `available` 是 comparison hash，只算 Master
+copier 會帶進 Master 的檔案（`skill::carried_into_master`：排除 `metadata.json`
+與 `.git`/`__pycache__`/`__pypackages__`）；它們不必等於 lock 的 raw hash。
+所以上游只改這些被排除的檔案不算更新——安裝也不會帶過去。所有 lock 寫入、
+healing 與安全稽核仍使用 raw 內容。只有被排除檔案不同可判最新，但 preflight
 仍需 raw 完整性證明；不能拿 comparison hash 與 raw lock 相比來省略 fetch。
 
 ## PREFLIGHT (must stay correct)

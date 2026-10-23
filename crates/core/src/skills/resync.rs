@@ -346,8 +346,11 @@ fn refuse_conflicting_copy(
 	let Some(master) = masters.into_iter().next() else {
 		return Ok(());
 	};
-	let master_hash =
-		skill::compute_skill_folder_hash(&master).map_err(|e| {
+	// Through the Master copier's projection: a copy made by another copier
+	// that kept what ours drops (`metadata.json`, `__pycache__`) holds the
+	// same skill, not a divergent one.
+	let master_hash = skill::compute_skill_folder_comparison_hash(&master)
+		.map_err(|e| {
 			ResyncError::Hash(format!("failed to hash Master: {e}"))
 		})?;
 
@@ -367,8 +370,8 @@ fn refuse_conflicting_copy(
 			if root == master {
 				continue;
 			}
-			let hash =
-				skill::compute_skill_folder_hash(&root).map_err(|e| {
+			let hash = skill::compute_skill_folder_comparison_hash(&root)
+				.map_err(|e| {
 					ResyncError::Hash(format!(
 						"failed to hash installed copy {}: {e}",
 						root.display()
@@ -852,6 +855,43 @@ mod tests {
 			.contains("foreign copy"));
 		assert_eq!(std::fs::read_link(claude.join("sync-me")).unwrap(), master);
 		assert_eq!(std::fs::read(&lock_path).unwrap(), lock_before);
+	}
+
+	/// A per-agent copy made by another copier (npx, an older aghub) may keep
+	/// what the Master copier drops. That is not a different copy: the
+	/// conflict check compares through the same projection as the Master.
+	#[cfg(unix)]
+	#[test]
+	fn copy_differing_only_in_master_dropped_files_is_not_a_conflict() {
+		use std::os::unix::fs::symlink;
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let master = project.join(".aghub/sync-me");
+		let copy = project.join(".cursor/skills/sync-me");
+		write_skill(&master, "sync-me", "same");
+		write_skill(&copy, "sync-me", "same");
+		std::fs::write(copy.join("metadata.json"), "{}").unwrap();
+		std::fs::create_dir_all(copy.join("__pycache__")).unwrap();
+		std::fs::write(copy.join("__pycache__/x.cpython-312.pyc"), "bc")
+			.unwrap();
+		let claude = project.join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		symlink(&master, claude.join("sync-me")).unwrap();
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "new upstream");
+		resync_installed_skill(ResyncRequest {
+			source_dir: &source,
+			name: "sync-me",
+			scope: WriteScope::project(&project),
+			ref_commit: Some("new-commit"),
+			expected: captured("sync-me", &project),
+		})
+		.unwrap();
+		assert!(std::fs::read_to_string(master.join("SKILL.md"))
+			.unwrap()
+			.contains("new upstream"));
 	}
 
 	#[test]

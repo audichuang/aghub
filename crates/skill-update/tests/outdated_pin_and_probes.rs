@@ -284,7 +284,6 @@ fn outdated_resync_installs_the_judged_commit() {
 /// `copyDirectory` parity). The next check against the SAME upstream must
 /// read `UpToDate`, or `apply-update` can never converge.
 #[test]
-#[ignore = "known bug (T5): the comparison hash still counts what the Master copier drops, so the check never reads UpToDate"]
 fn metadata_json_upstream_converges_after_install() {
 	with_isolated_env(|| {
 		let tmp = tempfile::tempdir().unwrap();
@@ -311,7 +310,6 @@ fn metadata_json_upstream_converges_after_install() {
 /// Upstream commits `__pycache__/x.cpython-312.pyc` with no source `.py`; the
 /// copier drops the whole `__pycache__` directory.
 #[test]
-#[ignore = "known bug (T5): the comparison hash still counts what the Master copier drops, so the check never reads UpToDate"]
 fn orphan_pycache_upstream_converges_after_install() {
 	with_isolated_env(|| {
 		let tmp = tempfile::tempdir().unwrap();
@@ -408,6 +406,103 @@ fn install_and_resync_write_the_same_master() {
 			lock.skills["alpha"].computed_hash,
 			skill::compute_skill_folder_hash(&folder).unwrap(),
 			"the lock keeps the raw source hash (npx parity)"
+		);
+	});
+}
+
+/// `skills/alpha` with `body`, plus what the Master copier drops: a
+/// `metadata.json` and an orphan `__pycache__` bytecode file.
+fn write_upstream_with_dropped_files(root: &Path, body: &str) {
+	let folder = root.join("skills/alpha");
+	write_skill(&folder, "alpha", body);
+	std::fs::write(folder.join("metadata.json"), "{}").unwrap();
+	std::fs::create_dir_all(folder.join("__pycache__")).unwrap();
+	std::fs::write(folder.join("__pycache__/x.cpython-312.pyc"), "bc").unwrap();
+}
+
+fn diff_state(
+	project: &Path,
+	upstream: &Path,
+) -> skill_update::sources::SourceSkillState {
+	let outcome = skill_update::sources::diff_source(
+		skill_update::sources::SourceDiffInput {
+			source: "owner/repo".to_string(),
+			git_ref: None,
+			scopes: vec![WriteScope::project(project)],
+		},
+		skill_update::sources::SourceDiffDeps {
+			fetcher: &SequenceFetcher::new(vec![(
+				upstream.to_path_buf(),
+				"c0",
+			)]),
+			resolver: &NoToken,
+		},
+	);
+	let skills = match outcome {
+		skill_update::sources::SourceDiffOutcome::Ok { skills, .. } => skills,
+		other => panic!("{other:?}"),
+	};
+	let row = skills
+		.iter()
+		.find(|d| d.name == "alpha")
+		.expect("alpha row");
+	row.state.clone()
+}
+
+/// The copier's exclusions must not blind the check: once the dropped files
+/// stop counting, a real `SKILL.md` change upstream still reads as an update.
+#[test]
+fn check_ignores_dropped_files_but_still_sees_real_changes() {
+	with_isolated_env(|| {
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		std::fs::create_dir_all(&project).unwrap();
+		let upstream = tmp.path().join("upstream");
+		let edited = tmp.path().join("edited");
+		write_upstream_with_dropped_files(&upstream, "body");
+		write_upstream_with_dropped_files(&edited, "new body");
+		install(&project, &upstream, "c0", "alpha");
+
+		let out = check(
+			&project,
+			Arc::new(SequenceFetcher::new(vec![(upstream, "c0")])),
+		);
+		assert_eq!(only_status(&out), &SkillUpdateStatus::UpToDate);
+		let out = check(
+			&project,
+			Arc::new(SequenceFetcher::new(vec![(edited, "c1")])),
+		);
+		assert!(
+			matches!(
+				only_status(&out),
+				SkillUpdateStatus::UpdateAvailable { .. }
+			),
+			"{out:?}"
+		);
+	});
+}
+
+/// `source diff` judges with the same projection as `check`.
+#[test]
+fn source_diff_ignores_dropped_files_but_still_sees_real_changes() {
+	use skill_update::sources::SourceSkillState;
+	with_isolated_env(|| {
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		std::fs::create_dir_all(&project).unwrap();
+		let upstream = tmp.path().join("upstream");
+		let edited = tmp.path().join("edited");
+		write_upstream_with_dropped_files(&upstream, "body");
+		write_upstream_with_dropped_files(&edited, "new body");
+		install(&project, &upstream, "c0", "alpha");
+
+		assert_eq!(
+			diff_state(&project, &upstream),
+			SourceSkillState::InstalledCurrent
+		);
+		assert_eq!(
+			diff_state(&project, &edited),
+			SourceSkillState::InstalledOutdated
 		);
 	});
 }

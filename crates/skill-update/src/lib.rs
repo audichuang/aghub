@@ -90,7 +90,7 @@ pub struct EntryInput {
 	pub stored_hash: Option<String>,
 	/// Raw installed-folder hash, used for preflight integrity and lock healing.
 	pub local_hash: Option<String>,
-	/// Hash with generated caches excluded, used for local/upstream comparison.
+	/// Hash over only what the Master copier carries, used for local/upstream comparison.
 	pub local_comparison_hash: Option<String>,
 	/// The managed agents' readable copies disagree; there is no single local
 	/// baseline (`verdict::Verdict::Ambiguous`).
