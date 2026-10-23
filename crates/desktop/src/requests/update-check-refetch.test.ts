@@ -10,6 +10,7 @@ import {
 import type { ApiClient } from "./client.ts";
 import { queryKeys } from "./keys.ts";
 import {
+	applySkillUpdateMutationOptions,
 	applySkillUpdatesMutationOptions,
 	refetchUpdateChecksAfterWrites,
 } from "./skills.ts";
@@ -136,4 +137,120 @@ test("one batch plus the final refetch runs exactly one check", async () => {
 
 	assert.equal(fetches, 1);
 	unsubscribe();
+});
+
+// The skill detail panel reads the check through a lazy `enabled: false`
+// observer. A single apply-update must refresh it with exactly ONE check from
+// the shared options — the panel no longer starts a second one — whether or
+// not an auto-check observer on the same key is mounted (settings page) or not
+// (project page).
+for (const withActiveObserver of [false, true]) {
+	test(`single update runs exactly one check (auto-check observer: ${withActiveObserver})`, async () => {
+		const client = new QueryClient({
+			defaultOptions: { queries: { retry: false } },
+		});
+		const queryKey = queryKeys.skills.updateChecks("global");
+		let fetches = 0;
+		const queryFn = async () => {
+			fetches += 1;
+			return fetches;
+		};
+		const lazy = new QueryObserver(client, {
+			queryKey,
+			queryFn,
+			enabled: false,
+		});
+		const unsubLazy = lazy.subscribe(() => {});
+		const active = withActiveObserver
+			? new QueryObserver(client, {
+					queryKey,
+					queryFn,
+					staleTime: Number.POSITIVE_INFINITY,
+				})
+			: null;
+		const unsubActive = active?.subscribe(() => {});
+		await active?.refetch();
+		// Lazy-only case: an earlier check left an answer in the cache.
+		if (!active) client.setQueryData(queryKey, 0);
+		fetches = 0;
+
+		const api = {
+			skills: { applyUpdate: async () => ({ success: true }) },
+		} as unknown as ApiClient;
+		const options = applySkillUpdateMutationOptions({
+			api,
+			queryClient: client,
+		});
+		await options.onSuccess?.(
+			{ success: true } as any,
+			{ body: {} as any },
+			undefined,
+			{} as any,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		assert.equal(fetches, 1, "one update must cost one every-source check");
+		assert.equal(lazy.getCurrentResult().data, 1);
+		unsubLazy();
+		unsubActive?.();
+	});
+}
+
+// Disabled-only observers (settings page offline / no project selected) must
+// not be forced into a check unless they already hold an answer and we are online.
+function setOnline(value: boolean | undefined) {
+	Object.defineProperty(globalThis, "navigator", {
+		value: { onLine: value },
+		configurable: true,
+	});
+}
+
+async function disabledOnlyFetches(seed: boolean, online: boolean) {
+	const client = new QueryClient({
+		defaultOptions: { queries: { retry: false } },
+	});
+	const queryKey = queryKeys.skills.updateChecks("global");
+	let fetches = 0;
+	const observer = new QueryObserver(client, {
+		queryKey,
+		queryFn: async () => {
+			fetches += 1;
+			return fetches;
+		},
+		enabled: false,
+	});
+	const unsubscribe = observer.subscribe(() => {});
+	if (seed) client.setQueryData(queryKey, 0);
+	setOnline(online);
+	try {
+		const api = {
+			skills: { applyUpdate: async () => ({ success: true }) },
+		} as unknown as ApiClient;
+		await applySkillUpdateMutationOptions({
+			api,
+			queryClient: client,
+		}).onSuccess?.(
+			{ success: true } as any,
+			{ body: {} as any },
+			undefined,
+			{} as any,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	} finally {
+		setOnline(undefined);
+		unsubscribe();
+	}
+	return fetches;
+}
+
+test("all-disabled update-check query with no data is not fetched", async () => {
+	assert.equal(await disabledOnlyFetches(false, true), 0);
+});
+
+test("all-disabled update-check query with data is fetched once", async () => {
+	assert.equal(await disabledOnlyFetches(true, true), 1);
+});
+
+test("all-disabled update-check query with data is not fetched offline", async () => {
+	assert.equal(await disabledOnlyFetches(true, false), 0);
 });
