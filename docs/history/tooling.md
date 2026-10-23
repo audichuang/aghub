@@ -238,3 +238,35 @@ test messages. rustfmt and clippy accept it, and the tests only asserted
 text on a line is this bug in practice (intended tab data uses `\t`; a tab
 aligning a trailing comment would also trip it). `scripts/check-string-tabs.sh` (preflight
 and the CI Format job) fails on it.
+
+## CI apt tail and cargo index
+
+`scripts/ci-apt-install.sh` and the "Cargo index cache" steps in
+`.github/workflows/ci.yml`. Measured over the 60 CI runs up to 2026-10-23.
+
+The GTK/webkit install is ~36s at the median on each of the three Linux jobs,
+but 5 of 138 took 8-23 minutes: the runner's azure mirror served the 73MB
+download at ~60 kB/s, so one slow leg set the whole run's wall clock. The
+script downloads with a 90s timeout (download only, so dpkg is never
+interrupted) and retries against `archive.ubuntu.com`. Its first PR run hit
+the slow mirror once; the retry finished in 13s.
+
+Every cargo job printed `Updating crates.io index` even on an exact rust-cache
+hit: 3s on Linux, 17s on macOS, 44-48s on each Windows job, one of them on the
+PR critical path (Build Windows). rust-cache prunes the index before saving it,
+and the pruned copy is incomplete: `CARGO_NET_OFFLINE` on an exact hit failed
+with `no matching package named dirs`. A separate cache of
+`~/.cargo/registry/index`, keyed on Cargo.lock and restored after rust-cache,
+gives cargo the whole index.
+
+Warm PR rerun, Windows: `cargo fetch` 44s -> 34s (no index download; the rest
+is unpacking `.crate` sources, which rust-cache does not keep), the Build job's
+gap before the first compile 51s -> 36s.
+
+Rejected: a Windows bun package cache. `bun install` fell 58s -> 10s, but the
+cache restore took 14s and the following `tsc` paid ~20s more reading the
+freshly linked node_modules, so the step went 68s -> 63s.
+
+Not changed: the three release cargo builds in `build` recompile the
+workspace crates under two feature sets on purpose (see Release build speed);
+merging them would leave release.yml's `build-cli` cold.

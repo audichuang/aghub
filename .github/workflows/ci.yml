@@ -157,6 +157,15 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
@@ -164,9 +173,7 @@ jobs:
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Cargo audit (vulnerabilities fail the job)
               if: matrix.os == 'ubuntu-latest'
               run: cargo audit
@@ -263,6 +270,15 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
@@ -270,10 +286,8 @@ jobs:
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
-              run: |
-                  sudo apt-get update
-                  # gnome-keyring + dbus-x11: the native keyring smoke test.
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
+              # gnome-keyring + dbus-x11: the native keyring smoke test.
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
             # Defender scanned every file the tests create (temp dirs, SQLite
             # journals): aghub-inference's tests ran ~60x slower on Windows
             # than elsewhere. Non-fatal, like release.yml's exclusions.
@@ -334,10 +348,11 @@ jobs:
     build:
         name: Build (${{ matrix.target }})
         needs: changes
-        # ALWAYS on push to main: the bump commit is what refreshes the cache
-        # the following tag restores.
+        # Path-filtered on main too: an unchanged Cargo.lock is an exact key
+        # hit, which rust-cache never re-saves, so a docs-only push built three
+        # release targets for nothing. The bump commit touches Cargo.toml and
+        # still refreshes the cache the following tag restores.
         if: |
-            github.event_name == 'push' ||
             github.event_name == 'workflow_dispatch' ||
             needs.changes.outputs.rust == 'true' ||
             needs.changes.outputs.desktop == 'true' ||
@@ -358,9 +373,7 @@ jobs:
             - uses: actions/checkout@v6
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-22.04'
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
               with:
@@ -377,6 +390,15 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
