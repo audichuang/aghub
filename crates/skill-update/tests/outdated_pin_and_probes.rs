@@ -506,3 +506,115 @@ fn source_diff_ignores_dropped_files_but_still_sees_real_changes() {
 		);
 	});
 }
+
+/// `skills/alpha` whose root `SKILL.md` is a link to an in-folder
+/// `docs/SKILL.md`: containment holds, but the Master copier skips links.
+fn write_upstream_with_linked_skill_md(root: &Path) {
+	let folder = root.join("skills/alpha");
+	write_skill(&folder.join("docs"), "alpha", "linked");
+	std::os::unix::fs::symlink("docs/SKILL.md", folder.join("SKILL.md"))
+		.unwrap();
+}
+
+/// A resync from a source whose `SKILL.md` is a link would swap in a Master
+/// with no `SKILL.md` (the copier skips links) and still advance the lock.
+/// It must be refused before anything is touched.
+#[test]
+fn a_linked_skill_md_resync_is_refused_and_the_master_is_kept() {
+	with_isolated_env(|| {
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		std::fs::create_dir_all(&project).unwrap();
+		let v0 = tmp.path().join("v0");
+		write_skill(&v0.join("skills/alpha"), "alpha", "v0 body");
+		install(&project, &v0, "c0", "alpha");
+		let master = project.join(".aghub/alpha");
+		let master_before = skill::compute_skill_folder_hash(&master).unwrap();
+		let lock_file = project.join("skills-lock.json");
+		let lock_before = std::fs::read(&lock_file).unwrap();
+		let v1 = tmp.path().join("v1");
+		write_upstream_with_linked_skill_md(&v1);
+
+		let names = vec!["alpha".to_string()];
+		let results = skill_update::mutation::resync_locked_skills(
+			skill_update::mutation::LockedSkillsResyncRequest {
+				source_group: None,
+				names: &names,
+				scope: WriteScope::project(&project),
+			},
+			&SequenceFetcher::new(vec![(v1, "c1")]),
+			&NoToken,
+		)
+		.unwrap();
+
+		let Err(error) = &results[0].outcome else {
+			panic!("a linked SKILL.md must be refused: {results:?}");
+		};
+		assert!(
+			format!("{error:?}").contains("not a regular file"),
+			"refused for the link, not for a missing path: {error:?}"
+		);
+		assert!(master.join("SKILL.md").is_file());
+		assert!(installed_body(&project, "alpha").contains("v0 body"));
+		assert_eq!(
+			skill::compute_skill_folder_hash(&master).unwrap(),
+			master_before
+		);
+		assert_eq!(std::fs::read(&lock_file).unwrap(), lock_before);
+	});
+}
+
+/// A fresh fetched install from the same source must be refused with no
+/// Master, no Referrer and no lock entry left behind.
+#[test]
+fn a_linked_skill_md_fresh_install_is_refused_with_no_residue() {
+	with_isolated_env(|| {
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		std::fs::create_dir_all(&project).unwrap();
+		let upstream = tmp.path().join("upstream");
+		write_upstream_with_linked_skill_md(&upstream);
+		let fetcher = SequenceFetcher::new(vec![(upstream, "c0")]);
+		let repo = fetcher
+			.fetch(
+				&SourceRef {
+					source: SOURCE_URL.into(),
+					ref_: Some("main".into()),
+				},
+				None,
+				FetchSelection::CatalogSnapshot,
+			)
+			.unwrap();
+
+		let error = install_fetched_source(
+			&FetchedSource::from_repo(repo),
+			FetchedInstallRequest {
+				source: &skill::InstallLockSource {
+					source: "owner/repo".into(),
+					source_type: "git".into(),
+					source_url: SOURCE_URL.into(),
+					ref_name: Some("main".into()),
+				},
+				lock_skill_path: "skills/alpha/SKILL.md",
+				expected_name: None,
+				scope: WriteScope::project(&project),
+				target_agents: &[aghub_core::models::AgentType::Claude],
+				expected_ref: None,
+			},
+		)
+		.expect_err("a linked SKILL.md must be refused");
+
+		assert!(
+			format!("{error:?}").contains("not a regular file"),
+			"refused for the link, not for a missing path: {error:?}"
+		);
+		assert!(!project.join(".aghub/alpha").exists());
+		assert!(std::fs::symlink_metadata(
+			project.join(".claude/skills/alpha")
+		)
+		.is_err());
+		assert!(!skill::lock::local::read_local_lock(Some(&project))
+			.skills
+			.contains_key("alpha"));
+	});
+}

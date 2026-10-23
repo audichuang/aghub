@@ -163,6 +163,10 @@ fn write_install_lock(
 fn precheck_request(
 	req: &FetchedSkillInstallRequest<'_>,
 ) -> Result<String, crate::ConfigError> {
+	// A linked marker parses (parse follows it) but the copier skips it: the
+	// Master would land without SKILL.md and the lock would still be written.
+	crate::skills::update::ensure_regular_skill_marker(req.skill_file)
+		.map_err(crate::ConfigError::ValidationFailed)?;
 	let parsed = skill::parser::parse(req.skill_file).map_err(|e| {
 		crate::ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
 	})?;
@@ -380,6 +384,10 @@ fn verify_written_master(
 		))
 	})?;
 	ensure_link_free_master(name, canonical)?;
+	crate::skills::update::ensure_regular_skill_marker(
+		&canonical.join("SKILL.md"),
+	)
+	.map_err(crate::ConfigError::ValidationFailed)?;
 	let hash = |dir: &Path| {
 		master_content_hash(dir).map_err(|error| {
 			crate::ConfigError::ValidationFailed(format!(

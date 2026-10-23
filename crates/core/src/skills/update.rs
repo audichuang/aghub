@@ -153,6 +153,27 @@ pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
 	}
 }
 
+/// Refuse a skill whose root marker is not a REGULAR file (a link, a FIFO, a
+/// directory). Master copies carry regular files only, so copying such a
+/// folder writes a Master with no `SKILL.md` — while parse (which follows the
+/// link) and the lock write would both report success. `skill_file` is the
+/// marker path itself (`<folder>/SKILL.md`). The message is path-free.
+///
+/// Discovery of INSTALLED skills still follows a linked `SKILL.md`; this rule
+/// is only about what aghub copies into a Master.
+pub fn ensure_regular_skill_marker(skill_file: &Path) -> Result<(), String> {
+	match std::fs::symlink_metadata(skill_file) {
+		Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+		Ok(_) => Err("the skill's SKILL.md is not a regular file (a symbolic \
+			 link or a special file); a Master copies regular files only, so \
+			 the skill was refused and nothing was written"
+			.to_string()),
+		Err(error) => {
+			Err(format!("the skill's SKILL.md could not be read: {error}"))
+		}
+	}
+}
+
 /// Structured reason a transactional skill swap/rename could not complete, so
 /// callers render a reason + one actionable next step instead of a bare
 /// "may need manual recovery" string. The universal-rename path
@@ -267,7 +288,16 @@ impl PreparedDirSwap {
 		let staged = staging_root.join("skill");
 		if let Err(error) =
 			crate::skills::linker::copy_dir_recursive(source_dir, &staged)
-		{
+				.and_then(|()| {
+					// Second guard: never swap in a copy without its marker.
+					ensure_regular_skill_marker(&staged.join("SKILL.md"))
+						.map_err(|message| {
+							std::io::Error::new(
+								std::io::ErrorKind::InvalidData,
+								message,
+							)
+						})
+				}) {
 			warn_on_cleanup_failure(&staging_root);
 			return Err(error);
 		}

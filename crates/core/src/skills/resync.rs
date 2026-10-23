@@ -199,6 +199,12 @@ pub fn stored_master_root(
 pub fn resync_installed_skill(
 	req: ResyncRequest,
 ) -> Result<ResyncReport, ResyncError> {
+	// Pure read, before the lock: a source whose marker is a link would stage
+	// a Master with no SKILL.md and still advance the lock.
+	crate::skills::update::ensure_regular_skill_marker(
+		&req.source_dir.join("SKILL.md"),
+	)
+	.map_err(ResyncError::Parse)?;
 	// Hold the interprocess mutation lock across stage-and-swap AND the lock
 	// re-stamp, so a concurrent aghub cannot swap content under the hash we are
 	// about to record (nor be rolled back over by ours).
