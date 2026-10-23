@@ -84,15 +84,15 @@ impl Fetcher for RecordingFetcher {
 			.lock()
 			.unwrap()
 			.push((source_ref.clone(), token.map(str::to_string)));
-		Ok(FetchedRepo {
-			root: self.root.clone(),
-			snapshot: aghub_git::RepoSnapshot {
+		Ok(FetchedRepo::new(
+			self.root.clone(),
+			aghub_git::RepoSnapshot {
 				commit_oid: "global-commit".to_string(),
 				tree_oid: "global-tree".to_string(),
 				commit_time: None,
 			},
-			_guard: None,
-		})
+			None,
+		))
 	}
 }
 

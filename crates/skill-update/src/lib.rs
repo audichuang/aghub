@@ -23,9 +23,15 @@ pub mod mutation;
 mod repository;
 pub use repository::{
 	skill_folder_from_lock_path, skill_repo_to_fetch_error, CatalogSkill,
-	FetchSelection, PinnedSnapshot, SkillCatalog, SkillRepoError,
-	SkillRepository,
+	FetchSelection, InstalledFolder, PinnedSnapshot, SkillCatalog,
+	SkillRepoError, SkillRepository,
 };
+
+mod proof;
+pub use proof::LocalManifest;
+
+#[cfg(all(test, unix))]
+mod tree_first_tests;
 
 pub mod projection;
 
@@ -42,8 +48,8 @@ pub(crate) fn https_only_token<'token>(
 	token.filter(|_| url.starts_with("https://"))
 }
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -89,6 +95,9 @@ pub struct EntryInput {
 	/// The managed agents' readable copies disagree; there is no single local
 	/// baseline (`verdict::Verdict::Ambiguous`).
 	pub local_ambiguous: bool,
+	/// The walk behind `local_hash`, with per-file blob oids, so the fetch can
+	/// prove an unchanged folder from the tree alone. `None` → materialize.
+	pub local_manifest: Option<Arc<LocalManifest>>,
 	/// Stored repo-level commit OID (`refCommit`) from the lock, when present.
 	/// Drives the tip preflight: an unchanged tip lets the group skip the
 	/// fetch. `None` (project lock / npx / legacy) → never a preflight skip.
@@ -190,7 +199,7 @@ impl ResultCache {
 
 /// The outcome of a fetch for one [`SourceRef`]: a materialized local repo
 /// directory rooted at the temp checkout, kept alive for the borrow's lifetime.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FetchedRepo {
 	/// Root of the fetched source tree (the containment root for `skill_path`).
 	pub root: PathBuf,
@@ -199,9 +208,86 @@ pub struct FetchedRepo {
 	pub snapshot: aghub_git::RepoSnapshot,
 	/// Keep-alive guard for a temp dir, dropped when the repo is no longer needed.
 	pub _guard: Option<Arc<tempfile::TempDir>>,
+	/// Set by a [`FetchSelection::Verify`] fetch, whose `root` is PARTIAL:
+	/// proven folders are absent from it. `None` = every selected folder was
+	/// materialized whole.
+	verified: Option<Arc<VerifiedFolders>>,
+}
+
+/// What a [`FetchSelection::Verify`] fetch decided per installed folder.
+#[derive(Debug, Default)]
+pub(crate) struct VerifiedFolders {
+	/// Folders proven identical to a local copy from the tree alone — NOT
+	/// materialized; their upstream hashes are the manifest's.
+	pub(crate) proven: HashMap<String, Arc<LocalManifest>>,
+	/// Every installed folder the fetch was asked about (proven, materialized
+	/// whole, or absent from what the selection serves).
+	pub(crate) handled: HashSet<String>,
 }
 
 impl FetchedRepo {
+	/// A fully materialized fetch rooted at `root`.
+	pub fn new(
+		root: PathBuf,
+		snapshot: aghub_git::RepoSnapshot,
+		guard: Option<Arc<tempfile::TempDir>>,
+	) -> Self {
+		Self {
+			root,
+			snapshot,
+			_guard: guard,
+			verified: None,
+		}
+	}
+
+	pub(crate) fn with_verified(mut self, verified: VerifiedFolders) -> Self {
+		self.verified = Some(Arc::new(verified));
+		self
+	}
+
+	/// The local manifest that proved `folder` (a `SkillPath` string) without
+	/// materializing it.
+	pub fn proven(&self, folder: &str) -> Option<&LocalManifest> {
+		self.verified
+			.as_ref()?
+			.proven
+			.get(folder)
+			.map(|manifest| manifest.as_ref())
+	}
+
+	/// Upstream `(raw, comparison)` hashes of `folder` (a `SkillPath` string):
+	/// the proof's when it was proven, else the hashes of `dir`, its
+	/// materialized copy. EVERY consumer that judges a fetched folder goes
+	/// through here — a proven folder is not on disk, and hashing its absence
+	/// would read as "update available".
+	pub fn folder_hashes(
+		&self,
+		folder: Option<&str>,
+		dir: &Path,
+	) -> Result<(String, String), skill::HashError> {
+		match folder.and_then(|folder| self.proven(folder)) {
+			Some(manifest) => {
+				Ok((manifest.raw.clone(), manifest.comparison.clone()))
+			}
+			None => skill::compute_skill_folder_hashes(dir),
+		}
+	}
+
+	/// Whether this fetch can judge every one of `installed` (for a memo that
+	/// shares one fetch across callers): a full fetch can; a verified one only
+	/// for the folders it was asked about.
+	pub fn covers(&self, installed: &[InstalledFolder]) -> bool {
+		self.verified.as_ref().is_none_or(|verified| {
+			installed
+				.iter()
+				.all(|f| verified.handled.contains(f.folder.as_str()))
+		})
+	}
+
+	/// Whether `root` holds every selected folder whole.
+	pub fn is_complete(&self) -> bool {
+		self.verified.is_none()
+	}
 	/// The commit oid to record in the lock's `refCommit`. Always the COMMIT
 	/// oid, never the tree oid.
 	pub fn oid(&self) -> &str {
@@ -391,23 +477,50 @@ pub fn keychain_host_for_source(source: &str) -> Option<String> {
 		.and_then(|resolved| host_of(&resolved.clone_url))
 }
 
+/// The skill folder (`SkillPath` string, `""` = root) a lock `skill_path`
+/// names — the ONE key both the proof and the probe use, so a proven folder
+/// and a materialized one can never be two different directories.
+pub(crate) fn proof_folder(skill_path: &str) -> Option<String> {
+	skill_folder_from_lock_path(skill_path).map(|p| p.as_str().to_string())
+}
+
 /// Classify one fetched group result for a single skill entry: sanitize its
 /// `skill_path` under the fetched root, then recompute + compare the hash.
 fn probe_skill_hash_in_repo(
-	repo_root: &std::path::Path,
+	repo: &FetchedRepo,
 	skill_path: Option<&str>,
 ) -> HashProbe {
 	let Some(skill_path) = skill_path else {
 		return HashProbe::Uncheckable(UncheckableReason::NoPath);
 	};
-	// `skill_path` is `<dir>/SKILL.md`; sanitize the file path (rejects abs/`..`
-	// and verifies containment), then hash its PARENT folder.
-	let Some(skill_file) = sanitize_skill_path(repo_root, skill_path) else {
+	let Some(folder) = proof_folder(skill_path) else {
 		return HashProbe::Uncheckable(UncheckableReason::NoPath);
 	};
-	let folder = skill_file.parent().unwrap_or(repo_root);
+	let folder = Some(folder);
+	// A proven folder is NOT on disk: answer from the proof before any path
+	// resolution, which would read its absence as "no path".
+	if let Some(manifest) = folder.as_deref().and_then(|f| repo.proven(f)) {
+		return HashProbe::Fresh {
+			hash: manifest.raw.clone(),
+			comparison_hash: manifest.comparison.clone(),
+			name: manifest.skill_name().map(str::to_string),
+		};
+	}
+	let repo_root = repo.root.as_path();
+	// Resolve the folder's SKILL.md from the lock-derived folder, never from the
+	// raw `skill_path`: a suffix-less `skillPath` (`<dir>`) would otherwise make
+	// `<dir>` the "file" and hash its PARENT. Sanitizing rejects abs/`..` and
+	// verifies containment; the hashed folder is the marker's parent.
+	let marker = match folder.as_deref() {
+		Some("") | None => "SKILL.md".to_string(),
+		Some(dir) => format!("{dir}/SKILL.md"),
+	};
+	let Some(skill_file) = sanitize_skill_path(repo_root, &marker) else {
+		return HashProbe::Uncheckable(UncheckableReason::NoPath);
+	};
+	let dir = skill_file.parent().unwrap_or(repo_root);
 	let name = skill::parse(&skill_file).ok().map(|skill| skill.name);
-	match skill::compute_skill_folder_hashes(folder) {
+	match repo.folder_hashes(folder.as_deref(), dir) {
 		Ok((hash, comparison_hash)) => HashProbe::Fresh {
 			hash,
 			comparison_hash,
@@ -791,14 +904,19 @@ pub(crate) async fn check_updates(
 				}
 				pinned = observed.and_then(|observed| observed.pinned);
 			}
-			// Path-scoped fetch: only the locked skill folders for this group.
-			let folders: Vec<skill::SkillPath> = job
+			// Path-scoped fetch: only the locked skill folders for this group,
+			// each with its local manifest so an unchanged one is proven from
+			// the tree instead of downloaded.
+			let folders: Vec<InstalledFolder> = job
 				.members
 				.iter()
 				.filter_map(|m| {
-					m.skill_path
-						.as_deref()
-						.and_then(skill_folder_from_lock_path)
+					let skill_path = m.skill_path.as_deref()?;
+					Some(InstalledFolder {
+						folder: skill_folder_from_lock_path(skill_path)?,
+						manifest: proof_folder(skill_path)
+							.and(m.local_manifest.clone()),
+					})
 				})
 				.collect();
 			let result = tokio::time::timeout(
@@ -852,7 +970,7 @@ pub(crate) async fn check_updates(
 						hashes.entry(m.skill_path.clone()).or_insert_with(
 							|| {
 								probe_skill_hash_in_repo(
-									&repo.root,
+									&repo,
 									m.skill_path.as_deref(),
 								)
 							},
@@ -972,11 +1090,14 @@ async fn do_fetch(
 	fetcher: Arc<dyn Fetcher>,
 	sr: SourceRef,
 	token: Option<String>,
-	folders: Vec<skill::SkillPath>,
+	folders: Vec<InstalledFolder>,
 	pinned: Option<PinnedSnapshot>,
 ) -> Result<FetchedRepo, FetchError> {
 	tokio::task::spawn_blocking(move || {
-		let selection = FetchSelection::Skills(&folders);
+		let selection = FetchSelection::Verify {
+			installed: &folders,
+			catalog: false,
+		};
 		match &pinned {
 			// The preflight decided `Fetch` about a SPECIFIC tip. Fetching that
 			// exact snapshot is what makes the verdict and the content agree; a
@@ -1118,15 +1239,15 @@ mod tests {
 					_ => FetchError::network("stub"),
 				});
 			}
-			Ok(FetchedRepo {
-				root: self.root.clone().unwrap(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(FetchedRepo::new(
+				self.root.clone().unwrap(),
+				aghub_git::RepoSnapshot {
 					commit_oid: STUB_FETCH_OID.to_string(),
 					tree_oid: STUB_TREE_OID.to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -1144,6 +1265,7 @@ mod tests {
 			local_hash: None,
 			local_comparison_hash: None,
 			local_ambiguous: false,
+			local_manifest: None,
 			ref_commit: None,
 			ambiguous_host: false,
 		}
@@ -1649,15 +1771,15 @@ mod tests {
 			_token: Option<&str>,
 			_selection: FetchSelection<'_>,
 		) -> Result<FetchedRepo, FetchError> {
-			Ok(FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: self.commit_oid.clone(),
 					tree_oid: self.tree_oid.clone(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -2519,15 +2641,15 @@ mod tests {
 			self.max.fetch_max(current, Ordering::SeqCst);
 			std::thread::sleep(Duration::from_millis(100));
 			self.current.fetch_sub(1, Ordering::SeqCst);
-			Ok(FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: STUB_FETCH_OID.to_string(),
 					tree_oid: STUB_TREE_OID.to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 

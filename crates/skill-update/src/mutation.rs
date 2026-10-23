@@ -967,15 +967,15 @@ mod tests {
 			selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
 			assert!(matches!(selection, FetchSelection::CatalogSnapshot));
-			Ok(crate::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(crate::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: "moved-commit".to_string(),
 					tree_oid: "moved-tree".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -1057,15 +1057,15 @@ mod tests {
 			let fetched_root = temporary.path().join("fetched");
 			write_skill(&fetched_root.join("skills/sync-me"), "sync-me", "new");
 			let fetched = FetchedSource {
-				repo: crate::FetchedRepo {
-					root: fetched_root,
-					snapshot: aghub_git::RepoSnapshot {
+				repo: crate::FetchedRepo::new(
+					fetched_root,
+					aghub_git::RepoSnapshot {
 						commit_oid: "new-commit".to_string(),
 						tree_oid: "new-tree".to_string(),
 						commit_time: None,
 					},
-					_guard: None,
-				},
+					None,
+				),
 			};
 
 			let report = resync_fetched_source(
@@ -1126,15 +1126,15 @@ mod tests {
 				_token: Option<&str>,
 				_selection: FetchSelection<'_>,
 			) -> Result<crate::FetchedRepo, FetchError> {
-				Ok(crate::FetchedRepo {
-					root: self.root.clone(),
-					snapshot: aghub_git::RepoSnapshot {
+				Ok(crate::FetchedRepo::new(
+					self.root.clone(),
+					aghub_git::RepoSnapshot {
 						commit_oid: "once-commit".to_string(),
 						tree_oid: "once-tree".to_string(),
 						commit_time: None,
 					},
-					_guard: None,
-				})
+					None,
+				))
 			}
 		}
 
@@ -1229,15 +1229,15 @@ mod tests {
 				));
 				*self.seen.lock().unwrap() =
 					Some((source_ref.clone(), token.map(str::to_string)));
-				Ok(crate::FetchedRepo {
-					root: self.root.clone(),
-					snapshot: aghub_git::RepoSnapshot {
+				Ok(crate::FetchedRepo::new(
+					self.root.clone(),
+					aghub_git::RepoSnapshot {
 						commit_oid: "locked-commit".to_string(),
 						tree_oid: "locked-tree".to_string(),
 						commit_time: None,
 					},
-					_guard: None,
-				})
+					None,
+				))
 			}
 		}
 

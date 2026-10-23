@@ -145,15 +145,15 @@ impl skill_update::Fetcher for CliFetcher {
 			}
 			let root = std::path::PathBuf::from(root);
 			return if root.is_dir() {
-				Ok(skill_update::FetchedRepo {
+				Ok(skill_update::FetchedRepo::new(
 					root,
-					snapshot: aghub_git::RepoSnapshot {
+					aghub_git::RepoSnapshot {
 						commit_oid: "test-fetch-root".into(),
 						tree_oid: "test-fetch-tree".into(),
 						commit_time: None,
 					},
-					_guard: None,
-				})
+					None,
+				))
 			} else {
 				Err(FetchError::network(format!(
 					"AGHUB_TEST_SOURCE_FETCH_ROOT is not a directory \
@@ -234,7 +234,9 @@ fn fetch_key(sr: &SourceRef) -> FetchKey {
 /// `source diff` calls [`sources::diff_source`] once per read scope; without
 /// this a two-scope diff pays two identical round trips. `FetchedRepo`'s
 /// temp-dir guard is an `Arc`, so a memo hit shares the same keep-alive.
-/// Only `FetchSelection::CatalogSnapshot` fetches are shared.
+/// Only catalog fetches are shared (`CatalogSnapshot`, `Verify` with the
+/// catalog), and a hit is served only when the cached tree can judge every
+/// folder the caller asks about.
 struct MemoFetcher<'a> {
 	inner: &'a dyn skill_update::Fetcher,
 	seen: std::sync::Mutex<HashMap<FetchKey, skill_update::FetchedRepo>>,
@@ -253,14 +255,6 @@ impl<'a> MemoFetcher<'a> {
 	}
 }
 
-fn clone_repo(repo: &skill_update::FetchedRepo) -> skill_update::FetchedRepo {
-	skill_update::FetchedRepo {
-		root: repo.root.clone(),
-		snapshot: repo.snapshot.clone(),
-		_guard: repo._guard.clone(),
-	}
-}
-
 impl skill_update::Fetcher for MemoFetcher<'_> {
 	fn fetch(
 		&self,
@@ -268,23 +262,40 @@ impl skill_update::Fetcher for MemoFetcher<'_> {
 		token: Option<&str>,
 		selection: FetchSelection<'_>,
 	) -> Result<skill_update::FetchedRepo, FetchError> {
-		// Only a whole-catalog fetch is shareable: a `Skills` selection is a PARTIAL
+		// Only a catalog fetch is shareable: a `Skills` selection is a PARTIAL
 		// tree, and serving it to another caller would hand that caller an
 		// incomplete tree. Selective fetches pass through, never memoized.
-		if !matches!(selection, FetchSelection::CatalogSnapshot) {
+		//
+		// A `Verify` tree is partial too — folders it proved are not on disk —
+		// so it serves only callers whose installed folders it already judged
+		// (each scope's `source diff` asks about its own); anything else
+		// fetches again rather than misjudge an absent folder.
+		let served_by = |hit: &skill_update::FetchedRepo| match selection {
+			FetchSelection::CatalogSnapshot => hit.is_complete(),
+			FetchSelection::Verify {
+				installed,
+				catalog: true,
+			} => hit.covers(installed),
+			_ => false,
+		};
+		if !matches!(
+			selection,
+			FetchSelection::CatalogSnapshot
+				| FetchSelection::Verify { catalog: true, .. }
+		) {
 			return self.inner.fetch(sr, token, selection);
 		}
 		let key = fetch_key(sr);
 		let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-		if let Some(hit) = seen.get(&key) {
-			return Ok(clone_repo(hit));
+		if let Some(hit) = seen.get(&key).filter(|hit| served_by(hit)) {
+			return Ok(hit.clone());
 		}
 		// Failures are NOT memoized: a refusal is the caller's to see per call,
 		// and nothing here retries.
 		let repo = self.inner.fetch(sr, token, selection)?;
 		self.fetches
 			.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-		let out = clone_repo(&repo);
+		let out = repo.clone();
 		seen.insert(key, repo);
 		Ok(out)
 	}
@@ -1682,11 +1693,11 @@ mod tests {
 		) -> Result<skill_update::FetchedRepo, FetchError> {
 			self.calls
 				.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-			Ok(skill_update::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot::default(),
-				_guard: None,
-			})
+			Ok(skill_update::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot::default(),
+				None,
+			))
 		}
 	}
 
@@ -1795,6 +1806,46 @@ mod tests {
 			3,
 			"one repository, one catalog, one round trip"
 		);
+
+		// `source diff` asks with `Verify` + catalog: shared the same way, and
+		// a check-style `Verify` without the catalog never is.
+		let installed = [skill_update::InstalledFolder {
+			folder: skill::SkillPath::parse("alpha").unwrap(),
+			manifest: None,
+		}];
+		let fresh = MemoFetcher::new(&inner);
+		for _ in 0..2 {
+			fresh
+				.fetch(
+					&sr,
+					None,
+					FetchSelection::Verify {
+						installed: &installed,
+						catalog: true,
+					},
+				)
+				.unwrap();
+		}
+		assert_eq!(
+			inner.calls.load(std::sync::atomic::Ordering::Relaxed),
+			4,
+			"a catalog verify is shared like a catalog snapshot"
+		);
+		fresh
+			.fetch(
+				&sr,
+				None,
+				FetchSelection::Verify {
+					installed: &installed,
+					catalog: false,
+				},
+			)
+			.unwrap();
+		assert_eq!(
+			inner.calls.load(std::sync::atomic::Ordering::Relaxed),
+			5,
+			"a verify without the catalog is a partial tree, never shared"
+		);
 	}
 
 	fn diff(name: &str, state: SourceSkillState) -> SourceSkillDiff {
@@ -1855,15 +1906,15 @@ mod tests {
 	fn an_entry_that_appeared_mid_fetch_carries_the_shared_code() {
 		let temp = tempfile::tempdir().unwrap();
 		let fetched = skill_update::mutation::FetchedSource::from_repo(
-			skill_update::FetchedRepo {
-				root: temp.path().to_path_buf(),
-				snapshot: aghub_git::RepoSnapshot {
+			skill_update::FetchedRepo::new(
+				temp.path().to_path_buf(),
+				aghub_git::RepoSnapshot {
 					commit_oid: "c".into(),
 					tree_oid: "t".into(),
 					commit_time: None,
 				},
-				_guard: None,
-			},
+				None,
+			),
 		);
 		let row = apply_update_row(
 			&fetched,
