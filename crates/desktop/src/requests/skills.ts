@@ -512,9 +512,15 @@ export function checkSkillUpdatesQueryKey(params?: CheckSkillUpdatesParams) {
 	);
 }
 
-/// Modeled as a mutation (not a query) because it is an explicit, network-heavy
-/// user action (clones each source) — this gives clean onSuccess/onError hooks
-/// without a fetch-on-render effect. The global skill lock is the input scope.
+/// The manual "check for updates" button. A mutation only for its
+/// isPending/onSuccess/onError hooks: the check itself is a fetch of the SAME
+/// query the auto-check reads, so every update-check answer lands through one
+/// lifecycle and `refetchUpdateChecksAfterWrites` sees (and outlasts) a manual
+/// check in flight. It used to run its own request and `setQueryData` the
+/// answer, so a click just before an apply landed its pre-write answer AFTER
+/// the post-write check and pinned "outdated" for the whole staleTime.
+/// `staleTime: 0` forces a fresh check when idle; one already in flight is
+/// joined (no `cancelRefetch`), never orphaned.
 export function checkSkillUpdatesMutationOptions({
 	api,
 	queryClient,
@@ -523,17 +529,16 @@ export function checkSkillUpdatesMutationOptions({
 	forwardForCheck,
 }: CheckSkillUpdatesMutationParams) {
 	return mutationOptions({
-		mutationFn: async (params?: CheckSkillUpdatesParams) => {
-			const headers = await forwardForCheck?.(params);
-			return api.skills.checkUpdates(params, headers);
-		},
-		onSuccess: async (data, variables) => {
-			queryClient.setQueryData(
-				checkSkillUpdatesQueryKey(variables),
-				data,
-			);
-			await onSuccess?.(data);
-		},
+		mutationFn: (params?: CheckSkillUpdatesParams) =>
+			queryClient.fetchQuery({
+				...checkSkillUpdatesQueryOptions({
+					api,
+					params,
+					forwardForCheck,
+				}),
+				staleTime: 0,
+			}),
+		onSuccess,
 		onError,
 	});
 }
@@ -560,9 +565,8 @@ interface CheckSkillUpdatesQueryParams {
 /**
  * `useQuery`-compatible options for `GET /skills/check-updates`.
  *
- * Use this for the **auto-check-on-page-enter** path. The mutation variant
- * (`checkSkillUpdatesMutationOptions`) is kept for the manual refresh
- * button where explicit loading state matters.
+ * Use this for the **auto-check-on-page-enter** path. The manual refresh
+ * button (`checkSkillUpdatesMutationOptions`) fetches this same query.
  *
  * The check writes back to the skill lock (auto-heals ref_commit/hash) —
  * this side-effect is accepted per spec §4.3.

@@ -12,6 +12,8 @@ import { queryKeys } from "./keys.ts";
 import {
 	applySkillUpdateMutationOptions,
 	applySkillUpdatesMutationOptions,
+	checkSkillUpdatesMutationOptions,
+	checkSkillUpdatesQueryOptions,
 	gitSyncSkillMutationOptions,
 	refetchUpdateChecksAfterWrites,
 } from "./skills.ts";
@@ -347,4 +349,66 @@ test("all-disabled update-check query with data is fetched once", async () => {
 
 test("all-disabled update-check query with data is not fetched offline", async () => {
 	assert.equal(await disabledOnlyFetches(true, false), 0);
+});
+
+// The manual "check for updates" button used to run its own request and
+// setQueryData its answer. Clicked just before an apply, that answer (read
+// pre-write) landed AFTER the trailing post-write check and pinned "outdated"
+// for the 10-min staleTime. A manual check must be one of the query's fetches.
+test("a manual check started before a write cannot overwrite the post-write answer", async () => {
+	const client = new QueryClient({
+		defaultOptions: {
+			queries: { retry: false },
+			mutations: { retry: false },
+		},
+	});
+	let server = "outdated";
+	const manualFetch = deferred();
+	const manualStarted = deferred();
+	let calls = 0;
+	const api = {
+		skills: {
+			checkUpdates: async () => {
+				calls += 1;
+				const seen = server;
+				if (calls === 1) {
+					manualStarted.resolve();
+					await manualFetch.promise;
+				}
+				return seen;
+			},
+			applyUpdate: async () => ({ success: true }),
+		},
+	} as unknown as ApiClient;
+	const params = { scope: "global" } as const;
+	const observer = new QueryObserver(
+		client,
+		checkSkillUpdatesQueryOptions({
+			api,
+			params,
+			enabled: false,
+			staleTime: Number.POSITIVE_INFINITY,
+		}),
+	);
+	const unsubscribe = observer.subscribe(() => {});
+	client.setQueryData(observer.options.queryKey, "outdated" as any);
+
+	const manual = new MutationObserver(
+		client,
+		checkSkillUpdatesMutationOptions({ api, queryClient: client }),
+	).mutate(params);
+	await manualStarted.promise;
+	server = "current";
+	await new MutationObserver(
+		client,
+		applySkillUpdateMutationOptions({ api, queryClient: client }),
+	).mutate({ body: {} as any });
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	manualFetch.resolve();
+	await manual;
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	assert.equal(observer.getCurrentResult().data, "current");
+	assert.equal(calls, 2, "the manual check + one trailing post-write check");
+	unsubscribe();
 });
