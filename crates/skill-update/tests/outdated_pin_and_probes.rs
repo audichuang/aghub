@@ -89,15 +89,15 @@ impl Fetcher for SequenceFetcher {
 		} else {
 			tips.front().cloned().unwrap()
 		};
-		Ok(FetchedRepo {
+		Ok(FetchedRepo::new(
 			root,
-			snapshot: aghub_git::RepoSnapshot {
+			aghub_git::RepoSnapshot {
 				commit_oid: commit.to_string(),
 				tree_oid: format!("{commit}-tree"),
 				commit_time: None,
 			},
-			_guard: None,
-		})
+			None,
+		))
 	}
 }
 
