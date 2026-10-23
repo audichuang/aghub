@@ -385,6 +385,39 @@ fn an_extra_local_file_defeats_the_shortcut() {
 	);
 }
 
+/// A local file NAMED `__pycache__\payload` (Unix) hashes under the same rel
+/// as upstream's `__pycache__/payload`, so the raw listings match; but the
+/// copier carries the local name and drops the upstream directory, so the
+/// comparison hashes differ. The proof must step aside and the verdict must
+/// be what materializing gives.
+#[cfg(unix)]
+#[test]
+fn a_backslash_local_name_is_judged_by_materializing() {
+	let (local, mut upstream, mut entries) = unchanged_group();
+	let dir = local.path().join("s2");
+	std::fs::write(dir.join("__pycache__\\payload"), b"payload").unwrap();
+	let index = entries.iter().position(|e| e.name == "s2").unwrap();
+	entries[index] = entry("s2", &dir, None);
+	upstream.insert(
+		"skills/s2/__pycache__/payload".to_string(),
+		(StagedEntryMode::Regular, b"payload".to_vec()),
+	);
+	let fake = FakeGithub::new(upstream);
+
+	let out = check(&fake, entries);
+
+	assert!(
+		matches!(out["s2"].0, SkillUpdateStatus::UpdateAvailable { .. }),
+		"{:?}",
+		out["s2"]
+	);
+	assert_eq!(
+		fake.blobs(),
+		fake.oids_where(|p| p.starts_with("skills/s2/")),
+		"the aliased folder is downloaded whole, nothing else"
+	);
+}
+
 /// Acceptance 6: the consumers judge a proven folder through the proof, not
 /// through the (empty) disk — check's probe and source diff's classifier.
 #[test]

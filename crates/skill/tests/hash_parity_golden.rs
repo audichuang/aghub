@@ -92,7 +92,7 @@ fn hash_parity_observing_walk_matches_golden() {
 	let mut seen: Vec<(String, u64, Vec<u8>)> = Vec::new();
 	let (raw, comparison) =
 		compute_skill_folder_hashes_with(&dst, |event| match event {
-			FileEvent::Begin { rel, len } => {
+			FileEvent::Begin { rel, len, .. } => {
 				seen.push((rel.to_string(), len, Vec::new()))
 			}
 			FileEvent::Bytes(chunk) => {

@@ -25,7 +25,8 @@ pub struct LocalManifest {
 	pub comparison: String,
 	/// `(relative path, blob oid)` sorted by path; `None` when a file's bytes
 	/// did not match the length its handle reported (changed under the read),
-	/// so this walk cannot vouch for a file list.
+	/// when a hashed spelling does not name its native path, or when the copier
+	/// drops an entry — this walk cannot vouch for a file list then.
 	files: Option<Vec<(String, String)>>,
 	/// Frontmatter `name` of the folder's `SKILL.md`, parsed from the bytes
 	/// the walk read (what a fetched copy's parse would yield when proven).
@@ -43,7 +44,17 @@ impl LocalManifest {
 		let (raw, comparison) = skill::compute_skill_folder_hashes_with(
 			dir,
 			|event| match event {
-				FileEvent::Begin { rel, len } => {
+				FileEvent::Begin { rel, native, len } => {
+					// A listing only stands for the folder when every entry's
+					// hashed spelling IS its native path, and when the copier
+					// keeps it (an entry it drops hashes into the raw listing
+					// but not into the comparison, so equal listings would no
+					// longer imply equal comparison hashes).
+					if !spelled_natively(rel, native)
+						|| !skill::carried_into_master(native)
+					{
+						intact = false;
+					}
 					current = Some((rel.to_string(), BlobHasher::new(len)));
 					capturing = rel == "SKILL.md";
 					if capturing {
@@ -90,6 +101,20 @@ impl LocalManifest {
 	}
 }
 
+/// Whether `rel` (the hash's `/`-joined spelling) names exactly `native`: no
+/// component holds a `\` (a name character on Unix, collapsed into a separator
+/// by the spelling) and every component is UTF-8 (else the spelling is lossy).
+fn spelled_natively(rel: &str, native: &Path) -> bool {
+	let mut parts = Vec::new();
+	for part in native.components() {
+		match part.as_os_str().to_str() {
+			Some(name) if !name.contains('\\') => parts.push(name),
+			_ => return false,
+		}
+	}
+	parts.join("/") == rel
+}
+
 /// Whether `tree`'s entries under `folder` are exactly `manifest`'s files —
 /// i.e. materializing `folder` would reproduce the local copy byte for byte,
 /// so the upstream folder hashes ARE `manifest.raw` / `manifest.comparison`.
@@ -99,7 +124,10 @@ impl LocalManifest {
 /// link the hash skips), a `.git` / `node_modules` component (skipped by the
 /// hash), a path staging would refuse, a non-ASCII path or two paths equal
 /// under ASCII case-folding (the local filesystem may have rewritten either),
-/// a manifest that cannot vouch for its file list, or no `SKILL.md` (a fetched
+/// an entry the Master copier drops (`skill::carried_into_master`: raw-list
+/// equality no longer implies comparison equality), a manifest that cannot
+/// vouch for its file list (including a local name its hashed spelling
+/// aliases), or no `SKILL.md` (a fetched
 /// copy without one is unreadable as a skill, which a proof must not hide).
 pub(crate) fn proves(
 	tree: &RepoTree,
@@ -121,6 +149,7 @@ pub(crate) fn proves(
 			continue;
 		};
 		if entry.mode == StagedEntryMode::Symlink
+			|| !skill::carried_into_master(Path::new(rel))
 			|| !entry.path.is_ascii()
 			|| !aghub_git::is_valid_entry_path(&entry.path)
 			|| entry
@@ -312,6 +341,51 @@ mod tests {
 		];
 		for (label, tree) in cases {
 			assert!(!proves(&tree, "skills/demo", &manifest), "{label}");
+		}
+	}
+
+	/// On Unix `\` is part of a NAME: the local file `__pycache__\payload`
+	/// is carried into a Master, but its hash rel `__pycache__/payload` reads
+	/// like upstream's excluded `__pycache__/payload`. Equal raw listings must
+	/// not prove a folder whose comparison hashes differ.
+	#[cfg(unix)]
+	#[test]
+	fn a_backslash_name_never_aliases_an_upstream_path() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), SKILL).unwrap();
+		std::fs::write(dir.path().join("__pycache__\\payload"), b"p").unwrap();
+		let manifest = LocalManifest::read(dir.path()).unwrap();
+		let listing = tree(vec![
+			entry("skills/demo/SKILL.md", StagedEntryMode::Regular, SKILL),
+			entry(
+				"skills/demo/__pycache__/payload",
+				StagedEntryMode::Regular,
+				b"p",
+			),
+		]);
+		assert!(!proves(&listing, "skills/demo", &manifest));
+	}
+
+	/// Raw-list equality implies comparison equality only when nothing on
+	/// either side is dropped by the Master copier's projection.
+	#[test]
+	fn an_entry_the_copier_drops_never_proves() {
+		for rel in ["__pycache__/x.pyc", "__pypackages__/x", "metadata.json"] {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("SKILL.md"), SKILL).unwrap();
+			let path = dir.path().join(rel);
+			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+			std::fs::write(&path, b"x").unwrap();
+			let manifest = LocalManifest::read(dir.path()).unwrap();
+			let listing = tree(vec![
+				entry("skills/demo/SKILL.md", StagedEntryMode::Regular, SKILL),
+				entry(
+					&format!("skills/demo/{rel}"),
+					StagedEntryMode::Regular,
+					b"x",
+				),
+			]);
+			assert!(!proves(&listing, "skills/demo", &manifest), "{rel}");
 		}
 	}
 

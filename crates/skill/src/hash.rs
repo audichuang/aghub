@@ -102,9 +102,16 @@ pub fn compute_skill_folder_hashes(
 
 /// One step of [`compute_skill_folder_hashes_with`]'s read of a hashed file.
 pub enum FileEvent<'a> {
-	/// A file is about to be read. `len` is the length its open handle reports
+	/// A file is about to be read. `rel` is the hashed (`/`-joined, lossy)
+	/// spelling and `native` the file's real path relative to the folder; they
+	/// name different things when a component holds a `\` (a name character
+	/// on Unix) or is not UTF-8. `len` is the length its open handle reports
 	/// before the read; the bytes that follow may differ if the file changes.
-	Begin { rel: &'a str, len: u64 },
+	Begin {
+		rel: &'a str,
+		native: &'a Path,
+		len: u64,
+	},
 	/// The next chunk of the file's bytes — the same chunk the digests consume.
 	Bytes(&'a [u8]),
 	/// The file was read to its end.
@@ -126,11 +133,9 @@ pub fn compute_skill_folder_hashes_with(
 		true,
 	);
 	files.sort_by(|a, b| collator.collate(&a.0, &b.0));
-	let compared: Vec<bool> = files
+	let natives: Vec<&Path> = files
 		.iter()
-		.map(|(_, abs)| {
-			carried_into_master(abs.strip_prefix(dir).unwrap_or(abs))
-		})
+		.map(|(_, abs)| abs.strip_prefix(dir).unwrap_or(abs))
 		.collect();
 
 	let mut raw = Sha256::new();
@@ -138,7 +143,8 @@ pub fn compute_skill_folder_hashes_with(
 	let mut read_bytes = 0;
 	// Both callbacks below report to `on_file`, never at the same time.
 	let on_file = std::cell::RefCell::new(&mut on_file);
-	for ((rel, abs), compared) in files.iter().zip(compared) {
+	for ((rel, abs), native) in files.iter().zip(natives) {
+		let compared = carried_into_master(native);
 		raw.update(rel.as_bytes());
 		if compared {
 			cmp.update(rel.as_bytes());
@@ -147,7 +153,7 @@ pub fn compute_skill_folder_hashes_with(
 			abs,
 			&mut read_bytes,
 			MAX_TOTAL_BYTES,
-			|len| (on_file.borrow_mut())(FileEvent::Begin { rel, len }),
+			|len| (on_file.borrow_mut())(FileEvent::Begin { rel, native, len }),
 			|chunk| {
 				raw.update(chunk);
 				if compared {
