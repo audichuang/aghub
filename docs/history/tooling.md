@@ -85,6 +85,16 @@ would trim link time, but it merges their env mutexes' scopes and breaks the
 "one env mutex per binary" rule in `crates/core/AGENTS.md` Testing for little
 gain over 11s.
 
+Re-measured on CI 2026-10-23 (PR #86, closed): only the 25 files that write
+no env moved into one `tests/it/` binary per crate (44 -> 23 integration
+binaries). The Windows test compile step, the job that motivated it, stayed
+put: 1m48s and 2m03s against 1m49s and 1m56s before; Ubuntu went 56s -> 42s
+in one sample, off the critical path. The step is a serial chain, `aghub-core`
+-> `skill-update` -> the `aghub-api` lib -> the `aghub-api` lib's unit-test
+binary (the largest single unit, `cargo --timings`) -> the desktop crate; the
+integration binaries are small and link in parallel beside it. Shortening
+that chain, not the binary count, is what would move this job.
+
 Rule: `just test` and `preflight` use nextest; doc tests stay on `cargo test
 --doc`. Plain `cargo test` must keep passing, so the env-mutex rule still
 applies.
