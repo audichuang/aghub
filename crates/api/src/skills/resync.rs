@@ -40,7 +40,9 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 			status: Status::BadRequest,
 		},
 		ResyncError::Parse(_) => SafeResyncError {
-			message: "Failed to parse synced skill",
+			message: "The fetched skill's SKILL.md could not be used: it is \
+			          missing, malformed, or not a regular file (a symbolic \
+			          link is refused); nothing was written",
 			status: Status::BadRequest,
 		},
 		ResyncError::Conflict(_) => SafeResyncError {
