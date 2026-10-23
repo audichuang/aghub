@@ -290,3 +290,9 @@ every main push again (it had been path-filtered there for a day): a docs-only
 successor would otherwise skip it and give `verify-ci` a green run on code
 whose Windows build had failed. Measured on the PR itself: wall clock
 ~8.5 -> 5.6 min, Build Linux now the longest job.
+
+The PR's Linux build then ran its four cargo builds in sequence (257s), each
+ending in one large release crate (aghub-api, the desktop crate). A PR splits
+it into two parallel legs on the same restored cache: `app` (sidecar +
+desktop, needs the frontend) and `bins` (standalone CLI + api). Main keeps one
+`all` job per target, since that is the job that saves the cache.
