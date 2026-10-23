@@ -157,6 +157,15 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
@@ -164,9 +173,7 @@ jobs:
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Cargo audit (vulnerabilities fail the job)
               if: matrix.os == 'ubuntu-latest'
               run: cargo audit
@@ -263,6 +270,15 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
@@ -270,10 +286,8 @@ jobs:
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-latest'
               shell: bash
-              run: |
-                  sudo apt-get update
-                  # gnome-keyring + dbus-x11: the native keyring smoke test.
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
+              # gnome-keyring + dbus-x11: the native keyring smoke test.
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
             # Defender scanned every file the tests create (temp dirs, SQLite
             # journals): aghub-inference's tests ran ~60x slower on Windows
             # than elsewhere. Non-fatal, like release.yml's exclusions.
@@ -326,16 +340,19 @@ jobs:
               run: cargo test --workspace --test skill_repository -- --ignored real_github_rest
 
     # Release build + smoke test - the 3 release targets. Runs release.yml's
-    # exact cargo commands, so a PR proves the tag would build, and on main it
+    # exact cargo commands, so main proves the tag would build, and there it
     # saves the dependency cache release.yml restores (a tag run cannot save
     # one a later tag can read). The matrix strings, the cargo commands and
     # the CARGO*/RUST* env (hashed into the key) MUST match release.yml's
     # build-tauri / build-cli. docs/history/tooling.md#release-build-speed
     build:
-        name: Build (${{ matrix.target }})
+        name: Build (${{ matrix.target }}, ${{ matrix.part }})
         needs: changes
-        # ALWAYS on push to main: the bump commit is what refreshes the cache
-        # the following tag restores.
+        # ALWAYS on push to main: PRs build Linux only, so main is the only
+        # place Windows/macOS release builds run, and verify-ci trusts any
+        # green main run. A path-filtered docs-only successor of a commit whose
+        # Windows build failed would be a green run on broken code. It also
+        # keeps the release caches current across stable rustc bumps.
         if: |
             github.event_name == 'push' ||
             github.event_name == 'workflow_dispatch' ||
@@ -346,21 +363,24 @@ jobs:
         timeout-minutes: 60
         strategy:
             fail-fast: false
+            # PRs build Linux only: custom-protocol and the embedded dist are
+            # the same on every OS, and Test/Clippy already compile the desktop
+            # crate on Windows and macOS. Main builds all three before any tag
+            # (verify-ci needs that run green) and saves their caches. Cut the
+            # PR critical path from Build Windows (~8.5 min) to ~5. On a PR the
+            # Linux build is also split in two parallel legs, `app` (sidecar +
+            # desktop) and `bins` (standalone CLI + api); they restore the same
+            # cache and save nothing. Main runs `all` so one job saves it.
+            # docs/history/tooling.md#pr-builds-linux-only
             matrix:
-                include:
-                    - os: macos-latest
-                      target: aarch64-apple-darwin
-                    - os: ubuntu-22.04
-                      target: x86_64-unknown-linux-gnu
-                    - os: windows-latest
-                      target: x86_64-pc-windows-msvc
+                include: ${{ fromJSON(github.event_name == 'pull_request'
+                    && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","part":"app"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","part":"bins"}]'
+                    || '[{"os":"macos-latest","target":"aarch64-apple-darwin","part":"all"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","part":"all"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","part":"all"}]') }}
         steps:
             - uses: actions/checkout@v6
             - name: Install Linux system dependencies (GTK/webkit for Tauri)
               if: matrix.os == 'ubuntu-22.04'
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+              run: scripts/ci-apt-install.sh libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
               with:
@@ -377,16 +397,27 @@ jobs:
             # every Cargo.lock or profile change carried the old artifacts into
             # the new entry (test 1.2 -> 1.8GB). Main starts clean instead; PRs
             # keep the partial restore. docs/history/tooling.md#ci-cache-bloat
+            # rust-cache prunes the crates.io index it saves, so every job
+            # re-downloaded it (44-48s on Windows). Restored after rust-cache so
+            # the full copy wins. docs/history/tooling.md#ci-apt-tail-and-cargo-index
+            - name: Cargo index cache
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
             - name: Drop a partially restored target (main only)
               if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
               shell: bash
               run: rm -rf target
             - name: Setup Bun
+              if: matrix.part != 'bins'
               uses: oven-sh/setup-bun@v2
               with:
                   bun-version: ${{ env.BUN_VERSION }}
             # The desktop crate embeds ../dist, so every OS builds it.
             - name: Build frontend (typecheck + Vite)
+              if: matrix.part != 'bins'
               run: |
                   cd crates/desktop
                   bun install --frozen-lockfile
@@ -398,15 +429,21 @@ jobs:
               run: |
                   set -euo pipefail
                   T="${{ matrix.target }}"
-                  cargo build --release --target "$T" -p aghub -p aghub-api \
-                      --bin aghub-api --features tauri/custom-protocol
-                  cargo build --release --target "$T" -p aghub --bins \
-                      --features tauri/custom-protocol
-                  cargo build --release -p aghub-cli --target "$T"
-                  if [ "$T" = "x86_64-unknown-linux-gnu" ]; then
-                      cargo build --release -p aghub-api --target "$T"
+                  P="${{ matrix.part }}"
+                  if [ "$P" != bins ]; then
+                      cargo build --release --target "$T" -p aghub -p aghub-api \
+                          --bin aghub-api --features tauri/custom-protocol
+                      cargo build --release --target "$T" -p aghub --bins \
+                          --features tauri/custom-protocol
+                  fi
+                  if [ "$P" != app ]; then
+                      cargo build --release -p aghub-cli --target "$T"
+                      if [ "$T" = "x86_64-unknown-linux-gnu" ]; then
+                          cargo build --release -p aghub-api --target "$T"
+                      fi
                   fi
             - name: Smoke test CLI binary
+              if: matrix.part != 'app'
               shell: bash
               run: |
                   BIN="target/${{ matrix.target }}/release/aghub-cli"
@@ -434,12 +471,17 @@ jobs:
                   set -euo pipefail
                   # rust-cache keys end in -<env hash>-<lockfile hash>; the env
                   # hash carries the rustc version, so group on what precedes
-                  # both and keep the newest entry of each group.
+                  # both and keep the newest entry of each group. cargo-index-* keys
+                  # end in the Cargo.lock hash: keep main's newest, drop PR copies.
                   gh cache list -R "$REPO" -L 500 --json id,key,ref,createdAt --jq '
                     [.[] | select(.ref | contains("refs/tags/"))]
                     + ([.[] | select(.ref == "refs/heads/main" and (.key | startswith("v0-rust-")))]
                        | group_by(.key | sub("-[0-9a-f]{8}-[0-9a-f]{8}$"; ""))
                        | map(sort_by(.createdAt) | .[:-1]) | add // [])
-                    | .[] | "\(.id)\t\(.ref)\t\(.key)"' > stale.tsv
+                    + [.[] | select((.key | startswith("cargo-index-")) and .ref != "refs/heads/main")]
+                    + ([.[] | select(.ref == "refs/heads/main" and (.key | startswith("cargo-index-")))]
+                       | group_by(.key | sub("-[0-9a-f]{64}$"; ""))
+                       | map(sort_by(.createdAt) | .[:-1]) | add // [])
+                    | unique_by(.id) | .[] | "\(.id)\t\(.ref)\t\(.key)"' > stale.tsv
                   cat stale.tsv
                   cut -f1 stale.tsv | xargs -r -n1 gh cache delete -R "$REPO"

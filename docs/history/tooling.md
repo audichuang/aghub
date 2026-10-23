@@ -85,6 +85,24 @@ would trim link time, but it merges their env mutexes' scopes and breaks the
 "one env mutex per binary" rule in `crates/core/AGENTS.md` Testing for little
 gain over 11s.
 
+Re-measured on CI 2026-10-23 (PR #86, closed): only the 25 files that write
+no env moved into one `tests/it/` binary per crate (44 -> 23 integration
+binaries). The Windows test compile step, the job that motivated it, stayed
+put: 1m48s and 2m03s against 1m49s and 1m56s before; Ubuntu went 56s -> 42s
+in one sample, off the critical path. The step is a serial chain, `aghub-core`
+-> `skill-update` -> the `aghub-api` lib -> the `aghub-api` lib's unit-test
+binary (the largest single unit, `cargo --timings`) -> the desktop crate; the
+integration binaries are small and link in parallel beside it. Shortening
+that chain, not the binary count, is what would move this job.
+
+Shortening it does not pay either. Native cargo, `-j4`, `CARGO_INCREMENTAL=0`,
+deps warm and workspace crates rebuilt (a CI test job's shape): the workspace
+test build took 28.3s and 28.0s; with the `aghub-api` lib unit tests switched
+off entirely (`[lib] test = false`, the upper bound) 23.2s and 23.5s. Moved to
+an integration binary they would still compile, only after the `aghub-api`
+lib, ending about where they end now, and the desktop crate is next in line
+behind them. Left as is; CI tuning stopped here (PR wall ~5 min).
+
 Rule: `just test` and `preflight` use nextest; doc tests stay on `cargo test
 --doc`. Plain `cargo test` must keep passing, so the env-mutex rule still
 applies.
@@ -238,3 +256,61 @@ test messages. rustfmt and clippy accept it, and the tests only asserted
 text on a line is this bug in practice (intended tab data uses `\t`; a tab
 aligning a trailing comment would also trip it). `scripts/check-string-tabs.sh` (preflight
 and the CI Format job) fails on it.
+
+## CI apt tail and cargo index
+
+`scripts/ci-apt-install.sh` and the "Cargo index cache" steps in
+`.github/workflows/ci.yml`. Measured over the 60 CI runs up to 2026-10-23.
+
+The GTK/webkit install is ~36s at the median on each of the three Linux jobs,
+but 5 of 138 took 8-23 minutes: the runner's azure mirror served the 73MB
+download at ~60 kB/s, so one slow leg set the whole run's wall clock. The
+script downloads with a 90s timeout (download only, so dpkg is never
+interrupted) and retries against `archive.ubuntu.com`. Its first PR run hit
+the slow mirror once; the retry finished in 13s.
+
+Every cargo job printed `Updating crates.io index` even on an exact rust-cache
+hit: 3s on Linux, 17s on macOS, 44-48s on each Windows job, one of them on the
+PR critical path (Build Windows). rust-cache prunes the index before saving it,
+and the pruned copy is incomplete: `CARGO_NET_OFFLINE` on an exact hit failed
+with `no matching package named dirs`. A separate cache of
+`~/.cargo/registry/index`, keyed on Cargo.lock and restored after rust-cache,
+gives cargo the whole index.
+
+Warm PR rerun, Windows: `cargo fetch` 44s -> 34s (no index download; the rest
+is unpacking `.crate` sources, which rust-cache does not keep), the Build job's
+gap before the first compile 51s -> 36s.
+
+Rejected: a Windows bun package cache. `bun install` fell 58s -> 10s, but the
+cache restore took 14s and the following `tsc` paid ~20s more reading the
+freshly linked node_modules, so the step went 68s -> 63s.
+
+Not changed: the three release cargo builds in `build` recompile the
+workspace crates under two feature sets on purpose (see Release build speed);
+merging them would leave release.yml's `build-cli` cold.
+
+## PR builds Linux only
+
+`.github/workflows/ci.yml` `build` matrix. On 2026-10-23 the warm PR wall
+clock was ~8.5 min, all of it Build Windows (three release cargo builds,
+~6 min, kept for release-cache parity, see Release build speed); every other
+PR job finished within ~5 min.
+
+What only `build` proves is the release shape: `tauri/custom-protocol` and
+the embedded `../dist` (Test runs debug, which serves `devUrl` and never
+embeds the frontend). That is the same code on every OS, and the
+Windows/macOS-specific parts (`tauri-build` resources, `cfg` code) already
+compile in Test and Rust Lint on those runners. PRs therefore build Linux
+only; main still builds all three targets, saves their caches, and must be
+green for `verify-ci` before any tag, so a Windows/macOS-only release break
+surfaces on main after merge instead of on the PR. That is why `build` runs on
+every main push again (it had been path-filtered there for a day): a docs-only
+successor would otherwise skip it and give `verify-ci` a green run on code
+whose Windows build had failed. Measured on the PR itself: wall clock
+~8.5 -> 5.6 min, Build Linux now the longest job.
+
+The PR's Linux build then ran its four cargo builds in sequence (257s), each
+ending in one large release crate (aghub-api, the desktop crate). A PR splits
+it into two parallel legs on the same restored cache: `app` (sidecar +
+desktop, needs the frontend) and `bins` (standalone CLI + api). Main keeps one
+`all` job per target, since that is the job that saves the cache.
