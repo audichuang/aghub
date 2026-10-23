@@ -404,42 +404,6 @@ fn verify_written_master(
 	Ok(())
 }
 
-/// Test-only fault injection: the post-write Master check cannot be made to
-/// fail through filesystem state alone (the copier wrote the Master from the
-/// same source a moment earlier).
-#[cfg(test)]
-pub(crate) mod test_hooks {
-	use std::cell::Cell;
-	use std::path::Path;
-
-	thread_local! {
-		static CORRUPT_MASTER: Cell<bool> = const { Cell::new(false) };
-	}
-
-	/// Make the next install on this thread write a stray file into its
-	/// freshly materialized Master.
-	// Only the unix-gated `nocopy_tests` call it.
-	#[cfg(unix)]
-	pub(crate) fn corrupt_next_master() {
-		CORRUPT_MASTER.with(|flag| flag.set(true));
-	}
-
-	pub(super) fn after_materialize(
-		_source_root: &Path,
-		safe_name: &str,
-		req: &super::FetchedSkillInstallRequest<'_>,
-	) {
-		if CORRUPT_MASTER.with(|flag| flag.replace(false)) {
-			let store = crate::skills::linker::master_store_dir(
-				req.scope.project_root(),
-			)
-			.unwrap();
-			std::fs::write(store.join(safe_name).join("stray.txt"), "x")
-				.unwrap();
-		}
-	}
-}
-
 /// What [`materialize_universal_master`] actually did, as attribution a caller
 /// can roll back safely.
 pub struct MaterializedMaster {
@@ -867,5 +831,41 @@ mod nocopy_tests {
 			got, want,
 			"link-era lock entry must match copy-era byte-for-byte"
 		);
+	}
+}
+
+/// Test-only fault injection: the post-write Master check cannot be made to
+/// fail through filesystem state alone (the copier wrote the Master from the
+/// same source a moment earlier).
+#[cfg(test)]
+pub(crate) mod test_hooks {
+	use std::cell::Cell;
+	use std::path::Path;
+
+	thread_local! {
+		static CORRUPT_MASTER: Cell<bool> = const { Cell::new(false) };
+	}
+
+	/// Make the next install on this thread write a stray file into its
+	/// freshly materialized Master.
+	// Only the unix-gated `nocopy_tests` call it.
+	#[cfg(unix)]
+	pub(crate) fn corrupt_next_master() {
+		CORRUPT_MASTER.with(|flag| flag.set(true));
+	}
+
+	pub(super) fn after_materialize(
+		_source_root: &Path,
+		safe_name: &str,
+		req: &super::FetchedSkillInstallRequest<'_>,
+	) {
+		if CORRUPT_MASTER.with(|flag| flag.replace(false)) {
+			let store = crate::skills::linker::master_store_dir(
+				req.scope.project_root(),
+			)
+			.unwrap();
+			std::fs::write(store.join(safe_name).join("stray.txt"), "x")
+				.unwrap();
+		}
 	}
 }
