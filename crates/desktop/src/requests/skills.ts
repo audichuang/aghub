@@ -234,7 +234,16 @@ function refetchUpdateChecks(queryClient: QueryClient) {
 	for (const query of queryClient.getQueryCache().findAll({
 		queryKey: queryKeys.skills.updateChecksAll(),
 	})) {
-		if (query.getObserversCount() > 0) {
+		// An enabled observer is what `type: "active"` matched. A query whose
+		// observers are ALL disabled was held back on purpose (offline, no
+		// project selected), so it refreshes only when a stale answer is already
+		// on screen (has data) and the network is up.
+		const wanted =
+			query.isActive() ||
+			(query.getObserversCount() > 0 &&
+				query.state.data !== undefined &&
+				globalThis.navigator?.onLine !== false);
+		if (wanted) {
 			void query
 				.fetch(undefined, { cancelRefetch: false })
 				.catch(() => {});
