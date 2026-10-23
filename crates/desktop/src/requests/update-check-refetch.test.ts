@@ -12,6 +12,7 @@ import { queryKeys } from "./keys.ts";
 import {
 	applySkillUpdateMutationOptions,
 	applySkillUpdatesMutationOptions,
+	gitSyncSkillMutationOptions,
 	refetchUpdateChecksAfterWrites,
 } from "./skills.ts";
 
@@ -195,6 +196,99 @@ for (const withActiveObserver of [false, true]) {
 		unsubActive?.();
 	});
 }
+
+/**
+ * A displayed check that is already in flight and has read the PRE-write
+ * server state ("outdated"), plus a way to run one write against it.
+ */
+async function preWriteCheckInFlight(enabled: boolean) {
+	const client = new QueryClient({
+		defaultOptions: { queries: { retry: false } },
+	});
+	let server = "outdated";
+	const firstFetch = deferred();
+	const firstStarted = deferred();
+	let fetches = 0;
+	const observer = new QueryObserver(client, {
+		queryKey: queryKeys.skills.updateChecks("global"),
+		queryFn: async () => {
+			fetches += 1;
+			const seen = server;
+			if (fetches === 1) {
+				firstStarted.resolve();
+				await firstFetch.promise;
+			}
+			return seen;
+		},
+		enabled,
+		staleTime: Number.POSITIVE_INFINITY,
+	});
+	const unsubscribe = observer.subscribe(() => {});
+	if (!enabled) {
+		client.setQueryData(queryKeys.skills.updateChecks("global"), "old");
+		void observer.refetch();
+	}
+	await firstStarted.promise;
+	const api = {
+		skills: {
+			applyUpdate: async () => ({ success: true }),
+			gitSync: async () => ({}),
+		},
+	} as unknown as ApiClient;
+	const write = async (kind: "update" | "sync" = "update") => {
+		server = "current";
+		const options =
+			kind === "update"
+				? applySkillUpdateMutationOptions({ api, queryClient: client })
+				: gitSyncSkillMutationOptions({ api, queryClient: client });
+		await new MutationObserver(client, options as any).mutate({
+			body: {},
+		} as any);
+	};
+	const settle = async () => {
+		firstFetch.resolve();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	};
+	return {
+		write,
+		settle,
+		answer: () => observer.getCurrentResult().data,
+		fetches: () => fetches,
+		unsubscribe,
+	};
+}
+
+// A single update joined the check that started BEFORE its write and ran
+// nothing after it: the badge kept "outdated" for the whole staleTime.
+for (const [label, enabled, kind] of [
+	["single update, auto-check observer", true, "update"],
+	["single update, lazy observer", false, "update"],
+	["git sync, auto-check observer", true, "sync"],
+] as const) {
+	test(`${label}: the final answer comes from a check started after the write`, async () => {
+		const race = await preWriteCheckInFlight(enabled);
+		await race.write(kind);
+		await race.settle();
+
+		assert.equal(race.answer(), "current");
+		assert.equal(race.fetches(), 2, "join the stale one, then one more");
+		race.unsubscribe();
+	});
+}
+
+// Several quick updates while that stale check is in flight share ONE
+// trailing check: each one re-fetches every source over the network.
+test("rapid updates during an in-flight check add one trailing check", async () => {
+	const race = await preWriteCheckInFlight(true);
+	await race.write();
+	await race.write();
+	await race.write();
+	await race.settle();
+
+	assert.equal(race.answer(), "current");
+	assert.equal(race.fetches(), 2, "the in-flight check + one trailing");
+	race.unsubscribe();
+});
 
 // Disabled-only observers (settings page offline / no project selected) must
 // not be forced into a check unless they already hold an answer and we are online.
