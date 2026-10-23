@@ -2,7 +2,7 @@
 use skill::compute_skill_folder_hash;
 use skill::lock::{SkillLockEntry, SkillLockFile};
 
-const NPX_LOCK: &str = include_str!("fixtures/global-lock-npx-written.json");
+const NPX_LOCK: &str = include_str!("../fixtures/global-lock-npx-written.json");
 
 #[test]
 fn reads_npx_lock_and_preserves_unknown_and_versions() {

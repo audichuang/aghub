@@ -23,7 +23,7 @@ Terms (Source hash, Master, Referrer, Relink, …) are defined in
   against the fetched-install entry for the same repo, and give the reviewer
   the same table.
 - Never bump lock versions; hash parity is pinned by
-  `crates/skill/tests/hash_parity_golden.rs`. Full round-trip contract:
+  `crates/skill/tests/it/hash_parity_golden.rs`. Full round-trip contract:
   [npx-skills-contract](../npx-skills-contract/SKILL.md).
 
 ## Install layout: universal vs copy

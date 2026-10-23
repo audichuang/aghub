@@ -64,7 +64,7 @@ pub struct ProjectSkillPaths {
 pub struct AgentDescriptor {
 	pub id: &'static str,
 	/// This agent's identity. Declared by its descriptor module and pinned to its
-	/// `agent_roster!` row by `crates/core/tests/registry_bijection.rs`, so holders of a
+	/// `agent_roster!` row by `crates/core/tests/it/registry_bijection.rs`, so holders of a
 	/// descriptor read it directly instead of parsing `id` back into an `AgentType`.
 	pub agent_type: crate::AgentType,
 	pub display_name: &'static str,

@@ -57,7 +57,7 @@ is the sort. aghub uses `feruca::Collator::new(Tailoring::Cldr(Locale::Root), fa
 default reorders punctuation/numeric/case paths versus `localeCompare`. aghub's bounds
 (`MAX_FILES`, `MAX_TOTAL_BYTES`, `MAX_DEPTH`) only reject pathological input.
 
-Parity is golden-pinned in `crates/skill/tests/hash_parity_golden.rs` against real npx
+Parity is golden-pinned in `crates/skill/tests/it/hash_parity_golden.rs` against real npx
 output (incl. `hash_parity_exotic_filenames_match_npx`: `1/2/10`, `z/ZEBRA`). Touching
 the walk, sort or exclusions means re-pinning those goldens against `npx skills` — a
 green unit test alone proves nothing.

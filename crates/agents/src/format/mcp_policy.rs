@@ -40,7 +40,7 @@
 //! the dialects, so error behaviour on malformed input is byte-identical to
 //! before the extraction.
 //!
-//! The forcing half is `crates/core/tests/mcp_dialect_decisions.rs`: a shared
+//! The forcing half is `crates/core/tests/it/mcp_dialect_decisions.rs`: a shared
 //! function nobody is FORCED to call does not propagate.
 //! See docs/history/agents.md#mixed-entry-rule-missing-in-three-dialects.
 

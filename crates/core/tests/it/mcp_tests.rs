@@ -2027,7 +2027,7 @@ fn mcp_writes_land_on_the_declared_path_for_every_agent() {
 		let tmp = tempfile::tempdir().unwrap();
 		let home = tmp.path();
 		let mut command = Command::new(std::env::current_exe().unwrap());
-		command.args(["--exact", NAME, "--nocapture"]);
+		command.args(["--exact", &format!("mcp_tests::{NAME}"), "--nocapture"]);
 		for key in PATH_OVERRIDE_VARS {
 			command.env_remove(key);
 		}

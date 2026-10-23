@@ -4,7 +4,7 @@
 //! so a thread-based race test passes with no file lock at all — the single most
 //! likely way this ships broken. Every exclusion test here therefore spawns a
 //! REAL second process: this same test binary, re-invoked with
-//! `--exact holder_child`, which acquires the guard and holds it.
+//! `--exact mutation_lock::holder_child`, which acquires the guard and holds it.
 //!
 //! No test mutates this process's environment, and none uses
 //! [`MutationScope::Global`] (whose lock file lives under the real `$HOME` when
@@ -44,7 +44,7 @@ fn holder_child() {
 /// Spawn the holder child and return it only once it reports the lock is held.
 fn spawn_holder(root: &Path, hold: Duration) -> Child {
 	let mut child = Command::new(std::env::current_exe().unwrap())
-		.args(["--exact", "holder_child"])
+		.args(["--exact", "mutation_lock::holder_child"])
 		.env(ROOT_ENV, root)
 		.env(HOLD_ENV, hold.as_millis().to_string())
 		.stdout(Stdio::null())

@@ -84,6 +84,8 @@ Rejected: merging the 44 integration-test files into one binary per crate. It
 would trim link time, but it merges their env mutexes' scopes and breaks the
 "one env mutex per binary" rule in `crates/core/AGENTS.md` Testing for little
 gain over 11s.
+Reversed in part on 2026-10-23, see Integration tests share one binary: CI's
+Windows job, not a 20-core laptop, is where the link time shows.
 
 Rule: `just test` and `preflight` use nextest; doc tests stay on `cargo test
 --doc`. Plain `cargo test` must keep passing, so the env-mutex rule still
@@ -296,3 +298,21 @@ ending in one large release crate (aghub-api, the desktop crate). A PR splits
 it into two parallel legs on the same restored cache: `app` (sidecar +
 desktop, needs the frontend) and `bins` (standalone CLI + api). Main keeps one
 `all` job per target, since that is the job that saves the cache.
+
+## Integration tests share one binary
+
+`crates/*/tests/it/`, `scripts/check-test-layout.sh`. On 2026-10-23 the
+Windows test job, the PR critical path once Build ran Linux-only, spent ~96s
+of its ~109s compile step linking test binaries, one per
+`crates/*/tests/*.rs` (44 of them, plus each crate's lib and bins).
+
+The 2026-10-11 rejection (cargo test serialized on the env mutex) stands for
+the files it was about: a file that writes env or takes an env lock keeps its
+own binary, so no env-mutex scope merges. Only the 26 files that never write
+env moved, into one `tests/it/` binary per crate (44 -> 22 integration
+binaries). A binary with no env writer cannot race a hidden env reader, so
+moving those needs no new lock.
+
+Names gained the module: `--test it <module>::`, and the self-re-executing
+tests (`holder_child`, `mcp_tests`) pass `<module>::<name>` to `--exact`.
+`check-test-layout.sh` pins the split in both directions.

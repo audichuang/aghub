@@ -670,7 +670,7 @@ fn insert_tag(
 /// `WINDSURF`, `AMP` — and reading them as coverage is how `gemini.rs` lost
 /// `http_url_key` outright while the "gemini" assertions here stayed green.
 /// What a shipped descriptor actually puts on disk is asserted against the
-/// descriptor's OWN fn pointers, in `aghub-core/tests/mcp_dialect_golden.rs`.
+/// descriptor's OWN fn pointers, in `aghub-core/tests/it/mcp_dialect_golden.rs`.
 /// Add an agent-shaped case there, never here.
 #[cfg(test)]
 mod tests {

@@ -83,7 +83,7 @@ In this repo: the scanner tests use the ENOTDIR trick
 universal-rename rollback tests use the read-only-dir technique
 (`crates/core/src/manager/skill/tests.rs`). There is no shared `perms_enforced`
 helper — each test file keeps its own copy (also `removal/verdict/tests.rs`,
-`repair.rs`, `core/tests/sub_agent_tests.rs`, `cli/tests/cli_tests.rs`,
+`repair.rs`, `core/tests/it/sub_agent_tests.rs`, `cli/tests/cli_tests.rs`,
 `api/src/routes/skills.rs`); copy one. For which item must fail in a multi-step
 rename and what the rename transaction covers, see the **aghub-skills** skill and
 `docs/adr/0001`.

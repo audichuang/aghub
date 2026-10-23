@@ -12,7 +12,7 @@ Role map (not a full file tree — `ls` / codegraph for that):
 - `models.rs` — `AgentConfig`, `McpServer`, `McpTransport`, `Skill`, `AgentSelection`, and `AgentType`'s re-export plus `parse_list` (the enum itself comes from `agents/mod.rs`)
 - `agents/` — one descriptor per agent, plus the `agent_roster!` macro in `mod.rs` that declares the roster ONCE and emits `AgentType`, `AgentType::ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and `ALL_DESCRIPTORS` from it (so `models.rs` re-exports `AgentType` rather than defining it); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
 - `sub_agents.rs` — markdown sub-agent I/O + `SubAgentLayout`: `Flat { suffix }` (`.md` for Claude/Grok/OpenCode, `.agent.md` for Copilot) vs `Nested { file_name }` (Antigravity's `<name>/agent.md`). The layout decides the read filter, the NAME and the written filename at once — get one wrong and aghub round-trips with itself while the vendor sees nothing. Frontmatter keys aghub does not model ride the model as `SubAgent::extra_frontmatter` (deserialized through a flattened `extra`), with the destination file read back only when the model carries none — a save rewrites EVERY sub-agent in the directory, not just the edited one, so without this creating one strips its siblings' `tools`/`model`/`color`. Codex is not here: its sub-agents are TOML (`agents/codex/sub_agent.rs`)
-- `format/` — serializers: OpenCode native, JSON map MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). Every dialect keeps its own engine (no two share a `Value` type). **Every MCP-capable agent** declares the answers they must not differ on in `mcp_policy.rs` — `TransportVocabulary` (its word for each transport; `sse: ""` is what `refuse_unwritable` turns into a refusal — but the dialect still has to CALL it, declaring alone writes an empty tag; `mcp_dialect_roundtrip` is what catches a missing call, NOT `mcp_dialect_decisions`), `OwnedKeys`, `reject_mixed_transport`, `remote_transport`, `transport_fields`, `reads_http` (the one "is this tag streamable HTTP?" condition — `json_map` shares ONE wide alias list across every agent that inherits it, so narrowing it per dialect is a behaviour change). Each hand-written dialect module declares one `TransportVocabulary`; the `json_map` agents declare theirs inside `json_map::Dialect`, which is the SAME type. Only the mixed-entry WORDING is still split, by `MixedWording` — a `json_map` agent's users already see `cannot contain both command and url`. (Counts rot on every roster edit: ask `agent_roster!` in `agents/mod.rs` and the capability tables in `tests/descriptor_regression.rs` for who is in which set.) Read `mcp_policy.rs` before touching any parser, and add a row to `crates/core/tests/mcp_dialect_decisions.rs` when you add an **MCP-capable agent** (a `json_map` agent introduces no dialect and still owes a row)
+- `format/` — serializers: OpenCode native, JSON map MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). Every dialect keeps its own engine (no two share a `Value` type). **Every MCP-capable agent** declares the answers they must not differ on in `mcp_policy.rs` — `TransportVocabulary` (its word for each transport; `sse: ""` is what `refuse_unwritable` turns into a refusal — but the dialect still has to CALL it, declaring alone writes an empty tag; `mcp_dialect_roundtrip` is what catches a missing call, NOT `mcp_dialect_decisions`), `OwnedKeys`, `reject_mixed_transport`, `remote_transport`, `transport_fields`, `reads_http` (the one "is this tag streamable HTTP?" condition — `json_map` shares ONE wide alias list across every agent that inherits it, so narrowing it per dialect is a behaviour change). Each hand-written dialect module declares one `TransportVocabulary`; the `json_map` agents declare theirs inside `json_map::Dialect`, which is the SAME type. Only the mixed-entry WORDING is still split, by `MixedWording` — a `json_map` agent's users already see `cannot contain both command and url`. (Counts rot on every roster edit: ask `agent_roster!` in `agents/mod.rs` and the capability tables in `tests/descriptor_regression.rs` for who is in which set.) Read `mcp_policy.rs` before touching any parser, and add a row to `crates/core/tests/it/mcp_dialect_decisions.rs` when you add an **MCP-capable agent** (a `json_map` agent introduces no dialect and still owes a row)
 
 ## KEY TYPES
 
@@ -44,7 +44,7 @@ chosen defaults (dsh, zcode, antigravity, omp, the 2026-08-13 MCP audit):
 - **OpenCode**: `mcp` object key; `"type": "remote"` is streamable HTTP, and an
   SSE server is **REFUSED on write** ("cannot express; use streamable HTTP"),
   not silently downgraded. The authoritative list of agents that refuse SSE is
-  `NO_NATIVE_SSE` in `crates/core/tests/mcp_dialect_roundtrip.rs` — today codex,
+  `NO_NATIVE_SSE` in `crates/core/tests/it/mcp_dialect_roundtrip.rs` — today codex,
   opencode, kilocode and mistral
 - **Codex/Mistral/Grok**: TOML. Grok: MCP under `mcp_servers` in
   `~/.grok/config.toml` (project: `.grok/config.toml`); streamable HTTP carries
@@ -129,14 +129,14 @@ BUILD. A missing step-7 asset fails no build, lint or typecheck — only
    `ALL_DESCRIPTORS` — there is no second list, and no `AgentType` edit in
    `models.rs` (it re-exports). **Row position is the order of everything**: the
    desktop agent list, `-a all` expansion, batch row order and first-error
-3. `crates/core/tests/mcp_dialect_golden.rs` — a `row!` naming what the agent
+3. `crates/core/tests/it/mcp_dialect_golden.rs` — a `row!` naming what the agent
    writes and how it reads a config aghub did not write. REQUIRED for any agent
    claiming MCP support
-4. `crates/core/tests/mcp_dialect_decisions.rs` — a second `row!`: a mixed entry,
+4. `crates/core/tests/it/mcp_dialect_decisions.rs` — a second `row!`: a mixed entry,
    an unknown transport tag, a field the model does not own, a value that does
    not fit, an SSE server it cannot spell. Required even for a `json_map` agent
    that introduces no new dialect
-5. `crates/core/tests/mcp_dialect_roundtrip.rs` — `NATIVE_TOGGLE`, if the agent
+5. `crates/core/tests/it/mcp_dialect_roundtrip.rs` — `NATIVE_TOGGLE`, if the agent
    has a native enabled/disabled flag. Exhaustive BOTH ways: a listed agent that
    drops a disabled server fails, an unlisted one that keeps it fails too
 6. `crates/agents/tests/descriptor_regression.rs` — a row in **every** table.
@@ -153,7 +153,7 @@ BUILD. A missing step-7 asset fails no build, lint or typecheck — only
    `just preflight` runs it. An id with a dash may ship either spelling — the
    lookup has an `id.replaceAll("-", "_")` fallback
 
-`crates/core/tests/registry_bijection.rs` covers the three row mistakes the
+`crates/core/tests/it/registry_bijection.rs` covers the three row mistakes the
 compiler cannot: a row naming the wrong MODULE, two rows sharing an ID, and a
 row whose id literal drifts from the `id:` field inside `agents/<module>.rs`.
 

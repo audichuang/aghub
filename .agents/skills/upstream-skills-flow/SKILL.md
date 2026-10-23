@@ -81,7 +81,7 @@ Referrer" and knowledge page `技能連結形狀與 repair 鏈`.
 1. **Never bump a lock version** — upstream `readSkillLock` returns an empty lock for
    `version < CURRENT_VERSION` (3), wiping cross-tool state. Details: `npx-skills-contract`.
 2. **The folder hash must stay byte-identical** — golden-pinned in
-   `crates/skill/tests/hash_parity_golden.rs`; see `references/lock-and-hash.md`.
+   `crates/skill/tests/it/hash_parity_golden.rs`; see `references/lock-and-hash.md`.
 3. **`skillFolderHash` and `contentHash` are mutually exclusive** — only
    `apply_content_hash` / `apply_computed_hash` may set them.
 4. **aghub's extra safety is deliberate** — interprocess mutation lock, conflict-not-clobber

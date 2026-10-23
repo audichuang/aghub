@@ -2,7 +2,7 @@ use aghub_agents::{agents, AgentDescriptor, AgentType};
 
 /// The shipped descriptors. Single-sourced from `aghub_agents::agents` so this
 /// is not a second hand-written roster that can silently drift from
-/// `AgentType::ALL` — see `tests/registry_bijection.rs`.
+/// `AgentType::ALL` — see `tests/it/registry_bijection.rs`.
 pub static ALL_AGENTS: &[&AgentDescriptor] = agents::ALL_DESCRIPTORS;
 
 /// Total by construction — `AgentType::descriptor` is a `match` generated

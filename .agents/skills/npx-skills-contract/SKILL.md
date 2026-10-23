@@ -71,7 +71,7 @@ so npx-written entries deserialize and npx ignores the extra key. Live
 extensions: global `contentHash` (Source hash, with `skillFolderHash` left
 empty — see `CONTEXT.md`) and `refCommit` in both locks (project
 `computedHash` is npx's own field, not an extension). Pinned by
-`crates/skill/tests/npx_interop.rs` and the serde tests in `lock/{types,local}.rs`.
+`crates/skill/tests/it/npx_interop.rs` and the serde tests in `lock/{types,local}.rs`.
 
 The reverse direction: a key aghub does NOT model (another installer's
 `pinnedRef`, provider data, a newer schema's field) lands in the `extra`
@@ -99,7 +99,7 @@ and another installer's pin on the old name does not follow it.
   `shifting = false` (non-ignorable punctuation) is load-bearing: feruca's
   default reorders punctuation / numeric / case-collision paths vs
   `localeCompare`. Pinned against real npx output in
-  `crates/skill/tests/hash_parity_golden.rs` (incl. `10.md`, `ZEBRA.md`); a
+  `crates/skill/tests/it/hash_parity_golden.rs` (incl. `10.md`, `ZEBRA.md`); a
   change to the hash re-pins those goldens from real npx, never from aghub.
 
 ## Cosmetic (round-trips; fix only to minimize byte diffs)

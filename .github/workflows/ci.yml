@@ -113,6 +113,8 @@ jobs:
               run: node scripts/check-history-links.mjs
             - name: No literal tab inside a string (missing `\` continuation)
               run: bash scripts/check-string-tabs.sh
+            - name: Integration tests that never write env share one binary
+              run: bash scripts/check-test-layout.sh
 
     # Rust lint (clippy + audit) - 3 OS matrix
     lint-rust:
@@ -315,10 +317,10 @@ jobs:
                       # shellcheck disable=SC2016
                       dbus-run-session -- bash -c '
                         eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
-                        cargo test --workspace --test keyring_smoke -- --ignored
+                        cargo test --workspace --test it -- --ignored keyring_smoke::
                       '
                   else
-                      cargo test --workspace --test keyring_smoke -- --ignored
+                      cargo test --workspace --test it -- --ignored keyring_smoke::
                   fi
             # Real-network REST E2E: authenticated GitHub API via the runner's
             # ephemeral GITHUB_TOKEN (no PAT to manage). The test self-skips

@@ -21,10 +21,10 @@
 //! Only the mixed-entry WORDING stays split (`MixedWording`), because unifying
 //! the text is a user-visible change, not a merge.
 //!
-//! `crates/core/tests/mcp_dialect_decisions.rs` is the forcing half —
+//! `crates/core/tests/it/mcp_dialect_decisions.rs` is the forcing half —
 //! registry-driven, one row per MCP-capable AGENT (`json_map` agents included,
 //! so adding one needs a row even though it adds no dialect) — and
-//! `tests/format_tests.rs` carries the cross-dialect contract test.
+//! `tests/it/format_tests.rs` carries the cross-dialect contract test.
 
 pub mod json_map;
 pub mod json_openclaw;

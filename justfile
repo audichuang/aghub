@@ -27,7 +27,7 @@ test:
 
 # Run integration tests only
 integration-test:
-    cargo test -p aghub-core --test integration_tests
+    cargo test -p aghub-core --test it integration_tests::
 
 # Run tests with agent validation (requires claude/opencode CLIs)
 test-with-validation:
@@ -58,6 +58,7 @@ preflight: && target-cap
     node scripts/check-history-links.mjs
     bash scripts/check-test-tmpdir.sh
     bash scripts/check-string-tabs.sh
+    bash scripts/check-test-layout.sh
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     # Sync node_modules to the LOCKFILE before any frontend gate runs: CI

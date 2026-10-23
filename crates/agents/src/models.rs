@@ -1007,7 +1007,7 @@ mod tests {
 	}
 
 	/// Every `from_str` ALIAS, read from the roster rows themselves. The ids
-	/// are pinned by `aghub-core/tests/registry_bijection.rs`, but an alias
+	/// are pinned by `aghub-core/tests/it/registry_bijection.rs`, but an alias
 	/// exists only in its `agent_roster!` row and is reachable from nothing
 	/// else — deleting all seven left the whole workspace suite green.
 	#[test]

@@ -1,6 +1,6 @@
 //! The mutation lock as the FLOWS see it.
 //!
-//! `crates/skill/tests/mutation_lock.rs` proves the lock mechanism works. This
+//! `crates/skill/tests/it/mutation_lock.rs` proves the lock mechanism works. This
 //! file proves a core flow actually TAKES it — delete the
 //! `let _mutation_guard = …` from `prune_lock_from_dirs` and both tests below go
 //! red, which nothing in the skill crate's tests would catch.
@@ -108,7 +108,7 @@ fn spawn_holder_with(
 ) -> Child {
 	let mut command = Command::new(std::env::current_exe().unwrap());
 	command
-		.args(["--exact", "holder_child"])
+		.args(["--exact", "mutation_lock_flows::holder_child"])
 		.env(ROOT_ENV, root)
 		.env(HOLD_ENV, hold.as_millis().to_string());
 	if let Some(name) = repoint {

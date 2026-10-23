@@ -5986,7 +5986,7 @@ mod tests {
 	/// first depends on the paths (global first, then by resolved lock path).
 	/// Single-threaded, so this cannot tell whether the source lock is HELD at
 	/// all — `a_cross_scope_transfer_reads_the_source_entry_under_its_lock`
-	/// (`tests/mutation_lock_flows.rs`, a real second process) pins that.
+	/// (`tests/it/mutation_lock_flows.rs`, a real second process) pins that.
 	#[cfg(unix)]
 	#[test]
 	fn transfer_skill_cross_scope_locks_both_scopes_in_either_direction() {

@@ -49,7 +49,7 @@ sixth review found the same half-parsed mixed entry in three dialects at once �
 all of which could have called it since the first review. A shared function
 nobody is FORCED to call does not propagate.
 
-**Rule**: `crates/core/tests/mcp_dialect_decisions.rs` is the forcing half —
+**Rule**: `crates/core/tests/it/mcp_dialect_decisions.rs` is the forcing half —
 registry-driven, one row per MCP-capable agent (`json_map` agents included).
 Commits: `8ac07b2f` (the three dialects call it), `1c0c42b9` (the forcing
 table).
@@ -59,7 +59,7 @@ The decisions table does NOT force the `refuse_unwritable` call. Declaring
 Grok's `sse` and neutering the call leaves the decisions table green (its row
 says `Spelled`, and writing an empty tag still "succeeds"), while
 `every_agent_reads_back_the_transport_it_wrote` in
-`crates/core/tests/mcp_dialect_roundtrip.rs` fails with `grok cannot read back
+`crates/core/tests/it/mcp_dialect_roundtrip.rs` fails with `grok cannot read back
 its own output`. That roundtrip guard, registry-driven and bidirectional via
 `NO_NATIVE_SSE`, is the forcing half for the call.
 
@@ -73,7 +73,7 @@ servers landed in `~/.claude.json` and its skills in Claude's directory.
 
 **Rule**: one `agent_roster!` row per agent; `AgentType::descriptor` is a total
 `match`, so `registry::get` has no fallback left to reach. The row mistakes the
-compiler cannot see are pinned by `crates/core/tests/registry_bijection.rs`.
+compiler cannot see are pinned by `crates/core/tests/it/registry_bijection.rs`.
 Commit: `5179cf38`.
 
 ## Absent vs unreadable sub agent dir
