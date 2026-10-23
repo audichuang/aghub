@@ -557,3 +557,61 @@ test("a manual check that fails rejects the mutation", async () => {
 		.catch(() => {});
 	assert.equal(failed?.message, "offline");
 });
+
+// Codex: a connection switch (`ConnectionProvider.setActive` removes every
+// skills query) cancels the click's check mid-flight. The click was answered
+// from `query.state`, which a removed query leaves at its PRE-click "success",
+// so the settings page toasted "check complete" over the stale answer.
+test("a manual check cancelled mid-flight rejects instead of returning cached data", async () => {
+	const client = new QueryClient({
+		defaultOptions: {
+			queries: { retry: false },
+			mutations: { retry: false },
+		},
+	});
+	const started = deferred();
+	const api = {
+		skills: {
+			checkUpdates: async () => {
+				started.resolve();
+				await new Promise(() => {}); // never answers; only cancelled
+			},
+		},
+	} as unknown as ApiClient;
+	const params = { scope: "global" } as const;
+	// The settings page's auto-check observer, holding an earlier answer.
+	const observer = new QueryObserver(
+		client,
+		checkSkillUpdatesQueryOptions({ api, params, enabled: false }),
+	);
+	const unsubscribe = observer.subscribe(() => {});
+	client.setQueryData(observer.options.queryKey, "pre-click" as any);
+	const delivered: unknown[] = [];
+	const failed: string[] = [];
+	const options = checkSkillUpdatesMutationOptions({
+		api,
+		queryClient: client,
+		onSuccess: (data) => {
+			delivered.push(data);
+		},
+		onError: (error) => {
+			failed.push(error.message);
+		},
+	});
+	const click = () =>
+		new MutationObserver(client, options).mutate(params).catch(() => {});
+	// The second click coalesces onto the first one's scheduled check.
+	const manual = Promise.all([click(), click()]);
+	await started.promise;
+	// Mirror setActive: drop the skills namespace.
+	client.removeQueries({ queryKey: ["skills"] });
+	await manual;
+
+	assert.deepEqual(
+		delivered,
+		[],
+		"the stale pre-click answer must not succeed",
+	);
+	assert.deepEqual(failed, ["CancelledError", "CancelledError"]);
+	unsubscribe();
+});

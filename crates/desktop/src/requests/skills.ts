@@ -1,7 +1,7 @@
 import {
+	isCancelledError,
 	mutationOptions,
 	type QueryClient,
-	type QueryKey,
 	queryOptions,
 } from "@tanstack/react-query";
 import type {
@@ -234,18 +234,17 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 /// check per query, not one per click; a write landing during it queues one
 /// more.
 ///
-/// It is the ONE entry point for every trigger that needs a fresh answer:
-/// writes, credential changes, and the manual "check for updates" button.
-/// `queryKey` narrows it to that exact query, refreshed even when not
-/// displayed (the user asked for it explicitly).
+/// Writes and credential changes go through here; the manual "check for
+/// updates" button calls `refreshAfterWrite` on its one query directly (even
+/// when not displayed: the user asked explicitly). Both share its per-query
+/// coalescing. Outcomes are swallowed here: these callers fire and forget, and
+/// the query's own state carries the error.
 export function refetchUpdateChecksAfterWrites(
 	queryClient: QueryClient,
-	queryKey?: QueryKey,
 ): Promise<void> {
-	const queries = queryKey
-		? queryClient.getQueryCache().findAll({ queryKey, exact: true })
-		: displayedUpdateChecks(queryClient);
-	return Promise.all(queries.map(refreshAfterWrite)).then(() => undefined);
+	return Promise.allSettled(
+		displayedUpdateChecks(queryClient).map(refreshAfterWrite),
+	).then(() => undefined);
 }
 
 /// Not `refetchQueries({ type: "active" })`: that skips a query whose only
@@ -274,31 +273,47 @@ type UpdateCheckQuery = ReturnType<typeof displayedUpdateChecks>[number];
 /// the loop draining it. Keyed by the Query object so it dies with its cache.
 const pendingAfterWrite = new WeakMap<
 	UpdateCheckQuery,
-	{ dirty: boolean; drained: Promise<void> }
+	{ dirty: boolean; drained: Promise<unknown> }
 >();
 
-function refreshAfterWrite(query: UpdateCheckQuery): Promise<void> {
+/// Settles like the LAST trailing check — the one that covers every trigger
+/// joined so far, including a caller that coalesced onto a running drain.
+function refreshAfterWrite(query: UpdateCheckQuery): Promise<unknown> {
 	const running = pendingAfterWrite.get(query);
 	if (running) {
 		running.dirty = true;
 		return running.drained;
 	}
-	const state = { dirty: true, drained: Promise.resolve() };
-	const fetchJoining = () =>
-		query.fetch(undefined, { cancelRefetch: false }).then(
-			() => undefined,
-			() => undefined,
+	const state: { dirty: boolean; drained: Promise<unknown> } = {
+		dirty: true,
+		drained: Promise.resolve(),
+	};
+	const fetchJoining = () => query.fetch(undefined, { cancelRefetch: false });
+	let cancelled = false;
+	const settled = (promise: Promise<unknown>) =>
+		promise.then(
+			() => {
+				cancelled = false;
+			},
+			(error) => {
+				cancelled = isCancelledError(error);
+			},
 		);
 	state.drained = (async () => {
 		try {
-			while (state.dirty) {
+			let trailing: Promise<unknown>;
+			do {
 				// A check already running may predate the write: wait it out.
 				if (query.state.fetchStatus === "fetching")
-					await fetchJoining();
+					await settled(fetchJoining());
 				// Every write so far is now covered by the check started next.
 				state.dirty = false;
-				await fetchJoining();
-			}
+				trailing = fetchJoining();
+				await settled(trailing);
+				// Cancelled = the query was removed (connection switch): another
+				// check would hit the old host for a cache nobody reads.
+			} while (state.dirty && !cancelled);
+			return trailing;
 		} finally {
 			pendingAfterWrite.delete(query);
 		}
@@ -527,7 +542,7 @@ export function checkSkillUpdatesQueryKey(params?: CheckSkillUpdatesParams) {
 /// check in flight. It used to run its own request and `setQueryData` the
 /// answer, so a click just before an apply landed its pre-write answer AFTER
 /// the post-write check and pinned "outdated" for the whole staleTime.
-/// A click goes through `refetchUpdateChecksAfterWrites` so its answer comes
+/// A click goes through `refreshAfterWrite` so its answer comes
 /// from a check that STARTED after the click: `fetchQuery` joined a check
 /// already in flight, which may have read the server before the click (e.g.
 /// before a credential was bound). Cost: a click during a check runs one more.
@@ -549,9 +564,12 @@ export function checkSkillUpdatesMutationOptions({
 			const query = queryClient
 				.getQueryCache()
 				.build(queryClient, { queryKey, queryFn });
-			await refetchUpdateChecksAfterWrites(queryClient, query.queryKey);
-			if (query.state.status === "error") throw query.state.error;
-			return query.state.data as NonNullable<typeof query.state.data>;
+			// The trailing check's ACTUAL outcome, never `query.state`: a
+			// cancelled fetch (the query removed by a connection switch) leaves
+			// it at the pre-click "success".
+			return (await refreshAfterWrite(
+				query as unknown as UpdateCheckQuery,
+			)) as NonNullable<typeof query.state.data>;
 		},
 		onSuccess,
 		onError,
