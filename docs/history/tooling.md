@@ -285,4 +285,8 @@ Windows/macOS-specific parts (`tauri-build` resources, `cfg` code) already
 compile in Test and Rust Lint on those runners. PRs therefore build Linux
 only; main still builds all three targets, saves their caches, and must be
 green for `verify-ci` before any tag, so a Windows/macOS-only release break
-surfaces on main after merge instead of on the PR.
+surfaces on main after merge instead of on the PR. That is why `build` runs on
+every main push again (it had been path-filtered there for a day): a docs-only
+successor would otherwise skip it and give `verify-ci` a green run on code
+whose Windows build had failed. Measured on the PR itself: wall clock
+~8.5 -> 5.6 min, Build Linux now the longest job.

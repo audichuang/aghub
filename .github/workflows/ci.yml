@@ -348,13 +348,13 @@ jobs:
     build:
         name: Build (${{ matrix.target }})
         needs: changes
-        # Path-filtered on main too: an unchanged Cargo.lock is an exact key
-        # hit, which rust-cache never re-saves, so a docs-only push built three
-        # release targets for nothing. The bump commit touches Cargo.toml and
-        # still refreshes the cache the following tag restores. A new stable
-        # rustc changes the key, so a tag on a commit that skipped `build`
-        # after one restores nothing; run CI via workflow_dispatch first.
+        # ALWAYS on push to main: PRs build Linux only, so main is the only
+        # place Windows/macOS release builds run, and verify-ci trusts any
+        # green main run. A path-filtered docs-only successor of a commit whose
+        # Windows build failed would be a green run on broken code. It also
+        # keeps the release caches current across stable rustc bumps.
         if: |
+            github.event_name == 'push' ||
             github.event_name == 'workflow_dispatch' ||
             needs.changes.outputs.rust == 'true' ||
             needs.changes.outputs.desktop == 'true' ||
