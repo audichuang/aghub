@@ -95,6 +95,14 @@ binary (the largest single unit, `cargo --timings`) -> the desktop crate; the
 integration binaries are small and link in parallel beside it. Shortening
 that chain, not the binary count, is what would move this job.
 
+Shortening it does not pay either. Native cargo, `-j4`, `CARGO_INCREMENTAL=0`,
+deps warm and workspace crates rebuilt (a CI test job's shape): the workspace
+test build took 28.3s and 28.0s; with the `aghub-api` lib unit tests switched
+off entirely (`[lib] test = false`, the upper bound) 23.2s and 23.5s. Moved to
+an integration binary they would still compile, only after the `aghub-api`
+lib, ending about where they end now, and the desktop crate is next in line
+behind them. Left as is; CI tuning stopped here (PR wall ~5 min).
+
 Rule: `just test` and `preflight` use nextest; doc tests stay on `cargo test
 --doc`. Plain `cargo test` must keep passing, so the env-mutex rule still
 applies.
