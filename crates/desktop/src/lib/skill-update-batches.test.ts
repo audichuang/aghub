@@ -7,6 +7,7 @@ import type { LockSourceEntry } from "./skill-update-batches.ts";
 import {
 	batchedSkillCount,
 	groupUpdatesBySource,
+	judgedCommitsFor,
 } from "./skill-update-batches.ts";
 
 function lockEntry(
@@ -141,4 +142,34 @@ test("a project lock row, which records no URL, still groups", () => {
 	assert.deepEqual(unresolved, []);
 	assert.equal(batches.length, 1);
 	assert.equal(batches[0].source, "o/one");
+});
+
+// The batch must carry the commit each displayed verdict was judged against,
+// so the server installs THAT commit or refuses — never a tip that moved since.
+test("judged commits travel with their batch and are split per chunk", () => {
+	const statuses: SkillUpdateResponse[] = [
+		{ ...updatable("alpha"), judgedCommit: "c0" },
+		updatable("beta"),
+		{ ...updatable("gamma"), judgedCommit: "c9" },
+	];
+	const { batches } = groupUpdatesBySource(
+		statuses,
+		[
+			lockEntry("alpha", "o/r", "https://github.com/o/r"),
+			lockEntry("beta", "o/r", "https://github.com/o/r"),
+			lockEntry("gamma", "x/y", "https://github.com/x/y"),
+		],
+		"global",
+		null,
+	);
+	assert.deepEqual(batches[0].judgedCommits, { alpha: "c0" });
+	assert.deepEqual(batches[1].judgedCommits, { gamma: "c9" });
+	assert.deepEqual(judgedCommitsFor(batches[0].judgedCommits, ["alpha"]), {
+		alpha: "c0",
+	});
+	assert.equal(
+		judgedCommitsFor(batches[0].judgedCommits, ["beta"]),
+		undefined,
+	);
+	assert.equal(judgedCommitsFor(undefined, ["alpha"]), undefined);
 });

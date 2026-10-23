@@ -47,15 +47,15 @@ impl Fetcher for RecordingFetcher {
 			token.map(str::to_string),
 			paths.iter().map(|path| path.as_str().to_string()).collect(),
 		));
-		Ok(FetchedRepo {
-			root: self.root.clone(),
-			snapshot: aghub_git::RepoSnapshot {
+		Ok(FetchedRepo::new(
+			self.root.clone(),
+			aghub_git::RepoSnapshot {
 				commit_oid: "bulk-commit".to_string(),
 				tree_oid: "bulk-tree".to_string(),
 				commit_time: None,
 			},
-			_guard: None,
-		})
+			None,
+		))
 	}
 }
 

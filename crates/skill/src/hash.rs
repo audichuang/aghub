@@ -97,6 +97,34 @@ pub fn compute_skill_folder_hash_covering_all(
 pub fn compute_skill_folder_hashes(
 	dir: &Path,
 ) -> Result<(String, String), HashError> {
+	compute_skill_folder_hashes_with(dir, |_| {})
+}
+
+/// One step of [`compute_skill_folder_hashes_with`]'s read of a hashed file.
+pub enum FileEvent<'a> {
+	/// A file is about to be read. `rel` is the hashed (`/`-joined, lossy)
+	/// spelling and `native` the file's real path relative to the folder; they
+	/// name different things when a component holds a `\` (a name character
+	/// on Unix) or is not UTF-8. `len` is the length its open handle reports
+	/// before the read; the bytes that follow may differ if the file changes.
+	Begin {
+		rel: &'a str,
+		native: &'a Path,
+		len: u64,
+	},
+	/// The next chunk of the file's bytes — the same chunk the digests consume.
+	Bytes(&'a [u8]),
+	/// The file was read to its end.
+	End,
+}
+
+/// [`compute_skill_folder_hashes`], also streaming every hashed file's bytes
+/// to `on_file`, so a caller can derive more (e.g. git blob oids) from the
+/// SAME walk and the SAME read the digests come from.
+pub fn compute_skill_folder_hashes_with(
+	dir: &Path,
+	mut on_file: impl FnMut(FileEvent<'_>),
+) -> Result<(String, String), HashError> {
 	let mut files = collect_skill_files(dir)?;
 	// Same collation as `hash_files`; filtering a sorted list keeps its order.
 	let mut collator = feruca::Collator::new(
@@ -105,84 +133,79 @@ pub fn compute_skill_folder_hashes(
 		true,
 	);
 	files.sort_by(|a, b| collator.collate(&a.0, &b.0));
-	let compared: Vec<bool> = {
-		let paths: std::collections::HashSet<&str> =
-			files.iter().map(|(path, _)| path.as_str()).collect();
-		files
-			.iter()
-			.map(|(path, _)| !generated_python_cache(path, &paths))
-			.collect()
-	};
+	let natives: Vec<&Path> = files
+		.iter()
+		.map(|(_, abs)| abs.strip_prefix(dir).unwrap_or(abs))
+		.collect();
 
 	let mut raw = Sha256::new();
 	let mut cmp = Sha256::new();
 	let mut read_bytes = 0;
-	for ((rel, abs), compared) in files.iter().zip(compared) {
+	// Both callbacks below report to `on_file`, never at the same time.
+	let on_file = std::cell::RefCell::new(&mut on_file);
+	for ((rel, abs), native) in files.iter().zip(natives) {
+		let compared = carried_into_master(native);
 		raw.update(rel.as_bytes());
 		if compared {
 			cmp.update(rel.as_bytes());
 		}
-		update_from_file(abs, &mut read_bytes, MAX_TOTAL_BYTES, |chunk| {
-			raw.update(chunk);
-			if compared {
-				cmp.update(chunk);
-			}
-		})?;
+		update_from_file(
+			abs,
+			&mut read_bytes,
+			MAX_TOTAL_BYTES,
+			|len| (on_file.borrow_mut())(FileEvent::Begin { rel, native, len }),
+			|chunk| {
+				raw.update(chunk);
+				if compared {
+					cmp.update(chunk);
+				}
+				(on_file.borrow_mut())(FileEvent::Bytes(chunk));
+			},
+		)?;
+		(on_file.borrow_mut())(FileEvent::End);
 	}
 	Ok((lower_hex(&raw.finalize()), lower_hex(&cmp.finalize())))
 }
 
-/// Compare installed and upstream content without CPython's generated cache.
-/// Never use this digest for locks or security: those retain every file.
+/// Names the Master copier leaves out, mirroring upstream npx
+/// `copyDirectory` (installer.ts) so a Master hashes identically to npx.
+const MASTER_EXCLUDED_FILES: &[&str] = &["metadata.json"];
+const MASTER_EXCLUDED_DIRS: &[&str] =
+	&[".git", "__pycache__", "__pypackages__"];
+
+/// Does the Master copier leave this entry out? The ONE answer for the copier
+/// itself and for anything that compares content against a Master it made.
+///
+/// Excluding a name from comparison means an upstream change touching ONLY
+/// excluded entries (say, a new `metadata.json`) is not an update. That is
+/// deliberate: installing it would not carry the change either, so calling it
+/// an update would promise something `apply-update` can never deliver.
+pub fn excluded_from_master(name: &str, is_dir: bool) -> bool {
+	MASTER_EXCLUDED_FILES.contains(&name)
+		|| (is_dir && MASTER_EXCLUDED_DIRS.contains(&name))
+}
+
+/// Would the Master copier carry the file at `rel`, a NATIVE path relative to
+/// the folder root? (On Unix a `\` is part of a name, not a separator.)
+pub fn carried_into_master(rel: &Path) -> bool {
+	let mut parts = rel.components().peekable();
+	while let Some(part) = parts.next() {
+		let name = part.as_os_str().to_string_lossy();
+		if excluded_from_master(&name, parts.peek().is_some()) {
+			return false;
+		}
+	}
+	true
+}
+
+/// Compare installed and upstream content as a Master would hold it: only what
+/// the Master copier carries ([`carried_into_master`]), so a Master always
+/// compares equal to the folder it was copied from. Never use this digest for
+/// locks or security: those retain every file.
 pub fn compute_skill_folder_comparison_hash(
 	dir: &Path,
 ) -> Result<String, HashError> {
-	let files = collect_skill_files(dir)?;
-	let paths: std::collections::HashSet<&str> =
-		files.iter().map(|(path, _)| path.as_str()).collect();
-	let compared = files
-		.iter()
-		.filter(|(path, _)| !generated_python_cache(path, &paths))
-		.cloned()
-		.collect();
-	hash_files(compared)
-}
-
-fn generated_python_cache(
-	path: &str,
-	paths: &std::collections::HashSet<&str>,
-) -> bool {
-	let Some((parent, file)) = path.rsplit_once('/') else {
-		return false;
-	};
-	let source_dir = if parent == "__pycache__" {
-		""
-	} else if let Some(dir) = parent.strip_suffix("/__pycache__") {
-		dir
-	} else {
-		return false;
-	};
-	let Some((module, tag)) = file
-		.strip_suffix(".pyc")
-		.and_then(|stem| stem.rsplit_once(".cpython-"))
-	else {
-		return false;
-	};
-	let (version, optimization) = tag.split_once(".opt-").unwrap_or((tag, "0"));
-	if module.is_empty()
-		|| version.len() < 2
-		|| !version.bytes().all(|b| b.is_ascii_digit())
-		|| optimization.len() != 1
-		|| !optimization.bytes().all(|b| b.is_ascii_digit())
-	{
-		return false;
-	}
-	let source = if source_dir.is_empty() {
-		format!("{module}.py")
-	} else {
-		format!("{source_dir}/{module}.py")
-	};
-	paths.contains(source.as_str())
+	compute_skill_folder_hash_where(dir, carried_into_master)
 }
 
 /// Lowercase hex of a digest; sha2 0.11 output no longer implements `LowerHex`.
@@ -209,9 +232,13 @@ fn hash_files(
 	let mut read_bytes = 0;
 	for (rel, abs) in &files {
 		hasher.update(rel.as_bytes());
-		update_from_file(abs, &mut read_bytes, MAX_TOTAL_BYTES, |chunk| {
-			hasher.update(chunk)
-		})?;
+		update_from_file(
+			abs,
+			&mut read_bytes,
+			MAX_TOTAL_BYTES,
+			|_| {},
+			|chunk| hasher.update(chunk),
+		)?;
 	}
 	Ok(lower_hex(&hasher.finalize()))
 }
@@ -238,9 +265,11 @@ fn update_from_file(
 	path: &Path,
 	total_bytes: &mut u64,
 	max_total_bytes: u64,
+	on_open: impl FnOnce(u64),
 	mut sink: impl FnMut(&[u8]),
 ) -> Result<(), HashError> {
 	let mut file = std::fs::File::open(path)?;
+	on_open(file.metadata()?.len());
 	let mut buf = [0_u8; 16 * 1024];
 	loop {
 		let read = file.read(&mut buf)?;
@@ -353,27 +382,62 @@ mod tests {
 		);
 	}
 
+	/// The comparison projects through the Master copier, which drops every
+	/// `__pycache__` directory whole and every `metadata.json`. So bytecode
+	/// WITHOUT a sibling `.py` (and anything else in `__pycache__`) is ignored
+	/// too — a Master never holds it, so counting it upstream could never
+	/// converge. What the copier carries stays compared: a stray root `.pyc`, a
+	/// cache directory not on the copier's list.
 	#[test]
-	fn comparison_keeps_orphan_bytecode_and_other_cache_directory_files() {
-		for path in [
+	fn comparison_ignores_exactly_what_the_master_copier_drops() {
+		let ignored = [
 			"__pycache__/orphan.cpython-312.pyc",
 			"__pycache__/run.pyc",
-			"__pycache__/run.cpython-invalid.pyc",
 			"__pycache__/instructions.md",
-			"run.pyc",
-		] {
+			"lib/__pycache__/deep.cpython-312.pyc",
+			"__pypackages__/pkg/mod.py",
+			"metadata.json",
+			"lib/metadata.json",
+		];
+		let compared = ["run.pyc", ".pytest_cache/x", "__pycache__.md"];
+		for (path, counts) in ignored
+			.iter()
+			.map(|p| (p, false))
+			.chain(compared.iter().map(|p| (p, true)))
+		{
 			let dir = tempdir().unwrap();
-			fs::create_dir(dir.path().join("__pycache__")).unwrap();
 			fs::write(dir.path().join("run.py"), "print('hello')").unwrap();
 			let before =
 				compute_skill_folder_comparison_hash(dir.path()).unwrap();
-			fs::write(dir.path().join(path), "extra content").unwrap();
+			let file = dir.path().join(path);
+			fs::create_dir_all(file.parent().unwrap()).unwrap();
+			fs::write(&file, "extra content").unwrap();
+			let after =
+				compute_skill_folder_comparison_hash(dir.path()).unwrap();
+			assert_eq!(after != before, counts, "{path}");
+			assert_eq!(
+				compute_skill_folder_hashes(dir.path()).unwrap().1,
+				after,
+				"paired walk agrees for {path}"
+			);
 			assert_ne!(
-				compute_skill_folder_comparison_hash(dir.path()).unwrap(),
+				compute_skill_folder_hash(dir.path()).unwrap(),
 				before,
-				"{path}"
+				"the raw hash counts {path}"
 			);
 		}
+	}
+
+	/// On Unix `__pycache__\payload` is ONE file name the copier carries; the
+	/// paired walk must judge the native name, not the `/`-folded one.
+	#[cfg(unix)]
+	#[test]
+	fn paired_comparison_counts_backslash_named_file() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("SKILL.md"), "s").unwrap();
+		let before = compute_skill_folder_hashes(dir.path()).unwrap().1;
+		fs::write(dir.path().join("__pycache__\\payload"), "p").unwrap();
+		assert_ne!(compute_skill_folder_hashes(dir.path()).unwrap().1, before);
 	}
 
 	#[test]
@@ -597,9 +661,13 @@ mod tests {
 		let mut hashed = Vec::new();
 		let mut total_bytes = 0;
 		assert!(matches!(
-			update_from_file(&file, &mut total_bytes, 4, |chunk| {
-				hashed.extend_from_slice(chunk)
-			}),
+			update_from_file(
+				&file,
+				&mut total_bytes,
+				4,
+				|_| {},
+				|chunk| hashed.extend_from_slice(chunk)
+			),
 			Err(HashError::Bounds(_))
 		));
 	}
@@ -612,7 +680,8 @@ mod tests {
 		fs::write(dir.path().join("run.py"), b"print('hi')").unwrap();
 		fs::write(dir.path().join("__pycache__/run.cpython-312.pyc"), b"c")
 			.unwrap();
-		// No orphan.py, so this cache file is NOT excluded from comparison.
+		// `metadata.json` is dropped by the Master copier, so comparison skips it.
+		fs::write(dir.path().join("metadata.json"), b"{}").unwrap();
 		fs::write(dir.path().join("__pycache__/orphan.cpython-312.pyc"), b"o")
 			.unwrap();
 		let paired = compute_skill_folder_hashes(dir.path()).unwrap();

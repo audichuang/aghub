@@ -111,6 +111,13 @@ line** — don't reword it). Pass `--port N` to pin one.
 - Batch routes answer HTTP 200 for a handled batch whose rows failed — the row's
   `error` is the answer, and failed rows are also logged (never the source URL
   or a forwarded token).
+- `apply-update` / `apply-updates` take the check row's `judgedCommit` back
+  (`judgedCommit` / per-name `judgedCommits`, both optional) and run
+  `skill_update::mutation::resync_judged_skill(s)` — the CLI's
+  `apply-update --outdated` seam: a source that moved past it is refused
+  (`SKILL_SOURCE_CHANGED_DURING_FETCH`, nothing written). Absent installs the
+  fetched tip, as before; the desktop's source view applies from `source diff`
+  rows, which carry no judged commit.
 - `GET /skills/check-updates` deliberately reads the lock fail-OPEN (a corrupted
   or unreadable lock is treated as empty/missing; the CLI `check` is fail-closed,
   because CLI check presents lock contents as its answer and probes first).

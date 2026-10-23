@@ -78,16 +78,19 @@ export function groupUpdatesBySource(
 			continue;
 		}
 
-		const existing = batches.get(source);
-		if (existing) {
-			existing.names.push(status.name);
-		} else {
-			batches.set(source, {
-				source,
-				names: [status.name],
-				scope,
-				projectRoot,
-			});
+		let batch = batches.get(source);
+		if (!batch) {
+			batch = { source, names: [], scope, projectRoot };
+			batches.set(source, batch);
+		}
+		batch.names.push(status.name);
+		// The commit this verdict was judged against: the update installs it
+		// or is refused, never a tip nobody judged.
+		if (status.judgedCommit) {
+			batch.judgedCommits = {
+				...batch.judgedCommits,
+				[status.name]: status.judgedCommit,
+			};
 		}
 	}
 
@@ -105,4 +108,18 @@ export function groupUpdatesBySource(
 /** Total skills the batches would update. */
 export function batchedSkillCount(batches: readonly SourceUpdateBatch[]) {
 	return batches.reduce((sum, batch) => sum + batch.names.length, 0);
+}
+
+/** The judged commits of one chunk's names, or nothing when none is known. */
+export function judgedCommitsFor(
+	judged: Record<string, string> | undefined,
+	names: readonly string[],
+): Record<string, string> | undefined {
+	if (!judged) return undefined;
+	const chunk = Object.fromEntries(
+		names.flatMap((name) =>
+			judged[name] === undefined ? [] : [[name, judged[name]]],
+		),
+	);
+	return Object.keys(chunk).length > 0 ? chunk : undefined;
 }

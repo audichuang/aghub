@@ -9,6 +9,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
+
+use crate::LocalManifest;
 
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::removal::skill_root;
@@ -24,6 +27,10 @@ pub struct LocalHashes {
 	/// dropped as ambiguous rather than reported with an arbitrary one.
 	pub hashes: HashMap<String, String>,
 	pub comparison_hashes: HashMap<String, String>,
+	/// The walk behind each name's hashes, for the fetch's tree-first proof.
+	/// Only for a name with ONE agreed local copy (no ambiguity, no copies
+	/// whose file lists differ).
+	pub manifests: HashMap<String, Arc<LocalManifest>>,
 	/// Folders actually read off disk.
 	pub folders_hashed: usize,
 	/// Copies served from the per-root memo instead of a fresh tree read.
@@ -77,8 +84,10 @@ pub(crate) fn local_hashes_with(
 	// and a folder hash is a pure function of that folder — so the second agent
 	// carrying a linked skill costs a map lookup instead of a full tree read.
 	// One master was observed being re-hashed 19 times without this.
-	let mut hash_by_root: HashMap<std::path::PathBuf, (String, String)> =
+	let mut hash_by_root: HashMap<std::path::PathBuf, Arc<LocalManifest>> =
 		HashMap::new();
+	// Names whose copies hash alike but list different files: no manifest.
+	let mut manifest_conflicts = HashSet::new();
 	// The sweep — the agent scan AND every folder hash — is what `offline` skips.
 	// The log line below is emitted either way, so `folders_hashed=0` is the
 	// observable a caller's offline flag can be pinned by: it is otherwise
@@ -95,15 +104,12 @@ pub(crate) fn local_hashes_with(
 				let Some(root) = skill_root(&skill) else {
 					continue;
 				};
-				let (hash, comparison_hash) = if let Some(known) =
-					hash_by_root.get(&root)
-				{
+				let manifest = if let Some(known) = hash_by_root.get(&root) {
 					out.roots_reused += 1;
-					known.clone()
+					Arc::clone(known)
 				} else {
 					out.folders_hashed += 1;
-					let Ok(pair) = skill::compute_skill_folder_hashes(&root)
-					else {
+					let Ok(manifest) = LocalManifest::read(&root) else {
 						// A managed copy we could not read is local evidence we
 						// cannot vouch for: it vetoes "current" instead of letting
 						// a healthy sibling stand in as the baseline.
@@ -112,9 +118,21 @@ pub(crate) fn local_hashes_with(
 						out.ambiguous.insert(skill.name);
 						continue;
 					};
-					hash_by_root.insert(root.clone(), pair.clone());
-					pair
+					let manifest = Arc::new(manifest);
+					hash_by_root.insert(root.clone(), Arc::clone(&manifest));
+					manifest
 				};
+				let hash = manifest.raw.clone();
+				let comparison_hash = manifest.comparison.clone();
+				match out.manifests.get(&skill.name) {
+					Some(existing) if **existing != *manifest => {
+						manifest_conflicts.insert(skill.name.clone());
+					}
+					Some(_) => {}
+					None => {
+						out.manifests.insert(skill.name.clone(), manifest);
+					}
+				}
 				if let Some(existing) = out.hashes.get(&skill.name) {
 					if existing != &hash {
 						out.hashes.remove(&skill.name);
@@ -157,15 +175,22 @@ pub(crate) fn local_hashes_with(
 				continue;
 			};
 			out.folders_hashed += 1;
-			let Ok((hash, comparison)) =
-				skill::compute_skill_folder_hashes(&root)
-			else {
+			let Ok(manifest) = LocalManifest::read(&root) else {
 				continue;
 			};
-			out.hashes.insert(name.clone(), hash);
-			out.comparison_hashes.insert(name.clone(), comparison);
+			out.hashes.insert(name.clone(), manifest.raw.clone());
+			out.comparison_hashes
+				.insert(name.clone(), manifest.comparison.clone());
+			out.manifests.insert(name.clone(), Arc::new(manifest));
 		}
 	}
+	// A manifest stands for "the" local copy, so it survives only where the
+	// hashes did (raw disagreement, ambiguity) and no copy listed other files.
+	out.manifests.retain(|name, _| {
+		out.hashes.contains_key(name)
+			&& !out.ambiguous.contains(name)
+			&& !manifest_conflicts.contains(name)
+	});
 	log::info!(
 		"check-updates: local hashes wanted={} folders_hashed={} \
 		 root_reused={} distinct_names={} ambiguous={} took={:?}",

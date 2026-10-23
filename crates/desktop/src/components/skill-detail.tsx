@@ -178,8 +178,8 @@ export function SkillDetail({
 					toast.danger(data.error ?? t("skillUpdateApplyError"));
 					return;
 				}
+				// The shared mutation options already re-check updates once.
 				toast.success(t("skillSyncedSuccessfully"));
-				checkUpdatesMutation.mutate(updateCheckParams);
 			},
 			onError: () => toast.danger(t("skillUpdateApplyError")),
 		}),
@@ -666,6 +666,9 @@ export function SkillDetail({
 																			projectPath ??
 																			null,
 																		confirm: true,
+																		// Install the commit this badge was judged against, or refuse.
+																		judgedCommit:
+																			updateStatus.judgedCommit,
 																	},
 																	// P1-b/P1-c: forward keyed by clone URL.
 																	sourceUrl:
@@ -962,9 +965,8 @@ export function SkillDetail({
 						setCredDialogOpen(false);
 						onCredDialogClose?.();
 					}}
-					onBound={() =>
-						checkUpdatesMutation.mutate(updateCheckParams)
-					}
+					// The bind mutation itself re-checks displayed updates.
+					onBound={() => {}}
 				/>
 			)}
 		</>

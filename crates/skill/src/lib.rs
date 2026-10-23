@@ -28,10 +28,12 @@ pub mod validator;
 // Re-export commonly used items
 pub use error::SkillError;
 pub use hash::{
-	collect_skill_files, compute_skill_folder_comparison_hash,
-	compute_skill_folder_hash, compute_skill_folder_hash_where,
-	compute_skill_folder_hashes, is_placeholder_digest, lock_hash_unknown,
-	HashError, EMPTY_SKILLS_LOCK_DIGEST,
+	carried_into_master, collect_skill_files,
+	compute_skill_folder_comparison_hash, compute_skill_folder_hash,
+	compute_skill_folder_hash_where, compute_skill_folder_hashes,
+	compute_skill_folder_hashes_with, excluded_from_master,
+	is_placeholder_digest, lock_hash_unknown, FileEvent, HashError,
+	EMPTY_SKILLS_LOCK_DIGEST,
 };
 pub use install::{
 	discover_repo_skills, lock_skill_file_path, select_repo_skills,

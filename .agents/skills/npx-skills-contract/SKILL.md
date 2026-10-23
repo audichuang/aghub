@@ -86,10 +86,11 @@ and another installer's pin on the old name does not follow it.
 ## Aligned with upstream — keep aligned
 
 - **Master materialization excludes** — `copy_dir_recursive`
-  (`crates/core/src/skills/linker/mod.rs`, `EXCLUDE_FILES` / `EXCLUDE_DIRS`)
-  mirrors upstream `copyDirectory`'s skip list: `metadata.json` +
-  `.git`/`__pycache__`/`__pypackages__`. A plain copy makes the Master hash
-  differently from npx. Deliberate divergence: aghub SKIPS symlinks (matching
+  (`crates/core/src/skills/linker/mod.rs`) mirrors upstream `copyDirectory`'s
+  skip list: `metadata.json` + `.git`/`__pycache__`/`__pypackages__`, defined
+  ONCE as `skill::excluded_from_master` (`crates/skill/src/hash.rs`) because the
+  update-check comparison hash projects through the same list. A plain copy
+  makes the Master hash differently from npx. Deliberate divergence: aghub SKIPS symlinks (matching
   the lstat-based hash) where upstream dereferences them.
 - **No copy fallback** — upstream copies into the agent dir when a symlink
   fails (`symlinkFailed: true`); aghub deliberately does not

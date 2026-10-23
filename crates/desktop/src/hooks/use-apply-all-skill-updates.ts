@@ -4,6 +4,7 @@ import type { ApplySkillUpdateResponse } from "../generated/dto";
 import { useApi } from "./use-api";
 import { useGitForwarding } from "./use-git-forwarding";
 import { sendInBatches } from "../lib/batch-names";
+import { judgedCommitsFor } from "../lib/skill-update-batches";
 import { describeRequestFailure } from "../lib/request-failure";
 import { queryKeys } from "../requests/keys";
 import {
@@ -23,6 +24,13 @@ export interface SourceUpdateBatch {
 	names: string[];
 	scope: "global" | "project";
 	projectRoot: string | null;
+	/**
+	 * name → the commit the displayed check judged it against
+	 * (`SkillUpdateResponse.judgedCommit`). The server refuses a name whose
+	 * source has moved past it instead of installing an unjudged tip. Names
+	 * absent here (no check row behind them) install the fetched tip.
+	 */
+	judgedCommits?: Record<string, string>;
 }
 
 export interface ApplyAllOutcome {
@@ -94,6 +102,10 @@ export function useApplyAllSkillUpdates() {
 									scope: batch.scope,
 									projectRoot: batch.projectRoot,
 									confirm: true,
+									judgedCommits: judgedCommitsFor(
+										batch.judgedCommits,
+										names,
+									),
 								},
 								sourceUrl: batch.source,
 							},

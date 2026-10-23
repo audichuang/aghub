@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use crate::models::ResourceScope;
 use crate::scope::WriteScope;
 use crate::skills::linker::classify::{classify_agent, LinkNeed};
-use crate::skills::linker::{install_universal, master_store_dir, LinkTarget};
+use crate::skills::linker::{
+	install_universal, master_content_hash, master_store_dir, LinkTarget,
+};
 use crate::skills::skill_source_root;
 use crate::skills::update::{detect_rename, skill_renamed_message};
 use aghub_agents::models::AgentType;
@@ -161,6 +163,10 @@ fn write_install_lock(
 fn precheck_request(
 	req: &FetchedSkillInstallRequest<'_>,
 ) -> Result<String, crate::ConfigError> {
+	// A linked marker parses (parse follows it) but the copier skips it: the
+	// Master would land without SKILL.md and the lock would still be written.
+	crate::skills::update::ensure_regular_skill_marker(req.skill_file)
+		.map_err(crate::ConfigError::ValidationFailed)?;
 	let parsed = skill::parser::parse(req.skill_file).map_err(|e| {
 		crate::ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
 	})?;
@@ -260,6 +266,8 @@ pub fn install_fetched_skill_and_lock(
 		created_master: wrote_master,
 		created_referrer_dirs,
 	} = materialized;
+	#[cfg(test)]
+	test_hooks::after_materialize(source_root.as_path(), &safe_name, &req);
 
 	// Gate lock rewrites on a fresh Master or fresh Referrer — the CREATION
 	// receipt, never readability (`installed` folds in `already_linked`, so an
@@ -287,19 +295,22 @@ pub fn install_fetched_skill_and_lock(
 	// taken before the write cannot prove what the write actually replaced.
 	let mut receipt = LockWriteReceipt::default();
 	if wrote_lock {
-		let canonical = canonical.as_ref().ok_or_else(|| {
-			crate::ConfigError::ValidationFailed(format!(
-				"Master for skill '{name}' could not be resolved before the \
-				 source lock write; the lock was not written",
-			))
-		})?;
-		ensure_link_free_master(&name, canonical)?;
-		let master_hash = hash_master(&name, canonical)?;
-		if master_hash != installed_hash {
-			return Err(crate::ConfigError::ValidationFailed(format!(
-				"Master for skill '{name}' does not match the fetched content \
-				 before the source lock write; the lock was not written",
-			)));
+		// The Master holds what the copier carries (npx `copyDirectory`
+		// excludes), so compare that projection of both sides; the lock still
+		// records the RAW source hash (`installed_hash`), as npx does. A failed
+		// check undoes this call's own writes: a bare `?` here once left an
+		// untracked Master + Referrers behind every refused install.
+		if let Err(error) =
+			verify_written_master(&name, canonical.as_deref(), &source_root)
+		{
+			crate::skills::rename::rollback_materialized_install(
+				&name,
+				req.scope.resource_scope(),
+				req.scope.project_root(),
+				&created_referrer_dirs,
+				wrote_master,
+			);
+			return Err(error);
 		}
 		// Never DROP a coordinate this request omits. But a recorded commit
 		// certifies ONE (ref, skillPath) pair: carry it over only while both
@@ -357,6 +368,40 @@ pub fn install_fetched_skill_and_lock(
 		installed_hash,
 		agent_results,
 	})
+}
+
+/// The Master this install is about to record matches the fetched content,
+/// compared over what the Master copier carries.
+fn verify_written_master(
+	name: &str,
+	canonical: Option<&Path>,
+	source_root: &Path,
+) -> Result<(), crate::ConfigError> {
+	let canonical = canonical.ok_or_else(|| {
+		crate::ConfigError::ValidationFailed(format!(
+			"Master for skill '{name}' could not be resolved before the \
+			 source lock write; the lock was not written",
+		))
+	})?;
+	ensure_link_free_master(name, canonical)?;
+	crate::skills::update::ensure_regular_skill_marker(
+		&canonical.join("SKILL.md"),
+	)
+	.map_err(crate::ConfigError::ValidationFailed)?;
+	let hash = |dir: &Path| {
+		master_content_hash(dir).map_err(|error| {
+			crate::ConfigError::ValidationFailed(format!(
+				"Master for skill '{name}' could not be verified: {error}",
+			))
+		})
+	};
+	if hash(canonical)? != hash(source_root)? {
+		return Err(crate::ConfigError::ValidationFailed(format!(
+			"Master for skill '{name}' does not match the fetched content \
+			 before the source lock write; the lock was not written",
+		)));
+	}
+	Ok(())
 }
 
 /// What [`materialize_universal_master`] actually did, as attribution a caller
@@ -626,6 +671,108 @@ mod nocopy_tests {
 		);
 	}
 
+	fn fetched_request<'a>(
+		src: &'a Path,
+		root: &'a Path,
+		lock_source: &'a skill::InstallLockSource,
+	) -> FetchedSkillInstallRequest<'a> {
+		FetchedSkillInstallRequest {
+			skill_file: src,
+			source: lock_source,
+			lock_skill_path: "my-skill/SKILL.md".to_string(),
+			ref_commit: None,
+			scope: WriteScope::project(root),
+			target_agents: &[AgentType::Claude],
+			expected_name: None,
+			target: LinkTarget::Relative,
+		}
+	}
+
+	fn remote_source() -> skill::InstallLockSource {
+		skill::InstallLockSource {
+			source: "owner/repo".to_string(),
+			source_type: "git".to_string(),
+			source_url: "https://git.example/owner/repo.git".to_string(),
+			ref_name: None,
+		}
+	}
+
+	/// A fetched skill with files the Master copier drops (npx
+	/// `copyDirectory` parity) installs: the Master is the copier projection,
+	/// the lock records the RAW source hash.
+	#[test]
+	fn install_fetched_accepts_files_the_copier_drops() {
+		let tmp = tempdir().unwrap();
+		let root = tmp.path().canonicalize().unwrap();
+		let src = root.join("src/my-skill");
+		fs::create_dir_all(src.join("__pycache__")).unwrap();
+		fs::write(
+			src.join("SKILL.md"),
+			"---\nname: my-skill\ndescription: d\n---\nbody",
+		)
+		.unwrap();
+		fs::write(src.join("metadata.json"), "{}").unwrap();
+		fs::write(src.join("__pycache__/x.cpython-312.pyc"), b"\0\x01")
+			.unwrap();
+		let lock_source = remote_source();
+
+		install_fetched_skill_and_lock(fetched_request(
+			&src.join("SKILL.md"),
+			&root,
+			&lock_source,
+		))
+		.expect("copier-dropped files must not refuse the install");
+
+		let master = root.join(".aghub/my-skill");
+		assert!(master.join("SKILL.md").is_file());
+		assert!(!master.join("metadata.json").exists());
+		assert!(!master.join("__pycache__").exists());
+		assert_eq!(
+			master_content_hash(&master).unwrap(),
+			master_content_hash(&src).unwrap()
+		);
+		assert!(Linker::is_link(&root.join(".claude/skills/my-skill")));
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		assert_eq!(
+			lock.skills["my-skill"].computed_hash,
+			skill::compute_skill_folder_hash(&src).unwrap(),
+			"the lock keeps the raw source hash (npx parity)"
+		);
+	}
+
+	/// A post-write Master check that fails undoes this call's Master and
+	/// Referrer; no lock entry is written.
+	#[test]
+	fn install_fetched_rolls_back_when_the_written_master_mismatches() {
+		let tmp = tempdir().unwrap();
+		let root = tmp.path().canonicalize().unwrap();
+		let src = root.join("src/my-skill");
+		fs::create_dir_all(&src).unwrap();
+		fs::write(
+			src.join("SKILL.md"),
+			"---\nname: my-skill\ndescription: d\n---\nbody",
+		)
+		.unwrap();
+		let lock_source = remote_source();
+
+		test_hooks::corrupt_next_master();
+		let error = install_fetched_skill_and_lock(fetched_request(
+			&src.join("SKILL.md"),
+			&root,
+			&lock_source,
+		))
+		.expect_err("a mismatching Master must refuse the lock write");
+		assert!(error.to_string().contains("does not match"), "{error}");
+
+		assert!(!root.join(".aghub/my-skill").exists(), "Master left behind");
+		assert!(
+			fs::symlink_metadata(root.join(".claude/skills/my-skill")).is_err(),
+			"Referrer left behind"
+		);
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		assert!(!lock.skills.contains_key("my-skill"));
+	}
+
 	// T-LOCK-PARITY-LINK-VS-COPY: the FULL install-lock entry written by
 	// the symlink-only (link-era) path is byte-identical to the copy-era
 	// fixture, because both eras hash the SOURCE folder and write the same
@@ -684,5 +831,41 @@ mod nocopy_tests {
 			got, want,
 			"link-era lock entry must match copy-era byte-for-byte"
 		);
+	}
+}
+
+/// Test-only fault injection: the post-write Master check cannot be made to
+/// fail through filesystem state alone (the copier wrote the Master from the
+/// same source a moment earlier).
+#[cfg(test)]
+pub(crate) mod test_hooks {
+	use std::cell::Cell;
+	use std::path::Path;
+
+	thread_local! {
+		static CORRUPT_MASTER: Cell<bool> = const { Cell::new(false) };
+	}
+
+	/// Make the next install on this thread write a stray file into its
+	/// freshly materialized Master.
+	// Only the unix-gated `nocopy_tests` call it.
+	#[cfg(unix)]
+	pub(crate) fn corrupt_next_master() {
+		CORRUPT_MASTER.with(|flag| flag.set(true));
+	}
+
+	pub(super) fn after_materialize(
+		_source_root: &Path,
+		safe_name: &str,
+		req: &super::FetchedSkillInstallRequest<'_>,
+	) {
+		if CORRUPT_MASTER.with(|flag| flag.replace(false)) {
+			let store = crate::skills::linker::master_store_dir(
+				req.scope.project_root(),
+			)
+			.unwrap();
+			std::fs::write(store.join(safe_name).join("stray.txt"), "x")
+				.unwrap();
+		}
 	}
 }

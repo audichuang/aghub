@@ -8,9 +8,5 @@ import type { SkillUpdateResponse } from "./SkillUpdateResponse";
  */
 export type CheckSkillUpdatesResponse = {
 	results: Array<SkillUpdateResponse>;
-	/**
-	 * Why the post-check lock auto-heal did not land. Wire code from
-	 * `aghub_core::error_codes` (e.g. `SKILL_MUTATION_LOCK_BUSY`).
-	 */
-	heal_error?: SkillHealErrorResponse;
+	healError?: SkillHealErrorResponse;
 };

@@ -84,15 +84,15 @@ impl Fetcher for DirFetcher {
 		_: FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError> {
 		(self.on_fetch)();
-		Ok(FetchedRepo {
-			root: self.root.clone(),
-			snapshot: aghub_git::RepoSnapshot {
+		Ok(FetchedRepo::new(
+			self.root.clone(),
+			aghub_git::RepoSnapshot {
 				commit_oid: "new-commit".into(),
 				tree_oid: "new-tree".into(),
 				commit_time: None,
 			},
-			_guard: None,
-		})
+			None,
+		))
 	}
 }
 

@@ -3,6 +3,43 @@ use std::path::Path;
 
 const MAX_TREE_DEPTH: usize = 64;
 
+/// Streaming git blob object id (SHA-1 over `blob <len>\0<bytes>`), the oid a
+/// tree lists for a file with these bytes.
+pub struct BlobHasher {
+	hasher: gix::hash::Hasher,
+	declared: u64,
+	seen: u64,
+}
+
+impl BlobHasher {
+	/// `declared_len` goes into the object header, so it must be the byte
+	/// count that [`Self::update`] will be fed; [`Self::finish`] checks it.
+	pub fn new(declared_len: u64) -> Self {
+		let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+		hasher.update(format!("blob {declared_len}\0").as_bytes());
+		Self {
+			hasher,
+			declared: declared_len,
+			seen: 0,
+		}
+	}
+
+	pub fn update(&mut self, bytes: &[u8]) {
+		self.seen = self.seen.saturating_add(bytes.len() as u64);
+		self.hasher.update(bytes);
+	}
+
+	/// Lowercase hex oid, or `None` when the fed byte count differs from the
+	/// declared length (the file changed under the read) or SHA-1 collision
+	/// detection fired.
+	pub fn finish(self) -> Option<String> {
+		if self.seen != self.declared {
+			return None;
+		}
+		self.hasher.try_finalize().ok().map(|oid| oid.to_string())
+	}
+}
+
 pub fn is_safe_tree_entry_name(name: &[u8]) -> bool {
 	if name.is_empty() || name == b"." || name == b".." {
 		return false;
@@ -78,6 +115,25 @@ fn check_tree_depth(depth: usize) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Goldens from `git hash-object --stdin`.
+	#[test]
+	fn blob_hasher_matches_git_hash_object() {
+		let mut hello = BlobHasher::new(6);
+		hello.update(b"hel");
+		hello.update(b"lo\n");
+		assert_eq!(
+			hello.finish().as_deref(),
+			Some("ce013625030ba8dba906f756967f9e9ca394464a")
+		);
+		assert_eq!(
+			BlobHasher::new(0).finish().as_deref(),
+			Some("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+		);
+		let mut short = BlobHasher::new(7);
+		short.update(b"hello\n");
+		assert_eq!(short.finish(), None, "length mismatch yields no oid");
+	}
 
 	#[test]
 	fn safe_tree_entry_name_accepts_plain_names() {

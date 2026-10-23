@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aghub_core::models::{AgentType, ResourceScope};
@@ -777,6 +778,21 @@ pub fn resync_locked_skills(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<Vec<LockedSkillResyncResult>, LockedSkillsResyncError> {
+	resync_judged_skills(request, &HashMap::new(), fetcher, resolver)
+}
+
+/// [`resync_locked_skills`] for rows a check already judged: `judged` maps a
+/// name to the commit its verdict was made against
+/// ([`crate::CheckOutput::judged_commit`]). The fetch re-resolves the tip, so a
+/// named row whose group fetched a DIFFERENT commit is refused (nothing
+/// written; re-run the check) instead of installing content nobody judged.
+/// Names absent from `judged` behave as in [`resync_locked_skills`].
+pub fn resync_judged_skills(
+	request: LockedSkillsResyncRequest<'_>,
+	judged: &HashMap<String, String>,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> Result<Vec<LockedSkillResyncResult>, LockedSkillsResyncError> {
 	if request.names.is_empty() {
 		return Err(LockedSkillsResyncError::EmptyRequest);
 	}
@@ -874,6 +890,19 @@ pub fn resync_locked_skills(
 				let fetched = fetched_groups[item.group_index]
 					.as_ref()
 					.map_err(|error| LockedResyncError::Fetch(error.clone()))?;
+				if let Some(judged) =
+					judged.get(&name).filter(|c| c.as_str() != fetched.oid())
+				{
+					return Err(LockedResyncError::Resync(
+						aghub_core::skills::resync::ResyncError::StaleFetch(
+							format!(
+								"upstream moved from {judged} to {} since the \
+								 check; nothing was written, re-run the check",
+								fetched.oid()
+							),
+						),
+					));
+				}
 				if !fetched_skill_path_exists(fetched, &item.skill_path) {
 					return Err(LockedResyncError::SourceSkillNotFound);
 				}
@@ -901,17 +930,34 @@ pub fn resync_locked_skill(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
+	resync_judged_skill(request, None, fetcher, resolver)
+}
+
+/// [`resync_locked_skill`] for a row a check already judged: `judged` is the
+/// commit that verdict was made against, refused if the fetch resolves another
+/// (see [`resync_judged_skills`]). `None` behaves as [`resync_locked_skill`].
+pub fn resync_judged_skill(
+	request: LockedResyncRequest<'_>,
+	judged: Option<&str>,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
 	// `source_group: None` — this caller has no independent Sources view to
 	// check against, and checking one would mean reading the entry a SECOND
 	// time: a repoint landing between the two reads would fail an update that
 	// is perfectly safe to apply against the coordinates actually read here.
 	let names = [request.name.to_string()];
-	let results = resync_locked_skills(
+	let judged: HashMap<String, String> = judged
+		.map(|commit| (request.name.to_string(), commit.to_string()))
+		.into_iter()
+		.collect();
+	let results = resync_judged_skills(
 		LockedSkillsResyncRequest {
 			source_group: None,
 			names: &names,
 			scope: request.scope,
 		},
+		&judged,
 		fetcher,
 		resolver,
 	)
@@ -967,15 +1013,15 @@ mod tests {
 			selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
 			assert!(matches!(selection, FetchSelection::CatalogSnapshot));
-			Ok(crate::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(crate::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: "moved-commit".to_string(),
 					tree_oid: "moved-tree".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -1057,15 +1103,15 @@ mod tests {
 			let fetched_root = temporary.path().join("fetched");
 			write_skill(&fetched_root.join("skills/sync-me"), "sync-me", "new");
 			let fetched = FetchedSource {
-				repo: crate::FetchedRepo {
-					root: fetched_root,
-					snapshot: aghub_git::RepoSnapshot {
+				repo: crate::FetchedRepo::new(
+					fetched_root,
+					aghub_git::RepoSnapshot {
 						commit_oid: "new-commit".to_string(),
 						tree_oid: "new-tree".to_string(),
 						commit_time: None,
 					},
-					_guard: None,
-				},
+					None,
+				),
 			};
 
 			let report = resync_fetched_source(
@@ -1126,15 +1172,15 @@ mod tests {
 				_token: Option<&str>,
 				_selection: FetchSelection<'_>,
 			) -> Result<crate::FetchedRepo, FetchError> {
-				Ok(crate::FetchedRepo {
-					root: self.root.clone(),
-					snapshot: aghub_git::RepoSnapshot {
+				Ok(crate::FetchedRepo::new(
+					self.root.clone(),
+					aghub_git::RepoSnapshot {
 						commit_oid: "once-commit".to_string(),
 						tree_oid: "once-tree".to_string(),
 						commit_time: None,
 					},
-					_guard: None,
-				})
+					None,
+				))
 			}
 		}
 
@@ -1229,15 +1275,15 @@ mod tests {
 				));
 				*self.seen.lock().unwrap() =
 					Some((source_ref.clone(), token.map(str::to_string)));
-				Ok(crate::FetchedRepo {
-					root: self.root.clone(),
-					snapshot: aghub_git::RepoSnapshot {
+				Ok(crate::FetchedRepo::new(
+					self.root.clone(),
+					aghub_git::RepoSnapshot {
 						commit_oid: "locked-commit".to_string(),
 						tree_oid: "locked-tree".to_string(),
 						commit_time: None,
 					},
-					_guard: None,
-				})
+					None,
+				))
 			}
 		}
 

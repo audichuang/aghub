@@ -67,6 +67,11 @@ pub(crate) struct SkillUpdateView {
 	pub(crate) checked: bool,
 	#[serde(flatten)]
 	pub(crate) status: StatusView,
+	/// The commit this row was judged against (`CheckOutput::judged_commit`).
+	/// Not part of the wire shape: `apply-update --outdated` hands it to the
+	/// resync so it installs the judged commit or refuses.
+	#[serde(skip)]
+	pub(crate) judged_commit: Option<String>,
 }
 
 /// Render the update statuses as a table, or the exact `SkillUpdateView` array
@@ -375,6 +380,7 @@ pub(crate) fn collect_update_views(
 			// otherwise.
 			checked: online,
 			status: status_view(output.status),
+			judged_commit: output.judged_commit,
 		})
 		.collect();
 	views.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
@@ -591,6 +597,7 @@ mod tests {
 			scope: "global".to_string(),
 			checked: true,
 			status: status_view(status),
+			judged_commit: None,
 		};
 		serde_json::to_value(view).unwrap()
 	}
@@ -621,6 +628,7 @@ mod tests {
 			status: StatusView::Uncheckable {
 				reason: reason.to_string(),
 			},
+			judged_commit: None,
 		}
 	}
 

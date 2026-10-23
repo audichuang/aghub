@@ -8,4 +8,11 @@ export type ApplySkillUpdateRequest = {
 	scope: string;
 	projectRoot: string | null;
 	confirm: boolean | null;
+	/**
+	 * The `judgedCommit` of the check row this update acts on. When set and
+	 * the source has moved past it, the update is refused
+	 * (`SKILL_SOURCE_CHANGED_DURING_FETCH`) with nothing written; absent
+	 * installs whatever the fetch resolves.
+	 */
+	judgedCommit?: string;
 };

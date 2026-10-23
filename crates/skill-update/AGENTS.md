@@ -41,9 +41,11 @@ never re-derive them here.
 `check` 與 `source diff` 對可讀的本機副本採同一個內容比較基準。
 「可更新」也包含本機修改而上游未變，並不只表示上游有新版本；
 `apply-update --yes` 會用來源內容覆蓋本機修改。不要改回只比較 lock。
-`UpdateAvailable.current` / `available` 是 comparison hash，排除有來源 `.py`
-的標準 CPython 快取；它們不必等於 lock 的 raw hash。所有 lock 寫入、
-healing 與安全稽核仍使用 raw 內容。只有快取不同可判最新，但 preflight
+`UpdateAvailable.current` / `available` 是 comparison hash，只算 Master
+copier 會帶進 Master 的檔案（`skill::carried_into_master`：排除 `metadata.json`
+與 `.git`/`__pycache__`/`__pypackages__`）；它們不必等於 lock 的 raw hash。
+所以上游只改這些被排除的檔案不算更新——安裝也不會帶過去。所有 lock 寫入、
+healing 與安全稽核仍使用 raw 內容。只有被排除檔案不同可判最新，但 preflight
 仍需 raw 完整性證明；不能拿 comparison hash 與 raw lock 相比來省略 fetch。
 
 ## PREFLIGHT (must stay correct)
@@ -79,6 +81,36 @@ spend a request to be told so. That gate is a QUOTA decision as much as a speed
 one — the REST path spends anonymous GitHub's 60/hr. A `git ls-refs` handshake is
 cheap in bytes and ~0.6s against github.com, and that was most of a check's wall
 clock before REST took over the github path.
+
+## TREE-FIRST CONTENT PROOF (#77, #13)
+
+refCommit is per-entry provenance, not a group cache key: one single-skill
+update, an upstream-deleted member, or a lock without refCommit (npx / project)
+makes `preflight_can_skip` false for the whole group forever. So when the
+preflight cannot skip, check and `source diff` fetch with
+`FetchSelection::Verify`: read the tree (REST: one request), compare each
+installed folder's sorted `(rel, blob oid)` list with the local copy's
+(`proof.rs` `LocalManifest`, built in the SAME walk and read as the hashes),
+and materialize only folders that are not proven; `source diff` also fetches
+just each catalog skill's `SKILL.md` (+ root `CHANGELOG.md`, `.ignore`).
+
+- Equal lists ⇒ identical content; anything uncertain ⇒ materialize. The
+  fallback list (root skill, symlink entry, `.git`/`node_modules`, invalid or
+  non-ASCII path, case-fold collision, native path ≠ normalized rel, any entry
+  the Master copier drops) lives in `proof.rs` — extend it there, never relax it.
+- **Every consumer hashes a fetched folder through `FetchedRepo::folder_hashes`.**
+  A proven folder is not on disk; hashing `repo.root` directly reads it as
+  missing and reports every unchanged skill as outdated.
+- `source sync`, install and rename stay on `CatalogSnapshot` / `Skills`: they
+  install from the fetched tree ("Fetch ONCE").
+- gix and system-git download every blob in their depth-1 fetch anyway (gix has
+  no partial clone yet), so the saving is REST-only; the verdict is identical.
+- Count REST requests (FakeTransport), never time it: REST and gix each cache.
+
+**Apply installs only the commit the check judged.** `CheckOutput.judged_commit`
+(API `judgedCommit`) is carried into `resync_judged_skill(s)`; a fetch that lands
+on another commit refuses the row with `SKILL_SOURCE_CHANGED_DURING_FETCH` and
+writes nothing. CLI `apply-update --outdated` and the API apply routes share it.
 
 ## GIT ADAPTER GOTCHAS
 

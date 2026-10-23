@@ -129,15 +129,15 @@ impl Fetcher for ApiFetcher {
 				Some(token.map(str::to_string));
 			let root = std::path::PathBuf::from(root);
 			return if root.is_dir() {
-				Ok(FetchedRepo {
+				Ok(FetchedRepo::new(
 					root,
-					snapshot: aghub_git::RepoSnapshot {
+					aghub_git::RepoSnapshot {
 						commit_oid: "test-fetch-root".to_string(),
 						tree_oid: "test-fetch-tree".to_string(),
 						commit_time: None,
 					},
-					_guard: None,
-				})
+					None,
+				))
 			} else {
 				Err(FetchError::network(
 					"AGHUB_TEST_SOURCE_FETCH_ROOT is not a directory",

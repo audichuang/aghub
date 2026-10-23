@@ -743,6 +743,13 @@ pub struct SkillUpdateResponse {
 	pub scope: String,
 	#[serde(flatten)]
 	pub status: SkillUpdateStatusResponse,
+	/// The commit this row's verdict was judged against
+	/// (`skill_update::CheckOutput::judged_commit`); absent when the row was
+	/// not judged against a fetched commit. Send it back in `judgedCommit` /
+	/// `judgedCommits` so an apply installs this commit or refuses.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub judged_commit: Option<String>,
 }
 
 /// `GET /skills/check-updates` body. A failed lock auto-heal never drops
@@ -776,6 +783,13 @@ pub struct ApplySkillUpdateRequest {
 	pub scope: String,
 	pub project_root: Option<String>,
 	pub confirm: Option<bool>,
+	/// The `judgedCommit` of the check row this update acts on. When set and
+	/// the source has moved past it, the update is refused
+	/// (`SKILL_SOURCE_CHANGED_DURING_FETCH`) with nothing written; absent
+	/// installs whatever the fetch resolves.
+	#[serde(default)]
+	#[ts(optional)]
+	pub judged_commit: Option<String>,
 }
 
 /// Request to update several locked skills from one shared source.
@@ -788,6 +802,12 @@ pub struct ApplySkillUpdatesRequest {
 	pub scope: String,
 	pub project_root: Option<String>,
 	pub confirm: Option<bool>,
+	/// Per-name `judgedCommit` of the check rows this batch acts on; see
+	/// [`ApplySkillUpdateRequest::judged_commit`]. Names absent here install
+	/// whatever the fetch resolves.
+	#[serde(default)]
+	#[ts(optional)]
+	pub judged_commits: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Response from `POST /skills/apply-update`.
@@ -1107,6 +1127,7 @@ mod tests {
 	#[test]
 	fn update_available_serializes_with_status_tag_and_fields() {
 		let resp = SkillUpdateResponse {
+			judged_commit: None,
 			name: "my-skill".to_string(),
 			scope: "global".to_string(),
 			status: SkillUpdateStatusResponse::UpdateAvailable {
@@ -1124,8 +1145,23 @@ mod tests {
 	}
 
 	#[test]
+	fn judged_commit_is_on_the_wire_only_when_known() {
+		let row = |judged_commit: Option<&str>| SkillUpdateResponse {
+			name: "s".to_string(),
+			scope: "global".to_string(),
+			status: SkillUpdateStatusResponse::UpToDate,
+			judged_commit: judged_commit.map(str::to_string),
+		};
+		let json = serde_json::to_value(row(Some("c0"))).unwrap();
+		assert_eq!(json["judgedCommit"], "c0");
+		let json = serde_json::to_value(row(None)).unwrap();
+		assert!(json.get("judgedCommit").is_none());
+	}
+
+	#[test]
 	fn update_available_with_commit_time_serializes() {
 		let resp = SkillUpdateResponse {
+			judged_commit: None,
 			name: "s".to_string(),
 			scope: "global".to_string(),
 			status: SkillUpdateStatusResponse::UpdateAvailable {
@@ -1142,6 +1178,7 @@ mod tests {
 	#[test]
 	fn update_available_without_commit_time_omits_field() {
 		let resp = SkillUpdateResponse {
+			judged_commit: None,
 			name: "s".to_string(),
 			scope: "global".to_string(),
 			status: SkillUpdateStatusResponse::UpdateAvailable {
@@ -1161,6 +1198,7 @@ mod tests {
 	#[test]
 	fn uncheckable_serializes_reason_string() {
 		let resp = SkillUpdateResponse {
+			judged_commit: None,
 			name: "s".to_string(),
 			scope: "project".to_string(),
 			status: SkillUpdateStatusResponse::Uncheckable {
@@ -1175,6 +1213,7 @@ mod tests {
 	#[test]
 	fn renamed_serializes_new_name() {
 		let resp = SkillUpdateResponse {
+			judged_commit: None,
 			name: "old".to_string(),
 			scope: "global".to_string(),
 			status: SkillUpdateStatusResponse::Renamed {
@@ -1189,6 +1228,7 @@ mod tests {
 	#[test]
 	fn up_to_date_serializes_status_only() {
 		let resp = SkillUpdateResponse {
+			judged_commit: None,
 			name: "s".to_string(),
 			scope: "global".to_string(),
 			status: SkillUpdateStatusResponse::UpToDate,

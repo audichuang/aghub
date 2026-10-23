@@ -51,15 +51,15 @@ impl Fetcher for FixtureFetcher {
 			)
 			.expect("the simulated concurrent repoint should succeed");
 		}
-		Ok(skill_update::FetchedRepo {
-			root: self.root.clone(),
-			snapshot: aghub_git::RepoSnapshot {
+		Ok(skill_update::FetchedRepo::new(
+			self.root.clone(),
+			aghub_git::RepoSnapshot {
 				commit_oid: "bulk-commit".to_string(),
 				tree_oid: "bulk-tree".to_string(),
 				commit_time: None,
 			},
-			_guard: None,
-		})
+			None,
+		))
 	}
 }
 
@@ -90,15 +90,15 @@ impl Fetcher for GroupFetcher {
 		if source_ref.ref_.as_deref() == Some(self.failing_ref) {
 			return Err(FetchError::network("stub group failure"));
 		}
-		Ok(skill_update::FetchedRepo {
-			root: self.root.clone(),
-			snapshot: aghub_git::RepoSnapshot {
+		Ok(skill_update::FetchedRepo::new(
+			self.root.clone(),
+			aghub_git::RepoSnapshot {
 				commit_oid: "bulk-commit".to_string(),
 				tree_oid: "bulk-tree".to_string(),
 				commit_time: None,
 			},
-			_guard: None,
-		})
+			None,
+		))
 	}
 }
 

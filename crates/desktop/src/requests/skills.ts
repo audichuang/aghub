@@ -1,4 +1,5 @@
 import {
+	isCancelledError,
 	mutationOptions,
 	type QueryClient,
 	queryOptions,
@@ -217,36 +218,108 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 /// skills that were just updated (nothing else clears it: no
 /// refetch-on-window-focus, and the page's observer never unmounts).
 ///
-/// Only the apply-update flows call it. An update check re-fetches EVERY source
-/// over the network, which is not a price a create/delete/transfer should pay.
-/// Fire-and-forget for the same reason `invalidateSkillQueries` is: a stuck or
-/// offline source must not hang the mutation that triggered it.
-function refetchUpdateChecks(queryClient: QueryClient) {
-	void queryClient.refetchQueries(
-		{ queryKey: queryKeys.skills.updateChecksAll(), type: "active" },
-		// Default `true` would ORPHAN an in-flight check and start another —
-		// and the queryFn ignores the abort signal, so the server keeps working
-		// on the orphan. Updating several skills in a row would then run one
-		// full every-source check per click instead of sharing one.
-		{ cancelRefetch: false },
-	);
+/// Only the update-applying flows call it (single update, update-all, git
+/// sync). An update check re-fetches EVERY source over the network, which is
+/// not a price a create/delete/transfer should pay. Callers fire and forget it
+/// for the same reason `invalidateSkillQueries` is: a stuck or offline source
+/// must not hang the mutation that triggered it.
+///
+/// Every displayed check must END on an answer from a check that STARTED after
+/// the write. Joining the in-flight one alone is not enough — it may have read
+/// the pre-write state, and the badge then keeps "outdated" for the whole
+/// staleTime. So: join any in-flight check (`cancelRefetch: false`; cancelling
+/// would orphan it, and the queryFn ignores the abort signal so the server
+/// keeps working on it), then run ONE trailing check. Writes that land before
+/// that trailing check starts share it, so a burst of clicks costs one extra
+/// check per query, not one per click; a write landing during it queues one
+/// more.
+///
+/// Writes and credential changes go through here; the manual "check for
+/// updates" button calls `refreshAfterWrite` on its one query directly (even
+/// when not displayed: the user asked explicitly). Both share its per-query
+/// coalescing. Outcomes are swallowed here: these callers fire and forget, and
+/// the query's own state carries the error.
+export function refetchUpdateChecksAfterWrites(
+	queryClient: QueryClient,
+): Promise<void> {
+	return Promise.allSettled(
+		displayedUpdateChecks(queryClient).map(refreshAfterWrite),
+	).then(() => undefined);
 }
 
-/// After a multi-batch "update all": the per-batch refetches all JOIN whichever
-/// check was already running (`cancelRefetch: false`), and that check may have
-/// read the lock before the later batches wrote — leaving the badge on a
-/// pre-write answer for the whole staleTime. So join the in-flight one, then
-/// run one that provably started after every write. Nothing in flight means
-/// one check, never two: each re-fetches every source over the network.
-export async function refetchUpdateChecksAfterWrites(queryClient: QueryClient) {
-	const filters = {
-		queryKey: queryKeys.skills.updateChecksAll(),
-		type: "active" as const,
-	};
-	if (queryClient.isFetching(filters) > 0) {
-		await queryClient.refetchQueries(filters, { cancelRefetch: false });
+/// Not `refetchQueries({ type: "active" })`: that skips a query whose only
+/// observer is `enabled: false` (the skill detail panel's lazy cache reader,
+/// e.g. on the project page where no auto-check observer exists). An enabled
+/// observer is what `type: "active"` matched. A query whose observers are ALL
+/// disabled was held back on purpose (offline, no project selected), so it
+/// refreshes only when a stale answer is already on screen (has data) and the
+/// network is up.
+function displayedUpdateChecks(queryClient: QueryClient) {
+	return queryClient
+		.getQueryCache()
+		.findAll({ queryKey: queryKeys.skills.updateChecksAll() })
+		.filter(
+			(query) =>
+				query.isActive() ||
+				(query.getObserversCount() > 0 &&
+					query.state.data !== undefined &&
+					globalThis.navigator?.onLine !== false),
+		);
+}
+
+type UpdateCheckQuery = ReturnType<typeof displayedUpdateChecks>[number];
+
+/// Per query: whether a write landed that no started check has seen yet, and
+/// the loop draining it. Keyed by the Query object so it dies with its cache.
+const pendingAfterWrite = new WeakMap<
+	UpdateCheckQuery,
+	{ dirty: boolean; drained: Promise<unknown> }
+>();
+
+/// Settles like the LAST trailing check — the one that covers every trigger
+/// joined so far, including a caller that coalesced onto a running drain.
+function refreshAfterWrite(query: UpdateCheckQuery): Promise<unknown> {
+	const running = pendingAfterWrite.get(query);
+	if (running) {
+		running.dirty = true;
+		return running.drained;
 	}
-	await queryClient.refetchQueries(filters, { cancelRefetch: false });
+	const state: { dirty: boolean; drained: Promise<unknown> } = {
+		dirty: true,
+		drained: Promise.resolve(),
+	};
+	const fetchJoining = () => query.fetch(undefined, { cancelRefetch: false });
+	let cancelled = false;
+	const settled = (promise: Promise<unknown>) =>
+		promise.then(
+			() => {
+				cancelled = false;
+			},
+			(error) => {
+				cancelled = isCancelledError(error);
+			},
+		);
+	state.drained = (async () => {
+		try {
+			let trailing: Promise<unknown>;
+			do {
+				// A check already running may predate the write: wait it out.
+				if (query.state.fetchStatus === "fetching")
+					await settled(fetchJoining());
+				// Every write so far is now covered by the check started next.
+				state.dirty = false;
+				trailing = fetchJoining();
+				await settled(trailing);
+				// Cancelled = the query was removed (connection switch): another
+				// check would hit the old host for a cache nobody reads.
+			} while (state.dirty && !cancelled);
+			return trailing;
+		} finally {
+			pendingAfterWrite.delete(query);
+		}
+	})();
+	pendingAfterWrite.set(query, state);
+	return state.drained;
 }
 
 /// A flow that REWRITES a skill's files (apply-update, sync) leaves the open
@@ -462,9 +535,17 @@ export function checkSkillUpdatesQueryKey(params?: CheckSkillUpdatesParams) {
 	);
 }
 
-/// Modeled as a mutation (not a query) because it is an explicit, network-heavy
-/// user action (clones each source) — this gives clean onSuccess/onError hooks
-/// without a fetch-on-render effect. The global skill lock is the input scope.
+/// The manual "check for updates" button. A mutation only for its
+/// isPending/onSuccess/onError hooks: the check itself is a fetch of the SAME
+/// query the auto-check reads, so every update-check answer lands through one
+/// lifecycle and `refetchUpdateChecksAfterWrites` sees (and outlasts) a manual
+/// check in flight. It used to run its own request and `setQueryData` the
+/// answer, so a click just before an apply landed its pre-write answer AFTER
+/// the post-write check and pinned "outdated" for the whole staleTime.
+/// A click goes through `refreshAfterWrite` so its answer comes
+/// from a check that STARTED after the click: `fetchQuery` joined a check
+/// already in flight, which may have read the server before the click (e.g.
+/// before a credential was bound). Cost: a click during a check runs one more.
 export function checkSkillUpdatesMutationOptions({
 	api,
 	queryClient,
@@ -474,16 +555,23 @@ export function checkSkillUpdatesMutationOptions({
 }: CheckSkillUpdatesMutationParams) {
 	return mutationOptions({
 		mutationFn: async (params?: CheckSkillUpdatesParams) => {
-			const headers = await forwardForCheck?.(params);
-			return api.skills.checkUpdates(params, headers);
+			// Ensure the query exists (no observer may have created it yet).
+			const { queryKey, queryFn } = checkSkillUpdatesQueryOptions({
+				api,
+				params,
+				forwardForCheck,
+			});
+			const query = queryClient
+				.getQueryCache()
+				.build(queryClient, { queryKey, queryFn });
+			// The trailing check's ACTUAL outcome, never `query.state`: a
+			// cancelled fetch (the query removed by a connection switch) leaves
+			// it at the pre-click "success".
+			return (await refreshAfterWrite(
+				query as unknown as UpdateCheckQuery,
+			)) as NonNullable<typeof query.state.data>;
 		},
-		onSuccess: async (data, variables) => {
-			queryClient.setQueryData(
-				checkSkillUpdatesQueryKey(variables),
-				data,
-			);
-			await onSuccess?.(data);
-		},
+		onSuccess,
 		onError,
 	});
 }
@@ -510,9 +598,8 @@ interface CheckSkillUpdatesQueryParams {
 /**
  * `useQuery`-compatible options for `GET /skills/check-updates`.
  *
- * Use this for the **auto-check-on-page-enter** path. The mutation variant
- * (`checkSkillUpdatesMutationOptions`) is kept for the manual refresh
- * button where explicit loading state matters.
+ * Use this for the **auto-check-on-page-enter** path. The manual refresh
+ * button (`checkSkillUpdatesMutationOptions`) fetches this same query.
  *
  * The check writes back to the skill lock (auto-heals ref_commit/hash) —
  * this side-effect is accepted per spec §4.3.
@@ -574,7 +661,7 @@ export function applySkillUpdateMutationOptions({
 		},
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
-			refetchUpdateChecks(queryClient);
+			void refetchUpdateChecksAfterWrites(queryClient);
 			refetchSkillBodies(queryClient);
 			await onSuccess?.(data);
 		},
@@ -658,7 +745,7 @@ export function gitSyncSkillMutationOptions({
 			await invalidateSkillQueries(queryClient);
 			// git-sync runs the same resync transaction as apply-update, so it
 			// flips a skill from outdated to current and owes the same refetch.
-			refetchUpdateChecks(queryClient);
+			void refetchUpdateChecksAfterWrites(queryClient);
 			refetchSkillBodies(queryClient);
 			await onSuccess?.(data);
 		},

@@ -4,7 +4,4 @@
  * Why the post-check lock auto-heal did not land. Wire code from
  * `aghub_core::error_codes` (e.g. `SKILL_MUTATION_LOCK_BUSY`).
  */
-export type SkillHealErrorResponse = {
-	code: string;
-	retryable: boolean;
-};
+export type SkillHealErrorResponse = { code: string; retryable: boolean };

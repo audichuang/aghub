@@ -120,7 +120,11 @@ pub fn precheck_source(
 }
 
 /// Reject absolute paths and any `..`; join under `root`; canonicalize; verify the
-/// result stays under `root`. Returns the safe absolute skill dir, or None to reject.
+/// result stays under `root`. Returns the safe absolute path, or None to reject.
+///
+/// The fully resolved target decides containment, but the returned path keeps
+/// the LEAF as named: callers hash its `parent()`, and a `SKILL.md` that is a
+/// link must still name the lock's folder, not the link target's.
 pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
 	if skill_path.is_empty() {
 		return None;
@@ -137,10 +141,36 @@ pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
 	let joined = root.join(p);
 	let canon_root = root.canonicalize().ok()?;
 	let canon = joined.canonicalize().ok()?; // also resolves symlinks
-	if canon.starts_with(&canon_root) {
-		Some(canon)
-	} else {
-		None
+	if !canon.starts_with(&canon_root) {
+		return None;
+	}
+	match (joined.parent(), joined.file_name()) {
+		(Some(parent), Some(leaf)) => {
+			let parent = parent.canonicalize().ok()?;
+			parent.starts_with(&canon_root).then(|| parent.join(leaf))
+		}
+		_ => Some(canon),
+	}
+}
+
+/// Refuse a skill whose root marker is not a REGULAR file (a link, a FIFO, a
+/// directory). Master copies carry regular files only, so copying such a
+/// folder writes a Master with no `SKILL.md` — while parse (which follows the
+/// link) and the lock write would both report success. `skill_file` is the
+/// marker path itself (`<folder>/SKILL.md`). The message is path-free.
+///
+/// Discovery of INSTALLED skills still follows a linked `SKILL.md`; this rule
+/// is only about what aghub copies into a Master.
+pub fn ensure_regular_skill_marker(skill_file: &Path) -> Result<(), String> {
+	match std::fs::symlink_metadata(skill_file) {
+		Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+		Ok(_) => Err("the skill's SKILL.md is not a regular file (a symbolic \
+			 link or a special file); a Master copies regular files only, so \
+			 the skill was refused and nothing was written"
+			.to_string()),
+		Err(error) => {
+			Err(format!("the skill's SKILL.md could not be read: {error}"))
+		}
 	}
 }
 
@@ -194,7 +224,7 @@ pub fn stage_and_swap_dir(
 
 	let staging_root = unique_temp_dir(parent, ".aghub-stage")?;
 	let staged = staging_root.join("skill");
-	copy_dir_recursive_skip_symlinks(source_dir, &staged)?;
+	crate::skills::linker::copy_dir_recursive(source_dir, &staged)?;
 
 	let backup_root = unique_temp_dir(parent, ".aghub-backup")?;
 	let backup = backup_root.join("target");
@@ -257,8 +287,17 @@ impl PreparedDirSwap {
 		let staging_root = unique_temp_dir(parent, ".aghub-stage")?;
 		let staged = staging_root.join("skill");
 		if let Err(error) =
-			copy_dir_recursive_skip_symlinks(source_dir, &staged)
-		{
+			crate::skills::linker::copy_dir_recursive(source_dir, &staged)
+				.and_then(|()| {
+					// Second guard: never swap in a copy without its marker.
+					ensure_regular_skill_marker(&staged.join("SKILL.md"))
+						.map_err(|message| {
+							std::io::Error::new(
+								std::io::ErrorKind::InvalidData,
+								message,
+							)
+						})
+				}) {
 			warn_on_cleanup_failure(&staging_root);
 			return Err(error);
 		}
@@ -462,28 +501,6 @@ fn warn_on_cleanup_failure(path: &Path) {
 	}
 }
 
-fn copy_dir_recursive_skip_symlinks(
-	from: &Path,
-	to: &Path,
-) -> std::io::Result<()> {
-	std::fs::create_dir_all(to)?;
-	for entry in std::fs::read_dir(from)? {
-		let entry = entry?;
-		let file_type = entry.file_type()?;
-		if file_type.is_symlink() {
-			continue;
-		}
-		let from_path = entry.path();
-		let to_path = to.join(entry.file_name());
-		if file_type.is_dir() {
-			copy_dir_recursive_skip_symlinks(&from_path, &to_path)?;
-		} else if file_type.is_file() {
-			std::fs::copy(&from_path, &to_path)?;
-		}
-	}
-	Ok(())
-}
-
 fn unique_temp_dir(parent: &Path, prefix: &str) -> std::io::Result<PathBuf> {
 	static COUNTER: AtomicU64 = AtomicU64::new(0);
 	for _ in 0..100 {
@@ -578,6 +595,38 @@ mod tests {
 		fs::write(outside.path().join("SKILL.md"), b"x").unwrap();
 		symlink(outside.path(), root.path().join("escape")).unwrap();
 		assert_eq!(sanitize_skill_path(root.path(), "escape/SKILL.md"), None);
+	}
+	/// A `SKILL.md` that is itself a link (staging keeps in-folder links) must
+	/// still name the LOCK's folder: callers hash `parent()`, and resolving the
+	/// leaf would hash the link target's directory instead.
+	#[cfg(unix)]
+	#[test]
+	fn symlinked_skill_md_keeps_the_lock_folder_as_parent() {
+		use std::os::unix::fs::symlink;
+		let root = tempdir().unwrap();
+		let folder = root.path().join("skills/a");
+		fs::create_dir_all(folder.join("docs")).unwrap();
+		fs::write(folder.join("docs/SKILL.md"), b"x").unwrap();
+		symlink("docs/SKILL.md", folder.join("SKILL.md")).unwrap();
+		let got =
+			sanitize_skill_path(root.path(), "skills/a/SKILL.md").unwrap();
+		assert_eq!(got, folder.canonicalize().unwrap().join("SKILL.md"));
+	}
+	/// The leaf link is still followed for containment.
+	#[cfg(unix)]
+	#[test]
+	fn rejects_a_skill_md_link_escaping_the_root() {
+		use std::os::unix::fs::symlink;
+		let root = tempdir().unwrap();
+		let outside = tempdir().unwrap();
+		fs::write(outside.path().join("SKILL.md"), b"x").unwrap();
+		fs::create_dir_all(root.path().join("skills/a")).unwrap();
+		symlink(
+			outside.path().join("SKILL.md"),
+			root.path().join("skills/a/SKILL.md"),
+		)
+		.unwrap();
+		assert_eq!(sanitize_skill_path(root.path(), "skills/a/SKILL.md"), None);
 	}
 
 	#[test]

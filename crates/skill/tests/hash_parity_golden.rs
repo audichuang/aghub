@@ -73,3 +73,51 @@ fn hash_parity_exotic_filenames_match_npx() {
 		"aghub hash must match npx localeCompare order for case/numeric names"
 	);
 }
+
+/// The observing walk must not perturb the digest, and must report exactly
+/// the files and bytes the digest consumed — on the golden fixture, with the
+/// skipped `.git` / `node_modules` injected.
+#[test]
+fn hash_parity_observing_walk_matches_golden() {
+	use skill::{compute_skill_folder_hashes_with, FileEvent};
+
+	let tmp = tempfile::tempdir().unwrap();
+	let dst = tmp.path().join("skill");
+	copy_dir(std::path::Path::new(FIXTURE), &dst);
+	fs::create_dir_all(dst.join(".git")).unwrap();
+	fs::write(dst.join(".git/HEAD"), b"junk").unwrap();
+	fs::create_dir_all(dst.join("node_modules/pkg")).unwrap();
+	fs::write(dst.join("node_modules/pkg/index.js"), b"junk").unwrap();
+
+	let mut seen: Vec<(String, u64, Vec<u8>)> = Vec::new();
+	let (raw, comparison) =
+		compute_skill_folder_hashes_with(&dst, |event| match event {
+			FileEvent::Begin { rel, len, .. } => {
+				seen.push((rel.to_string(), len, Vec::new()))
+			}
+			FileEvent::Bytes(chunk) => {
+				seen.last_mut().unwrap().2.extend_from_slice(chunk)
+			}
+			FileEvent::End => {}
+		})
+		.unwrap();
+	assert_eq!(raw, GOLDEN);
+	assert_eq!(
+		(raw, comparison),
+		skill::compute_skill_folder_hashes(&dst).unwrap()
+	);
+	let mut expected: Vec<String> = skill::collect_skill_files(&dst)
+		.unwrap()
+		.into_iter()
+		.map(|(rel, _)| rel)
+		.collect();
+	expected.sort();
+	let mut got: Vec<String> =
+		seen.iter().map(|(rel, ..)| rel.clone()).collect();
+	got.sort();
+	assert_eq!(got, expected, "observed exactly the hashed files");
+	for (rel, len, bytes) in &seen {
+		assert_eq!(*len as usize, bytes.len(), "{rel}: declared vs read");
+		assert_eq!(bytes, &fs::read(dst.join(rel)).unwrap(), "{rel}: bytes");
+	}
+}
