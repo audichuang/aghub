@@ -666,6 +666,9 @@ export function SkillDetail({
 																			projectPath ??
 																			null,
 																		confirm: true,
+																		// Install the commit this badge was judged against, or refuse.
+																		judgedCommit:
+																			updateStatus.judgedCommit,
 																	},
 																	// P1-b/P1-c: forward keyed by clone URL.
 																	sourceUrl:

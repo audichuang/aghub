@@ -3,7 +3,17 @@
 /**
  * One skill's name plus its flattened update status.
  */
-export type SkillUpdateResponse = { name: string; scope: string } & (
+export type SkillUpdateResponse = {
+	name: string;
+	scope: string;
+	/**
+	 * The commit this row's verdict was judged against
+	 * (`skill_update::CheckOutput::judged_commit`); absent when the row was
+	 * not judged against a fetched commit. Send it back in `judgedCommit` /
+	 * `judgedCommits` so an apply installs this commit or refuses.
+	 */
+	judgedCommit?: string;
+} & (
 	| { status: "upToDate" }
 	| {
 			status: "updateAvailable";

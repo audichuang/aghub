@@ -30,7 +30,7 @@ use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use crate::skills::rename::skill_renamed_message;
 use crate::skills::resync::safe_resync_error;
 use skill_update::mutation::{
-	rename_locked_skill, resync_locked_skill, resync_locked_skills,
+	rename_locked_skill, resync_judged_skill, resync_judged_skills,
 	LockedRenameRequest, LockedResyncError, LockedResyncRequest,
 	LockedSkillsResyncRequest, RenameMutationError,
 };
@@ -403,6 +403,7 @@ pub(crate) async fn check_skill_updates_inner(
 			name: output.key.name,
 			scope: output.key.scope,
 			status: SkillUpdateStatusResponse::from(output.status),
+			judged_commit: output.judged_commit,
 		})
 		.collect();
 	results.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
@@ -462,16 +463,18 @@ pub(crate) async fn apply_skill_update_inner(
 		}
 	};
 
-	// `resync_locked_skill` is synchronous but does BOTH the network fetch and the
+	// `resync_judged_skill` is synchronous but does BOTH the network fetch and the
 	// lock-holding transaction, so it must not run on an async worker.
 	let name = req.name;
 	let scope = req.scope;
+	let judged = req.judged_commit;
 	crate::blocking::in_mutation_pool(|| {
-		let outcome = resync_locked_skill(
+		let outcome = resync_judged_skill(
 			LockedResyncRequest {
 				name: &name,
 				scope: write_scope,
 			},
+			judged.as_deref(),
 			fetcher,
 			resolver,
 		);
@@ -537,17 +540,19 @@ pub(crate) async fn apply_skill_updates_inner(
 
 	let names = req.names;
 	let scope = req.scope;
+	let judged = req.judged_commits.unwrap_or_default();
 	crate::blocking::in_mutation_pool(|| {
 		// Every per-skill failure — unresolvable entry, repointed Source, its
 		// group's fetch — comes back as its own ordered row, so one bad skill
 		// never costs the others their update. Only a request that cannot
 		// produce rows at all is an API-level error.
-		let outcomes = resync_locked_skills(
+		let outcomes = resync_judged_skills(
 			LockedSkillsResyncRequest {
 				source_group: Some(&req.source),
 				names: &names,
 				scope: write_scope,
 			},
+			&judged,
 			fetcher,
 			resolver,
 		)
@@ -867,6 +872,7 @@ mod tests {
 			skill::lock::global::write_skill_lock(&lock).unwrap();
 
 			let req = ApplySkillUpdateRequest {
+				judged_commit: None,
 				name: "some-skill".to_string(),
 				scope: "global".to_string(),
 				project_root: None,
@@ -953,6 +959,7 @@ mod tests {
 			let error = runtime
 				.block_on(apply_skill_updates_inner(
 					ApplySkillUpdatesRequest {
+						judged_commits: None,
 						source: "https://github.com/owner/repo".to_string(),
 						names,
 						scope: "global".to_string(),
@@ -1002,6 +1009,7 @@ mod tests {
 				.unwrap()
 				.block_on(apply_skill_updates_inner(
 					ApplySkillUpdatesRequest {
+						judged_commits: None,
 						source: "https://github.com/owner/repo".to_string(),
 						names: vec!["beta".to_string(), "alpha".to_string()],
 						scope: "global".to_string(),
@@ -1209,6 +1217,7 @@ mod tests {
 				.unwrap()
 				.block_on(apply_skill_updates_inner(
 					ApplySkillUpdatesRequest {
+						judged_commits: None,
 						source: "https://github.com/owner/repo".to_string(),
 						names: vec!["alpha".to_string()],
 						scope: "global".to_string(),
@@ -1266,6 +1275,7 @@ mod tests {
 			for confirm in [None, Some(false)] {
 				let result = runtime.block_on(apply_skill_updates_inner(
 					ApplySkillUpdatesRequest {
+						judged_commits: None,
 						source: "https://github.com/owner/repo".to_string(),
 						names: vec!["alpha".to_string()],
 						scope: "global".to_string(),
@@ -1307,6 +1317,7 @@ mod tests {
 				.unwrap();
 			let request =
 				|names: Vec<String>, scope: &str| ApplySkillUpdatesRequest {
+					judged_commits: None,
 					source: "https://github.com/owner/repo".to_string(),
 					names,
 					scope: scope.to_string(),
@@ -1382,6 +1393,7 @@ mod tests {
 				.unwrap()
 				.block_on(apply_skill_updates_inner(
 					ApplySkillUpdatesRequest {
+						judged_commits: None,
 						source: "https://github.com/owner/repo".to_string(),
 						names: vec!["beta".to_string(), "alpha".to_string()],
 						scope: "global".to_string(),
@@ -1477,6 +1489,7 @@ mod tests {
 					.unwrap()
 					.block_on(apply_skill_updates_inner(
 						ApplySkillUpdatesRequest {
+							judged_commits: None,
 							source: "owner/repo".to_string(),
 							names: vec![
 								"alpha".to_string(),
@@ -1542,6 +1555,138 @@ mod tests {
 				Some("batch-commit")
 			);
 			assert!(project_lock.skills["gamma"].ref_commit.is_none());
+		});
+	}
+
+	/// The desktop applies an update on the strength of a check it displayed.
+	/// When that check judged `c0` and the tip has since moved (the fetch
+	/// resolves `batch-commit`), both apply routes must refuse with nothing
+	/// written; without a judged commit they keep installing the tip.
+	#[cfg(unix)]
+	#[test]
+	fn apply_routes_refuse_a_tip_the_check_did_not_judge() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let _home = HomeGuard::set(home.path());
+			let project = tempfile::tempdir().unwrap();
+			let fetched = tempfile::tempdir().unwrap();
+			for name in ["alpha", "beta"] {
+				let installed =
+					project.path().join(format!(".claude/skills/{name}"));
+				std::fs::create_dir_all(&installed).unwrap();
+				std::fs::write(
+					installed.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: old\n---\nold\n"),
+				)
+				.unwrap();
+				let directory = fetched.path().join(format!("skills/{name}"));
+				std::fs::create_dir_all(&directory).unwrap();
+				std::fs::write(
+					directory.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: new\n---\nnew\n"),
+				)
+				.unwrap();
+				skill::add_skill_to_local_lock(
+					name,
+					skill::LocalSkillLockEntry {
+						extra: Default::default(),
+						source_url: None,
+						source: "owner/repo".to_string(),
+						ref_name: Some("main".to_string()),
+						source_type: "github".to_string(),
+						computed_hash: "old".to_string(),
+						skill_path: Some(format!("skills/{name}/SKILL.md")),
+						ref_commit: None,
+					},
+					Some(project.path()),
+				)
+				.unwrap();
+			}
+			let fetcher = CountingFetcher {
+				root: fetched.path().to_path_buf(),
+				calls: std::sync::atomic::AtomicUsize::new(0),
+			};
+			let root = project.path().to_string_lossy().to_string();
+			let runtime = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let body = |name: &str| {
+				std::fs::read_to_string(
+					project
+						.path()
+						.join(format!(".claude/skills/{name}/SKILL.md")),
+				)
+				.unwrap()
+			};
+			let lock_bytes = || {
+				std::fs::read(project.path().join("skills-lock.json")).unwrap()
+			};
+			let before = lock_bytes();
+
+			let single = |judged: Option<&str>| match runtime.block_on(
+				apply_skill_update_inner(
+					ApplySkillUpdateRequest {
+						name: "alpha".to_string(),
+						scope: "project".to_string(),
+						project_root: Some(root.clone()),
+						confirm: Some(true),
+						judged_commit: judged.map(str::to_string),
+					},
+					&fetcher,
+					&empty_keyring_resolver(),
+				),
+			) {
+				Ok(json) => json.into_inner(),
+				Err(error) => panic!("{}", error.body.error),
+			};
+			let batch = |judged: Option<&str>| match runtime.block_on(
+				apply_skill_updates_inner(
+					ApplySkillUpdatesRequest {
+						source: "owner/repo".to_string(),
+						names: vec!["beta".to_string()],
+						scope: "project".to_string(),
+						project_root: Some(root.clone()),
+						confirm: Some(true),
+						judged_commits: judged.map(|commit| {
+							[("beta".to_string(), commit.to_string())].into()
+						}),
+					},
+					&fetcher,
+					&empty_keyring_resolver(),
+				),
+			) {
+				Ok(json) => json.into_inner().results.remove(0),
+				Err(error) => panic!("{}", error.body.error),
+			};
+
+			let refused = single(Some("c0"));
+			assert!(!refused.success, "{refused:?}");
+			assert_eq!(
+				refused.code.as_deref(),
+				Some(
+					aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE
+				)
+			);
+			let refused = batch(Some("c0"));
+			assert!(!refused.success, "{refused:?}");
+			assert_eq!(
+				refused.code.as_deref(),
+				Some(
+					aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE
+				)
+			);
+			assert!(
+				body("alpha").contains("old") && body("beta").contains("old")
+			);
+			assert_eq!(lock_bytes(), before, "nothing written");
+
+			// Absent judged commit: today's behaviour, the tip is installed.
+			assert!(single(None).success);
+			assert!(batch(None).success);
+			assert!(
+				body("alpha").contains("new") && body("beta").contains("new")
+			);
 		});
 	}
 
@@ -2137,6 +2282,7 @@ mod tests {
 				root: fetched.path().to_path_buf(),
 			};
 			let req = ApplySkillUpdateRequest {
+				judged_commit: None,
 				name: "some-skill".to_string(),
 				scope: "global".to_string(),
 				project_root: None,
@@ -2275,6 +2421,7 @@ mod tests {
 			let resolver = SourceAuth::for_test(forwarded, false);
 
 			let req = ApplySkillUpdateRequest {
+				judged_commit: None,
 				name: "some-skill".to_string(),
 				scope: "global".to_string(),
 				project_root: None,
@@ -2387,6 +2534,7 @@ mod tests {
 			let resolver = SourceAuth::for_test(forwarded, true);
 
 			let req = ApplySkillUpdateRequest {
+				judged_commit: None,
 				name: "some-skill".to_string(),
 				scope: "global".to_string(),
 				project_root: None,
@@ -2460,6 +2608,7 @@ mod tests {
 			};
 			let resolver = empty_keyring_resolver();
 			let req = ApplySkillUpdateRequest {
+				judged_commit: None,
 				name: "some-skill".to_string(),
 				scope: "global".to_string(),
 				project_root: None,
@@ -2547,6 +2696,7 @@ mod tests {
 			let _guard = crate::routes::CwdGuard::change_to(&home_path);
 
 			let req = ApplySkillUpdateRequest {
+				judged_commit: None,
 				name: "alpha".to_string(),
 				scope: "project".to_string(),
 				project_root: Some("proj".to_string()),

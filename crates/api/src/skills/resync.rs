@@ -24,8 +24,9 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 		}
 		ResyncError::StaleFetch(_) => SafeResyncError {
 			message:
-				"The skill's source changed while this sync was fetching; \
-			          nothing was written. Re-run to use the current source",
+				"The skill's source changed since it was checked or while \
+			          it was fetching; nothing was written. Check for updates \
+			          again, then retry",
 			status: Status::Conflict,
 		},
 		ResyncError::NotInstalled => SafeResyncError {

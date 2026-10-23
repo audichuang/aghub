@@ -9,4 +9,10 @@ export type ApplySkillUpdatesRequest = {
 	scope: string;
 	projectRoot: string | null;
 	confirm: boolean | null;
+	/**
+	 * Per-name `judgedCommit` of the check rows this batch acts on; see
+	 * [`ApplySkillUpdateRequest::judged_commit`]. Names absent here install
+	 * whatever the fetch resolves.
+	 */
+	judgedCommits?: { [key in string]: string };
 };

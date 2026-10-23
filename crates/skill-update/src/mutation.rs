@@ -930,17 +930,34 @@ pub fn resync_locked_skill(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
+	resync_judged_skill(request, None, fetcher, resolver)
+}
+
+/// [`resync_locked_skill`] for a row a check already judged: `judged` is the
+/// commit that verdict was made against, refused if the fetch resolves another
+/// (see [`resync_judged_skills`]). `None` behaves as [`resync_locked_skill`].
+pub fn resync_judged_skill(
+	request: LockedResyncRequest<'_>,
+	judged: Option<&str>,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
 	// `source_group: None` — this caller has no independent Sources view to
 	// check against, and checking one would mean reading the entry a SECOND
 	// time: a repoint landing between the two reads would fail an update that
 	// is perfectly safe to apply against the coordinates actually read here.
 	let names = [request.name.to_string()];
-	let results = resync_locked_skills(
+	let judged: HashMap<String, String> = judged
+		.map(|commit| (request.name.to_string(), commit.to_string()))
+		.into_iter()
+		.collect();
+	let results = resync_judged_skills(
 		LockedSkillsResyncRequest {
 			source_group: None,
 			names: &names,
 			scope: request.scope,
 		},
+		&judged,
 		fetcher,
 		resolver,
 	)

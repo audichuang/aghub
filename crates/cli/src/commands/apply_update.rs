@@ -97,7 +97,9 @@ fn outdated_plan(views: &[SkillUpdateView]) -> OutdatedPlan {
 
 /// `apply-update skills --outdated`: the CLI's "update all" — check every
 /// locked skill in ONE scope online, then resync the outdated ones through the
-/// same batch seam the desktop's update-all uses. Without `--yes` it previews.
+/// judged batch seam (`resync_judged_skills`, each row pinned to the commit the
+/// check judged) that the desktop's update-all also uses. Without `--yes` it
+/// previews.
 pub fn execute_outdated(
 	scope: WriteScope,
 	yes: bool,
