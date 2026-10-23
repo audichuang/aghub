@@ -253,6 +253,7 @@ pub fn global_lock_entries_with(
 					.get(&name)
 					.cloned(),
 				local_ambiguous: local_hashes.ambiguous.contains(&name),
+				local_manifest: local_hashes.manifests.get(&name).cloned(),
 				name,
 				scope: "global".to_string(),
 				source_ref: SourceRef {
@@ -305,6 +306,7 @@ fn project_lock_entries_with(
 					.get(&name)
 					.cloned(),
 				local_ambiguous: local_hashes.ambiguous.contains(&name),
+				local_manifest: local_hashes.manifests.get(&name).cloned(),
 				name,
 				scope: "project".to_string(),
 				source_ref: SourceRef {

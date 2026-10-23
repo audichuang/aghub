@@ -4,11 +4,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::verdict::Verdict;
 use crate::{
-	FetchError, FetchSelection, Fetcher, SourceRef, TokenResolution,
-	TokenResolver,
+	FetchError, FetchSelection, FetchedRepo, Fetcher, InstalledFolder,
+	LocalManifest, SourceRef, TokenResolution, TokenResolver,
 };
 use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::source_coordinate::{
@@ -87,6 +88,9 @@ pub(crate) struct BaselineEntry {
 	pub local_comparison_hash: Option<String>,
 	/// Managed copies disagree (`verdict::Verdict::Ambiguous`).
 	pub local_ambiguous: bool,
+	/// The walk behind `local_comparison_hash`, for the fetch's tree-first
+	/// proof (`None` → the folder is materialized).
+	pub local_manifest: Option<Arc<LocalManifest>>,
 	pub scope_label: String,
 	/// The ref THIS entry is pinned to. A Sources row is one repository, but its
 	/// entries need not share a branch/tag, and an entry may only be judged
@@ -492,6 +496,7 @@ fn insert_scope_entries(
 						.get(&name)
 						.cloned(),
 					local_ambiguous: local.ambiguous.contains(&name),
+					local_manifest: local.manifests.get(&name).cloned(),
 					installed_name: name,
 					stored_hash,
 					scope_label: label.to_string(),
@@ -753,11 +758,11 @@ fn resolve_source_meta_from(
 /// `root`. A repo with no discoverable skills yields every baseline entry as a
 /// `removed` row.
 pub(crate) fn classify_repo_skills(
-	root: &Path,
+	repo: &FetchedRepo,
 	baseline: &Baseline,
 	upstream_commit_time: Option<String>,
 ) -> Vec<SourceSkillDiff> {
-	let discovered = match skill::discover_repo_skills(root, &[], true) {
+	let discovered = match skill::discover_repo_skills(&repo.root, &[], true) {
 		Ok(discovered) => discovered,
 		// An upstream with no SKILL.md at all is a legitimate diff input: every
 		// baseline entry belongs in the removed pass (an early return would
@@ -768,11 +773,11 @@ pub(crate) fn classify_repo_skills(
 		// it keeps yielding an empty diff.
 		Err(_) => return Vec::new(),
 	};
-	build_source_skill_diffs(root, discovered, baseline, upstream_commit_time)
+	build_source_skill_diffs(repo, discovered, baseline, upstream_commit_time)
 }
 
 fn build_source_skill_diffs(
-	root: &Path,
+	repo: &FetchedRepo,
 	discovered: Vec<skill::RepoDiscoveredSkill>,
 	baseline: &Baseline,
 	upstream_commit_time: Option<String>,
@@ -816,8 +821,12 @@ fn build_source_skill_diffs(
 			Some(entry) => {
 				let skill_dir =
 					aghub_core::skills::skill_source_root(&d.full_path);
+				// Through the fetch's own view: a proven folder is not on disk.
+				let folder = crate::proof_folder(&skill_path);
 				let (state, previous_name, reason) =
-					classify_source_skill_diff(entry, &name, &skill_dir);
+					classify_source_skill_diff(entry, &name, || {
+						repo.folder_hashes(folder.as_deref(), &skill_dir)
+					});
 				if indexes_by_name.insert(name.clone(), out.len()).is_some() {
 					ambiguous_names.insert(name.clone());
 				}
@@ -846,7 +855,7 @@ fn build_source_skill_diffs(
 		}
 	}
 
-	let successors = skill_successors_from_changelog(root);
+	let successors = skill_successors_from_changelog(&repo.root);
 	for (skill_path, entry) in baseline {
 		if seen_paths.contains(skill_path) {
 			continue;
@@ -1000,7 +1009,7 @@ fn is_deprecated_skill_path(skill_path: &str) -> bool {
 fn classify_source_skill_diff(
 	entry: &BaselineEntry,
 	discovered_name: &str,
-	skill_dir: &Path,
+	upstream_hashes: impl FnOnce() -> Result<(String, String), skill::HashError>,
 ) -> (SourceSkillState, Option<String>, Option<String>) {
 	if detect_rename(discovered_name, &entry.installed_name).is_some() {
 		return (
@@ -1009,7 +1018,7 @@ fn classify_source_skill_diff(
 			None,
 		);
 	}
-	let (state, reason) = classify_installed(entry, skill_dir);
+	let (state, reason) = classify_installed(entry, upstream_hashes());
 	(state, None, reason)
 }
 
@@ -1019,12 +1028,11 @@ fn classify_source_skill_diff(
 /// `Uncheckable { local }` too.
 fn classify_installed(
 	entry: &BaselineEntry,
-	skill_dir: &Path,
+	upstream_hashes: Result<(String, String), skill::HashError>,
 ) -> (SourceSkillState, Option<String>) {
 	let uncheckable =
 		|| (SourceSkillState::Uncheckable, Some("local".to_string()));
-	let Ok((raw, comparison)) = skill::compute_skill_folder_hashes(skill_dir)
-	else {
+	let Ok((raw, comparison)) = upstream_hashes else {
 		return uncheckable();
 	};
 	match crate::verdict::judge(
@@ -1056,16 +1064,16 @@ fn parse_meta(
 }
 
 /// PUBLIC CLI entry: build the baseline for one scope and classify the fetched
-/// repo against it. Does NOT fetch (caller passes the already-fetched `root`),
+/// repo against it. Does NOT fetch (caller passes the already-fetched repo),
 /// so the CLI reuses one `FetchedRepo` for every scope and for install.
 pub(crate) fn classify_scope(
-	root: &Path,
+	repo: &FetchedRepo,
 	scope: &WriteScope,
 	source: &str,
 	upstream_commit_time: Option<String>,
 ) -> Vec<SourceSkillDiff> {
 	let (baseline, _src_type, _ref) = baseline_for_scope(scope, source);
-	classify_repo_skills(root, &baseline, upstream_commit_time)
+	classify_repo_skills(repo, &baseline, upstream_commit_time)
 }
 
 /// One scope's lock file, read ONCE.
@@ -1476,7 +1484,7 @@ pub fn plan_source_sync(
 	};
 
 	let diffs = classify_scope(
-		repo.root.as_path(),
+		&repo,
 		&input.scope,
 		&source,
 		repo.upstream_commit_time(),
@@ -1565,12 +1573,28 @@ pub fn diff_source(
 			source: fetch_source.clone(),
 			ref_: cohort_ref,
 		};
+		// Every installed folder of this cohort, with its manifest: an
+		// unchanged one is proven from the tree, and an uninstalled catalog
+		// skill needs only its SKILL.md.
+		let installed: Vec<InstalledFolder> = cohort
+			.iter()
+			.filter_map(|(skill_path, entry)| {
+				Some(InstalledFolder {
+					folder: crate::skill_folder_from_lock_path(skill_path)?,
+					manifest: crate::proof_folder(skill_path)
+						.and(entry.local_manifest.clone()),
+				})
+			})
+			.collect();
 		let fetch_started = std::time::Instant::now();
 		let fetched = fetch_source_with_resolver(
 			&source_ref,
 			deps.fetcher,
 			deps.resolver,
-			FetchSelection::CatalogSnapshot,
+			FetchSelection::Verify {
+				installed: &installed,
+				catalog: true,
+			},
 		);
 		log::info!(
 			"source diff [{source_log}]: cohort {} ref={:?} fetch {} took={:?}",
@@ -1604,11 +1628,8 @@ pub fn diff_source(
 			}
 		};
 		let classify_started = std::time::Instant::now();
-		let classified = classify_repo_skills(
-			repo.root.as_path(),
-			&cohort,
-			repo.upstream_commit_time(),
-		);
+		let classified =
+			classify_repo_skills(&repo, &cohort, repo.upstream_commit_time());
 		log::info!(
 			"source diff [{source_log}]: cohort {} classify skills={} took={:?}",
 			index,
@@ -1721,15 +1742,24 @@ mod classify_tests {
 				stored_hash: raw.clone(),
 				local_comparison_hash: entry.local_comparison_hash.clone(),
 				local_ambiguous: false,
+				local_manifest: None,
 				scope_label: "project".into(),
 				ref_name: None,
 			};
 			assert_eq!(
-				classify_installed(&baseline, upstream.path()).0,
+				classify_installed(
+					&baseline,
+					skill::compute_skill_folder_hashes(upstream.path())
+				)
+				.0,
 				expected
 			);
 			let probe = crate::probe_skill_hash_in_repo(
-				upstream.path(),
+				&crate::FetchedRepo::new(
+					upstream.path().to_path_buf(),
+					Default::default(),
+					None,
+				),
 				Some("SKILL.md"),
 			);
 			let result = crate::classify_member_from_probe(entry, &probe, None);
@@ -1770,12 +1800,16 @@ mod classify_tests {
 			stored_hash: "stale-lock-hash".to_string(),
 			local_comparison_hash: Some(fresh),
 			local_ambiguous: false,
+			local_manifest: None,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
 
 		assert_eq!(
-			classify_installed(&entry, dir.path()),
+			classify_installed(
+				&entry,
+				skill::compute_skill_folder_hashes(dir.path())
+			),
 			(SourceSkillState::InstalledCurrent, None)
 		);
 	}
@@ -1789,12 +1823,16 @@ mod classify_tests {
 			stored_hash: "stale-lock-hash".to_string(),
 			local_comparison_hash: None,
 			local_ambiguous: false,
+			local_manifest: None,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
 
 		assert_eq!(
-			classify_installed(&entry, dir.path()),
+			classify_installed(
+				&entry,
+				skill::compute_skill_folder_hashes(dir.path())
+			),
 			(SourceSkillState::InstalledOutdated, None)
 		);
 	}
@@ -1810,12 +1848,16 @@ mod classify_tests {
 			stored_hash: skill::EMPTY_SKILLS_LOCK_DIGEST.to_string(),
 			local_comparison_hash: None,
 			local_ambiguous: false,
+			local_manifest: None,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
 
 		assert_eq!(
-			classify_installed(&entry, dir.path()),
+			classify_installed(
+				&entry,
+				skill::compute_skill_folder_hashes(dir.path())
+			),
 			(SourceSkillState::Uncheckable, Some("local".to_string()))
 		);
 	}
@@ -1832,12 +1874,16 @@ mod classify_tests {
 			stored_hash: fresh.clone(),
 			local_comparison_hash: None,
 			local_ambiguous: true,
+			local_manifest: None,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
 
 		assert_eq!(
-			classify_installed(&entry, dir.path()),
+			classify_installed(
+				&entry,
+				skill::compute_skill_folder_hashes(dir.path())
+			),
 			(SourceSkillState::Uncheckable, Some("local".to_string()))
 		);
 	}
@@ -1851,12 +1897,15 @@ mod classify_tests {
 			stored_hash: "stale-lock-hash".to_string(),
 			local_comparison_hash: None,
 			local_ambiguous: false,
+			local_manifest: None,
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
 
 		assert_eq!(
-			classify_source_skill_diff(&entry, "new-skill", dir.path()),
+			classify_source_skill_diff(&entry, "new-skill", || {
+				skill::compute_skill_folder_hashes(dir.path())
+			}),
 			(
 				SourceSkillState::Renamed,
 				Some("old-skill".to_string()),
@@ -1886,13 +1935,18 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_comparison_hash: None,
 				local_ambiguous: false,
+				local_manifest: None,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
 		);
 
 		let diffs = build_source_skill_diffs(
-			dir.path(),
+			&crate::FetchedRepo::new(
+				dir.path().to_path_buf(),
+				Default::default(),
+				None,
+			),
 			vec![skill::RepoDiscoveredSkill {
 				name: "diagnosing-bugs".to_string(),
 				full_path: skill_file,
@@ -1936,12 +1990,21 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_comparison_hash: None,
 				local_ambiguous: false,
+				local_manifest: None,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
 		);
 
-		let diffs = classify_repo_skills(dir.path(), &baseline, None);
+		let diffs = classify_repo_skills(
+			&crate::FetchedRepo::new(
+				dir.path().to_path_buf(),
+				Default::default(),
+				None,
+			),
+			&baseline,
+			None,
+		);
 
 		assert_eq!(diffs.len(), 1, "expected the removed row, got {diffs:?}");
 		assert_eq!(diffs[0].name, "only");
@@ -1959,7 +2022,11 @@ mod classify_tests {
 			.unwrap();
 
 		let diffs = build_source_skill_diffs(
-			dir.path(),
+			&crate::FetchedRepo::new(
+				dir.path().to_path_buf(),
+				Default::default(),
+				None,
+			),
 			vec![skill::RepoDiscoveredSkill {
 				name: "qa".to_string(),
 				full_path: skill_file,
@@ -2002,13 +2069,18 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_comparison_hash: None,
 				local_ambiguous: false,
+				local_manifest: None,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
 		);
 
 		let diffs = build_source_skill_diffs(
-			dir.path(),
+			&crate::FetchedRepo::new(
+				dir.path().to_path_buf(),
+				Default::default(),
+				None,
+			),
 			vec![skill::RepoDiscoveredSkill {
 				name: "diagnosing-bugs".to_string(),
 				full_path: skill_file,
@@ -2058,13 +2130,18 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_comparison_hash: None,
 				local_ambiguous: false,
+				local_manifest: None,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
 		);
 
 		let diffs = build_source_skill_diffs(
-			dir.path(),
+			&crate::FetchedRepo::new(
+				dir.path().to_path_buf(),
+				Default::default(),
+				None,
+			),
 			vec![skill::RepoDiscoveredSkill {
 				name: "writing-great-skills".to_string(),
 				full_path: skill_file,
@@ -2155,13 +2232,18 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_comparison_hash: None,
 				local_ambiguous: false,
+				local_manifest: None,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
 		);
 
 		let diffs = build_source_skill_diffs(
-			dir.path(),
+			&crate::FetchedRepo::new(
+				dir.path().to_path_buf(),
+				Default::default(),
+				None,
+			),
 			vec![
 				skill::RepoDiscoveredSkill {
 					name: "shared".to_string(),
@@ -2213,13 +2295,18 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_comparison_hash: None,
 				local_ambiguous: false,
+				local_manifest: None,
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
 		);
 
 		let diffs = build_source_skill_diffs(
-			dir.path(),
+			&crate::FetchedRepo::new(
+				dir.path().to_path_buf(),
+				Default::default(),
+				None,
+			),
 			vec![skill::RepoDiscoveredSkill {
 				name: "qa".to_string(),
 				full_path: dir.path().join("skills/deprecated/qa/SKILL.md"),
@@ -2346,15 +2433,15 @@ mod diff_tests {
 			_token: Option<&str>,
 			_selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
-			Ok(crate::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(crate::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: "test-oid".to_string(),
 					tree_oid: "test-tree-oid".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -2537,15 +2624,15 @@ mod diff_tests {
 			_selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
 			self.seen.lock().unwrap().push(sr.ref_.clone());
-			Ok(crate::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(crate::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: "test-oid".to_string(),
 					tree_oid: "test-tree-oid".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 		fn default_branch(
 			&self,
@@ -2636,15 +2723,15 @@ mod diff_tests {
 			_selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
 			*self.seen_ref.lock().unwrap() = Some(sr.ref_.clone());
-			Ok(crate::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(crate::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: "test-oid".to_string(),
 					tree_oid: "test-tree-oid".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -2666,15 +2753,15 @@ mod diff_tests {
 				.roots
 				.get(&sr.ref_)
 				.unwrap_or_else(|| panic!("unexpected ref {:?}", sr.ref_));
-			Ok(crate::FetchedRepo {
-				root: root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(crate::FetchedRepo::new(
+				root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: "test-oid".to_string(),
 					tree_oid: "test-tree-oid".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 

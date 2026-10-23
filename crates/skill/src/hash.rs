@@ -97,6 +97,27 @@ pub fn compute_skill_folder_hash_covering_all(
 pub fn compute_skill_folder_hashes(
 	dir: &Path,
 ) -> Result<(String, String), HashError> {
+	compute_skill_folder_hashes_with(dir, |_| {})
+}
+
+/// One step of [`compute_skill_folder_hashes_with`]'s read of a hashed file.
+pub enum FileEvent<'a> {
+	/// A file is about to be read. `len` is the length its open handle reports
+	/// before the read; the bytes that follow may differ if the file changes.
+	Begin { rel: &'a str, len: u64 },
+	/// The next chunk of the file's bytes — the same chunk the digests consume.
+	Bytes(&'a [u8]),
+	/// The file was read to its end.
+	End,
+}
+
+/// [`compute_skill_folder_hashes`], also streaming every hashed file's bytes
+/// to `on_file`, so a caller can derive more (e.g. git blob oids) from the
+/// SAME walk and the SAME read the digests come from.
+pub fn compute_skill_folder_hashes_with(
+	dir: &Path,
+	mut on_file: impl FnMut(FileEvent<'_>),
+) -> Result<(String, String), HashError> {
 	let mut files = collect_skill_files(dir)?;
 	// Same collation as `hash_files`; filtering a sorted list keeps its order.
 	let mut collator = feruca::Collator::new(
@@ -117,17 +138,27 @@ pub fn compute_skill_folder_hashes(
 	let mut raw = Sha256::new();
 	let mut cmp = Sha256::new();
 	let mut read_bytes = 0;
+	// Both callbacks below report to `on_file`, never at the same time.
+	let on_file = std::cell::RefCell::new(&mut on_file);
 	for ((rel, abs), compared) in files.iter().zip(compared) {
 		raw.update(rel.as_bytes());
 		if compared {
 			cmp.update(rel.as_bytes());
 		}
-		update_from_file(abs, &mut read_bytes, MAX_TOTAL_BYTES, |chunk| {
-			raw.update(chunk);
-			if compared {
-				cmp.update(chunk);
-			}
-		})?;
+		update_from_file(
+			abs,
+			&mut read_bytes,
+			MAX_TOTAL_BYTES,
+			|len| (on_file.borrow_mut())(FileEvent::Begin { rel, len }),
+			|chunk| {
+				raw.update(chunk);
+				if compared {
+					cmp.update(chunk);
+				}
+				(on_file.borrow_mut())(FileEvent::Bytes(chunk));
+			},
+		)?;
+		(on_file.borrow_mut())(FileEvent::End);
 	}
 	Ok((lower_hex(&raw.finalize()), lower_hex(&cmp.finalize())))
 }
@@ -209,9 +240,13 @@ fn hash_files(
 	let mut read_bytes = 0;
 	for (rel, abs) in &files {
 		hasher.update(rel.as_bytes());
-		update_from_file(abs, &mut read_bytes, MAX_TOTAL_BYTES, |chunk| {
-			hasher.update(chunk)
-		})?;
+		update_from_file(
+			abs,
+			&mut read_bytes,
+			MAX_TOTAL_BYTES,
+			|_| {},
+			|chunk| hasher.update(chunk),
+		)?;
 	}
 	Ok(lower_hex(&hasher.finalize()))
 }
@@ -238,9 +273,11 @@ fn update_from_file(
 	path: &Path,
 	total_bytes: &mut u64,
 	max_total_bytes: u64,
+	on_open: impl FnOnce(u64),
 	mut sink: impl FnMut(&[u8]),
 ) -> Result<(), HashError> {
 	let mut file = std::fs::File::open(path)?;
+	on_open(file.metadata()?.len());
 	let mut buf = [0_u8; 16 * 1024];
 	loop {
 		let read = file.read(&mut buf)?;
@@ -597,9 +634,13 @@ mod tests {
 		let mut hashed = Vec::new();
 		let mut total_bytes = 0;
 		assert!(matches!(
-			update_from_file(&file, &mut total_bytes, 4, |chunk| {
-				hashed.extend_from_slice(chunk)
-			}),
+			update_from_file(
+				&file,
+				&mut total_bytes,
+				4,
+				|_| {},
+				|chunk| hashed.extend_from_slice(chunk)
+			),
 			Err(HashError::Bounds(_))
 		));
 	}

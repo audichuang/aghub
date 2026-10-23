@@ -219,6 +219,11 @@ fn stage_one(
 	Ok(())
 }
 
+/// Whether [`stage_tree_entries`] would accept `path` as an entry path.
+pub fn is_valid_entry_path(path: &str) -> bool {
+	validate_entry_path(path).is_ok()
+}
+
 /// Split and validate an entry path. Rejects absolute, empty, `.`/`..`, and
 /// names that fail [`is_safe_tree_entry_name`].
 fn validate_entry_path(path: &str) -> Result<Vec<String>, StageError> {

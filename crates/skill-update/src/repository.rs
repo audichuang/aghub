@@ -3,18 +3,22 @@
 //! selection-scoped materialization (`fetch`). Surfaces never re-decide the
 //! transport.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aghub_git::{
 	github_api_host, Blob, Credentials, GitError, GithubRest, GixShallow,
-	HttpTransport, RepoFetchBackend, RepoSnapshot, ReqwestTransport, TreeEntry,
+	HttpTransport, RepoFetchBackend, RepoSnapshot, ReqwestTransport,
+	StagedEntryMode, TreeEntry,
 };
 use skill::{discover_from_entries, CandidateEntry, SkillPath};
 
-use crate::{https_only_token, FetchError, FetchedRepo, SourceRef};
+use crate::proof::{proves, LocalManifest};
+use crate::{
+	https_only_token, FetchError, FetchedRepo, SourceRef, VerifiedFolders,
+};
 
 /// Per-fetch HTTP timeout for the gix shallow backend (matches the historical
 /// `GitFetcher` bound so a stuck remote cannot hang forever).
@@ -36,6 +40,25 @@ pub enum FetchSelection<'a> {
 	Skills(&'a [SkillPath]),
 	/// Whole catalog tree (source sync/diff classification).
 	CatalogSnapshot,
+	/// Judge installed folders against the snapshot (`check`, `source diff`):
+	/// a folder whose tree listing equals its local manifest is proven
+	/// unchanged and NOT downloaded; every other one is materialized whole.
+	/// With `catalog`, also each catalog skill's `SKILL.md` (+ root
+	/// `CHANGELOG.md`) — enough for discovery, metadata and rename detection;
+	/// an uninstalled skill's other files are never needed. The result's root
+	/// is PARTIAL: judge folders only through [`FetchedRepo::folder_hashes`].
+	Verify {
+		installed: &'a [InstalledFolder],
+		catalog: bool,
+	},
+}
+
+/// One installed skill folder to judge, with the local copy's manifest when
+/// one could be read (`None` → always materialized).
+#[derive(Clone, Debug)]
+pub struct InstalledFolder {
+	pub folder: SkillPath,
+	pub manifest: Option<Arc<LocalManifest>>,
 }
 
 /// Discovered skills for one immutable snapshot.
@@ -634,6 +657,7 @@ impl SkillRepository {
 		backend: BackendKind,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, Attempt> {
+		let mut verified = None;
 		let path_owned: Vec<String> = match selection {
 			FetchSelection::Skills(paths) => {
 				paths.iter().map(|p| p.as_str().to_string()).collect()
@@ -646,6 +670,12 @@ impl SkillRepository {
 					.map(|skill| skill.skill_path)
 					.collect();
 				paths.push("CHANGELOG.md".to_string());
+				paths
+			}
+			FetchSelection::Verify { installed, catalog } => {
+				let (paths, folders) =
+					self.plan_verify(snapshot, backend, installed, catalog)?;
+				verified = Some(folders);
 				paths
 			}
 		};
@@ -661,21 +691,118 @@ impl SkillRepository {
 
 		let dest = tempfile::TempDir::new()
 			.map_err(|e| SkillRepoError::Network(format!("temp dir: {e}")))?;
-		let started = Instant::now();
-		self.run_on(backend, snapshot, |backend, snapshot| {
-			backend.materialize(snapshot, &path_refs, dest.path())
-		})?;
-		log::info!(
-			"skill repo materialize: paths={} took={:?}",
-			path_refs.len(),
-			started.elapsed()
-		);
+		// Nothing left to download (every installed folder proven): skip the
+		// backend call rather than trust an empty selection to be a no-op.
+		if !path_refs.is_empty() {
+			let started = Instant::now();
+			self.run_on(backend, snapshot, |backend, snapshot| {
+				backend.materialize(snapshot, &path_refs, dest.path())
+			})?;
+			log::info!(
+				"skill repo materialize: paths={} took={:?}",
+				path_refs.len(),
+				started.elapsed()
+			);
+		}
 
-		Ok(FetchedRepo {
-			root: dest.path().to_path_buf(),
-			snapshot: snapshot.clone(),
-			_guard: Some(Arc::new(dest)),
+		let fetched = FetchedRepo::new(
+			dest.path().to_path_buf(),
+			snapshot.clone(),
+			Some(Arc::new(dest)),
+		);
+		Ok(match verified {
+			Some(folders) => fetched.with_verified(folders),
+			None => fetched,
 		})
+	}
+
+	/// The paths a [`FetchSelection::Verify`] fetch materializes, and what it
+	/// proved. One tree read (REST caches it for the materialize that follows).
+	fn plan_verify(
+		&self,
+		snapshot: &RepoSnapshot,
+		backend: BackendKind,
+		installed: &[InstalledFolder],
+		catalog: bool,
+	) -> Result<(Vec<String>, VerifiedFolders), Attempt> {
+		let tree = self.run_on(backend, snapshot, |backend, snapshot| {
+			backend.read_tree(snapshot)
+		})?;
+		let catalog_folders: Option<Vec<String>> = if catalog {
+			let listed = self.list_with_backend(snapshot, backend)?;
+			Some(listed.skills.into_iter().map(|s| s.skill_path).collect())
+		} else {
+			None
+		};
+		// Today's catalog fetch only ever put catalog folders on disk, so an
+		// installed folder outside them stays absent (judged as before).
+		let served = |folder: &str| {
+			catalog_folders.as_ref().is_none_or(|folders| {
+				folders.iter().any(|c| folder_contains(c, folder))
+			})
+		};
+
+		let mut folders = VerifiedFolders::default();
+		let mut whole: BTreeSet<String> = BTreeSet::new();
+		for item in installed {
+			let folder = item.folder.as_str();
+			folders.handled.insert(folder.to_string());
+			if folders.proven.contains_key(folder) {
+				continue;
+			}
+			// Any one copy's manifest that matches proves the UPSTREAM content,
+			// so the proven hashes are upstream's whichever copy proved them.
+			match item.manifest.as_ref().filter(|m| proves(&tree, folder, m)) {
+				Some(manifest) => {
+					whole.remove(folder);
+					folders
+						.proven
+						.insert(folder.to_string(), Arc::clone(manifest));
+				}
+				None if served(folder) => {
+					whole.insert(folder.to_string());
+				}
+				None => {}
+			}
+		}
+
+		let mut paths: BTreeSet<String> = whole.clone();
+		if let Some(catalog_folders) = &catalog_folders {
+			// Per catalog folder not already materialized whole: its SKILL.md
+			// files (discovery, frontmatter, rename) and `.ignore` files (the
+			// discovery walk honours them) — every one that was on disk when the
+			// whole folder was. A symlinked one cannot be staged on its own, so
+			// that folder is materialized whole, as before.
+			for c in catalog_folders {
+				if whole.iter().any(|w| folder_contains(w, c)) {
+					continue;
+				}
+				let under: Vec<&TreeEntry> = tree
+					.entries
+					.iter()
+					.filter(|e| folder_contains(c, &e.path))
+					.filter(|e| {
+						is_skill_md_path(&e.path)
+							|| e.path.rsplit('/').next() == Some(".ignore")
+					})
+					.collect();
+				if under.iter().any(|e| e.mode == StagedEntryMode::Symlink) {
+					paths.insert(c.clone());
+				} else {
+					paths.extend(under.into_iter().map(|e| e.path.clone()));
+				}
+			}
+			paths.insert("CHANGELOG.md".to_string());
+		}
+		log::info!(
+			"skill repo verify: installed={} proven={} materialized_whole={} \
+			 paths={}",
+			folders.handled.len(),
+			folders.proven.len(),
+			whole.len(),
+			paths.len()
+		);
+		Ok((paths.into_iter().collect(), folders))
 	}
 
 	/// Run `operation` on `backend`. Callers pass the backend a
@@ -782,6 +909,15 @@ fn host_of_url(url: &str) -> Option<String> {
 		authority.split(':').next()?
 	};
 	(!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// `folder` (`""` = repo root) is `path` or one of its ancestors.
+fn folder_contains(folder: &str, path: &str) -> bool {
+	folder.is_empty()
+		|| path == folder
+		|| path
+			.strip_prefix(folder)
+			.is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn is_skill_md_path(path: &str) -> bool {

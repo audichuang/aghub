@@ -800,15 +800,15 @@ mod tests {
 			_selection: skill_update::FetchSelection<'_>,
 		) -> Result<skill_update::FetchedRepo, FetchError> {
 			self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-			Ok(skill_update::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(skill_update::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: "batch-commit".to_string(),
 					tree_oid: "batch-tree".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -1744,6 +1744,7 @@ mod tests {
 			local_hash: None,
 			local_comparison_hash: None,
 			local_ambiguous: false,
+			local_manifest: None,
 			ref_commit: None,
 			ambiguous_host: false,
 		}];
@@ -2011,6 +2012,7 @@ mod tests {
 			local_hash: None,
 			local_comparison_hash: None,
 			local_ambiguous: false,
+			local_manifest: None,
 			ref_commit: None,
 			ambiguous_host: false,
 		}];
@@ -2046,6 +2048,7 @@ mod tests {
 			local_hash: None,
 			local_comparison_hash: None,
 			local_ambiguous: false,
+			local_manifest: None,
 			ref_commit: None,
 			ambiguous_host: false,
 		}];
@@ -2079,15 +2082,15 @@ mod tests {
 			_token: Option<&str>,
 			_selection: skill_update::FetchSelection<'_>,
 		) -> Result<skill_update::FetchedRepo, FetchError> {
-			Ok(skill_update::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(skill_update::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: String::new(),
 					tree_oid: "test-tree-oid".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -2203,15 +2206,15 @@ mod tests {
 			_selection: skill_update::FetchSelection<'_>,
 		) -> Result<skill_update::FetchedRepo, FetchError> {
 			*self.seen_token.lock().unwrap() = Some(token.map(str::to_string));
-			Ok(skill_update::FetchedRepo {
-				root: self.root.clone(),
-				snapshot: aghub_git::RepoSnapshot {
+			Ok(skill_update::FetchedRepo::new(
+				self.root.clone(),
+				aghub_git::RepoSnapshot {
 					commit_oid: String::new(),
 					tree_oid: "test-tree-oid".to_string(),
 					commit_time: None,
 				},
-				_guard: None,
-			})
+				None,
+			))
 		}
 	}
 
@@ -2719,15 +2722,15 @@ mod tests {
 					.recv_timeout(Duration::from_secs(5))
 					.is_ok();
 				self.released.store(ok, Ordering::SeqCst);
-				Ok(skill_update::FetchedRepo {
-					root: self.root.clone(),
-					snapshot: aghub_git::RepoSnapshot {
+				Ok(skill_update::FetchedRepo::new(
+					self.root.clone(),
+					aghub_git::RepoSnapshot {
 						commit_oid: "c".to_string(),
 						tree_oid: "t".to_string(),
 						commit_time: None,
 					},
-					_guard: None,
-				})
+					None,
+				))
 			}
 		}
 
