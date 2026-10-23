@@ -178,8 +178,8 @@ export function SkillDetail({
 					toast.danger(data.error ?? t("skillUpdateApplyError"));
 					return;
 				}
+				// The shared mutation options already re-check updates once.
 				toast.success(t("skillSyncedSuccessfully"));
-				checkUpdatesMutation.mutate(updateCheckParams);
 			},
 			onError: () => toast.danger(t("skillUpdateApplyError")),
 		}),

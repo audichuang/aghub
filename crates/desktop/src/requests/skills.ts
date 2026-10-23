@@ -222,14 +222,24 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 /// Fire-and-forget for the same reason `invalidateSkillQueries` is: a stuck or
 /// offline source must not hang the mutation that triggered it.
 function refetchUpdateChecks(queryClient: QueryClient) {
-	void queryClient.refetchQueries(
-		{ queryKey: queryKeys.skills.updateChecksAll(), type: "active" },
-		// Default `true` would ORPHAN an in-flight check and start another —
-		// and the queryFn ignores the abort signal, so the server keeps working
-		// on the orphan. Updating several skills in a row would then run one
-		// full every-source check per click instead of sharing one.
-		{ cancelRefetch: false },
-	);
+	// Not `refetchQueries({ type: "active" })`: that skips a query whose only
+	// observer is `enabled: false` (the skill detail panel's lazy cache reader,
+	// e.g. on the project page where no auto-check observer exists), which used
+	// to force the component to run a SECOND, mutation-driven check. Any mounted
+	// observer means someone is displaying the answer, so refetch it here once.
+	// `cancelRefetch: false`: the default would ORPHAN an in-flight check and
+	// start another — and the queryFn ignores the abort signal, so the server
+	// keeps working on the orphan. Updating several skills in a row would then
+	// run one full every-source check per click instead of sharing one.
+	for (const query of queryClient.getQueryCache().findAll({
+		queryKey: queryKeys.skills.updateChecksAll(),
+	})) {
+		if (query.getObserversCount() > 0) {
+			void query
+				.fetch(undefined, { cancelRefetch: false })
+				.catch(() => {});
+		}
+	}
 }
 
 /// After a multi-batch "update all": the per-batch refetches all JOIN whichever

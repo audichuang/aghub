@@ -10,6 +10,7 @@ import {
 import type { ApiClient } from "./client.ts";
 import { queryKeys } from "./keys.ts";
 import {
+	applySkillUpdateMutationOptions,
 	applySkillUpdatesMutationOptions,
 	refetchUpdateChecksAfterWrites,
 } from "./skills.ts";
@@ -137,3 +138,58 @@ test("one batch plus the final refetch runs exactly one check", async () => {
 	assert.equal(fetches, 1);
 	unsubscribe();
 });
+
+// The skill detail panel reads the check through a lazy `enabled: false`
+// observer. A single apply-update must refresh it with exactly ONE check from
+// the shared options — the panel no longer starts a second one — whether or
+// not an auto-check observer on the same key is mounted (settings page) or not
+// (project page).
+for (const withActiveObserver of [false, true]) {
+	test(`single update runs exactly one check (auto-check observer: ${withActiveObserver})`, async () => {
+		const client = new QueryClient({
+			defaultOptions: { queries: { retry: false } },
+		});
+		const queryKey = queryKeys.skills.updateChecks("global");
+		let fetches = 0;
+		const queryFn = async () => {
+			fetches += 1;
+			return fetches;
+		};
+		const lazy = new QueryObserver(client, {
+			queryKey,
+			queryFn,
+			enabled: false,
+		});
+		const unsubLazy = lazy.subscribe(() => {});
+		const active = withActiveObserver
+			? new QueryObserver(client, {
+					queryKey,
+					queryFn,
+					staleTime: Number.POSITIVE_INFINITY,
+				})
+			: null;
+		const unsubActive = active?.subscribe(() => {});
+		await active?.refetch();
+		fetches = 0;
+
+		const api = {
+			skills: { applyUpdate: async () => ({ success: true }) },
+		} as unknown as ApiClient;
+		const options = applySkillUpdateMutationOptions({
+			api,
+			queryClient: client,
+		});
+		await options.onSuccess?.(
+			{ success: true } as any,
+			{ body: {} as any },
+			undefined,
+			{} as any,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		assert.equal(fetches, 1, "one update must cost one every-source check");
+		assert.equal(lazy.getCurrentResult().data, 1);
+		unsubLazy();
+		unsubActive?.();
+	});
+}
