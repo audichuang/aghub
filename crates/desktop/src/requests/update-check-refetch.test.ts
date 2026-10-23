@@ -8,6 +8,7 @@ import {
 	QueryObserver,
 } from "@tanstack/react-query";
 import type { ApiClient } from "./client.ts";
+import { bindSourceCredentialMutationOptions } from "./credentials.ts";
 import { queryKeys } from "./keys.ts";
 import {
 	applySkillUpdateMutationOptions,
@@ -411,4 +412,148 @@ test("a manual check started before a write cannot overwrite the post-write answ
 	assert.equal(observer.getCurrentResult().data, "current");
 	assert.equal(calls, 2, "the manual check + one trailing post-write check");
 	unsubscribe();
+});
+
+/**
+ * An auto-check observer whose first check is in flight and has already read
+ * `before`; the server then answers `after` from the next call on.
+ */
+async function autoCheckInFlight(before: string, after: string) {
+	const client = new QueryClient({
+		defaultOptions: {
+			queries: { retry: false },
+			mutations: { retry: false },
+		},
+	});
+	let server = before;
+	const firstFetch = deferred();
+	const firstStarted = deferred();
+	let calls = 0;
+	const api = {
+		skills: {
+			checkUpdates: async () => {
+				calls += 1;
+				const seen = server;
+				if (calls === 1) {
+					firstStarted.resolve();
+					await firstFetch.promise;
+				}
+				return seen;
+			},
+		},
+		credentials: { bindSource: async () => ({}) },
+	} as unknown as ApiClient;
+	const params = { scope: "global" } as const;
+	const observer = new QueryObserver(
+		client,
+		checkSkillUpdatesQueryOptions({ api, params }),
+	);
+	const unsubscribe = observer.subscribe(() => {});
+	await firstStarted.promise;
+	server = after;
+	return {
+		client,
+		api,
+		params,
+		release: () => firstFetch.resolve(),
+		answer: () => observer.getCurrentResult().data,
+		calls: () => calls,
+		unsubscribe,
+	};
+}
+
+// Codex round 3: binding a valid credential while a check is in flight joined
+// the pre-binding request, which cached its auth failure and left the source
+// uncheckable for the whole 10-min staleTime.
+test("a credential binding during an in-flight check ends on a post-binding answer", async () => {
+	const race = await autoCheckInFlight("auth-error", "ok");
+	await new MutationObserver(
+		race.client,
+		bindSourceCredentialMutationOptions({
+			api: race.api,
+			queryClient: race.client,
+		}),
+	).mutate({ source: "o/r", credentialId: "c1" });
+	race.release();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	assert.equal(race.answer(), "ok");
+	assert.equal(race.calls(), 2, "the in-flight check + one post-binding");
+	race.unsubscribe();
+});
+
+// A manual click used `fetchQuery`, which JOINS an in-flight check: the click
+// was answered by a check that read the server before the click.
+test("a manual check during an in-flight check is answered by a post-click check", async () => {
+	const race = await autoCheckInFlight("outdated", "current");
+	let delivered: unknown;
+	const manual = new MutationObserver(
+		race.client,
+		checkSkillUpdatesMutationOptions({
+			api: race.api,
+			queryClient: race.client,
+			onSuccess: (data) => {
+				delivered = data;
+			},
+		}),
+	).mutate(race.params);
+	race.release();
+	const returned = await manual;
+
+	assert.equal(race.answer(), "current");
+	assert.equal(returned, "current");
+	assert.equal(delivered, "current");
+	assert.equal(race.calls(), 2, "the in-flight check + one post-click");
+	race.unsubscribe();
+});
+
+// Rapid clicks during one in-flight check share ONE post-click check.
+test("rapid manual clicks during an in-flight check add one trailing check", async () => {
+	const race = await autoCheckInFlight("outdated", "current");
+	const options = checkSkillUpdatesMutationOptions({
+		api: race.api,
+		queryClient: race.client,
+	});
+	const clicks = [1, 2, 3].map(() =>
+		new MutationObserver(race.client, options).mutate(race.params),
+	);
+	race.release();
+	assert.deepEqual(await Promise.all(clicks), [
+		"current",
+		"current",
+		"current",
+	]);
+	assert.equal(race.calls(), 2);
+	race.unsubscribe();
+});
+
+// A failed check must still reach the mutation's onError.
+test("a manual check that fails rejects the mutation", async () => {
+	const client = new QueryClient({
+		defaultOptions: {
+			queries: { retry: false },
+			mutations: { retry: false },
+		},
+	});
+	const api = {
+		skills: {
+			checkUpdates: async () => {
+				throw new Error("offline");
+			},
+		},
+	} as unknown as ApiClient;
+	let failed: Error | undefined;
+	await new MutationObserver(
+		client,
+		checkSkillUpdatesMutationOptions({
+			api,
+			queryClient: client,
+			onError: (error) => {
+				failed = error;
+			},
+		}),
+	)
+		.mutate({ scope: "global" })
+		.catch(() => {});
+	assert.equal(failed?.message, "offline");
 });

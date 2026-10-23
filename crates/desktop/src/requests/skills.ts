@@ -1,6 +1,7 @@
 import {
 	mutationOptions,
 	type QueryClient,
+	type QueryKey,
 	queryOptions,
 } from "@tanstack/react-query";
 import type {
@@ -232,12 +233,19 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 /// that trailing check starts share it, so a burst of clicks costs one extra
 /// check per query, not one per click; a write landing during it queues one
 /// more.
+///
+/// It is the ONE entry point for every trigger that needs a fresh answer:
+/// writes, credential changes, and the manual "check for updates" button.
+/// `queryKey` narrows it to that exact query, refreshed even when not
+/// displayed (the user asked for it explicitly).
 export function refetchUpdateChecksAfterWrites(
 	queryClient: QueryClient,
+	queryKey?: QueryKey,
 ): Promise<void> {
-	return Promise.all(
-		displayedUpdateChecks(queryClient).map(refreshAfterWrite),
-	).then(() => undefined);
+	const queries = queryKey
+		? queryClient.getQueryCache().findAll({ queryKey, exact: true })
+		: displayedUpdateChecks(queryClient);
+	return Promise.all(queries.map(refreshAfterWrite)).then(() => undefined);
 }
 
 /// Not `refetchQueries({ type: "active" })`: that skips a query whose only
@@ -519,8 +527,10 @@ export function checkSkillUpdatesQueryKey(params?: CheckSkillUpdatesParams) {
 /// check in flight. It used to run its own request and `setQueryData` the
 /// answer, so a click just before an apply landed its pre-write answer AFTER
 /// the post-write check and pinned "outdated" for the whole staleTime.
-/// `staleTime: 0` forces a fresh check when idle; one already in flight is
-/// joined (no `cancelRefetch`), never orphaned.
+/// A click goes through `refetchUpdateChecksAfterWrites` so its answer comes
+/// from a check that STARTED after the click: `fetchQuery` joined a check
+/// already in flight, which may have read the server before the click (e.g.
+/// before a credential was bound). Cost: a click during a check runs one more.
 export function checkSkillUpdatesMutationOptions({
 	api,
 	queryClient,
@@ -529,15 +539,20 @@ export function checkSkillUpdatesMutationOptions({
 	forwardForCheck,
 }: CheckSkillUpdatesMutationParams) {
 	return mutationOptions({
-		mutationFn: (params?: CheckSkillUpdatesParams) =>
-			queryClient.fetchQuery({
-				...checkSkillUpdatesQueryOptions({
-					api,
-					params,
-					forwardForCheck,
-				}),
-				staleTime: 0,
-			}),
+		mutationFn: async (params?: CheckSkillUpdatesParams) => {
+			// Ensure the query exists (no observer may have created it yet).
+			const { queryKey, queryFn } = checkSkillUpdatesQueryOptions({
+				api,
+				params,
+				forwardForCheck,
+			});
+			const query = queryClient
+				.getQueryCache()
+				.build(queryClient, { queryKey, queryFn });
+			await refetchUpdateChecksAfterWrites(queryClient, query.queryKey);
+			if (query.state.status === "error") throw query.state.error;
+			return query.state.data as NonNullable<typeof query.state.data>;
+		},
 		onSuccess,
 		onError,
 	});

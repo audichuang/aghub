@@ -965,9 +965,8 @@ export function SkillDetail({
 						setCredDialogOpen(false);
 						onCredDialogClose?.();
 					}}
-					onBound={() =>
-						checkUpdatesMutation.mutate(updateCheckParams)
-					}
+					// The bind mutation itself re-checks displayed updates.
+					onBound={() => {}}
 				/>
 			)}
 		</>

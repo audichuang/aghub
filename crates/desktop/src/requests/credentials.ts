@@ -11,6 +11,7 @@ import type {
 } from "../generated/dto";
 import type { ApiClient } from "./client";
 import { queryKeys } from "./keys.ts";
+import { refetchUpdateChecksAfterWrites } from "./skills.ts";
 
 interface CredentialsQueryParams {
 	api: ApiClient;
@@ -50,9 +51,10 @@ export function sourceCredentialBindingsQueryOptions({
 /// NOTHING is awaited past marking stale: these are slow HTTP round trips (a
 /// source diff clones behind a 120s timeout; the credential list carries a 10s
 /// timeout plus a retry), and awaiting a refetch would hold the dialog pending
-/// after the write succeeded. Update checks are not refetched at all — that
-/// refetches EVERY source, the price `invalidateSkillQueries` also declines to
-/// pay. They stay stale until the user asks, which is the honest state.
+/// after the write succeeded. Displayed update checks go through the shared
+/// `refetchUpdateChecksAfterWrites` (fire and forget): marking stale alone is
+/// not enough, because a check already in flight read the pre-change token and
+/// its answer (e.g. an auth failure) would land fresh for the whole staleTime.
 async function invalidateSourceCredentialAnswers(queryClient: QueryClient) {
 	for (const queryKey of [
 		queryKeys.credentials.all(),
@@ -70,6 +72,7 @@ async function invalidateSourceCredentialAnswers(queryClient: QueryClient) {
 	]) {
 		void queryClient.refetchQueries({ queryKey, type: "active" });
 	}
+	void refetchUpdateChecksAfterWrites(queryClient);
 }
 
 interface CreateCredentialMutationParams {
