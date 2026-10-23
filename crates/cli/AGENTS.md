@@ -32,7 +32,9 @@ list, or `all`), `-g`/`-p`, `--all`.
   rejects `--all` from the scope table, i.e. BEFORE the `--yes` refusal.
   `apply-update --outdated` (the CLI's "update all") DOES preview: it runs the
   online check for ONE scope and resyncs every `updateAvailable` row through
-  `resync_locked_skills` (`source_group: None`, all Sources in one batch);
+  `resync_judged_skills` (`source_group: None`, all Sources in one batch),
+  handing each row the commit the check judged — a tip that moved since is
+  refused per row (`SKILL_SOURCE_CHANGED_DURING_FETCH`), never installed unseen;
   renamed rows are skipped with an `accept-rename` hint
   and uncheckable rows are reported by name and reason, never presented as
   proof that nothing is outdated

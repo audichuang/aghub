@@ -83,6 +83,7 @@ fn healed_output(name: &str, scope: &str, hash: &str) -> CheckOutput {
 		status: SkillUpdateStatus::UpToDate,
 		heal_hash: Some(hash.to_string()),
 		heal_oid: None,
+		judged_commit: None,
 	}
 }
 

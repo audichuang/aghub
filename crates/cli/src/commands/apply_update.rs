@@ -67,6 +67,8 @@ pub fn execute(
 #[derive(Debug, Default, PartialEq)]
 struct OutdatedPlan {
 	names: Vec<String>,
+	/// name → the commit the check judged it against.
+	judged: std::collections::HashMap<String, String>,
 	renamed: Vec<(String, String)>,
 	uncheckable: Vec<(String, String)>,
 }
@@ -76,7 +78,10 @@ fn outdated_plan(views: &[SkillUpdateView]) -> OutdatedPlan {
 	for view in views {
 		match &view.status {
 			StatusView::UpdateAvailable { .. } => {
-				plan.names.push(view.name.clone())
+				plan.names.push(view.name.clone());
+				if let Some(commit) = &view.judged_commit {
+					plan.judged.insert(view.name.clone(), commit.clone());
+				}
 			}
 			StatusView::Renamed { new_name } => {
 				plan.renamed.push((view.name.clone(), new_name.clone()))
@@ -159,7 +164,9 @@ pub fn execute_outdated(
 		return Ok(());
 	}
 
-	let outcomes = skill_update::mutation::resync_locked_skills(
+	// Install exactly what the check judged: a tip that moved since is
+	// refused per row rather than installed unseen.
+	let outcomes = skill_update::mutation::resync_judged_skills(
 		skill_update::mutation::LockedSkillsResyncRequest {
 			// The names come from this run's own lock read, so there is no
 			// independent Sources row to assert against.
@@ -167,6 +174,7 @@ pub fn execute_outdated(
 			names: &plan.names,
 			scope: scope.clone(),
 		},
+		&plan.judged,
 		&crate::commands::source::CliFetcher::new(),
 		&crate::commands::source::EnvTokenResolver,
 	)
@@ -490,6 +498,7 @@ mod tests {
 			name: name.to_string(),
 			scope: "global".to_string(),
 			checked: true,
+			judged_commit: Some(format!("{name}-commit")),
 			status,
 		};
 		let views = [
@@ -525,6 +534,11 @@ mod tests {
 			outdated_plan(&views),
 			OutdatedPlan {
 				names: vec!["stale".to_string(), "stale-too".to_string()],
+				judged: [
+					("stale".to_string(), "stale-commit".to_string()),
+					("stale-too".to_string(), "stale-too-commit".to_string()),
+				]
+				.into(),
 				renamed: vec![("moved".to_string(), "moved-v2".to_string())],
 				uncheckable: vec![(
 					"offline".to_string(),

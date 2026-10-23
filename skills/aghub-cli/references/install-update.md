@@ -120,7 +120,10 @@ diff`'s. Read the preview:
 
 Judge the committed run by `results[].success` per row: exit 1 means at least
 one row failed and the others still ran. A failed row carries `error`, `code`
-and `retryable` (`true` only for `SKILL_MUTATION_LOCK_BUSY`). A batch preflight
+and `retryable` (`true` only for `SKILL_MUTATION_LOCK_BUSY`). A row whose
+upstream moved between the check and the update fails with
+`SKILL_SOURCE_CHANGED_DURING_FETCH` and nothing written — it installs only the
+commit the check judged; re-run the command. A batch preflight
 failure (an unreadable lock, for one) fails the whole command before any row
 runs: no `results[]`, the error is the top-level `error.code`. `--yes` with
 nothing to update prints `dryRun: false`, `results: []`, exit 0.

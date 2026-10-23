@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aghub_core::models::{AgentType, ResourceScope};
@@ -777,6 +778,21 @@ pub fn resync_locked_skills(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<Vec<LockedSkillResyncResult>, LockedSkillsResyncError> {
+	resync_judged_skills(request, &HashMap::new(), fetcher, resolver)
+}
+
+/// [`resync_locked_skills`] for rows a check already judged: `judged` maps a
+/// name to the commit its verdict was made against
+/// ([`crate::CheckOutput::judged_commit`]). The fetch re-resolves the tip, so a
+/// named row whose group fetched a DIFFERENT commit is refused (nothing
+/// written; re-run the check) instead of installing content nobody judged.
+/// Names absent from `judged` behave as in [`resync_locked_skills`].
+pub fn resync_judged_skills(
+	request: LockedSkillsResyncRequest<'_>,
+	judged: &HashMap<String, String>,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> Result<Vec<LockedSkillResyncResult>, LockedSkillsResyncError> {
 	if request.names.is_empty() {
 		return Err(LockedSkillsResyncError::EmptyRequest);
 	}
@@ -874,6 +890,19 @@ pub fn resync_locked_skills(
 				let fetched = fetched_groups[item.group_index]
 					.as_ref()
 					.map_err(|error| LockedResyncError::Fetch(error.clone()))?;
+				if let Some(judged) =
+					judged.get(&name).filter(|c| c.as_str() != fetched.oid())
+				{
+					return Err(LockedResyncError::Resync(
+						aghub_core::skills::resync::ResyncError::StaleFetch(
+							format!(
+								"upstream moved from {judged} to {} since the \
+								 check; nothing was written, re-run the check",
+								fetched.oid()
+							),
+						),
+					));
+				}
 				if !fetched_skill_path_exists(fetched, &item.skill_path) {
 					return Err(LockedResyncError::SourceSkillNotFound);
 				}
