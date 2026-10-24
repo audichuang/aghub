@@ -63,10 +63,10 @@ with `cargo build --release -p aghub-cli`.
 
 ### macOS: "aghub is damaged and can't be opened"
 
-The macOS builds are **not signed with an Apple Developer certificate**, so
-Gatekeeper quarantines the app on first download and shows a "damaged" warning.
-The app is fine — just clear the quarantine attribute after moving it to
-`/Applications`:
+macOS builds are signed with a Developer ID certificate and notarized by Apple,
+so they open normally. Only **older releases** (ad-hoc signed) trigger the
+"damaged" warning; for those, clear the quarantine attribute after moving the
+app to `/Applications`:
 
 ```bash
 xattr -cr /Applications/aghub.app
@@ -77,9 +77,6 @@ If that doesn't help, remove the attribute explicitly:
 ```bash
 sudo xattr -dr com.apple.quarantine /Applications/aghub.app
 ```
-
-Then open the app normally. (Adjust the path if you haven't moved it to
-`/Applications` yet.)
 
 ---
 
