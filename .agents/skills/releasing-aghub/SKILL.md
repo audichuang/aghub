@@ -111,6 +111,10 @@ for macOS `/var` → `/private`).
 - Required secrets: `TAURI_SIGNING_PRIVATE_KEY`,
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `HOMEBREW_TAP_TOKEN` (PAT with
   Contents:write on `audichuang/homebrew-tap`; `GITHUB_TOKEN` can't reach it).
+  macOS signing + notarization: `APPLE_CERTIFICATE`,
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY`, `APPLE_API_ISSUER`,
+  `APPLE_API_KEY_P8`; the Developer ID cert expires 2027-11-23. Why and how
+  to renew: `docs/history/release.md#macos-developer-id-signing`.
 - **Tap layout: `Formula/aghub-cli.rb`, `Casks/aghub.rb`.** Homebrew ignores a
   formula at the tap root and silently keeps users on their installed version.
 

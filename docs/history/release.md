@@ -37,17 +37,47 @@ The updater signing key is separate from this macOS identity.
 `with_signing_identity` branch and runs `codesign --force -s - <target>` over
 each nested binary and framework, inner to outer.
 
-**Moving to real Apple certs + notarization.** Once an Apple Developer account
-exists, add these env entries to the step and DROP the literal
-`APPLE_SIGNING_IDENTITY: "-"` (the cert's own identity replaces it):
+**Superseded** by Developer ID signing, below. Kept for why the literal `-`
+existed and why empty `APPLE_*` secrets break the import.
 
-```yaml
-APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-APPLE_ID: ${{ secrets.APPLE_ID }}
-APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-```
+## macOS Developer ID signing
+
+`.github/workflows/release.yml` "Stage notarization API key (macOS)" and
+"Build Tauri" steps — 2026-10, once the Apple Developer account existed.
+
+**Why.** Every ad-hoc build had a different code signature, so macOS treated
+each update as a new, unidentified app: the cask had to `xattr -cr` it past
+Gatekeeper, and every update re-asked for the login password before the app
+could read its keychain items (inference keys via the Apple keyring store).
+A Developer ID signature gives a stable designated requirement (team
+`37HFR5V2JJ` + bundle id), so the keychain ACL survives updates. Users coming
+from an ad-hoc build get ONE more prompt ("Always Allow"), then none.
+
+**Secrets** (repo `audichuang/aghub`): `APPLE_CERTIFICATE` (base64 `.p12`:
+Developer ID Application cert + the Developer ID G2 intermediate + key),
+`APPLE_CERTIFICATE_PASSWORD`, and notarization through an App Store Connect
+API key (role Developer) — `APPLE_API_KEY` (key id), `APPLE_API_ISSUER`,
+`APPLE_API_KEY_P8` (the `.p8` content; the staging step writes it to a file and
+exports `APPLE_API_KEY_PATH`, which is what tauri reads). An API key, not
+`APPLE_ID` + app-specific password: it does not depend on the Apple ID's
+password or 2FA. `APPLE_TEAM_ID` is set too but tauri does not need it with an
+API key. Backups of the `.p12`, its password and the `.p8` are in 1Password
+(vault `Agent`, items titled `aghub …`). The cert expires **2027-11-23**:
+renew it (new CSR, same steps) and replace `APPLE_CERTIFICATE` and
+`APPLE_CERTIFICATE_PASSWORD` before then.
+
+**No `APPLE_SIGNING_IDENTITY`.** tauri derives the identity from the imported
+cert; leaving the old literal `-` would override it and ship ad-hoc again.
+
+**The gate.** "Verify macOS bundle signature…" requires
+`Authority=Developer ID Application:`, `TeamIdentifier=37HFR5V2JJ`, a stapled
+ticket (`xcrun stapler validate`) and `spctl --assess`. A lost or expired secret
+fails the release instead of silently shipping an app that prompts again. The
+staging step also fails by name when `APPLE_CERTIFICATE` / `APPLE_API_KEY_P8`
+are empty (the empty-string trap above).
+
+**Cask.** The `postflight` `xattr -cr` and the "not notarized" caveat were
+dropped: a notarized app needs neither.
 
 ## The tag followed a moving HEAD
 

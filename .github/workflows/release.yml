@@ -273,17 +273,39 @@ jobs:
                       exit 1
                   fi
 
+            - name: Stage notarization API key (macOS)
+              if: runner.os == 'macOS'
+              shell: bash
+              env:
+                  APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+                  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+              run: |
+                  set -eu
+                  # An unset secret expands to "" and tauri would import an
+                  # empty cert or skip notarization: fail here, by name.
+                  # docs/history/release.md#macos-developer-id-signing
+                  [ -n "$APPLE_CERTIFICATE" ] || { echo "APPLE_CERTIFICATE secret is not set" >&2; exit 1; }
+                  [ -n "$APPLE_API_KEY_P8" ] || { echo "APPLE_API_KEY_P8 secret is not set" >&2; exit 1; }
+                  # tauri reads the App Store Connect key from a file path.
+                  KEY="$RUNNER_TEMP/AuthKey.p8"
+                  printf '%s\n' "$APPLE_API_KEY_P8" > "$KEY"
+                  chmod 600 "$KEY"
+                  echo "APPLE_API_KEY_PATH=$KEY" >> "$GITHUB_ENV"
+
             - name: Build Tauri
               uses: tauri-apps/tauri-action@v0.6.2
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  # Ad-hoc code signing: a literal "-", NEVER a secret (an unset
-                  # secret expands to "" and tauri runs `codesign -s ""`, which
-                  # fails). It seals the bundle so `codesign --verify --deep
-                  # --strict` passes; it is NOT notarization or a Developer ID.
-                  # Why, and the switch to real certs: docs/history/release.md#macos-ad-hoc-codesign
-                  APPLE_SIGNING_IDENTITY: "-"
-                  # Real Apple certs + notarization (APPLE_* secrets): see docs/history/release.md#macos-ad-hoc-codesign
+                  # Developer ID signing + notarization (App Store Connect API
+                  # key; APPLE_API_KEY_PATH comes from the step above). Only the
+                  # macOS bundler reads these. No APPLE_SIGNING_IDENTITY: tauri
+                  # takes the identity from the imported cert, and a literal
+                  # "-" here would win and ship ad-hoc again.
+                  # Why: docs/history/release.md#macos-developer-id-signing
+                  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+                  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+                  APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+                  APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
               with:
@@ -325,7 +347,16 @@ jobs:
                   fi
                   echo "verifying $found"
                   codesign --verify --deep --strict --verbose=2 "$found"
-                  codesign --display --verbose=2 "$found" 2>&1 | sed 's/^/  /'
+                  info=$(codesign --display --verbose=2 "$found" 2>&1)
+                  printf '%s\n' "$info" | sed 's/^/  /'
+                  # A lost secret must fail the release, not quietly ship an
+                  # ad-hoc or un-notarized app (users get keychain prompts again).
+                  printf '%s\n' "$info" | grep -q '^Authority=Developer ID Application: ' \
+                    || { echo "bundle is not signed with a Developer ID Application cert" >&2; exit 1; }
+                  printf '%s\n' "$info" | grep -q '^TeamIdentifier=37HFR5V2JJ$' \
+                    || { echo "bundle TeamIdentifier is not 37HFR5V2JJ" >&2; exit 1; }
+                  xcrun stapler validate "$found"
+                  spctl --assess --type execute --verbose=2 "$found"
                   # Check the built artifact, not just the source Info.plist.
                   usage=$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$found/Contents/Info.plist")
                   if [ -z "$usage" ]; then
@@ -661,23 +692,11 @@ jobs:
 
                     app "aghub.app"
 
-                    # Ad-hoc signed only: Gatekeeper kills a quarantined copy on launch.
-                    postflight_steps do
-                      run "/usr/bin/xattr", args: ["-cr", "{{appdir}}/aghub.app"]
-                    end
-
                     zap trash: [
                       "~/Library/Application Support/com.akrc.aghub",
                       "~/Library/Preferences/com.akrc.aghub.plist",
                       "~/Library/Saved Application State/com.akrc.aghub.savedState",
                     ]
-
-                    caveats <<~EOS
-                      aghub is not notarized (ad-hoc signed only). If macOS refuses to open it:
-                        System Settings > Privacy & Security > Open Anyway
-                      or
-                        xattr -cr #{appdir}/aghub.app
-                    EOS
                   end
                   INNEREOF
 

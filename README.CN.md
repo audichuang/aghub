@@ -61,7 +61,7 @@ aghub-cli --help
 
 ### macOS：提示「aghub 已损坏，无法打开」
 
-macOS 版本**未使用 Apple 开发者证书签名**，因此首次下载时会被 Gatekeeper 加上隔离标记并弹出「已损坏」提示。App 本身没有问题——把它移动到 `/Applications` 后清除隔离属性即可：
+macOS 版本已使用 Developer ID 证书签名并经过 Apple 公证（notarization），可以直接打开。只有**旧版本**（ad-hoc 签名）会出现「已损坏」提示；遇到时，把 App 移动到 `/Applications` 后清除隔离属性：
 
 ```bash
 xattr -cr /Applications/aghub.app
@@ -72,8 +72,6 @@ xattr -cr /Applications/aghub.app
 ```bash
 sudo xattr -dr com.apple.quarantine /Applications/aghub.app
 ```
-
-之后正常打开即可。（如果还没移动到 `/Applications`，请把路径换成实际位置。）
 
 ---
 
