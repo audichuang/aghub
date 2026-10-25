@@ -90,6 +90,17 @@ when XDG_STATE_HOME is unset) — v3; `refCommit` must equal `git ls-remote <url
 `.agents/skills` is an ordinary shared Referrer slot); symlink
 `$VHOME/.claude/skills/<name>` resolving to that master in one hop.
 
+## Live GitHub request count (quota work)
+
+FakeTransport counts prove the request SHAPE; to see what a command really costs
+the account, read `core.used` from `GET https://api.github.com/rate_limit`
+(that call is free) before and after each run, in the sandbox above. Make the
+fixture state stale first (e.g. rewrite `refCommit` in the lock), run the
+command 2–3 times to separate first-run cost from steady state, and repeat the
+same script with the released binary on `PATH` as the baseline. The quota is
+shared by every agent on the account, so a delta is an upper bound — rerun when
+it looks off.
+
 ## gix shallow path + update chain (controllable upstream)
 
 A local `git daemon` gives a non-github host AND lets you push v2 to drive the update

@@ -282,7 +282,9 @@ holding two JSON documents and every parse of it fails.
 shape is pinned by `check_skills_outputs_json_array`; its heal and the request
 count it buys by `check_online_heals_ref_commit_so_the_next_check_skips_the_fetch`
 (the hook also answers the tip preflight and logs `resolve` / `fetch` to
-`AGHUB_TEST_SOURCE_FETCH_LOG`).
+`AGHUB_TEST_SOURCE_FETCH_LOG`). Its commit oid must follow the served content:
+a constant tip lets a test that edits the fetch root preflight-skip and read
+`upToDate`.
 
 ## Anti-patterns
 
