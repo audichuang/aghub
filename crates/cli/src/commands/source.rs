@@ -9,6 +9,7 @@
 //! hook for tests, dry-run/`--yes` gating, and output rendering.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use aghub_core::models::{AgentSelection, AgentType, ResourceScope};
 
@@ -120,8 +121,55 @@ impl CliFetcher {
 		}
 	}
 
-	pub fn ref_resolver(&self) -> skill_update::GitRefResolver {
-		self.inner.ref_resolver()
+	pub fn ref_resolver(&self) -> Arc<dyn skill_update::RefResolver> {
+		#[cfg(debug_assertions)]
+		if std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT").is_some() {
+			return Arc::new(TestRootRefResolver);
+		}
+		Arc::new(self.inner.ref_resolver())
+	}
+}
+
+/// The fetch-root hook's preflight half: every source's tip is the commit the
+/// hook's fetch reports, so a healed `refCommit` lets the next check skip.
+#[cfg(debug_assertions)]
+struct TestRootRefResolver;
+
+#[cfg(debug_assertions)]
+impl skill_update::RefResolver for TestRootRefResolver {
+	fn resolve(
+		&self,
+		_sr: &SourceRef,
+		_token: Option<&str>,
+	) -> Result<skill_update::TipObservation, FetchError> {
+		test_fetch_log("resolve");
+		let root = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT")
+			.map(std::path::PathBuf::from)
+			.unwrap_or_default();
+		Ok(skill_update::TipObservation::tip_only(test_fetch_root_oid(
+			&root,
+		)))
+	}
+}
+
+/// The hook's commit identity follows the served content, so a test that edits
+/// the fetch root is an upstream move the tip preflight can see.
+#[cfg(debug_assertions)]
+fn test_fetch_root_oid(root: &std::path::Path) -> String {
+	skill::compute_skill_folder_hash(root)
+		.unwrap_or_else(|_| "test-fetch-root".into())
+}
+
+/// e2e round-trip counter: one line per request the hook serves.
+#[cfg(debug_assertions)]
+fn test_fetch_log(kind: &str) {
+	if let Some(log) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_LOG") {
+		use std::io::Write;
+		let _ = std::fs::OpenOptions::new()
+			.create(true)
+			.append(true)
+			.open(log)
+			.and_then(|mut file| writeln!(file, "{kind}"));
 	}
 }
 
@@ -134,21 +182,14 @@ impl skill_update::Fetcher for CliFetcher {
 	) -> Result<skill_update::FetchedRepo, FetchError> {
 		#[cfg(debug_assertions)]
 		if let Some(root) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT") {
-			// e2e round-trip counter: one line per fetch the hook serves.
-			if let Some(log) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_LOG") {
-				use std::io::Write;
-				let _ = std::fs::OpenOptions::new()
-					.create(true)
-					.append(true)
-					.open(log)
-					.and_then(|mut file| writeln!(file, "fetch"));
-			}
+			test_fetch_log("fetch");
 			let root = std::path::PathBuf::from(root);
 			return if root.is_dir() {
+				let commit_oid = test_fetch_root_oid(&root);
 				Ok(skill_update::FetchedRepo::new(
 					root,
 					aghub_git::RepoSnapshot {
-						commit_oid: "test-fetch-root".into(),
+						commit_oid,
 						tree_oid: "test-fetch-tree".into(),
 						commit_time: None,
 					},
@@ -2075,7 +2116,7 @@ mod tests {
 
 	#[test]
 	fn cli_fetcher_forwards_pinned_claim_without_resolving_again() {
-		use skill_update::{FetchSelection, Fetcher, RefResolver, SourceRef};
+		use skill_update::{FetchSelection, Fetcher, SourceRef};
 		use std::sync::atomic::{AtomicUsize, Ordering};
 		use std::sync::Arc;
 

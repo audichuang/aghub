@@ -1,4 +1,4 @@
-//! Read-only `check skills` subcommand.
+//! `check skills` subcommand.
 //!
 //! Reports each locked skill's update status as a `SkillUpdateResponse`-shaped
 //! JSON array (camelCase, `status`-tagged).
@@ -13,17 +13,19 @@
 //! preflight skips the fetch when the tip is unchanged and the copy provably
 //! unmodified, else a treeless fetch + hash compare.
 //!
-//! Either way `check` is **read-only**: it never mutates either lock (the
-//! desktop API owns global-lock self-heal; the project lock is VCS-tracked).
+//! Offline `check` never writes. `--online` runs the API's post-check heal
+//! (`projection::write_auto_healed_hashes`, compare-and-set under the mutation
+//! lock) over GLOBAL rows only: an `upToDate` row records the fetched tip as
+//! `refCommit` so the next check can preflight-skip, and a placeholder
+//! `contentHash` gets its computed value (which clears `skillFolderHash`). The
+//! VCS-tracked project lock is never written.
 
 use crate::{eprintln_verbose, ResourceType};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use skill_update::{
-	projection, run_update_check, EntryInput, Fetcher, RefResolver,
-};
+use skill_update::{projection, run_update_check, EntryInput, Fetcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabled::builder::Builder;
@@ -278,8 +280,8 @@ use super::source::EnvTokenResolver;
 /// the env token resolver and the default git adapters.
 ///
 /// `online == false` runs the orchestrator `offline` (see the module doc; the
-/// `network` vs permanent-reason split is the orchestrator's). Read-only
-/// either way.
+/// `network` vs permanent-reason split is the orchestrator's). Only an
+/// online run heals the lock.
 fn run_check(
 	locks: crate::commands::LockSnapshot,
 	project_root: Option<&Path>,
@@ -337,8 +339,12 @@ pub(crate) fn collect_update_views(
 	// here would reopen the window the fail-closed probe exists to close — see
 	// `LockSnapshot`.
 	let mut entries: Vec<EntryInput> = Vec::new();
+	let mut global_identities = projection::Identities::new();
 	if let Some(global) = locks.global {
-		entries.extend(projection::global_lock_entries(!online, || global).0);
+		let (global_entries, identities) =
+			projection::global_lock_entries(!online, || global);
+		entries.extend(global_entries);
+		global_identities = identities;
 	}
 	if let Some(project) = locks.project {
 		entries.extend(
@@ -356,8 +362,7 @@ pub(crate) fn collect_update_views(
 	// that may follow it share the composite, its snapshot memo, and its token
 	// context.
 	let cli_fetcher = crate::commands::source::CliFetcher::new();
-	let ref_resolver: Arc<dyn RefResolver> =
-		Arc::new(cli_fetcher.ref_resolver());
+	let ref_resolver = cli_fetcher.ref_resolver();
 	let fetcher: Arc<dyn Fetcher> = Arc::new(cli_fetcher);
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
@@ -369,6 +374,29 @@ pub(crate) fn collect_update_views(
 		&EnvTokenResolver,
 		!online,
 	));
+
+	// The API route's post-check heal, GLOBAL rows only: without it a global
+	// entry's refCommit never advances past its install commit, so every later
+	// online check re-fetches the whole group instead of preflight-skipping it
+	// (#95). Project rows never preflight (no refCommit heal), so healing the
+	// VCS-tracked project lock would buy nothing. Offline looked at nothing
+	// upstream and stays read-only. A failed heal (e.g. a busy mutation lock)
+	// must not discard the computed results.
+	if online {
+		let global: Vec<_> = outputs
+			.iter()
+			.filter(|output| output.key.scope == "global")
+			.cloned()
+			.collect();
+		if let Err(e) = projection::write_auto_healed_hashes(
+			&global,
+			None,
+			&global_identities,
+			&projection::Identities::new(),
+		) {
+			eprintln!("warning: could not record check results in the skill lock: {e}");
+		}
+	}
 
 	let mut views: Vec<SkillUpdateView> = outputs
 		.into_iter()
@@ -491,7 +519,7 @@ fn is_inside_master(path: &Path) -> bool {
 		.any(|pair| pair[0] == ".agents" && pair[1] == "skills")
 }
 
-/// `check` is READ-ONLY. `--write-result` takes an arbitrary path, so without
+/// The sidecar is UNGUARDED. `--write-result` takes an arbitrary path, so without
 /// this a caller could aim the atomic write at managed state — no
 /// `MutationGuard`, no rollback, and in the lock's case the very file this
 /// command just read as its answer.
@@ -506,14 +534,14 @@ fn refuse_lock_targets(path: &Path, project_root: Option<&Path>) -> Result<()> {
 	if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
 		if MANAGED_FILE_NAMES.contains(&name) {
 			bail!(
-				"--write-result must not be named '{name}': that is aghub-managed state and check is read-only"
+				"--write-result must not be named '{name}': that is aghub-managed state and --write-result treats it as read-only"
 			);
 		}
 	}
 
 	if is_inside_master(&target) {
 		bail!(
-			"--write-result must not target managed skill content under .aghub or .agents/skills: check is read-only"
+			"--write-result must not target managed skill content under .aghub or .agents/skills: --write-result treats it as read-only"
 		);
 	}
 
@@ -529,7 +557,7 @@ fn refuse_lock_targets(path: &Path, project_root: Option<&Path>) -> Result<()> {
 	for lock in forbidden {
 		if same_path(&skill::lock::resolve_existing(&lock), &target) {
 			bail!(
-				"--write-result must not target a skill lock ({}): check is read-only",
+				"--write-result must not target a skill lock ({}): --write-result treats it as read-only",
 				lock.display()
 			);
 		}

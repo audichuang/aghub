@@ -3034,6 +3034,82 @@ fn source_sync_update_rewrites_the_installed_skill_and_the_lock() {
 	);
 }
 
+/// `check --online` records the fetched tip as `refCommit` for every global
+/// row it judged `upToDate`, so the next check preflight-skips the group with
+/// ONE tip resolve instead of a full fetch (#95). The fixture starts from the
+/// worst case: two members recording DIFFERENT commits, which no remote tip
+/// can satisfy, so without the heal every check re-fetches forever.
+#[cfg(unix)]
+#[test]
+fn check_online_heals_ref_commit_so_the_next_check_skips_the_fetch() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	write_source_skill(src.path(), "beta", "beta");
+	for name in ["alpha", "beta"] {
+		let install = run_sync_install(
+			home.path(),
+			state.path(),
+			src.path(),
+			"claude",
+			name,
+		);
+		assert!(
+			install.status.success(),
+			"seed install {name}: {}",
+			String::from_utf8_lossy(&install.stderr)
+		);
+	}
+	let lock_path = state.path().join("skills/.skill-lock.json");
+	let read_lock = || -> Value {
+		serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap())
+			.unwrap()
+	};
+	let mut lock = read_lock();
+	lock["skills"]["alpha"]["refCommit"] = "old-a".into();
+	lock["skills"]["beta"]["refCommit"] = "old-b".into();
+	std::fs::write(&lock_path, lock.to_string()).unwrap();
+
+	let fetch_log = state.path().join("fetch.log");
+	let check = || {
+		let _ = std::fs::remove_file(&fetch_log);
+		let out = isolated_cli(home.path(), state.path())
+			.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+			.env("AGHUB_TEST_SOURCE_FETCH_LOG", &fetch_log)
+			.args(["-g", "check", "skills", "--online", "--json"])
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"stderr: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		for row in json.as_array().unwrap() {
+			assert_eq!(row["status"], "upToDate", "json: {json}");
+		}
+		std::fs::read_to_string(&fetch_log).unwrap_or_default()
+	};
+
+	assert_eq!(check(), "fetch\n", "mixed refCommits cannot skip");
+	let healed = read_lock();
+	let tip = &healed["skills"]["alpha"]["refCommit"];
+	assert!(
+		!["old-a", "old-b"].contains(&tip.as_str().unwrap()),
+		"refCommit must advance to the judged tip: {healed}"
+	);
+	assert_eq!(
+		&healed["skills"]["beta"]["refCommit"], tip,
+		"both members must record the same judged tip: {healed}"
+	);
+	assert_eq!(
+		check(),
+		"resolve\n",
+		"a healed group answers from the tip alone"
+	);
+}
+
 #[cfg(unix)]
 #[test]
 fn source_sync_skill_filter_unknown_name_warns_and_installs_nothing() {

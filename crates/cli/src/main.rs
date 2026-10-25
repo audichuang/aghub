@@ -356,7 +356,7 @@ enum Commands {
 		resource: ResourceType,
 		name: String,
 	},
-	/// Check installed skills for available updates (read-only).
+	/// Check installed skills for available updates.
 	///
 	/// Scope defaults to BOTH global and the current project, like the other
 	/// read-only diagnostics (`doctor`, `source list`, `source diff`); `-g` /
@@ -371,13 +371,15 @@ enum Commands {
 
 		/// Check upstream over the network: a tip preflight that downloads no
 		/// objects, then a treeless fetch only when the tip moved. Default is
-		/// offline (remote sources are reported `uncheckable`). Read-only on
-		/// both locks.
+		/// offline (remote sources are reported `uncheckable`). Records the
+		/// fetched tip as `refCommit` on global skills found up to date, so
+		/// the next check can skip the fetch; offline and the project lock are
+		/// never written.
 		#[arg(long, visible_alias = "check-remote")]
 		online: bool,
 
 		/// Write a sidecar JSON summary (started/finished, counts, per-skill
-		/// views). Check itself stays read-only and does not mutate locks.
+		/// views). The sidecar never targets a lock or managed skill content.
 		/// Omit PATH to use `$AGHUB_DATA_DIR/skill-check-last.json` (or the
 		/// platform app data dir).
 		#[arg(long = "write-result", value_name = "PATH", num_args = 0..=1, default_missing_value = "")]

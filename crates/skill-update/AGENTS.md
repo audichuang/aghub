@@ -22,7 +22,7 @@ never re-derive them here.
 | TTL result cache          | `lib.rs` `ResultCache`        | Keyed by `SourceRef`; crate-private, built per call inside `run_update_check()`                                                                                                                                                                                                                |
 | Inject auth               | `lib.rs` `TokenResolver`      | CLI env / API own resolver                                                                                                                                                                                                                                                                     |
 | Source list/diff/classify | `sources.rs`                  | API + CLI `source`. Three entry points for surfaces — `list_sources`, `diff_source`, `plan_source_sync`; `import_ref` / `recorded_refs` are `pub` only for `fetched_install.rs`                                                                                                                |
-| Lock → check inputs       | `projection.rs`               | API route + CLI `check` share it: the `wanted` hash filter, the per-root hash memo, the offline skip, and the lock-before-disk read order. The API's post-check heal writer (`write_auto_healed_hashes`) lives here too; `check` never calls it                                                |
+| Lock → check inputs       | `projection.rs`               | API route + CLI `check` share it: the `wanted` hash filter, the per-root hash memo, the offline skip, and the lock-before-disk read order. The post-check heal writer (`write_auto_healed_hashes`, API + CLI `--online`) lives here too                                                        |
 | Source mutation flows     | `mutation.rs`                 | install / resync / accept-rename — API + CLI                                                                                                                                                                                                                                                   |
 | Fetched Source install    | `fetched_install.rs`          | /skills/install 與 /skills/git/install 的 ref 決策（先命名 ref 再 resolve）、agent 預檢與逐列歸屬、fetch、每個 skill 各自取鎖安裝、攤平成 rows；expected_ref 是建構子的政策（catalog 一律 Some，session 只在未指定 branch 時 Some，CLI source sync 為 None）；CLI 只共用 `install_lock_source` |
 | Repo fetch + catalog      | `repository.rs`               | `SkillRepository` + `FetchSelection` (consumes `aghub-git`'s `RepoSnapshot`)                                                                                                                                                                                                                   |
@@ -127,11 +127,14 @@ writes nothing. CLI `apply-update --outdated` and the API apply routes share it.
 
 CLI and API call the same entries; these are the divergences this crate owns (the API's fail-open lock read and `source diff ?scope=all` are in `crates/api/AGENTS.md`).
 
-- **check auto-heal**: `GET /skills/check-updates` calls
-  `projection::write_auto_healed_hashes` after the check; `aghub-cli check` never
-  does — check does not write the lock. A busy mutation lock is reported in the
-  response's `healError` (retryable `SKILL_MUTATION_LOCK_BUSY`), never a 500, and
-  the results are still returned.
+- **check auto-heal**: both surfaces call `projection::write_auto_healed_hashes`
+  after the check — the API route always and over both scopes, the CLI
+  (`check`, `apply-update --outdated`) only `--online` and over GLOBAL rows only
+  (a project row never preflights, so healing the VCS-tracked project lock buys
+  no request). Skipping it leaves `refCommit` at the install
+  commit, so every check re-fetches the group (#95). A busy mutation lock never
+  fails the check: the API reports it in `healError` (retryable
+  `SKILL_MUTATION_LOCK_BUSY`), the CLI as a stderr warning.
 
 ## TESTING
 

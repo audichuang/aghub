@@ -97,7 +97,13 @@ list, or `all`), `-g`/`-p`, `--all`.
   `apply-update --yes` OVERWRITES that edit. The row's two digests are
   comparison hashes and deliberately need NOT equal the lock's `computedHash`.
   Mechanics: `crates/skill-update/AGENTS.md`
-- **`check` never writes; `--write-result` is why that needs a guard.** The
+- **`check --online` heals the GLOBAL lock like the API** (`projection::write_auto_healed_hashes`,
+  shared with `apply-update --outdated`, its preview included): an `upToDate`
+  row's `refCommit` advances to the judged tip, or every later check re-fetches
+  the group (#95); a placeholder `contentHash` is filled (clearing
+  `skillFolderHash`). Offline and the project lock are never written; a busy
+  mutation lock is a stderr warning, never a failed check.
+- **`--write-result` is an UNGUARDED write, so it needs its own guard.** The
   sidecar path is arbitrary, so the write is refused by file NAME
   (`.skill-lock.json`, `skills-lock.json`, `.aghub-mutation.lock`), by an
   `.aghub` path SEGMENT, and by `.agents/skills` as adjacent SEGMENTS, BEFORE
@@ -270,9 +276,11 @@ holding two JSON documents and every parse of it fails.
 
 `tests/cli_tests.rs` (`assert_cmd`). `source sync` e2e need no network:
 `AGHUB_TEST_SOURCE_FETCH_ROOT` (a `#[cfg(debug_assertions)]` hook in
-`commands/source.rs`) serves a local dir as the fetched repo. `check skills` is
-read-only — it never mutates a lock — and its JSON shape is pinned by
-`check_skills_outputs_json_array`.
+`commands/source.rs`) serves a local dir as the fetched repo. `check skills`'s JSON
+shape is pinned by `check_skills_outputs_json_array`; its heal and the request
+count it buys by `check_online_heals_ref_commit_so_the_next_check_skips_the_fetch`
+(the hook also answers the tip preflight and logs `resolve` / `fetch` to
+`AGHUB_TEST_SOURCE_FETCH_LOG`).
 
 ## Anti-patterns
 

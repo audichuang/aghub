@@ -3,11 +3,11 @@
 //! reads the two.
 //!
 //! Both surfaces consume it: the `wanted` filter, the per-root hash memo, the
-//! offline skip, and the lock-before-disk read order live only here. The API
-//! route (`GET /skills/check-updates`) also consumes the [`Identities`] half
-//! and the heal writer [`write_auto_healed_hashes`] — it is the only surface
-//! that heals the lock afterwards — while the CLI (`aghub-cli check`) ignores
-//! both.
+//! offline skip, and the lock-before-disk read order live only here. Both
+//! also consume the [`Identities`] half and the heal writer
+//! [`write_auto_healed_hashes`]: the API route (`GET /skills/check-updates`)
+//! after every check, the CLI (`check --online`, `apply-update --outdated`)
+//! after an online one, over its global rows only.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -90,9 +90,9 @@ fn heal_precondition_holds(
 	identities.get(name) == Some(&live)
 }
 
-/// The post-check compare-and-set heal. The API calls it after a check; the CLI
-/// `check` never does (see `crates/skill-update/AGENTS.md`, "Deliberate surface
-/// differences").
+/// The post-check compare-and-set heal. The API calls it after every check;
+/// the CLI after an online one, global rows only (see `crates/skill-update/AGENTS.md`,
+/// "Deliberate surface differences").
 ///
 /// A busy mutation lock returns `ConfigError::Io(WouldBlock)` with NOTHING
 /// written, so the caller can report it as retryable beside the check results.

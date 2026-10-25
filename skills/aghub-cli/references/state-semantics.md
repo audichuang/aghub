@@ -236,6 +236,11 @@ branch.
 - `check --online` measures only copies held by enabled agents, plus a Master
   no enabled agent links: a copy only a disabled agent reads neither counts as
   the installed copy nor makes the row `uncheckable`.
+- `check --online` (and `apply-update --outdated`, even as a preview) updates
+  a global entry's `refCommit` to the upstream tip when the row is `upToDate`,
+  so the next check skips the fetch, and fills a placeholder `contentHash`.
+  That diff in the global `.skill-lock.json` is expected, not drift. Offline
+  `check` and the project `skills-lock.json` are never written.
 - `apply-update <NAME>` applies one locked update and refuses outright without
   `--yes` — it has no preview. `apply-update --outdated` (every
   `updateAvailable` row in one scope) DOES preview without `--yes`. Use
