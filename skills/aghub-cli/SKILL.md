@@ -183,6 +183,12 @@ private directory does not count — repair leaves that alone.
   `removed` / `deprecated` / `uncheckable` diff rows are inspect-first
   ([state semantics](references/state-semantics.md)). Never reinstall over
   `master-is-symlink`.
+- Upstream's root `SKILL.md` is a symlink (or any non-regular file): an
+  install (`source sync --install-missing`, preview included) refuses with
+  `VALIDATION_FAILED`, an update (`--update`, `apply-update`) with
+  `SKILL_PARSE_FAILED` — both say "the skill's SKILL.md is not a regular file"
+  and nothing is written. No flag gets past it — the fix is in the git source:
+  commit a regular `SKILL.md`, then sync again.
 
 ### Repair the layout
 
