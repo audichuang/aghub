@@ -7,7 +7,7 @@
 //! also consume the [`Identities`] half and the heal writer
 //! [`write_auto_healed_hashes`]: the API route (`GET /skills/check-updates`)
 //! after every check, the CLI (`check --online`, `apply-update --outdated`)
-//! after an online one, over its global rows only.
+//! after an online one, with only its global `heal_oid`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -91,7 +91,7 @@ fn heal_precondition_holds(
 }
 
 /// The post-check compare-and-set heal. The API calls it after every check;
-/// the CLI after an online one, global rows only (see `crates/skill-update/AGENTS.md`,
+/// the CLI after an online one, global `heal_oid` only (see `crates/skill-update/AGENTS.md`,
 /// "Deliberate surface differences").
 ///
 /// A busy mutation lock returns `ConfigError::Io(WouldBlock)` with NOTHING

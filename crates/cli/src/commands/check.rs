@@ -15,17 +15,19 @@
 //!
 //! Offline `check` never writes. `--online` runs the API's post-check heal
 //! (`projection::write_auto_healed_hashes`, compare-and-set under the mutation
-//! lock) over GLOBAL rows only: an `upToDate` row records the fetched tip as
-//! `refCommit` so the next check can preflight-skip, and a placeholder
-//! `contentHash` gets its computed value (which clears `skillFolderHash`). The
-//! VCS-tracked project lock is never written.
+//! lock) narrowed to GLOBAL `refCommit`: an `upToDate` row records the fetched
+//! tip so the next check can preflight-skip. The content baseline
+//! (`contentHash` / `skillFolderHash`) and the VCS-tracked project lock are
+//! never written.
 
 use crate::{eprintln_verbose, ResourceType};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use skill_update::{projection, run_update_check, EntryInput, Fetcher};
+use skill_update::{
+	projection, run_update_check, CheckOutput, EntryInput, Fetcher,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabled::builder::Builder;
@@ -375,18 +377,27 @@ pub(crate) fn collect_update_views(
 		!online,
 	));
 
-	// The API route's post-check heal, GLOBAL rows only: without it a global
-	// entry's refCommit never advances past its install commit, so every later
-	// online check re-fetches the whole group instead of preflight-skipping it
-	// (#95). Project rows never preflight (no refCommit heal), so healing the
-	// VCS-tracked project lock would buy nothing. Offline looked at nothing
-	// upstream and stays read-only. A failed heal (e.g. a busy mutation lock)
-	// must not discard the computed results.
+	// The API route's post-check heal writer, narrowed to GLOBAL `refCommit`:
+	// without it a global entry's refCommit never advances past its install
+	// commit, so every later online check re-fetches the whole group instead of
+	// preflight-skipping it (#95). `heal_oid` only exists on `upToDate` rows.
+	// The content baseline (`heal_hash`) is NOT healed here: it is emitted for
+	// any verdict, so on an `updateAvailable` row it would record a locally
+	// edited copy as the baseline (the next check then preflight-skips and
+	// hides the edit), and it clears npx's `skillFolderHash`. Project rows never
+	// preflight, so the VCS-tracked project lock is not written. Offline looked
+	// at nothing upstream and stays read-only. A failed heal (e.g. a busy
+	// mutation lock) must not discard the computed results.
 	if online {
 		let global: Vec<_> = outputs
 			.iter()
-			.filter(|output| output.key.scope == "global")
-			.cloned()
+			.filter(|output| {
+				output.key.scope == "global" && output.heal_oid.is_some()
+			})
+			.map(|output| CheckOutput {
+				heal_hash: None,
+				..output.clone()
+			})
 			.collect();
 		if let Err(e) = projection::write_auto_healed_hashes(
 			&global,
