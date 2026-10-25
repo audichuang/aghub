@@ -67,12 +67,13 @@ if $notarize; then
     chmod 600 "$WORK/AuthKey.p8"
     ditto -c -k --keepParent "$BIN" "$WORK/submit.zip"
     # A bare Mach-O cannot carry a stapled ticket; Gatekeeper fetches it online.
-    out="$(xcrun notarytool submit "$WORK/submit.zip" --wait --output-format json \
-        --key "$WORK/AuthKey.p8" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")"
+    # `|| true`: a non-zero exit must still reach the status check and the log below.
+    out="$(xcrun notarytool submit "$WORK/submit.zip" --wait --timeout 30m --output-format json \
+        --key "$WORK/AuthKey.p8" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")" || true
     echo "$out"
-    status="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' <<< "$out")"
+    status="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' <<< "$out" 2>/dev/null)" || true
     if [ "$status" != "Accepted" ]; then
-        id="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' <<< "$out")"
+        id="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' <<< "$out" 2>/dev/null)" || true
         [ -n "$id" ] && xcrun notarytool log "$id" \
             --key "$WORK/AuthKey.p8" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" || true
         echo "$BIN: notarization status '$status'" >&2

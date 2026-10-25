@@ -170,9 +170,6 @@ jobs:
               with:
                   targets: ${{ matrix.target }}
 
-            # Restore-only: the dependency graph ci.yml's `build` job saves on
-            # main. A tag run's own save would be scoped to the tag and
-            # readable by no later release.
             # tauri-cli exports MACOSX_DEPLOYMENT_TARGET (the bundle's minimum
             # macOS, default 10.13) and cc-rs reads it, so without the same value
             # here every C-backed crate (aws-lc-sys, ring, zstd-sys…) rebuilt in
@@ -181,6 +178,9 @@ jobs:
               if: runner.os == 'macOS'
               run: echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
 
+            # Restore-only: the dependency graph ci.yml's `build` job saves on
+            # main. A tag run's own save would be scoped to the tag and
+            # readable by no later release.
             - name: Rust Cache (warmed on main)
               uses: Swatinem/rust-cache@v2
               with:
@@ -461,6 +461,15 @@ jobs:
               uses: dtolnay/rust-toolchain@stable
               with:
                   targets: ${{ matrix.target }}
+
+            # tauri-cli exports MACOSX_DEPLOYMENT_TARGET (the bundle's minimum
+            # macOS, default 10.13) and cc-rs reads it, so without the same value
+            # here every C-backed crate (aws-lc-sys, ring, zstd-sys…) rebuilt in
+            # Build Tauri. rust-cache does not hash it, so the key is unchanged.
+            # Here too: ci.yml's `build` compiles aghub-cli into the same cache.
+            - name: Match tauri's macOS deployment target
+              if: runner.os == 'macOS'
+              run: echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
 
             # Restore-only: the dependency graph ci.yml's `build` job saves on
             # main. A tag run's own save would be scoped to the tag and
