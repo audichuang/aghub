@@ -51,7 +51,10 @@ Gatekeeper, and every update re-asked for the login password before the app
 could read its keychain items (inference keys via the Apple keyring store).
 A Developer ID signature gives a stable designated requirement (team
 `37HFR5V2JJ` + bundle id), so the keychain ACL survives updates. Users coming
-from an ad-hoc build get ONE more prompt ("Always Allow"), then none.
+from an ad-hoc build get ONE more prompt ("Always Allow"), then none — seen on
+v2.43.3 → v2.43.4: the upgraded app read `aghub`/`credentials` in 40 ms with
+no `SecurityAgent` dialog. The ACL trusts each identity separately, so
+`aghub-cli` (identifier `aghub-cli`) asks once on its own first read.
 
 **Secrets** (repo `audichuang/aghub`): `APPLE_CERTIFICATE` (base64 `.p12`:
 Developer ID Application cert + the Developer ID G2 intermediate + key),

@@ -290,9 +290,10 @@ pub(crate) fn clear_cache_for_test() {
 
 /// Everything credential-related in ONE keyring entry.
 ///
-/// macOS authorizes per keychain ITEM, and the ad-hoc-signed app's ACL breaks
-/// on every release, so each item re-prompts after an upgrade. One item = one
-/// prompt (and half the round trips elsewhere).
+/// macOS authorizes per keychain ITEM and per signing identity, so every item
+/// asks again whenever a new identity reads it (the ad-hoc → Developer ID
+/// switch, or `aghub-cli` vs the app). One item = one prompt (and half the
+/// round trips elsewhere). Why: docs/history/release.md#macos-developer-id-signing
 #[derive(Default, Serialize, serde::Deserialize)]
 pub(crate) struct CredentialBundle {
 	#[serde(default)]
