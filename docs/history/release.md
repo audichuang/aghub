@@ -80,11 +80,14 @@ so each `brew upgrade` re-prompted. The same script signs it and submits it
 to the notary service (a bare Mach-O cannot be stapled; Gatekeeper fetches
 the ticket online).
 
-**Not done: the DMG itself.** tauri notarizes and staples the `.app`, then
-builds and signs the DMG without notarizing it (`spctl` on the DMG says
-`Unnotarized Developer ID`). The app inside is stapled, so the cask and a
-Finder drag-install open it without prompts; notarizing the DMG would mean
-re-uploading tauri-action's asset in the draft.
+**The DMG is notarized and stapled too.** tauri notarizes and staples the
+`.app`, then builds and signs the DMG without notarizing it (`spctl --type
+open` on the DMG said `Unnotarized Developer ID`, v2.43.1–v2.43.3). Apple's
+rule is to notarize and staple the outermost container, so a Mac can validate
+the download offline. "Notarize and staple DMG (macOS)" runs
+`scripts/ci-macos-sign.sh --staple-dmg` on it and replaces the draft's asset
+before the generic `aghub_mac_arm.dmg` copy is made; the cask's sha comes
+from the server-side digest, so it follows.
 
 **No `APPLE_SIGNING_IDENTITY`.** tauri derives the identity from the imported
 cert; leaving the old literal `-` would override it and ship ad-hoc again.

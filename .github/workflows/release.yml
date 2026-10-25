@@ -393,6 +393,34 @@ jobs:
                       exit 1
                   fi
 
+            # tauri notarizes and staples the .app but only signs the DMG.
+            # Apple: notarize and staple the outermost container. Replaces the
+            # draft's unstapled copy before the generic copy below is made, so
+            # both DMG assets (and the cask's server-side digest) are stapled.
+            - name: Notarize and staple DMG (macOS)
+              if: runner.os == 'macOS'
+              shell: bash
+              env:
+                  APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+                  APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+                  APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_ID: ${{ needs.changelog.outputs.release_id }}
+              run: |
+                  set -euo pipefail
+                  found=$(find target -type f -path '*/bundle/dmg/*.dmg')
+                  count=$(printf '%s' "$found" | grep -c . || true)
+                  [ "$count" -eq 1 ] || { echo "expected exactly one DMG, found $count:" >&2; echo "$found" >&2; exit 1; }
+                  scripts/ci-macos-sign.sh --staple-dmg "$found"
+                  name=$(basename "$found")
+                  repo="${{ github.repository }}"
+                  asset_id=$(gh api "repos/$repo/releases/$RELEASE_ID/assets" --paginate \
+                      --jq ".[] | select(.name == \"$name\") | .id")
+                  [ -n "$asset_id" ] || { echo "draft has no asset $name to replace" >&2; exit 1; }
+                  gh api -X DELETE "repos/$repo/releases/assets/$asset_id"
+                  gh api -X POST "https://uploads.github.com/repos/$repo/releases/$RELEASE_ID/assets?name=$name" \
+                      -H 'Content-Type: application/x-apple-diskimage' --input "$found" --jq '.name + " " + .digest'
+
             - name: Prepare Generic Artifact
               shell: bash
               run: |
