@@ -66,6 +66,13 @@ API key. Backups of the `.p12`, its password and the `.p8` are in 1Password
 renew it (new CSR, same steps) and replace `APPLE_CERTIFICATE` and
 `APPLE_CERTIFICATE_PASSWORD` before then.
 
+**The sidecar is signed by hand.** `aghub-api` ships through
+`tauri.bundle.conf.json` `resources`, not `externalBin`, and tauri signs only
+the latter. The first signed release (v2.43.1) failed notarization on it: "not
+signed with a valid Developer ID certificate", no secure timestamp, no hardened
+runtime. "Sign staged aghub-api (macOS)" signs it with `--options runtime
+--timestamp` before "Build Tauri" seals the bundle.
+
 **No `APPLE_SIGNING_IDENTITY`.** tauri derives the identity from the imported
 cert; leaving the old literal `-` would override it and ship ad-hoc again.
 
