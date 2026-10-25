@@ -97,11 +97,13 @@ list, or `all`), `-g`/`-p`, `--all`.
   `apply-update --yes` OVERWRITES that edit. The row's two digests are
   comparison hashes and deliberately need NOT equal the lock's `computedHash`.
   Mechanics: `crates/skill-update/AGENTS.md`
-- **`check --online` heals the GLOBAL lock like the API** (`projection::write_auto_healed_hashes`,
+- **`check --online` heals GLOBAL `refCommit` only** (`projection::write_auto_healed_hashes`,
   shared with `apply-update --outdated`, its preview included): an `upToDate`
   row's `refCommit` advances to the judged tip, or every later check re-fetches
-  the group (#95); a placeholder `contentHash` is filled (clearing
-  `skillFolderHash`). Offline and the project lock are never written; a busy
+  the group (#95). The content baseline is NOT healed (unlike the API): a
+  `heal_hash` on an `updateAvailable` row would record a local edit as the
+  baseline and hide it from the next check, and would clear npx's
+  `skillFolderHash`. Offline and the project lock are never written; a busy
   mutation lock is a stderr warning, never a failed check.
 - **`--write-result` is an UNGUARDED write, so it needs its own guard.** The
   sidecar path is arbitrary, so the write is refused by file NAME

@@ -129,9 +129,10 @@ CLI and API call the same entries; these are the divergences this crate owns (th
 
 - **check auto-heal**: both surfaces call `projection::write_auto_healed_hashes`
   after the check — the API route always and over both scopes, the CLI
-  (`check`, `apply-update --outdated`) only `--online` and over GLOBAL rows only
-  (a project row never preflights, so healing the VCS-tracked project lock buys
-  no request). Skipping it leaves `refCommit` at the install
+  (`check`, `apply-update --outdated`) only `--online` and only GLOBAL
+  `heal_oid` (a project row never preflights, so healing the VCS-tracked
+  project lock buys no request; `heal_hash` is emitted for any verdict, so
+  healing it on an `updateAvailable` row records a local edit as the baseline). Skipping it leaves `refCommit` at the install
   commit, so every check re-fetches the group (#95). A busy mutation lock never
   fails the check: the API reports it in `healError` (retryable
   `SKILL_MUTATION_LOCK_BUSY`), the CLI as a stderr warning.

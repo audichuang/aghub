@@ -3110,6 +3110,69 @@ fn check_online_heals_ref_commit_so_the_next_check_skips_the_fetch() {
 	);
 }
 
+/// The CLI heals `refCommit` ONLY, never the content baseline. An entry with
+/// no `contentHash` (npx-installed, `skillFolderHash` set) whose copy was edited
+/// locally is `updateAvailable`; recording the edited bytes as its baseline
+/// would make the next check preflight-skip (tip unchanged) and hide the edit,
+/// and clearing `skillFolderHash` would make `npx skills update` skip it.
+#[cfg(unix)]
+#[test]
+fn check_online_never_rewrites_the_content_baseline_of_an_edited_copy() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	let install = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"alpha",
+	);
+	assert!(
+		install.status.success(),
+		"seed install: {}",
+		String::from_utf8_lossy(&install.stderr)
+	);
+	let lock_path = state.path().join("skills/.skill-lock.json");
+	let mut lock: Value =
+		serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap())
+			.unwrap();
+	let entry = lock["skills"]["alpha"].as_object_mut().unwrap();
+	entry.remove("contentHash");
+	entry.insert("skillFolderHash".into(), "npx-folder-hash".into());
+	std::fs::write(&lock_path, lock.to_string()).unwrap();
+	let before = std::fs::read_to_string(&lock_path).unwrap();
+	std::fs::write(
+		home.path().join(".aghub/alpha/SKILL.md"),
+		"---\nname: alpha\ndescription: d\n---\nlocal edit\n",
+	)
+	.unwrap();
+
+	for run in 1..=2 {
+		let out = isolated_cli(home.path(), state.path())
+			.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+			.args(["-g", "check", "skills", "--online", "--json"])
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"stderr: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(
+			json[0]["status"], "updateAvailable",
+			"run {run} must still see the local edit: {json}"
+		);
+		assert_eq!(
+			std::fs::read_to_string(&lock_path).unwrap(),
+			before,
+			"run {run} must not rewrite the content baseline"
+		);
+	}
+}
+
 #[cfg(unix)]
 #[test]
 fn source_sync_skill_filter_unknown_name_warns_and_installs_nothing() {
