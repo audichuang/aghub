@@ -26,7 +26,6 @@ import PluginsPage from "./pages/plugins";
 import ProjectDetailPage from "./pages/project/detail";
 import SettingsPage from "./pages/settings";
 import CoveragePage from "./pages/settings/coverage";
-import CustomAgentsPage from "./pages/settings/custom-agents";
 import MCPServersPage from "./pages/settings/mcp-servers";
 import SkillsPage from "./pages/settings/skills";
 import SubAgentsPage from "./pages/settings/sub-agents";
@@ -255,9 +254,6 @@ function App() {
 											</Route>
 											<Route path="/settings">
 												<SettingsPage />
-											</Route>
-											<Route path="/settings/custom-agents">
-												<CustomAgentsPage />
 											</Route>
 											<Route path="/sub-agents">
 												<ErrorBoundary>

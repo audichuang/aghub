@@ -4,7 +4,6 @@ import {
 	CheckCircleIcon,
 	ChevronDownIcon,
 	ChevronRightIcon,
-	ClipboardDocumentIcon,
 	ExclamationTriangleIcon,
 	FolderIcon,
 	GlobeAltIcon,
@@ -12,7 +11,6 @@ import {
 	TrashIcon,
 } from "@heroicons/react/24/solid";
 import { Alert, Button, Chip, Modal, Spinner, toast } from "@heroui/react";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -40,7 +38,10 @@ import {
 import { cn } from "../lib/utils";
 import { useSkillCoverage } from "../requests/agents";
 import { queryKeys } from "../requests/keys";
-import { applySkillUpdateMutationOptions } from "../requests/skills";
+import {
+	acceptSkillRenameMutationOptions,
+	applySkillUpdateMutationOptions,
+} from "../requests/skills";
 import { sourceDiffQueryOptions } from "../requests/sources";
 import { sourceCoordinate } from "../lib/source-coordinate";
 
@@ -533,44 +534,40 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		}
 	};
 
-	const deleteRenamedSkillMutation = useMutation({
-		mutationFn: async (skill: SourceSkillDiff) => {
-			const oldName = skill.previousName;
-			if (!oldName) {
-				throw new Error("Missing previous name for renamed skill.");
-			}
-			await deleteInstalledSkillByName(oldName);
-		},
-		onSuccess: (_data, skill) => {
-			if (!skill.previousName) return;
-			toast.success(
-				t("sourceRenamedDeleted", { oldName: skill.previousName }),
-			);
-		},
-		// `onSettled`, not `onSuccess`: a row that answers `absent` throws
-		// here, and an `absent` is ALSO what a concurrent delete-and-prune in
-		// another window (or the CLI) honestly returns. Refreshing only on
-		// success left that row on screen behind a "stale lock entry" message
-		// that was no longer true.
-		onSettled: async () => {
-			await queryClient.invalidateQueries({
-				queryKey: queryKeys.skills.all(),
-			});
-		},
-		onError: (error, skill) => {
-			if (skill.previousName) {
-				toast.danger(
-					error instanceof Error
-						? error.message
-						: t("sourceRenamedDeleteFailed", {
-								oldName: skill.previousName,
+	const acceptRenameMutation = useMutation(
+		acceptSkillRenameMutationOptions({
+			api,
+			queryClient,
+			forwardForSource,
+			onSuccess: async (result) => {
+				if (!result.success) {
+					toast.danger(
+						result.error ??
+							t("sourceRenamedAcceptFailed", {
+								oldName: result.oldName,
 							}),
+					);
+					return;
+				}
+				toast.success(
+					t("sourceRenamedAccepted", {
+						oldName: result.oldName,
+						newName: result.newName,
+					}),
 				);
-				return;
-			}
-			toast.danger(t("sourcePruneFailed"));
-		},
-	});
+				await queryClient.invalidateQueries({
+					queryKey: queryKeys.skills.sources.all(),
+				});
+			},
+			onError: (error) => {
+				const description = describeRequestFailure(error).description;
+				toast.danger(
+					t("skillUpdateApplyError"),
+					description ? { description } : undefined,
+				);
+			},
+		}),
+	);
 
 	const deleteRemovedSkillMutation = useMutation({
 		mutationFn: async (skill: SourceSkillDiff) => {
@@ -579,9 +576,9 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		onSuccess: (_data, skill) => {
 			toast.success(t("sourceRemovedCleaned", { name: skill.name }));
 		},
-		// See `deleteRenamedSkillMutation` — an `absent` throw must still
-		// refresh, because `absent` is also the honest answer when something
-		// else already removed and pruned this row.
+		// `onSettled`, not `onSuccess`: a row that answers `absent` throws
+		// here, and an `absent` is ALSO what a concurrent delete-and-prune in
+		// another window (or the CLI) honestly returns — the row must refresh.
 		onSettled: async () => {
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.all(),
@@ -594,20 +591,6 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 					: t("sourceRemovedCleanFailed", { name: skill.name }),
 			);
 		},
-	});
-
-	const copyRenamedInstallMutation = useMutation({
-		mutationFn: async (skill: SourceSkillDiff) => {
-			await writeText(`aghub-cli install ${skill.name}`);
-		},
-		onSuccess: (_data, skill) => {
-			toast.success(
-				t("sourceRenamedInstallCommandCopied", {
-					newName: skill.name,
-				}),
-			);
-		},
-		onError: () => toast.danger(t("sourceCopyCommandFailed")),
 	});
 
 	const updateRequestFor = (skill: SourceSkillDiff) => ({
@@ -1254,19 +1237,11 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											/>
 										);
 									})}
-									{/* TODO(Phase 3): replace with one-click accept-rename once
-									    POST /skills/accept-rename exists. For now, keep the
-									    existing two-step flow: delete old + copy install cmd. */}
 									{renamed.map((skill) => {
-										const isDeleting =
-											deleteRenamedSkillMutation.isPending &&
-											deleteRenamedSkillMutation.variables
-												?.skillPath === skill.skillPath;
-										const isCopying =
-											copyRenamedInstallMutation.isPending &&
-											copyRenamedInstallMutation.variables
-												?.skillPath === skill.skillPath;
-										const rowBusy = isDeleting || isCopying;
+										const isAccepting =
+											acceptRenameMutation.isPending &&
+											acceptRenameMutation.variables?.body
+												.newName === skill.name;
 										return (
 											<SourceSkillRow
 												sourceUrl={diffSource}
@@ -1287,51 +1262,46 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 												}
 												showReason
 												action={
-													<div className="flex items-center gap-1.5">
-														<Button
-															size="sm"
-															variant="secondary"
-															className="h-7 px-2 text-xs"
-															isDisabled={
-																!skill.previousName ||
-																rowBusy
-															}
-															onPress={() =>
-																deleteRenamedSkillMutation.mutate(
-																	skill,
+													<Button
+														size="sm"
+														variant="secondary"
+														className="h-7 px-2 text-xs"
+														isDisabled={
+															!skill.previousName ||
+															acceptRenameMutation.isPending
+														}
+														onPress={() => {
+															if (
+																!skill.previousName
+															)
+																return;
+															acceptRenameMutation.mutate(
+																{
+																	body: {
+																		oldName:
+																			skill.previousName,
+																		newName:
+																			skill.name,
+																		scope: updateScope,
+																		projectRoot:
+																			updateProjectRoot,
+																		confirm: true,
+																	},
+																	sourceUrl:
+																		diffSource,
+																},
+															);
+														}}
+													>
+														<ArrowPathIcon className="size-3.5" />
+														{isAccepting
+															? t(
+																	"sourceRenamedAccepting",
 																)
-															}
-														>
-															<TrashIcon className="size-3.5" />
-															{isDeleting
-																? t(
-																		"sourceRenamedDeleting",
-																	)
-																: t(
-																		"sourceRenamedDeleteOld",
-																	)}
-														</Button>
-														<Button
-															size="sm"
-															variant="ghost"
-															className="h-7 px-2 text-xs"
-															isDisabled={rowBusy}
-															onPress={() =>
-																copyRenamedInstallMutation.mutate(
-																	skill,
-																)
-															}
-														>
-															<ClipboardDocumentIcon className="size-3.5" />
-															{isCopying
-																? t(
-																		"sourceRenamedCopying",
-																	)
-																: t(
-																		"sourceRenamedCopyInstall",
-																	)}
-														</Button>
-													</div>
+															: t(
+																	"sourceRenamedAccept",
+																)}
+													</Button>
 												}
 											/>
 										);

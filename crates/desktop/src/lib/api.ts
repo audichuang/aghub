@@ -1,5 +1,7 @@
 import ky, { isHTTPError } from "ky";
 import type {
+	AcceptRenameRequest,
+	AcceptRenameResponse,
 	AgentAvailabilityDto,
 	DisabledAgentsDto,
 	AgentSkillCoverageDto,
@@ -602,6 +604,22 @@ export function createApi(baseUrl: string) {
 				// origin-pins the forwarded token like check-updates/diff.
 				return client
 					.post("skills/apply-update", {
+						json: body,
+						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
+					})
+					.json();
+			},
+			acceptRename(
+				body: AcceptRenameRequest,
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<AcceptRenameResponse> {
+				// accept-rename fetches the new name server-side, so it carries
+				// the forwarded token like apply-update.
+				return client
+					.post("skills/accept-rename", {
 						json: body,
 						timeout: 120000,
 						...(forwardedTokens

@@ -5,6 +5,8 @@ import {
 	queryOptions,
 } from "@tanstack/react-query";
 import type {
+	AcceptRenameRequest,
+	AcceptRenameResponse,
 	CreateSkillRequest,
 	ApplySkillUpdateRequest,
 	ApplySkillUpdateResponse,
@@ -658,6 +660,47 @@ export function applySkillUpdateMutationOptions({
 				? await forwardForSource?.(sourceUrl)
 				: undefined;
 			return api.skills.applyUpdate(body, headers);
+		},
+		onSuccess: async (data) => {
+			await invalidateSkillQueries(queryClient);
+			void refetchUpdateChecksAfterWrites(queryClient);
+			refetchSkillBodies(queryClient);
+			await onSuccess?.(data);
+		},
+		onError,
+	});
+}
+
+interface AcceptSkillRenameMutationParams {
+	api: ApiClient;
+	queryClient: QueryClient;
+	onSuccess?: (data: AcceptRenameResponse) => void | Promise<void>;
+	onError?: (error: Error) => void;
+	forwardForSource?: ForwardForSource;
+}
+
+export interface AcceptSkillRenameVariables {
+	body: AcceptRenameRequest;
+	sourceUrl?: string;
+}
+
+/**
+ * One-step rename (`POST /skills/accept-rename`): installs the new name and
+ * removes the old one in one server-side transaction.
+ */
+export function acceptSkillRenameMutationOptions({
+	api,
+	queryClient,
+	onSuccess,
+	onError,
+	forwardForSource,
+}: AcceptSkillRenameMutationParams) {
+	return mutationOptions({
+		mutationFn: async ({ body, sourceUrl }: AcceptSkillRenameVariables) => {
+			const headers = sourceUrl
+				? await forwardForSource?.(sourceUrl)
+				: undefined;
+			return api.skills.acceptRename(body, headers);
 		},
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);

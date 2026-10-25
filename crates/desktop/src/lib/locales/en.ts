@@ -453,7 +453,7 @@ export default {
 		"Source changed: {{current}} → {{available}} (upstream {{date}}). Sync to update.",
 	skillRenamedBadge: "Renamed",
 	skillRenamedTooltip:
-		"Source renamed this skill to {{newName}}. Delete the old skill and install the renamed skill.",
+		"Source renamed this skill to {{newName}}. Accept the rename from its source page.",
 	skillUncheckable: "Can't check",
 	skillUncheckableAuth: "Can't check: the source needs a credential.",
 	skillUncheckableNetwork: "Can't check: the source is unreachable.",
@@ -1148,7 +1148,6 @@ export default {
 		agent: "Agent",
 		discoverSkills: "Discover Skills",
 		manageMcp: "Manage MCP Servers",
-		newAgent: "New Agent...",
 		edit: "Edit",
 		undo: "Undo",
 		redo: "Redo",
@@ -1322,16 +1321,11 @@ export default {
 	sourceStateCurrent: "Installed (latest)",
 	sourceStateUncheckable: "Uncheckable",
 	sourceRenamedHint:
-		"Installed as {{oldName}}. Delete the old skill, then install {{newName}}.",
-	sourceRenamedDeleteOld: "Delete old",
-	sourceRenamedDeleting: "Deleting...",
-	sourceRenamedCopyInstall: "Copy install",
-	sourceRenamedCopying: "Copying...",
-	sourceRenamedDeleted: "Deleted `{{oldName}}`.",
-	sourceRenamedDeleteFailed: "Failed to delete `{{oldName}}`.",
-	sourceRenamedInstallCommandCopied:
-		"Copied command. Run: aghub-cli install `{{newName}}`.",
-	sourceCopyCommandFailed: "Failed to copy install command.",
+		"Installed as {{oldName}}. Accept the rename to install {{newName}} and remove {{oldName}} in one step.",
+	sourceRenamedAccept: "Accept rename",
+	sourceRenamedAccepting: "Renaming...",
+	sourceRenamedAccepted: "Renamed `{{oldName}}` to `{{newName}}`.",
+	sourceRenamedAcceptFailed: "Failed to rename `{{oldName}}`.",
 	sourceRemoveNoAgents:
 		"No available agents can remove skills in this scope.",
 	sourceRemovedCleanSkill: "Clean up",

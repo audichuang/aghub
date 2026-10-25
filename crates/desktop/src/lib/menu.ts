@@ -75,21 +75,9 @@ export async function setupAppMenu(t: TFunction) {
 			action: () => emit("navigate", "/mcp"),
 		});
 
-		const newAgentMenuItem = await MenuItem.new({
-			id: "new-agent",
-			text: t("menu.newAgent"),
-			accelerator: "CmdOrControl+N",
-			action: () => emit("navigate", "/settings/custom-agents"),
-		});
-
 		const agentSubmenu = await Submenu.new({
 			text: t("menu.agent"),
-			items: [
-				newAgentMenuItem,
-				await PredefinedMenuItem.new({ item: "Separator" }),
-				discoverSkillsMenuItem,
-				manageMcpMenuItem,
-			],
+			items: [discoverSkillsMenuItem, manageMcpMenuItem],
 		});
 
 		const searchMenuItem = await MenuItem.new({
