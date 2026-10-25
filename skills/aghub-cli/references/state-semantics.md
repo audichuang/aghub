@@ -1,7 +1,7 @@
 # `aghub-cli` state semantics
 
 JSON shapes, the full value domains, the adoption guard, and the flags whose
-names mislead. Written against the 2.41 line. The call sites in `SKILL.md` say
+names mislead. Written against the 2.43 line. The call sites in `SKILL.md` say
 when to come here.
 
 ## Contents

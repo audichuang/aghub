@@ -82,7 +82,8 @@ struct Cli {
 	///
 	/// This is the default for every command EXCEPT the cross-scope
 	/// diagnostics `doctor`, `check`, `source list` and `source diff`, which
-	/// span global + the current project unless you narrow them.
+	/// span global + the current project unless you narrow them, and
+	/// `source sync`, which needs an explicit -g or -p.
 	#[arg(short, long, global = true)]
 	global: bool,
 
@@ -137,13 +138,14 @@ Output:
   and the batch envelope (success_count/failed_count). camelCase for prune-lock
   (dryRun), source sync (dryRun/skillPath/targetAgents), source list, doctor
   and check. Read `delete`'s `outcome` field (preview | removed | absent |
-  partial) rather than deriving intent from dry_run/executed: `partial` means
+  partial | kept) rather than deriving intent from dry_run/executed: `partial` means
   the removal ran and at least one path could NOT be deleted, which those two
   booleans cannot express at all.
 
   Multi-agent runs wrap rows in {success_count, failed_count, results:[…]}.
-  A row carries BOTH `ok` and `success` (same value); a FAILED row replaces
-  `output` with `error`, so do not assume `output` is present.
+  An `-a` list row's verdict is `ok`; a transfer/reconcile row's is `success`.
+  A FAILED row carries `error` instead of `output`, so do not assume `output`
+  is present.
 
 Destructive commands (delete, apply-update, prune-lock, source sync, source
 accept-rename, reconcile with --remove) preview by default and only write with

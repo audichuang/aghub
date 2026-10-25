@@ -17,7 +17,7 @@
 
 aghub is a desktop app **and** CLI for managing **MCP servers, skills,
 sub-agents, inference providers, and Claude Code plugins** across all
-[26 supported agents](#supported-agents). Configure a capability once and deploy
+[28 supported agents](#supported-agents). Configure a capability once and deploy
 it everywhere — aghub reads your real config files and changes only what you ask
 it to.
 
@@ -32,7 +32,7 @@ The fastest way to install is [Homebrew](https://brew.sh) on macOS / Linux.
 brew install --cask audichuang/tap/aghub
 ```
 
-On **Windows or Linux**, download a build below (or from the
+Or download a build directly (or from the
 [Releases](https://github.com/audichuang/aghub/releases) page):
 
 | Platform               | Download                                                                                          |
@@ -67,7 +67,7 @@ with `cargo build --release -p aghub-cli`.
 
 **Unified MCP Management** — one config, deployed to every agent
 
-- Configure once, deploy to any of the 26 supported agents
+- Configure once, deploy to any of the 28 supported agents
 - Stdio, SSE, and StreamableHttp transports
 - Enable or disable servers without removing them
 - View and audit servers across all agents in one command
@@ -76,7 +76,7 @@ with `cargo build --release -p aghub-cli`.
 
 - Import `.skill` packages or author skills with SKILL.md frontmatter
 - Share skills across agents via the universal skills directory
-- Skill installs are always symlink/junction to a shared `.agents/skills` master; no isolated-copy install mode
+- Skill installs keep one master copy in `.aghub/` and grant each agent a symlink/junction to it; no isolated-copy install mode
 - SHA-256 content verification and source provenance tracking
 - Browse and install from the skills.sh marketplace
 

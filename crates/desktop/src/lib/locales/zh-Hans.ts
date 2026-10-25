@@ -492,7 +492,7 @@ const zhHans: typeof en = {
 	settingsAutostartError: "更新开机自启动失败",
 	skillCheckScheduleHeading: "定期检查 skill 更新",
 	skillCheckScheduleDescription:
-		"每天 09:00 在应用关闭时运行 `aghub-cli check skills --online`，不会自动套用更新。",
+		"每天 09:00 运行 `aghub-cli check skills --online -g`（只检查全局技能），即使应用未打开也会运行，不会自动套用更新。",
 	skillCheckScheduleNeedCli:
 		"需要安装 aghub-cli（或将其加入 PATH）才能启用定期检查。",
 	skillCheckScheduleEnabled: "已启用定期 skill 检查",
@@ -1339,7 +1339,7 @@ const zhHans: typeof en = {
 	filterByAgent: "按 agent 筛选",
 	skillsFromSource: "来自 {{source}} 的技能",
 	sourceListLoadFailed: "读不到这个范围的来源列表。请确认连接后刷新。",
-	skillsUnrecordedSource: "本机自建（未记录来源）",
+	skillsUnrecordedSource: "未记录来源",
 	skillGroupAllUncheckable: "全部无法检查",
 	expandSourceGroup: "展开",
 	collapseSourceGroup: "收起",

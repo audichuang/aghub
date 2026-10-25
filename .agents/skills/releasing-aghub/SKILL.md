@@ -91,10 +91,10 @@ the other.
 just preflight
 SHA=$(git rev-parse HEAD)   # pin it: main may move while CI runs
 git push fork "$SHA:refs/heads/main"
-gh run watch <ci-run-id> --repo audichuang/aghub --exit-status   # MUST be green
+gh-wait run <ci-run-id> -R audichuang/aghub   # then confirm conclusion == success
 git tag vX.Y.Z "$SHA" && git push fork vX.Y.Z
 gh run list  --repo audichuang/aghub --workflow release.yml --limit 1
-gh run watch <run-id> --repo audichuang/aghub --exit-status
+gh-wait run <run-id> -R audichuang/aghub
 just release verify X.Y.Z
 ```
 

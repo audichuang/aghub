@@ -529,7 +529,7 @@ export default {
 	settingsAutostartError: "Failed to update startup launch",
 	skillCheckScheduleHeading: "Check skill updates on a schedule",
 	skillCheckScheduleDescription:
-		"Runs `aghub-cli check skills --online` daily at 09:00 while the app is closed. Never applies updates.",
+		"Runs `aghub-cli check skills --online -g` (global skills) daily at 09:00, even when the app is closed. Never applies updates.",
 	skillCheckScheduleNeedCli:
 		"Install aghub-cli (or put it on PATH) to enable scheduled checks.",
 	skillCheckScheduleEnabled: "Scheduled skill check enabled",
@@ -1414,7 +1414,7 @@ export default {
 	skillsFromSource: "Skills from {{source}}",
 	sourceListLoadFailed:
 		"Could not load this scope's sources. Check the connection and refresh.",
-	skillsUnrecordedSource: "Locally created (no recorded source)",
+	skillsUnrecordedSource: "No recorded source",
 	/** Group header muted text when every visible skill shares a
 	 * non-auth uncheckable reason (the tooltip carries the actual reason). */
 	skillGroupAllUncheckable: "None of these can be checked",

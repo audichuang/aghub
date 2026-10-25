@@ -1,5 +1,5 @@
 # aghub - Code Agent Management Tool
-# https://github.com/akarachen/aghub
+# https://github.com/audichuang/aghub
 
 set windows-shell := ["cmd.exe", "/c"]
 
@@ -41,7 +41,7 @@ fmt:
 # Run clippy linter
 lint:
     cargo clippy --workspace -- -D warnings
-    cd ./crates/desktop && nr lint
+    cd ./crates/desktop && bun run lint
 
 # Pre-release gate: run everything the CI / release test gate runs, locally.
 # Run this BEFORE you push or tag. The pre-push hook only does
@@ -115,7 +115,7 @@ start *args:
     cargo run -p aghub-cli -- {{args}}
 
 desktop:
-    cd ./crates/desktop && nr start
+    cd ./crates/desktop && bun run start
 
 # Bump version across all manifests (perl -i is portable across GNU/BSD;
 # `sed -i ''` was macOS-only and errored on Linux)
@@ -177,7 +177,7 @@ desktop-bundle:
 # installs the app and prints the dmg path.
 #
 # macOS / Apple Silicon only (host build == arm64 there). Needs the release
-# toolchain (rustup, bun, sccache). The build is UNSIGNED and has no updater
+# toolchain (rustup, bun). The build is UNSIGNED and has no updater
 # artifacts — it is for LOCAL testing only; ship real builds via `just`-tagged
 # releases, never this dmg.
 [macos]

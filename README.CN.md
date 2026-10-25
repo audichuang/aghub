@@ -16,7 +16,7 @@
 [English Version](./README.md)
 
 aghub 是一款桌面端应用**兼**命令行工具，用于跨全部
-[26 个支持的助手](#支持的助手)统一管理 **MCP 服务器、技能、子代理、推理供应商
+[28 个支持的助手](#支持的助手)统一管理 **MCP 服务器、技能、子代理、推理供应商
 以及 Claude Code 插件**。一次配置某项能力，即可部署到各处 —— aghub 直接读取你
 真实的配置文件，且只改动你明确要求的部分。
 
@@ -31,7 +31,7 @@ aghub 是一款桌面端应用**兼**命令行工具，用于跨全部
 brew install --cask audichuang/tap/aghub
 ```
 
-**Windows 或 Linux** 请从下表下载（或前往
+也可以直接从下表下载（或前往
 [Releases](https://github.com/audichuang/aghub/releases) 页面）：
 
 | 平台                  | 下载                                                                                              |
@@ -65,7 +65,7 @@ aghub-cli --help
 
 **统一 MCP 管理** —— 一次配置，部署到所有助手
 
-- 一次配置，部署到全部 26 个支持的助手
+- 一次配置，部署到全部 28 个支持的助手
 - 支持本地 Stdio 和远程（SSE 和 StreamableHttp）连线方式
 - 无需删除即可启用或禁用服务器
 - 单条命令查看和审计所有助手的服务器
@@ -74,7 +74,7 @@ aghub-cli --help
 
 - 导入 `.skill` 包或使用 SKILL.md 前言编写技能
 - 通过通用技能目录跨助手共享技能
-- 技能安装一律以符号链接／junction 指向共享的 `.agents/skills` 主目录，不做隔离复制
+- 技能安装只在 `.aghub/` 保留一份主副本，再以符号链接／junction 授予各助手，不做隔离复制
 - SHA-256 内容验证与来源追踪
 - 浏览并安装 skills.sh 市场中的技能
 
@@ -114,12 +114,13 @@ aghub-cli --help
 
 ## 支持的助手
 
-26 个助手，一套统一界面：
+28 个助手，一套统一界面：
 
 Claude Code · Cursor · Windsurf · GitHub Copilot · Gemini CLI · OpenAI Codex ·
 OpenCode · Zed · Warp · Cline · RooCode · KiloCode · AugmentCode · Amp · Kiro ·
 Trae · Factory · Kimi Code CLI · Mistral Le Chat · Pi Coding Agent ·
-JetBrains AI · Hermes · Grok · Antigravity · OpenClaw · Oh My Pi
+JetBrains AI · Hermes · Grok · Antigravity · OpenClaw · Oh My Pi · ZCode ·
+DeepSeek Harness
 
 ## 贡献
 

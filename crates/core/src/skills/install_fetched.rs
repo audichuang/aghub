@@ -29,9 +29,10 @@ use aghub_agents::models::AgentType;
 #[derive(Clone, Debug)]
 pub struct AgentInstallResult {
 	pub agent: AgentType,
-	/// `true` when this agent received the skill on this call (a fresh copy or
-	/// a fresh universal link). `false` for a soft skip or runtime link failure
-	/// (see `error`). Predictably unsupported targets fail preflight before a
+	/// `true` when this agent can read the skill after this call: a fresh link,
+	/// or a slot that was ALREADY correctly linked (attribution, not rollback —
+	/// rollback uses `created_referrer_dirs`). `false` for a soft skip or runtime
+	/// link failure (see `error`). Predictably unsupported targets fail preflight before a
 	/// report is created.
 	pub installed: bool,
 	pub error: Option<String>,

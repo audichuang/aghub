@@ -153,7 +153,7 @@ list, or `all`), `-g`/`-p`, `--all`.
   `delete` and `reconcile skill` both report `UNSUPPORTED_OPERATION` / HTTP 422.
   Batching is transport and must not relabel either as bad parameters.
   Direct `delete` judges sharing against the WHOLE `-a` list (core's
-  `requested_agents`), not each row alone: `delete mcps <name> -a claude -p`
+  `requested`), not each row alone: `delete mcps <name> -a claude -p`
   refuses before preview or commit because copilot reads the same
   `<root>/.mcp.json`, and `-a claude,copilot` removes it (exit 0). Same for
   skills: a shared Referrer goes only when every reader of that slot is in the
@@ -217,7 +217,7 @@ a rootless `-p` stays `ProjectOnly` with no root and core's source lookup fails
 with a typed `ResourceNotFound`. Bailing early instead rewrites `--json`'s
 `error.code` to `CLI_ERROR` with nothing else visibly different — pinned by
 `rootless_project_transfer_keeps_resource_not_found_code`. That is also why
-`transfer::install_scope` maps the scope itself rather than calling
+`transfer::resolve_transfer_scope` maps the scope itself rather than calling
 `write_scope()`.
 
 **`Scope::write_scope()`** is the ONE answer to "which store does this write?"
@@ -226,7 +226,7 @@ ERRORS on anything else. Core's skill mutation entries take that `WriteScope`
 and carry no `Both` / missing-root rejection of their own — this resolver is
 where they are refused.
 `source`'s `write_scope`, `accept-rename`'s `WriteScope` and `transfer`'s
-`install_scope` stay exhaustive matches: a `_ => …::Global` catch-all turns any
+`resolve_transfer_scope` stay exhaustive matches: a `_ => …::Global` catch-all turns any
 scope the table lets through into a silent write to the GLOBAL lock.
 
 The classification itself is compile-forced but not compile-CHECKED: only review

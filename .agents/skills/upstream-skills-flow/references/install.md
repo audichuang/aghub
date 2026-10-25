@@ -44,8 +44,8 @@ aghub has no blob fast path; its git fetch is `aghub-git` (`fetch_ref_to_temp`,
 Upstream skips `metadata.json` and dirs `.git` / `__pycache__` / `__pypackages__`,
 **dereferences** symlinked files (`cp … dereference: true`) and skips broken ones.
 
-aghub's `copy_dir_recursive` (`crates/core/src/skills/linker/mod.rs`, `EXCLUDE_FILES` /
-`EXCLUDE_DIRS`) uses the same exclusions but **skips** symlinks instead of dereferencing
+aghub's `copy_dir_recursive` (`crates/core/src/skills/linker/mod.rs`, skip list
+`skill::excluded_from_master` in `crates/skill/src/hash.rs`) uses the same exclusions but **skips** symlinks instead of dereferencing
 — dereferencing would import outside bytes and make the Master disagree with the
 lstat-based Source hash. Pinned by `copy_dir_recursive_excludes_vcs_cache_and_metadata`
 and `master_copy_skips_links_and_preserves_source_hash`.

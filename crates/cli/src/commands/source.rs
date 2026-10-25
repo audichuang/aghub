@@ -739,8 +739,8 @@ struct SyncArgs<'a> {
 	agent: &'a str,
 }
 
-/// Per-agent outcome of one install action. `installed:false` with no `error`
-/// means the agent was ALREADY correctly linked (idempotent no-op = success);
+/// Per-agent outcome of one install action. `installed:true` also covers an
+/// agent that was ALREADY correctly linked (idempotent no-op = success);
 /// `error:Some` is a real failure (link error or an occupied/foreign slot).
 #[derive(Serialize, Clone)]
 struct AgentResultView {
@@ -1399,7 +1399,7 @@ fn apply_install(
 		Ok(report) => {
 			let applied = report.agent_results.iter().any(|r| r.installed);
 			// First HARD per-agent error (link failure / occupied slot). An
-			// already-linked agent has installed:false + error:None and must NOT
+			// already-linked agent has installed:true + error:None and must NOT
 			// count as an error — so surface the real error even when another
 			// agent installed fine (partial multi-agent failure stays visible).
 			let error =
