@@ -170,6 +170,14 @@ jobs:
               with:
                   targets: ${{ matrix.target }}
 
+            # tauri-cli exports MACOSX_DEPLOYMENT_TARGET (the bundle's minimum
+            # macOS, default 10.13) and cc-rs reads it, so without the same value
+            # here every C-backed crate (aws-lc-sys, ring, zstd-sys…) rebuilt in
+            # Build Tauri. rust-cache does not hash it, so the key is unchanged.
+            - name: Match tauri's macOS deployment target
+              if: runner.os == 'macOS'
+              run: echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
+
             # Restore-only: the dependency graph ci.yml's `build` job saves on
             # main. A tag run's own save would be scoped to the tag and
             # readable by no later release.
@@ -178,6 +186,15 @@ jobs:
               with:
                   shared-key: release-${{ matrix.os }}-${{ matrix.target }}
                   save-if: false
+
+            # Restore-only copy of ci.yml's full crates.io index (rust-cache
+            # prunes it; Windows re-downloaded it in Cargo Fetch, ~42s).
+            - name: Cargo index cache (warmed on main)
+              uses: actions/cache/restore@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
 
             - name: Cargo Fetch
               run: cargo fetch
@@ -279,29 +296,9 @@ jobs:
               env:
                   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
                   APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-              run: |
-                  set -euo pipefail
-                  # tauri signs externalBin but not `resources`, and the sidecar
-                  # ships as a resource: notarization rejects it unsigned.
-                  # docs/history/release.md#macos-developer-id-signing
-                  [ -n "$APPLE_CERTIFICATE" ] || { echo "APPLE_CERTIFICATE secret is not set" >&2; exit 1; }
-                  KC="$RUNNER_TEMP/sidecar-signing.keychain-db"
-                  KC_PASS="$(uuidgen)"
-                  printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/sidecar.p12"
-                  security create-keychain -p "$KC_PASS" "$KC"
-                  security set-keychain-settings -lut 3600 "$KC"
-                  security unlock-keychain -p "$KC_PASS" "$KC"
-                  security import "$RUNNER_TEMP/sidecar.p12" -k "$KC" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-                  rm -f "$RUNNER_TEMP/sidecar.p12"
-                  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASS" "$KC" > /dev/null
-                  # The chain resolves through the search list, not --keychain.
-                  existing=()
-                  while IFS= read -r line; do existing+=("$(echo "$line" | tr -d ' "')"); done < <(security list-keychains -d user)
-                  security list-keychains -d user -s "$KC" "${existing[@]}"
-                  BIN=crates/desktop/src-tauri/binaries/aghub-api
-                  codesign --force --options runtime --timestamp --keychain "$KC" \
-                      -s "Developer ID Application: Yung Chun Chuang (37HFR5V2JJ)" "$BIN"
-                  codesign --verify --strict --verbose=2 "$BIN"
+              # tauri signs externalBin but not `resources`, and the sidecar
+              # ships as a resource: notarization rejects it unsigned.
+              run: scripts/ci-macos-sign.sh crates/desktop/src-tauri/binaries/aghub-api
 
             - name: Stage notarization API key (macOS)
               if: runner.os == 'macOS'
@@ -323,7 +320,8 @@ jobs:
                   echo "APPLE_API_KEY_PATH=$KEY" >> "$GITHUB_ENV"
 
             - name: Build Tauri
-              uses: tauri-apps/tauri-action@v0.6.2
+              # Pinned by commit: this step receives the signing secrets.
+              uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   # Developer ID signing + notarization (App Store Connect API
@@ -332,10 +330,11 @@ jobs:
                   # takes the identity from the imported cert, and a literal
                   # "-" here would win and ship ad-hoc again.
                   # Why: docs/history/release.md#macos-developer-id-signing
-                  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-                  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-                  APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-                  APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+                  # Empty off macOS: the Linux/Windows legs have no use for them.
+                  APPLE_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE || '' }}
+                  APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+                  APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_ISSUER || '' }}
+                  APPLE_API_KEY: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY || '' }}
                   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
               with:
@@ -463,6 +462,15 @@ jobs:
               with:
                   targets: ${{ matrix.target }}
 
+            # tauri-cli exports MACOSX_DEPLOYMENT_TARGET (the bundle's minimum
+            # macOS, default 10.13) and cc-rs reads it, so without the same value
+            # here every C-backed crate (aws-lc-sys, ring, zstd-sys…) rebuilt in
+            # Build Tauri. rust-cache does not hash it, so the key is unchanged.
+            # Here too: ci.yml's `build` compiles aghub-cli into the same cache.
+            - name: Match tauri's macOS deployment target
+              if: runner.os == 'macOS'
+              run: echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
+
             # Restore-only: the dependency graph ci.yml's `build` job saves on
             # main. A tag run's own save would be scoped to the tag and
             # readable by no later release.
@@ -471,6 +479,15 @@ jobs:
               with:
                   shared-key: release-${{ matrix.os }}-${{ matrix.target }}
                   save-if: false
+
+            # Restore-only copy of ci.yml's full crates.io index (rust-cache
+            # prunes it; Windows re-downloaded it in Cargo Fetch, ~42s).
+            - name: Cargo index cache (warmed on main)
+              uses: actions/cache/restore@v6
+              with:
+                  path: ~/.cargo/registry/index
+                  key: cargo-index-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: cargo-index-${{ runner.os }}-
 
             - name: Cargo Fetch
               run: cargo fetch
@@ -520,6 +537,23 @@ jobs:
                       [[ "$GOT" == "aghub-cli ${RELEASE_TAG#v}" ]] \
                         || { echo "version mismatch: got '$GOT', want 'aghub-cli ${RELEASE_TAG#v}'" >&2; exit 1; }
                   fi
+
+            # Same Developer ID as the desktop: an ad-hoc CLI changes identity on
+            # every build, so each `brew upgrade` re-prompted for the keychain
+            # items it shares with the desktop (inference keys).
+            - name: Sign and notarize CLI (macOS)
+              if: runner.os == 'macOS'
+              shell: bash
+              env:
+                  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+                  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+                  APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+                  APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+                  APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+              run: |
+                  BIN="target/${{ matrix.target }}/release/aghub-cli"
+                  scripts/ci-macos-sign.sh --notarize "$BIN"
+                  "$BIN" --version
 
             - name: Package CLI (Unix)
               if: matrix.os != 'windows-latest'
@@ -621,10 +655,11 @@ jobs:
         # After `publish`: the tap points users at public download URLs,
         # which do not exist while the release is a draft.
         needs: publish
-        # Skip the stable Homebrew bump for pre-releases (tags with a '-' suffix,
-        # e.g. vX.Y.Z-rc.N). RC testers download the prerelease assets directly;
+        # Skip the stable Homebrew bump for pre-releases: tags with a '-' suffix
+        # (e.g. vX.Y.Z-rc.N) and dispatched runs with `prerelease` checked (the
+        # default), which `publish` marks pre-release too (env.IS_PRERELEASE).
         # `brew install aghub` must keep pointing at the last STABLE version.
-        if: ${{ !contains(github.event.inputs.version || github.ref_name, '-') }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.prerelease) && !contains(github.event.inputs.version || github.ref_name, '-') }}
         runs-on: ubuntu-latest
         env:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

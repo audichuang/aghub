@@ -59,20 +59,6 @@ aghub-cli --help
 - macOS: macOS 12 (Monterey) 及以上
 - Linux: Ubuntu 22.04+ / Debian 11+ / Fedora 34+ 及其他主流发行版
 
-### macOS：提示「aghub 已损坏，无法打开」
-
-macOS 版本已使用 Developer ID 证书签名并经过 Apple 公证（notarization），可以直接打开。只有**旧版本**（ad-hoc 签名）会出现「已损坏」提示；遇到时，把 App 移动到 `/Applications` 后清除隔离属性：
-
-```bash
-xattr -cr /Applications/aghub.app
-```
-
-如果仍无法打开，再显式移除隔离属性：
-
-```bash
-sudo xattr -dr com.apple.quarantine /Applications/aghub.app
-```
-
 ---
 
 ## 功能

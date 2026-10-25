@@ -61,23 +61,6 @@ with `cargo build --release -p aghub-cli`.
 - macOS: macOS 12 (Monterey) and above
 - Linux: Ubuntu 22.04+ / Debian 11+ / Fedora 34+ and other mainstream distributions
 
-### macOS: "aghub is damaged and can't be opened"
-
-macOS builds are signed with a Developer ID certificate and notarized by Apple,
-so they open normally. Only **older releases** (ad-hoc signed) trigger the
-"damaged" warning; for those, clear the quarantine attribute after moving the
-app to `/Applications`:
-
-```bash
-xattr -cr /Applications/aghub.app
-```
-
-If that doesn't help, remove the attribute explicitly:
-
-```bash
-sudo xattr -dr com.apple.quarantine /Applications/aghub.app
-```
-
 ---
 
 ## Features
