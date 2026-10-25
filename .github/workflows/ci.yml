@@ -388,6 +388,13 @@ jobs:
               uses: dtolnay/rust-toolchain@stable
               with:
                   targets: ${{ matrix.target }}
+            # tauri-cli exports MACOSX_DEPLOYMENT_TARGET (the bundle's minimum
+            # macOS, default 10.13) and cc-rs reads it, so without the same value
+            # here every C-backed crate (aws-lc-sys, ring, zstd-sys…) rebuilt in
+            # release.yml's Build Tauri. rust-cache does not hash it, so the key is unchanged.
+            - name: Match tauri's macOS deployment target
+              if: runner.os == 'macOS'
+              run: echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
             - name: Rust Cache
               id: cache
               uses: Swatinem/rust-cache@v2

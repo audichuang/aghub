@@ -71,7 +71,20 @@ renew it (new CSR, same steps) and replace `APPLE_CERTIFICATE` and
 the latter. The first signed release (v2.43.1) failed notarization on it: "not
 signed with a valid Developer ID certificate", no secure timestamp, no hardened
 runtime. "Sign staged aghub-api (macOS)" signs it with `--options runtime
---timestamp` before "Build Tauri" seals the bundle.
+--timestamp` before "Build Tauri" seals the bundle, through
+`scripts/ci-macos-sign.sh`.
+
+**The CLI is signed and notarized too.** `aghub-cli` shares keychain items
+with the desktop (inference keys). Ad-hoc, its identity changed every build,
+so each `brew upgrade` re-prompted. The same script signs it and submits it
+to the notary service (a bare Mach-O cannot be stapled; Gatekeeper fetches
+the ticket online).
+
+**Not done: the DMG itself.** tauri notarizes and staples the `.app`, then
+builds and signs the DMG without notarizing it (`spctl` on the DMG says
+`Unnotarized Developer ID`). The app inside is stapled, so the cask and a
+Finder drag-install open it without prompts; notarizing the DMG would mean
+re-uploading tauri-action's asset in the draft.
 
 **No `APPLE_SIGNING_IDENTITY`.** tauri derives the identity from the imported
 cert; leaving the old literal `-` would override it and ship ad-hoc again.
