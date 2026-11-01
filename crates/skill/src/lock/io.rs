@@ -87,7 +87,7 @@ fn read_skill_lock_locked() -> SkillLockFile {
 /// aghub against aghub only — `npx skills` and editors take none of it.
 ///
 /// The error names the FILE, never its path: it reaches API clients verbatim,
-/// and root AGENTS.md forbids internal lock paths in API errors. The path goes
+/// and crates/api/AGENTS.md forbids internal lock paths in API errors. The path goes
 /// to the log instead.
 pub(crate) fn read_lock_for_modify<T>(
 	path: &Path,
@@ -190,7 +190,7 @@ fn read_lock_for_modify_versioned() -> std::io::Result<SkillLockFile> {
 /// `install_fetched` materializes the Master and Referrers first, so a lock
 /// funnel that refuses mid-transaction would leave an untracked partial
 /// install behind. Prove the locks are writable while there is still nothing
-/// to roll back — the project-AGENTS rule is preflight before any write.
+/// to roll back — the rule is preflight before any write (crates/core/src/batch.rs).
 pub fn ensure_locks_writable(
 	global: bool,
 	project_root: Option<&Path>,

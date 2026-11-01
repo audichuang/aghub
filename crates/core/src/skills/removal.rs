@@ -3754,7 +3754,7 @@ mod universal_master_tests {
 	}
 
 	/// Both spellings are stores: `.agents/skills` and XDG `agents/skills`
-	/// (no leading dot — root AGENTS.md).
+	/// (no leading dot).
 	#[test]
 	fn both_store_spellings_are_listed() {
 		let roots = skill_store_roots(Some(std::path::Path::new("/p")));

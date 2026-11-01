@@ -1,6 +1,6 @@
 ---
 name: aghub-skills
-description: Invariants for aghub's own skill-subsystem code — lock hash fields, the Master/Referrer layout, the two rename transactions, and where skill code lives across crates. Use when changing skill install, update, remove, prune, repair, rename or discovery, the mutation lock and rollback, or which agents a flow reads or writes (disabled agents, keep rules), in crates/skill, crates/core or the api skills routes; not for npx lock/hash interop (npx-skills-contract).
+description: Invariants for aghub's skill-subsystem code — lock hash fields, the Master/Referrer layout, rename transactions, the mutation lock and rollback, and which agents a flow reads or writes. Use when changing skill install, update, remove, prune, repair, rename or discovery in crates/skill, crates/core or the api skills routes; not for npx lock/hash interop (npx-skills-contract).
 ---
 
 # Working on aghub's skill subsystem

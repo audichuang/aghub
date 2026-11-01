@@ -123,7 +123,8 @@ fn acquire(
 ///
 /// The mutation lock cannot close this window alone: a fetch must not run under
 /// the lock, so the read deciding what to fetch is unlocked — the WIDEST window
-/// in the subsystem (seconds). See crates/core/AGENTS.md "Mutation attribution".
+/// in the subsystem (seconds). See
+/// .agents/skills/aghub-skills/references/mutation-attribution.md.
 ///
 /// **Only an entry aghub actually read can produce one** —
 /// [`of_global_entry`](Self::of_global_entry) /

@@ -10,6 +10,7 @@ echo "Running format checks..."
 cargo fmt --all -- --check
 bun run format:check
 node scripts/check-history-links.mjs
+node scripts/check-agents-chain.mjs
 
 echo "Running Rust clippy..."
 cargo clippy --workspace --all-targets -- -D warnings

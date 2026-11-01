@@ -135,7 +135,7 @@ fn io_err(context: &str, e: std::io::Error) -> ConfigError {
 /// a surface calling it directly skips the guard.
 ///
 /// The guard is taken BEFORE `plan_repair`: the plan IS the deciding read
-/// (`crates/core/AGENTS.md` "Mutation attribution"). A dry run takes none.
+/// (`.agents/skills/aghub-skills/references/mutation-attribution.md`). A dry run takes none.
 ///
 /// `grant_to` is computed here, not passed in, so it is answered against the
 /// layout as it stands and under the same lock as the plan.

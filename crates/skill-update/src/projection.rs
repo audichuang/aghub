@@ -431,7 +431,7 @@ mod tests {
 
 	/// The project half of the read order, which the global test above pins for
 	/// its own half. Both matter and for the SAME reason: the heal writer
-	/// (`write_auto_healed_hashes`, called only by the API) also heals the
+	/// (`write_auto_healed_hashes`, on the API route) also heals the
 	/// project lock, and a heal computed from
 	/// disk hashes older than the lock snapshot passes its own precondition and
 	/// then clears `skillFolderHash` — destroying an `npx skills update` that
