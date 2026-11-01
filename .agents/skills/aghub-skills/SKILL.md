@@ -1,6 +1,6 @@
 ---
 name: aghub-skills
-description: Invariants for aghub's own skill-subsystem code — lock hash fields, universal vs copy layout, the two rename transactions, and where skill code lives across crates. Use when changing skill install, update, remove, prune, rename or discovery in crates/skill, crates/core or the api skills routes; not for npx lock/hash interop (npx-skills-contract).
+description: Invariants for aghub's own skill-subsystem code — lock hash fields, the Master/Referrer layout, the two rename transactions, and where skill code lives across crates. Use when changing skill install, update, remove, prune, repair, rename or discovery, the mutation lock and rollback, or which agents a flow reads or writes (disabled agents, keep rules), in crates/skill, crates/core or the api skills routes; not for npx lock/hash interop (npx-skills-contract).
 ---
 
 # Working on aghub's skill subsystem
@@ -26,13 +26,17 @@ Terms (Source hash, Master, Referrer, Relink, …) are defined in
   `crates/skill/tests/hash_parity_golden.rs`. Full round-trip contract:
   [npx-skills-contract](../npx-skills-contract/SKILL.md).
 
-## Install layout: universal vs copy
+## Install layout: Master + Referrers
 
-- **Universal**: one Master at `.aghub/<sanitized-name>` + per-agent symlink
-  Referrers. **Copy** (isolated): a real per-agent directory, no Master.
-- `canonical_path.is_some()` selects the universal rules (`plan_removal`
-  dispatches on it alone); it is set only for a link — except the
-  `--all-agents` store fallback, which synthesizes it (see `crates/core/AGENTS.md`).
+- Every install is one Master at `.aghub/<sanitized-name>` + per-agent symlink
+  Referrers. A real directory in an agent's slot is not a Referrer (npx,
+  hand-placed, or an aghub before 2.18). It may stand alone or sit beside a
+  Master (`ForkedCopy`), and its bytes may exist nowhere else.
+- `plan_removal` picks the Referrer rules when `canonical_path.is_some()` and
+  the copy rules (`plan_copy_removal`) otherwise, after first asking whether a
+  link's real-directory target can be released. `canonical_path` comes from a
+  link, except the `--all-agents` store fallback, which synthesizes it (see
+  `crates/core/AGENTS.md`).
 - Renaming or removing a Master must account for every Referrer. Record
   referrers **before** the rename (`canonicalize` resolves through the live
   Master), then re-point them.
@@ -55,7 +59,9 @@ Terms (Source hash, Master, Referrer, Relink, …) are defined in
 - Skill mutations persist to disk and the lock, **not** via `save_current()` —
   `save()` serializes MCPs only and rewriting them drops fields aghub does not
   model ([history](../../../docs/history/core-manager.md#skill-mutations-rewrote-mcp-config)).
-- Adding an agent: `crates/agents/AGENTS.md` "ADDING / REMOVING AN AGENT".
+- Mutation lock and rollback receipts: [references/mutation-attribution.md](references/mutation-attribution.md).
+- Disabled agents, rosters and what removal keeps:
+  [references/rosters-and-keep-rules.md](references/rosters-and-keep-rules.md).
 
 ## Testing
 

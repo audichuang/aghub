@@ -1,8 +1,6 @@
 # DESKTOP FRONTEND KNOWLEDGE BASE
 
-**Scope**: the React frontend (`crates/desktop/src/`). For build/Tauri/HeroUI **policy**, package manager (`bun`), and the Rust `src-tauri` backend, see the desktop root [`../AGENTS.md`](../AGENTS.md). This file is the frontend-internals map.
-
-**Stack**: React 19 + TypeScript + HeroUI v3 + Tailwind v4 + TanStack Query.
+**Scope**: the frontend internals (`crates/desktop/src/`), with TanStack Query for data.
 
 ## STRUCTURE
 

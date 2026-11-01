@@ -31,7 +31,10 @@ aghub splits detection from application and is offline-by-default.
 
 Scope defaults to global + current project. Both modes run the one orchestrator,
 `skill_update::run_update_check` (`crates/skill-update/src/lib.rs`, also behind API
-`GET /skills/check-updates`), and are read-only on both locks.
+`GET /skills/check-updates`). Offline writes neither lock. CLI `--online` advances a
+global `upToDate` row's `refCommit` (`projection::write_auto_healed_hashes`) and
+never writes the project lock; the API route heals both scopes, content hash
+included (`crates/skill-update/AGENTS.md`).
 
 - **Offline (default)** — remote sources report `uncheckable`/`network` with
   `checked: false`; no network. The main difference from npx.

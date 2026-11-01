@@ -9,17 +9,15 @@
 Role map (not a full tree):
 
 - `src/` — React frontend (`pages/`, `components/`, `lib/`, generated DTOs under `src/generated/`)
-- `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI), commands under `src/commands/`. Embeds `aghub-api` on localhost and uses `aghub-remote` for SSH; it depends on **neither** `aghub-core` nor `aghub-inference` — the app data root reaches it through the api re-export (root AGENTS.md "Where to Look"). It never opens the inference db: the provider list comes over HTTP from the embedded API. The credential wrapper it imports (`resolve_git_token_for_source`) DOES read the OS keyring in-process. A desktop upgrading from before the app-data-root unification keeps its inference db in the legacy Tauri dir and **aghub does not move it** — `src-tauri/src/commands/server.rs` `legacy_inference_db_hint` only warns, keyed on the LEGACY FILE EXISTING so a copy does not silence it. Do not "fix" that. Why: [`docs/history/desktop-tauri.md#legacy-inference-db-migration-removed`](../../docs/history/desktop-tauri.md#legacy-inference-db-migration-removed).
+- `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI), commands under `src/commands/`. Embeds `aghub-api` on localhost and uses `aghub-remote` for SSH; it depends on **neither** `aghub-core` nor `aghub-inference` — the app data root reaches it through the api re-export. It never opens the inference db: the provider list comes over HTTP from the embedded API. The credential wrapper it imports (`resolve_git_token_for_source`) DOES read the OS keyring in-process. A desktop upgrading from before the app-data-root unification keeps its inference db in the legacy Tauri dir and **aghub does not move it** — `src-tauri/src/commands/server.rs` `legacy_inference_db_hint` only warns, keyed on the LEGACY FILE EXISTING so a copy does not silence it. Do not "fix" that. Why: [`docs/history/desktop-tauri.md#legacy-inference-db-migration-removed`](../../docs/history/desktop-tauri.md#legacy-inference-db-migration-removed).
 - `src-tauri/capabilities/` — permission manifests (read `default.json`; don't restate the list here)
-
-Page-level frontend notes: `src/AGENTS.md`.
 
 `.impeccable.md` at the repo root is the frontend's design context (users, brand voice, aesthetic direction, type and color strategy).
 
-## CRITICAL: HEROUI V3
+## HEROUI V3
 
-**STOP**: what you remember about HeroUI React is WRONG for v3 — never write a
-component from memory. The source of truth is the live v3 docs
+HeroUI v3 changed the provider, styling and component API from v2, so write
+components from the docs. The source of truth is the live v3 docs
 (`https://v3.heroui.com/docs/react/…mdx`); the project skill **`heroui-react`**
 covers fetching them plus the compound-component patterns. A local
 `.heroui-docs/react/` cache may exist (gitignored, usually **absent** — do not
@@ -29,9 +27,13 @@ components, Tailwind v4.
 
 ## GOLDEN RULE
 
-After changing a Rust API DTO, run `bun run generate:dto` (the rest of the rule
-is in `src/AGENTS.md`). Everything else (`dev`/`start`/`build`/`test`/`typecheck`)
-is in `package.json`; **bun only**.
+After changing a Rust API DTO, run `bun run generate:dto`. Everything else
+(`dev`/`start`/`build`/`test`/`typecheck`) is in `package.json`; run it from this
+directory with `bun run`.
+
+After editing `src/data/featured-skills.json`, run `just featured-check`. The
+catalog points at other people's repos and rots on their schedule; the check needs
+the network and a `gh` login, so it stays outside preflight.
 
 ## ANTI-PATTERNS
 
@@ -43,7 +45,7 @@ is in `package.json`; **bun only**.
     - `.Control` as a SIBLING of `.Content` → the `<input>` exists, but the visible control sits OUTSIDE the clickable `<label>`: clicking the box does nothing, and hover/focus/press feedback is gone (3.2.x rewrote those selectors to `.checkbox:has([data-slot="checkbox-content"][data-hovered="true"])`).
     - `.Control` INSIDE `.Content` → correct: input, label, and the control within the label.
     - `children` is `ReactNode`, so neither `typecheck` nor `lint` can see a missing sub-component, and the pre-push hook runs no tests. The guard is `src/lib/heroui-control-structure.test.ts` — a source scan that fails on either broken shape (it owns the call-site count, with a vacuity floor). Do not delete it. Why: `docs/history/desktop-frontend.md#heroui-32-moved-the-interactive-element-to-content`.
-    - **If `.Content` carries a className describing the LABEL's layout (e.g. `flex flex-col`), move it to a wrapper `div` around the original children** — `.checkbox__content`/`.switch__content` already default to `inline-flex items-center gap-3` (read `node_modules/@heroui/styles/dist/components/{checkbox,switch}.css`), which is the row the old root used to provide. Leaving `flex-col` on `.Content` stacks the control above the label text.
+    - **If `.Content` carries a className describing the LABEL's layout (e.g. `flex flex-col`), move it to a wrapper `div` around the original children** — `.checkbox__content`/`.switch__content` already default to `inline-flex items-center gap-3` (read `node_modules/@heroui/styles/dist/components/{checkbox,switch}.css`), which is the row layout the label needs. Leaving `flex-col` on `.Content` stacks the control above the label text.
 - **Root-width pinning for a bare control needs a measurement.** The 3.2.x root is `flex flex-col items-start gap-1` and `gap-3` lives on `.checkbox__content`. Pinning the root is reasonable for a label-less control in a hand-built row, but **measure before quoting a number** — see the measurement bullet below.
 - **Debugging row alignment**: when a custom-laid-out row "should align by the padding/`px-` math but visibly doesn't," suspect a HeroUI control's root-wrapper width FIRST (read the component's `node_modules/@heroui/styles/dist/components/<name>.css`); don't keep re-flexing the container. The visible control ≠ its layout box.
 - **`Fieldset` cannot shrink below its content's min-content** — `<fieldset>` carries `min-inline-size: min-content` from the UA stylesheet, a floor no flex shrinking reaches, and HeroUI's `.fieldset` (`shrink grow basis-0`) does not clear it. `src/styles/form.css` sets `min-inline-size: 0` for `form.react-aria-Form fieldset` so every form can narrow; **do not delete that rule** — without it the MCP create/edit form is 24px wider than its card at the 1024px minimum window and the page grows a horizontal scrollbar. A `min-w-0` on the inner fields does NOT substitute for it: the floor is on the fieldset, not the fields.

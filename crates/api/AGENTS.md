@@ -84,7 +84,8 @@ line** — don't reword it). Pass `--port N` to pin one.
   other domains own their store — credentials → credential store, inference →
   `InferenceProviderStore`, plugins → `ClaudePluginManager`
 - Errors: machine-readable codes + safe messages — no internal temp/lock/keyring
-  paths (user-config paths, e.g. the missing-config-file message, are intentional)
+  paths (user-config paths, e.g. the missing-config-file message, are intentional;
+  skill DTOs may expose `source_path` / `canonical_path` for the UI)
 - Route error PRECEDENCE is public contract (e.g. MCP create answers
   capability → validate → writable): refactoring a route into shared helpers
   must not reorder which error wins on compound-invalid requests
@@ -116,7 +117,7 @@ line** — don't reword it). Pass `--port N` to pin one.
   `skill_update::mutation::resync_judged_skill(s)` — the CLI's
   `apply-update --outdated` seam: a source that moved past it is refused
   (`SKILL_SOURCE_CHANGED_DURING_FETCH`, nothing written). Absent installs the
-  fetched tip, as before; the desktop's source view applies from `source diff`
+  fetched tip; the desktop's source view applies from `source diff`
   rows, which carry no judged commit.
 - `GET /skills/check-updates` deliberately reads the lock fail-OPEN (a corrupted
   or unreadable lock is treated as empty/missing; the CLI `check` is fail-closed,
@@ -140,10 +141,4 @@ line** — don't reword it). Pass `--port N` to pin one.
   OUTSIDE the closure, which is also where they belong relative to the lock.
   Plugin ownership is injected once in `build_rocket` and read inside core,
   so no route passes it in.
-- NEVER orchestrate two or more core mutation steps within a handler to form a
-  single action — orchestration belongs in core behind one entry point.
-- Never re-spell in a route a code that core already owns
-  (`aghub_core::error_codes`) — map the core error through `ApiError::from`, so
-  the CLI and API cannot drift apart on it. A string literal is only for a code
-  no core error produces (request-shape and HTTP-boundary checks).
-- (path/ConfigManager rules: see root AGENTS.md Anti-Patterns — errors here use machine codes + safe messages)
+- Never re-spell in a route a code core already owns; map the core error through `ApiError::from`, so the CLI and API cannot drift apart on it
