@@ -57,13 +57,13 @@ Wrong skip = missed updates; wrong fetch = wasted network.
 
 **The preflight hands the fetch a CLAIM, not a cache entry.** `resolve_tip`
 returns a `PinnedSnapshot` (REST path only) and `check_updates` carries it into
-`Fetcher::fetch_pinned`. A `(url, ref, token) -> snapshot` cache was
-last-writer-wins, and since several source spellings normalize to one coordinate
+`Fetcher::fetch_pinned`. A `(url, ref, token) -> snapshot` cache would be
+last-writer-wins: several source spellings normalize to one coordinate
 (`acme/skills`, `github:acme/skills`, `https://github.com/acme/skills.git`) while
-groups are keyed by the RAW string, a slow observation of an older tip could
-overwrite a newer one — the fetch then materialized a tip nobody judged and the
-row read `UpToDate` for a source that had moved. A claim also carries its backend,
-there is no commit-oid-keyed memo to consult, so list/fetch need no prior `resolve` on the same instance.
+groups are keyed by the RAW string, so a slow observation of an older tip can
+overwrite a newer one, and the fetch materializes a tip nobody judged while the
+row reads `UpToDate` for a source that moved. A claim also carries its backend,
+so the gix path needs no prior `resolve` on the same instance; the REST path still reads the `commit_oid` context its own backend cached at resolve.
 
 **Anything that answers without looking upstream must still verify the local
 copy** (`locally_intact`): the preflight skip, the pinned-SHA shortcut, and the
@@ -82,7 +82,7 @@ one — the REST path spends anonymous GitHub's 60/hr. A `git ls-refs` handshake
 cheap in bytes and ~0.6s against github.com, and that was most of a check's wall
 clock before REST took over the github path.
 
-## TREE-FIRST CONTENT PROOF (#77, #13)
+## TREE-FIRST CONTENT PROOF
 
 refCommit is per-entry provenance, not a group cache key: one single-skill
 update, an upstream-deleted member, or a lock without refCommit (npx / project)
@@ -133,7 +133,7 @@ CLI and API call the same entries; these are the divergences this crate owns (th
   `heal_oid` (a project row never preflights, so healing the VCS-tracked
   project lock buys no request; `heal_hash` is emitted for any verdict, so
   healing it on an `updateAvailable` row records a local edit as the baseline). Skipping it leaves `refCommit` at the install
-  commit, so every check re-fetches the group (#95). A busy mutation lock never
+  commit, so every check re-fetches the group. A busy mutation lock never
   fails the check: the API reports it in `healError` (retryable
   `SKILL_MUTATION_LOCK_BUSY`), the CLI as a stderr warning.
 

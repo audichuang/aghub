@@ -76,4 +76,4 @@ Master location is `master_store_dir(root)/<sanitize_name(name)>` (`.aghub`), no
   removes it). Preserve this; it protects hand-placed skills.
 - **Master reuse** — an existing Master is left intact; only the link is (re)made.
 - **Mutation lock** — the install holds the interprocess mutation lock from the first
-  state read through the lock write (`crates/core/AGENTS.md` "Mutation attribution").
+  state read through the lock write ([mutation attribution](../../aghub-skills/references/mutation-attribution.md)).

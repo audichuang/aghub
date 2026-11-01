@@ -87,8 +87,8 @@ rounds is normal.
 
 ## 4. Spec from the approved prototype
 
-Only once they say it is right, write `.scratch/<feature>/spec.md` (tracked;
-see existing ones). What makes it followable:
+Only once they say it is right, write the spec as a GitHub issue
+(`docs/agents/issue-tracker.md`). What makes it followable:
 
 - **Why**, with `file:line` for each structural problem from step 1.
 - **Target behavior** as tables, not prose: URL params and their rules, what
@@ -108,10 +108,10 @@ see existing ones). What makes it followable:
 
 ## 5. Hand off and verify
 
-The implementer gets the spec path, the prototype link, and
+The implementer gets the spec issue, the prototype link, and
 `crates/desktop/AGENTS.md` (which routes HeroUI v3 to the `heroui-react` skill).
 Then verify the result yourself with `verify-desktop-ui` — the acceptance
 scenarios are already written, so this is mostly running them.
 
 Ask for the numbers back, not a summary: gates run, scenarios observed. "I
-confirmed by reading the code path" is the answer that hid a blank list here.
+confirmed by reading the code path" does not show the page renders its data.

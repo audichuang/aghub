@@ -20,7 +20,7 @@ curl -fsSL https://v3.heroui.com/install | bash -s heroui-react
 
 ---
 
-## CRITICAL: v3 Only - Ignore v2 Knowledge
+## v3 only
 
 **This guide is for HeroUI v3 ONLY.** Do NOT apply v2 patterns — the provider, styling, and component API all changed:
 
@@ -112,72 +112,17 @@ Getting started guides: `https://v3.heroui.com/docs/react/getting-started/{topic
 
 ---
 
-## Installation Essentials
+## Package setup
 
-HeroUI v3 is **stable** (this repo pins `@heroui/react` `^3.0.1` — no `@beta`
-tag; the desktop frontend installs with **bun**, not npm).
-
-### Quick Install
-
-```bash
-bun add @heroui/styles @heroui/react tailwind-variants
-```
-
-### Framework Setup (Next.js App Router - Recommended)
-
-1. **Install dependencies:**
-
-```bash
-bun add @heroui/styles @heroui/react tailwind-variants tailwindcss @tailwindcss/postcss postcss
-```
-
-2. **Create/update `app/globals.css`:**
-
-```css
-/* Tailwind CSS v4 - Must be first */
-@import "tailwindcss";
-
-/* HeroUI v3 styles - Must be after Tailwind */
-@import "@heroui/styles";
-```
-
-3. **Import in `app/layout.tsx`:**
-
-```tsx
-import "./globals.css";
-
-export default function RootLayout({
-	children,
-}: {
-	children: React.ReactNode;
-}) {
-	return (
-		<html lang="en" suppressHydrationWarning>
-			<body>
-				{/* No Provider needed in HeroUI v3! */}
-				{children}
-			</body>
-		</html>
-	);
-}
-```
-
-4. **Configure PostCSS (`postcss.config.mjs`):**
-
-```js
-export default {
-	plugins: {
-		"@tailwindcss/postcss": {},
-	},
-};
-```
+HeroUI v3 is **stable**: `crates/desktop/package.json` holds the pin (no `@beta`
+tag). Add packages with **bun**, not npm: `bun add @heroui/react @heroui/styles`.
 
 ### Critical Setup Requirements
 
-1. **Tailwind CSS v4 is MANDATORY** - HeroUI v3 will NOT work with Tailwind CSS v3
+1. **Tailwind CSS v4** - HeroUI v3 does not work with Tailwind CSS v3
 2. **Use Compound Components** - Components use compound structure (e.g., `Card.Header`, `Card.Content`)
 3. **Use onPress, not onClick** - For better accessibility, use `onPress` event handlers
-4. **Import Order Matters** - Always import Tailwind CSS before HeroUI styles
+4. **Import Order Matters** - Always import Tailwind CSS before HeroUI styles (`crates/desktop/src/index.css`)
 
 ---
 

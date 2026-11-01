@@ -21,7 +21,7 @@ _Avoid_: "lock row".
 ### Skill layout & install
 
 **Universal install**:
-A layout where a skill lives once as a shared Master and each agent's skills directory holds a symlink pointing at it. Contrast with an Isolated-copy install, where every agent gets its own independent copy and there is no Master.
+A layout where a skill lives once as a shared Master and each agent's skills directory holds a symlink pointing at it. It is the only layout aghub installs; a real per-agent directory comes from npx, a hand copy or an aghub before 2.18.
 _Avoid_: "symlink mode" / "linked skill" as the canonical name.
 
 **Master**:

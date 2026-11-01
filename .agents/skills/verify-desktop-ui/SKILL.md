@@ -59,7 +59,7 @@ the way the `verify` skill does, not against the real home.
 
 ## Scenario shape
 
-The acceptance scenarios in a `.scratch/<feature>/spec.md` written by
+The acceptance scenarios in the spec issue written by
 `plan-desktop-ui` are what you translate into this format.
 
 ```json
@@ -88,7 +88,7 @@ Per scenario: `url`, `settle`, optional `dark` and `viewport`. Steps: `click` /
 dispatcher does not recognise is skipped silently, so a typo like `screenShot`
 produces a green scenario that did nothing.
 
-## Traps, each of which cost real time here
+## Traps
 
 | Symptom                                    | Cause                                                                                                                                                                     |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -123,9 +123,7 @@ the end, which is not the same as every scenario being right.
 
 When a line contradicts what you expected, the default is that **the output is
 right and your explanation is wrong**. Explaining an anomaly away as test noise
-("probably clicked the wrong row") discards the one thing that would have found
-the bug — that exact mistake happened here, and the regression surfaced two
-reviews later instead.
+("probably clicked the wrong row") discards the one thing that would find the bug.
 
 ## Cleaning up
 

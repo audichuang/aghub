@@ -19,10 +19,8 @@
 
 ## Overview
 
-Aghub manages AI coding agent configurations across many agents (see
-`AgentType::ALL` in `crates/agents/src/agents/mod.rs` — NOT `crates/core`), handling
-MCP servers, skills, and sub-agents through a unified interface. It also manages
-inference providers, Claude Code plugins, and SSH-based remote deployment.
+Aghub manages MCP servers, skills, sub-agents, inference providers, Claude Code
+plugins and SSH-based remote deployment across many coding agents.
 Stateless design — it reads the actual config files, tracks capability sources,
 and requires explicit opt-in for changes.
 
@@ -88,10 +86,6 @@ Cargo graph (depends-on): `agents` ← `core` ← `{cli, api}`; `desktop` → `a
 
 ## Where to Look
 
-Only where the obvious guess is wrong; everything else, ask CodeGraph. The one
-that catches everybody: the `AgentAdapter` **trait** is in
-`crates/core/src/adapters/mod.rs`, but the impl is in `core/src/adapter.rs`.
-
 **ONE app data root: `aghub_core::paths::app_data_dir()`** — `$AGHUB_DATA_DIR`
 else `dirs::data_dir()/aghub`. `aghub-cli`'s `commands::app_data_dir()` and
 `aghub_api::default_app_data_dir()` are one-line delegations to it (the desktop
@@ -103,18 +97,12 @@ macOS/Windows, so the split never shows up locally. Parity is pinned by
 `aghub_api::tests::default_app_data_dir_matches_core_seam` and the CLI's
 `commands::tests::app_data_dir_matches_core_seam`. Why: knowledge page `推論供應商與 app data root`.
 
-## Key Design Patterns
-
-- **Adapter pattern**: `create_adapter(agent_type)` → `registry::get` →
-  `&'static AgentDescriptor` implements `AgentAdapter`. **No hand-wired adapter
-  structs** — behavior is function pointers on each descriptor.
-
 ## Agent-Specific Behavior
 
 Each agent's **descriptor** lives in `crates/agents/src/agents/<name>.rs` (not
 core) and owns that agent's config paths — there is no path table to maintain
 anywhere else. The MCP **parse/serialize** logic it points at lives in
-`crates/agents/src/format/`. Per-agent dialect gotchas: `crates/agents/AGENTS.md`.
+`crates/agents/src/format/`.
 
 The two rules that span crates stay here:
 
@@ -149,10 +137,6 @@ The two rules that span crates stay here:
   runs `bun run format:check` from the REPO ROOT (`oxfmt --check .`), so it
   covers `scripts/` and `docs/`. `crates/desktop`'s own `format:check` never
   sees root files
-- `just featured-check` (bundled skills-sh catalog still installable) needs the
-  network and a `gh` login, so it is deliberately outside preflight. Run it
-  after editing `crates/desktop/src/data/featured-skills.json` — the catalog
-  points at other people's repos and rots on their schedule
 - `just test` and preflight run **cargo-nextest** (one process per test), not
   `cargo test`; doc tests stay `cargo test --workspace --doc`. Plain
   `cargo test` must still pass, so the env-mutex rule still binds. Why:
@@ -164,7 +148,6 @@ The two rules that span crates stay here:
   its measurement, not from scratch
 - Prefer file-scoped over the full suite:
   `cargo test -p aghub-core <full::module::path::name> -- --exact`
-- Desktop frontend commands run from `crates/desktop` via `bun run …`
 
 ## Definition of done
 
@@ -187,8 +170,6 @@ implementing and verifying.
   ("what changed in the components we call?"); one buried under another title
   does not, and the revert is no longer cheap. It has cost this repo a release
   once already.
-- **After editing `crates/desktop/src/data/featured-skills.json`**:
-  `just featured-check` (see Commands).
 
 Return early only when an ask-first item below blocks you, or when the gate
 fails for a reason outside the requested change. A failure you caused is part of
@@ -196,18 +177,7 @@ the task, not a reason to stop.
 
 ## Surfaces
 
-Authoritative for the CLI: clap (`just start -- --help`, `crates/cli/src/commands/`).
-Authoritative for the API: `crates/api/src/lib.rs` + `routes/`.
-
-The user-facing semantics a surface must not get wrong — destructive defaults,
-scope resolution, `-a` parsing, what each `outcome` means, which commands refuse
-what — live with the surface that owns them: **`crates/cli/AGENTS.md`** and
-**`crates/api/AGENTS.md`**. The behaviour they implement, and why it is that way,
-lives in the knowledge pages (`技能移除與 Master 回收`,
-`多目標突變的 scope 閘門與批次歸因`, `Skill update pipeline`,
-`check --write-result 的受管狀態守衛`, `CLI 與 API 的共用錯誤契約`).
-
-Two cross-surface invariants that neither file owns alone:
+Two invariants that neither the CLI nor the API owns alone:
 
 - **An unreadable lock fails the commands that report it** (`check`, `doctor`,
   `source list`/`diff`). The lock read paths fail OPEN by design; those commands
@@ -221,7 +191,7 @@ Two cross-surface invariants that neither file owns alone:
 **Mutation lock**: every mutating skill flow holds ONE interprocess lock across
 its whole check→write→rollback span; read paths are deliberately unlocked, and it
 serializes aghub against aghub only. Invariants and the call-site rule:
-`crates/core/AGENTS.md` "Mutation attribution".
+the `aghub-skills` skill.
 
 ## Testing
 
@@ -262,8 +232,8 @@ Reasons are given so you can generalize to the case not listed here.
 - **Free — do it, do not ask**: editing code; `just fmt` / `just lint`;
   `cargo build`; `bun run typecheck` / `lint:check` / `format:check`; the Rust
   test suite at any scope, `just preflight` included; reading and writing under
-  a temp dir, `$AGHUB_DATA_DIR`, or a tempdir project root; committing and
-  pushing to `fork`. Run it, fix the failures your change caused, and rerun.
+  a temp dir, `$AGHUB_DATA_DIR`, or a tempdir project root; committing, pushing
+  a branch to `fork` and opening a PR there. Run it, fix the failures your change caused, and rerun.
   Stop and ask only if a test would need the real `~/.agents`, the OS keyring,
   or the network.
 - **Ask first — legitimate, but external or irreversible**: pushing to someone
@@ -287,13 +257,15 @@ Reasons are given so you can generalize to the case not listed here.
 > and none is negotiable either. The same holds for every `NEVER` in a per-crate
 > `AGENTS.md`.
 
-- NEVER return arbitrary internal temp/lock/keyring paths in API **errors**;
-  skill DTOs may expose intentional `source_path` / `canonical_path` for UI
 - NEVER hand-mirror a mutating/transactional flow across surfaces (CLI ↔ API, or
   per-dialect parsers) and "keep it in sync by hand" — it WILL drift (worked
   example: the multi-agent batch policy, extracted to `core/src/batch.rs`).
   Extract the invariant to `core` / a shared policy behind ONE tested interface;
   surfaces stay thin adapters.
+- NEVER orchestrate two or more core mutation steps in a surface to form one
+  action: that belongs in core behind one entry point. Error codes come from
+  `aghub_core::error_codes` too; a string literal is only for a code no core
+  error produces.
 - NEVER hand-roll path normalization to compare two paths. Use
   `skill::lock::resolve_existing` (the one the mutation lock uses): it resolves
   the longest existing prefix so the FILESYSTEM answers `..` after a symlink,
@@ -304,14 +276,12 @@ Reasons are given so you can generalize to the case not listed here.
   re-checks the lock itself) — a public entry point is only as safe as its own
   guards
 
-## Release & Packaging
-
-Runbook (versioning, `just bump`, signing secrets, Homebrew tap, workflow
-failures): project skill **`releasing-aghub`** + `.github/workflows/release.yml`.
-The two release rules that are also approval boundaries are in the table above.
-
 ## Agent workflows
 
+- **Issue + PR**: the project is managed on GitHub. A spec, plan or ticket is an
+  issue; a change is a branch and a PR to `main` (`Closes #N`), merged once CI is
+  green and the user has approved that work. The release flow's own pushes to
+  `main` (`just release`, repairing a botched tag) are the exception
 - **Issues**: GitHub Issues on the fork — ALWAYS `gh … -R audichuang/aghub`
   (a bare `gh` can resolve to upstream `origin`) — `docs/agents/issue-tracker.md`;
   triage labels in `docs/agents/triage-labels.md`. Pre-switch specs stay under
