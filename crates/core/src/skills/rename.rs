@@ -178,7 +178,7 @@ pub fn rename_source_from_lock(
 				)
 			})?;
 			// Identity from THIS read, the same observation as the coordinates
-			// (`crates/core/AGENTS.md` "Mutation attribution").
+			// (`.agents/skills/aghub-skills/references/mutation-attribution.md`).
 			let captured =
 				crate::skills::lock::EntryIdentity::of_global_entry(entry);
 			Ok(RenameLockSource {
@@ -385,9 +385,9 @@ pub fn accept_rename(
 	}
 
 	// Compare-after-fetch: the lock cannot cover the fetch, so prove under it
-	// that the entry is still the one fetched (`crates/core/AGENTS.md`
-	// "Mutation attribution"). The captured identity holds the OLD skillPath,
-	// so a rename following a MOVED skill (new path in `source.skill_path`)
+	// that the entry is still the one fetched
+	// (`.agents/skills/aghub-skills/references/mutation-attribution.md`). The
+	// captured identity holds the OLD skillPath, so a rename following a MOVED skill (new path in `source.skill_path`)
 	// still passes.
 	fetched
 		.source

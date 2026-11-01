@@ -655,7 +655,7 @@ fn accept_rename_rolls_back_when_one_of_two_agents_fails_to_install() {
 		// transparent Display ("Permission denied (os error 13)") is already
 		// path-free. It fires for the path-bearing `LinkError` forms ("could
 		// not link <link> -> <target>") if a future change stops redacting
-		// them (root AGENTS.md: never return an internal path in an API
+		// them (crates/api/AGENTS.md: never return an internal path in an API
 		// error).
 		let msg = err.message();
 		assert!(

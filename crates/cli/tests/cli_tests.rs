@@ -11703,7 +11703,7 @@ fn delete_json_distinguishes_preview_removed_and_absent() {
 	}
 
 	// MCP delete shares the seam, and its `paths` is deliberately always empty
-	// (root AGENTS.md MCP removal contract) — so `outcome` is the ONLY thing
+	// (crates/core/AGENTS.md MCP removal contract) — so `outcome` is the ONLY thing
 	// that can tell its three cases apart.
 	let seeded_mcp = isolated_cli(home.path(), state.path())
 		.current_dir(project.path())
@@ -12685,7 +12685,7 @@ fn a_kept_shared_master_preview_promises_no_prune() {
 	);
 }
 
-/// `check`'s default spans BOTH scopes, like the other read-only diagnostics.
+/// `check`'s default spans BOTH scopes, like the other diagnostics.
 ///
 /// It used to follow the plain global default, so run inside a project it
 /// answered from the global lock alone — reporting that the project's skills
@@ -15756,7 +15756,7 @@ fn installing_for_one_agent_does_not_leak_to_the_shared_slot() {
 ///
 /// The spec drafted this as "`--yes` returns `unsupported_operation` and exit
 /// 1". Measured, that is wrong and the documented contract wins: root
-/// `AGENTS.md` defines `kept` as "shared Master another agent still reads —
+/// `crates/cli/AGENTS.md` defines `kept` as "shared Master another agent still reads —
 /// `success: true` but THE ENTITY IS STILL THERE". `spared_everything` returns
 /// its preview BEFORE the `executed` branch, so `--yes` lands there too and
 /// exits 0 with nothing deleted. Refusing would be a second, contradictory

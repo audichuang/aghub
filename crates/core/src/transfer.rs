@@ -2020,7 +2020,7 @@ impl ReconcileSkillPlan {
 	///
 	/// Preflight runs before any copy, so the disk cannot show it; reasoned
 	/// from ONE home per half: where copies land is [`Self::copy_entry_dirs`]
-	/// (`agent_link_need` — root AGENTS.md "Link decision"), where the target
+	/// (`agent_link_need` — crates/core/AGENTS.md "Link decision"), where the target
 	/// reads is its `get_skills_paths`. Compare DIRS, not planned paths — the
 	/// shared entry need not exist yet. Do NOT derive either half from
 	/// `skill_store_roots` (it includes a dir no cross-agent copy writes).
@@ -2192,7 +2192,7 @@ pub fn reconcile_skill(
 	// preflight dry-runs — the state reads that decide the mutation. Reentrant,
 	// so inner `guard_and_reload`s are free. It serializes aghub against aghub
 	// only — `remove_skill_planned`'s executing refusal stays as the backstop.
-	// See crates/core/AGENTS.md "Mutation attribution".
+	// See .agents/skills/aghub-skills/references/mutation-attribution.md.
 	let _mutation_guard = crate::skills::lock::mutation_guard(
 		"reconcile skill",
 		source.scope.resource_scope(),
@@ -2219,7 +2219,7 @@ pub fn reconcile_skill(
 					let target_scope = row.target.scope.resource_scope();
 					// ONE guard across check → write → rollback; the install's
 					// own guard ends when `install_local_skill` returns.
-					// See crates/core/AGENTS.md "Mutation attribution".
+					// See .agents/skills/aghub-skills/references/mutation-attribution.md.
 					let _copy_guard = crate::skills::lock::mutation_guard(
 						"reconcile skill copy",
 						target_scope,
@@ -2277,7 +2277,7 @@ pub fn reconcile_skill(
 							// leaves the target holding content nobody asked to
 							// copy. The master is not touched: we did not write
 							// it. Runs under `_copy_guard`; see
-							// crates/core/AGENTS.md "Mutation attribution".
+							// .agents/skills/aghub-skills/references/mutation-attribution.md.
 							crate::skills::rename::rollback_materialized_install(
 								&plan.skill.name,
 								target_scope,

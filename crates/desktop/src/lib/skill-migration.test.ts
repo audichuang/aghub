@@ -38,7 +38,7 @@ function answer(over: Partial<RepairResponse> = {}): RepairResponse {
 	};
 }
 
-// THE trap desktop AGENTS.md names by hand. Getting this wrong tells a user
+// THE trap `src/AGENTS.md` names by hand (`!isLoading`). Getting this wrong tells a user
 // with a broken layout that they are fine — the one failure mode a migration
 // banner must not have.
 test("a failed preview never renders as 'nothing to migrate'", () => {

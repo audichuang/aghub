@@ -114,6 +114,8 @@ jobs:
               run: bun run format:check
             - name: docs/history links
               run: node scripts/check-history-links.mjs
+            - name: Check AGENTS.md load chains
+              run: node scripts/check-agents-chain.mjs
             - name: No literal tab inside a string (missing `\` continuation)
               run: bash scripts/check-string-tabs.sh
 

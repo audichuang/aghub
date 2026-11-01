@@ -1083,7 +1083,8 @@ pub(crate) fn classify_scope(
 /// all three must come from the SAME observation. Two reads can straddle
 /// another process's repoint: the identity then matches the live entry while
 /// the bytes came from the other coordinates, and the compare-after-fetch waves
-/// it through. See [`EntryIdentity`] and `core/AGENTS.md`.
+/// it through. See [`EntryIdentity`] and
+/// `.agents/skills/aghub-skills/references/mutation-attribution.md`.
 enum ScopeLock {
 	Global(BTreeMap<String, skill::SkillLockEntry>),
 	Project(skill::LocalSkillLockFile),

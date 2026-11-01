@@ -359,7 +359,7 @@ enum Commands {
 	/// Check installed skills for available updates.
 	///
 	/// Scope defaults to BOTH global and the current project, like the other
-	/// read-only diagnostics (`doctor`, `source list`, `source diff`); `-g` /
+	/// diagnostics (`doctor`, `source list`, `source diff`); `-g` /
 	/// `-p` still narrow it.
 	///
 	/// Offline by default: remote sources report `uncheckable`/`network` with
@@ -1307,8 +1307,8 @@ fn takes_agent_list(command: &Commands) -> bool {
 //
 // ONE table (`scope_policy`), ONE resolver (`resolve_scope`), ONE resolved
 // value (`Scope`). Command modules receive the `Scope`, never the three
-// booleans, so none can regrow a private resolver. Rules: crates/cli/AGENTS.md
-// "Two dispatch funnels".
+// booleans, so none can regrow a private resolver. Rules:
+// .agents/skills/cli-surface-rules/SKILL.md "Scope funnel".
 
 /// The scope flags exactly as parsed. Only [`resolve_scope`] reads them.
 #[derive(Clone, Copy, Default, Debug)]
@@ -1560,8 +1560,8 @@ mod scope {
 		///
 		/// Fails for a scope no writing policy should produce — never a
 		/// `_ => Global` fallback, which once made a slipped scope a silent
-		/// write to the GLOBAL lock (crates/cli/AGENTS.md "Two dispatch
-		/// funnels"). A rootless `-p` is unreachable through `resolve_scope`
+		/// write to the GLOBAL lock (.agents/skills/cli-surface-rules/SKILL.md
+		/// "Scope funnel"). A rootless `-p` is unreachable through `resolve_scope`
 		/// for every policy that calls this (they bail first); only
 		/// `TRANSFER_SCOPE` lets it through, and `transfer` maps the scope
 		/// itself instead of calling here. This is the ONE place core's

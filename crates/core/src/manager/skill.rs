@@ -27,7 +27,7 @@ pub struct SkillAdd {
 	pub wrote_master: bool,
 	/// Agent skills-dirs where this call created a FRESH referrer, straight
 	/// from the linker — never reconstructed from `installed` (see
-	/// crates/core/AGENTS.md "Mutation attribution").
+	/// .agents/skills/aghub-skills/references/mutation-attribution.md).
 	pub created_referrer_dirs: Vec<std::path::PathBuf>,
 }
 
@@ -116,7 +116,7 @@ impl ConfigManager {
 	/// Every guarded `ConfigManager` mutation goes through here rather than
 	/// calling `mutation_guard` directly, so none can forget the re-read. A
 	/// dry-run takes neither. One documented exception: `update_skill`.
-	/// See crates/core/AGENTS.md "Mutation attribution".
+	/// See .agents/skills/aghub-skills/references/mutation-attribution.md.
 	fn guard_and_reload(
 		&mut self,
 		op: &str,

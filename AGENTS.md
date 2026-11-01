@@ -130,7 +130,7 @@ The two rules that span crates stay here:
 
 `just --list` is the catalog. What it doesn't tell you:
 
-- `just preflight` = the three `scripts/check-*` guards (history links, test tmpdir, string tabs) + fmt + clippy + `bun install --frozen-lockfile` (root AND
+- `just preflight` = the four `scripts/check-*` guards (history links, AGENTS.md load chains, test tmpdir, string tabs) + fmt + clippy + `bun install --frozen-lockfile` (root AND
   desktop) + desktop typecheck + **desktop frontend unit tests** + workspace
   tests + doc tests. It is the release gate; its `just --list` blurb is truncated
 - **preflight does NOT run oxfmt or oxlint** — the pre-push hook does, and it
@@ -162,7 +162,8 @@ implementing and verifying.
   REPO ROOT. Neither alone is a pushable tree — preflight runs no
   oxfmt/oxlint, and the pre-push hook runs no tests. A push whose diff is
   Markdown only (`*.md`: AGENTS.md, `docs/`, skills) needs just
-  `bun run format:check` + `node scripts/check-history-links.mjs`; any other
+  `bun run format:check`, `node scripts/check-history-links.mjs` and
+  `node scripts/check-agents-chain.mjs`; any other
   file in the diff takes the full gate.
 - **Before tagging a release**: tag `v*` only after green CI.
 - **Bump a dependency in its OWN commit**, never inside a feature or fix commit.

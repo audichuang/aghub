@@ -56,6 +56,7 @@ lint:
 # Linux (e.g. operate through a symlinked temp dir to mimic macOS /private).
 preflight: && target-cap
     node scripts/check-history-links.mjs
+    node scripts/check-agents-chain.mjs
     bash scripts/check-test-tmpdir.sh
     bash scripts/check-string-tabs.sh
     cargo fmt --all --check
