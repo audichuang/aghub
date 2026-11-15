@@ -644,7 +644,8 @@ fn no_row_may_declare_a_known_defect_shape() {
 				!matches!(
 					answer,
 					PresenceFallback
-						| DropsRemote | Approximated
+						| DropsRemote
+						| Approximated
 						| NotAttachedToServer
 				),
 				"'{}' declares {answer:?} for `{question}`. Fix the dialect, \

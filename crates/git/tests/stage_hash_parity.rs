@@ -150,7 +150,8 @@ fn collect(root: &Path, dir: &Path, set: &mut BTreeSet<(String, String)>) {
 		} else {
 			let bytes = std::fs::read(&p).unwrap();
 			let exec = std::fs::metadata(&p).unwrap().permissions().mode()
-				& 0o111 != 0;
+				& 0o111
+				!= 0;
 			set.insert((rel, format!("file:exec={exec}:{}", hex(&bytes))));
 		}
 	}

@@ -2884,7 +2884,8 @@ mod tests {
 							!matches!(
 								**agent,
 								AgentType::Claude
-									| AgentType::Cursor | AgentType::OpenCode
+									| AgentType::Cursor
+									| AgentType::OpenCode
 							)
 						})
 						.map(|agent| agent.as_str().to_string())
@@ -8034,7 +8035,8 @@ mod tests {
 					let exec = {
 						use std::os::unix::fs::PermissionsExt;
 						std::fs::metadata(&p).unwrap().permissions().mode()
-							& 0o111 != 0
+							& 0o111
+							!= 0
 					};
 					let mode = if exec { "100755" } else { "100644" };
 					entries.push(format!(
@@ -8163,7 +8165,8 @@ mod tests {
 						let bytes = std::fs::read(&p).unwrap();
 						let exec =
 							std::fs::metadata(&p).unwrap().permissions().mode()
-								& 0o111 != 0;
+								& 0o111
+								!= 0;
 						out.insert(
 							rel,
 							format!("file:exec={exec}:{}", hex_bytes(&bytes)),

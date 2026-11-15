@@ -467,11 +467,12 @@ impl SkillRemovalResponse {
 				dry_run && matches!(row.verdict, Verdict::Refused { .. });
 			let is_partial = matches!(row.verdict, Verdict::Partial);
 			let is_partial_mixed = !dry_run && has_removed;
-			let is_fatal_error =
-				(row.typed_error.is_some() || row.error.is_some())
-					&& !is_absent_noop
-					&& !is_refused_preview
-					&& !is_partial && !is_partial_mixed;
+			let is_fatal_error = (row.typed_error.is_some()
+				|| row.error.is_some())
+				&& !is_absent_noop
+				&& !is_refused_preview
+				&& !is_partial
+				&& !is_partial_mixed;
 			if is_fatal_error {
 				if let Some(ref err) = row.typed_error {
 					return Err(clone_config_error(err));

@@ -215,7 +215,7 @@ impl GitBasedInstaller {
 	pub async fn download_and_extract(
 		&self,
 		url: &str,
-		subdir: &str,      // Subdirectory within the tarball to extract
+		subdir: &str, // Subdirectory within the tarball to extract
 		target_dir: &Path, // Where to extract to
 	) -> Result<String> {
 		// Download tarball
