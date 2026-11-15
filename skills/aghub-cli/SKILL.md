@@ -104,10 +104,10 @@ or `git@host:` source discards tokens and reports `uncheckable` `reason: "ssh"`
 
 **Over SSH into a Mac, the login keychain is unreadable**, so a `gh` token stored
 there fails the helper: aghub says `Could not read this source` and `gh auth
-status` says the token is invalid, even when it is valid. Do not re-login over
-SSH. On the Mac itself, run `gh auth logout`, then `gh auth login
---insecure-storage`; without the logout, local `gh` keeps using the keychain
-token. Or pass `GITHUB_TOKEN` for that one command.
+status` says the token is invalid, even when it is valid. Confirm it with
+`security show-keychain-info login.keychain-db` (`User interaction is not
+allowed`), then pass `GITHUB_TOKEN` for that one command. The token itself is
+fine: do not log out or log in again.
 
 ## 2. Read the current state
 
