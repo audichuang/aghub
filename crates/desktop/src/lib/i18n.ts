@@ -5,6 +5,15 @@ import en from "./locales/en";
 import zhHans from "./locales/zh-Hans";
 import zhHant from "./locales/zh-Hant";
 
+// Keys are untyped (plain `string`), so i18next 27's strict interpolation
+// types check nothing here; they only make `t` unassignable to the narrow
+// `(key, options?) => string` helpers it is passed to. Keep the v26 types.
+declare module "i18next" {
+	interface CustomTypeOptions {
+		strictInterpolationChecks: false;
+	}
+}
+
 // Keep only script-based translation bundles and let region tags alias to them.
 const SUPPORTED_LANGUAGES = [
 	"en",
