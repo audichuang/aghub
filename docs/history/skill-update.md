@@ -22,6 +22,25 @@ Pinned by: `fetch_refused_by_rest_budget_after_resolve_is_served_by_gix_at_the_s
 `apply_skill_updates_writes_a_skill_the_rest_budget_refused`.
 Commit: f9003217.
 
+## REST sync spent the shared GitHub quota per file
+
+`source sync` fetches `CatalogSnapshot`, and the REST backend downloaded every
+selected file with its own `git/blobs` request into an in-memory cache that
+died with the process. Measured on 2026-11-16 with `gh api rate_limit` around
+one dry-run sync of a 516-blob private repo: 502 requests (commit + tree + 500
+blobs), 10.6 s. Three machines syncing together drew 1000–1500 of the account's
+shared 5000/h.
+
+Rule: blobs persist in a content-addressed `BlobStore` that re-hashes on every
+read, and a `materialize` needing more than `MAX_REST_BLOBS` downloads hands
+the commit to gix (`BULK_HANDOFF`, zero REST quota) whose files backfill the
+store. After the fix the same sync cost 34 requests cold (commit + tree + the
+catalog's 32 `SKILL.md`, then gix) and 2 with an unchanged source.
+
+Pinned by: `a_later_catalog_fetch_of_an_unchanged_source_downloads_no_blob`,
+`a_later_catalog_fetch_downloads_only_the_changed_file`,
+`a_bulk_cold_fetch_rides_git_and_warms_the_store` (`src/tree_first_tests.rs`).
+
 ## One clone coordinate per lock entry
 
 `owner/repo` is the shape EVERY forge's lock identifier takes, so whoever

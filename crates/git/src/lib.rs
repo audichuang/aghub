@@ -17,6 +17,7 @@
 //! ```
 
 pub mod backend;
+pub mod blob_store;
 pub mod clone;
 pub mod credentials;
 pub mod error;
@@ -32,6 +33,7 @@ pub mod tree;
 pub use backend::{
 	Blob, GixShallow, RepoFetchBackend, RepoTree, SourceRef, TreeEntry,
 };
+pub use blob_store::BlobStore;
 pub use clone::{clone_to_path, clone_to_temp, CloneOptions};
 pub use credentials::{inject_credentials, read_credentials, Credentials};
 pub use error::{GitError, Result};
@@ -41,7 +43,8 @@ pub use fetch::{
 };
 pub use github_rest::{
 	github_api_host, is_github_com_host, GithubRest, HttpRequest, HttpResponse,
-	HttpTransport, ReqwestTransport, DEFAULT_CONCURRENCY,
+	HttpTransport, ReqwestTransport, BULK_HANDOFF, DEFAULT_CONCURRENCY,
+	MAX_REST_BLOBS,
 };
 pub use redact::{redact_source_credentials, redact_url_userinfo};
 pub use remote::{

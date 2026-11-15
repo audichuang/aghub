@@ -567,3 +567,199 @@ fn suffixless_lock_skill_path_hashes_the_skill_folder() {
 		_ => panic!("expected a fresh probe"),
 	}
 }
+
+// ── Persistent blob store: what a LATER process pays ────────────────────────
+//
+// Every test builds a FRESH repository per run sharing only the on-disk store:
+// one instance run twice would be served by the in-memory blob cache and pass
+// without the store.
+
+/// gix stand-in for the bulk handoff: serves the same upstream from memory.
+struct FakeGix {
+	files: Upstream,
+}
+
+impl FakeGix {
+	fn tree(&self) -> RepoTree {
+		RepoTree {
+			entries: self
+				.files
+				.iter()
+				.map(|(path, (mode, bytes))| aghub_git::TreeEntry {
+					path: path.clone(),
+					mode: *mode,
+					oid: oid(bytes),
+					size: Some(bytes.len() as u64),
+				})
+				.collect(),
+		}
+	}
+}
+
+impl RepoFetchBackend for FakeGix {
+	fn resolve(
+		&self,
+		_s: &aghub_git::SourceRef,
+		_a: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		Ok(RepoSnapshot {
+			commit_oid: COMMIT.to_string(),
+			tree_oid: TREE.to_string(),
+			commit_time: None,
+		})
+	}
+	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
+		Ok(self.tree())
+	}
+	fn read_blobs(
+		&self,
+		_s: &RepoSnapshot,
+		oids: &[String],
+	) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+		Ok(self
+			.files
+			.values()
+			.filter(|(_, bytes)| oids.contains(&oid(bytes)))
+			.map(|(_, bytes)| aghub_git::Blob {
+				oid: oid(bytes),
+				bytes: bytes.clone(),
+			})
+			.collect())
+	}
+	fn materialize(
+		&self,
+		_s: &RepoSnapshot,
+		_p: &[&str],
+		dest: &Path,
+	) -> aghub_git::Result<()> {
+		// A superset of any selection is fine for these assertions.
+		for (path, (_, bytes)) in &self.files {
+			let target = dest.join(path);
+			std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+			std::fs::write(target, bytes).unwrap();
+		}
+		Ok(())
+	}
+}
+
+fn stored_fetcher(
+	fake: &Arc<FakeGithub>,
+	store: &aghub_git::BlobStore,
+	gix: Arc<dyn RepoFetchBackend>,
+) -> GitFetcher {
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(
+		GithubRest::new(Arc::clone(fake) as Arc<dyn HttpTransport>)
+			.with_blob_store(store.clone()),
+	);
+	GitFetcher::with_repository(
+		SkillRepository::with_backends(Some(rest), gix)
+			.with_blob_store(store.clone()),
+	)
+}
+
+fn catalog_fetch(fetcher: &GitFetcher) -> FetchedRepo {
+	use crate::Fetcher;
+	fetcher
+		.fetch(
+			&SourceRef {
+				source: "https://github.com/acme/skills.git".to_string(),
+				ref_: Some("main".to_string()),
+			},
+			None,
+			FetchSelection::CatalogSnapshot,
+		)
+		.unwrap()
+}
+
+fn six_skills() -> Upstream {
+	let mut upstream = BTreeMap::new();
+	for name in NAMES {
+		upstream_add(
+			&mut upstream,
+			&format!("skills/{name}"),
+			&skill_files(name),
+		);
+	}
+	upstream
+}
+
+/// The `source sync` fetch (`CatalogSnapshot`) of a source that has not
+/// changed since the last process costs the tip resolve and ONE tree read.
+#[test]
+fn a_later_catalog_fetch_of_an_unchanged_source_downloads_no_blob() {
+	let store_dir = tempfile::tempdir().unwrap();
+	let store = aghub_git::BlobStore::new(store_dir.path());
+	let first = FakeGithub::new(six_skills());
+	catalog_fetch(&stored_fetcher(&first, &store, Arc::new(NeverGix)));
+	assert_eq!(
+		first.blobs().len(),
+		NAMES.len() * 3,
+		"cold run downloads all"
+	);
+
+	let second = FakeGithub::new(six_skills());
+	let repo =
+		catalog_fetch(&stored_fetcher(&second, &store, Arc::new(NeverGix)));
+
+	let urls = second.urls();
+	assert_eq!(second.blobs(), BTreeSet::new(), "no blob may be downloaded");
+	assert_eq!(urls.len(), 2, "resolve + tree only, got {urls:#?}");
+	assert_eq!(
+		std::fs::read(repo.root.join("skills/s4/scripts/run.sh")).unwrap(),
+		b"echo s4\n",
+		"store-served bytes must still be materialized"
+	);
+}
+
+/// One changed upstream file costs exactly one blob request.
+#[test]
+fn a_later_catalog_fetch_downloads_only_the_changed_file() {
+	let store_dir = tempfile::tempdir().unwrap();
+	let store = aghub_git::BlobStore::new(store_dir.path());
+	let first = FakeGithub::new(six_skills());
+	catalog_fetch(&stored_fetcher(&first, &store, Arc::new(NeverGix)));
+
+	let mut changed = six_skills();
+	changed.insert(
+		"skills/s2/docs/guide.md".to_string(),
+		(StagedEntryMode::Regular, b"guide v2\n".to_vec()),
+	);
+	let second = FakeGithub::new(changed);
+	catalog_fetch(&stored_fetcher(&second, &store, Arc::new(NeverGix)));
+
+	assert_eq!(second.blobs(), BTreeSet::from([oid(b"guide v2\n")]));
+}
+
+/// Past `MAX_REST_BLOBS` the download is handed to git (no REST quota), not
+/// reported as a degraded fallback, and git's files warm the store so the
+/// next process is back on REST with zero blob requests.
+#[test]
+fn a_bulk_cold_fetch_rides_git_and_warms_the_store() {
+	let mut upstream = BTreeMap::new();
+	let mut files = vec![("SKILL.md".to_string(), skill_md("big"))];
+	for i in 0..=aghub_git::MAX_REST_BLOBS {
+		files
+			.push((format!("refs/r{i}.md"), format!("ref {i}\n").into_bytes()));
+	}
+	upstream_add(&mut upstream, "skills/big", &files);
+	let store_dir = tempfile::tempdir().unwrap();
+	let store = aghub_git::BlobStore::new(store_dir.path());
+
+	let first = FakeGithub::new(upstream.clone());
+	let gix = Arc::new(FakeGix {
+		files: upstream.clone(),
+	});
+	let fetcher = stored_fetcher(&first, &store, gix);
+	catalog_fetch(&fetcher);
+	assert_eq!(fetcher.rest_fallback(), None, "a handoff is not a fallback");
+	assert!(
+		first.blobs().len() <= 1,
+		"only the catalog's SKILL.md may go over REST, got {}",
+		first.blobs().len()
+	);
+
+	let second = FakeGithub::new(upstream);
+	catalog_fetch(&stored_fetcher(&second, &store, Arc::new(NeverGix)));
+	assert_eq!(second.blobs(), BTreeSet::new());
+	assert_eq!(second.urls().len(), 2);
+}
