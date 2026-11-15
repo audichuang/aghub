@@ -35,7 +35,7 @@ port it. We build the two genuine gaps instead.
    the same `wouldOrphanSkill` guard as `manage-skill-agents-dialog`. MCP has no such
    risk (delete rewrites shared config, deletes no disk path).
 5. (Z) approach: **generalize** `BulkManageGroupAgentsDialog` to a `kind: "skill" |
-"mcp"` param (pick reconcile mutation + capability check + orphan-guard by kind),
+   "mcp"` param (pick reconcile mutation + capability check + orphan-guard by kind),
    per AGENTS.md "don't hand-mirror across surfaces". Skills path stays behaviorally
    identical.
 6. (Y) placement: standalone sidebar page `/coverage` (spans skills+MCP, doesn't

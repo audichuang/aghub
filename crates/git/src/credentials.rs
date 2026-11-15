@@ -74,7 +74,7 @@ pub fn inject_credentials(url: &str, creds: &Credentials) -> Result<String> {
 
 pub(crate) fn noninteractive_credentials(
 	action: gix::credentials::helper::Action,
-) -> gix::credentials::protocol::Result {
+) -> gix::Result<Option<gix::credentials::protocol::Outcome>> {
 	use gix::credentials::{helper, protocol};
 
 	let helper::Action::Get(mut context) = action else {

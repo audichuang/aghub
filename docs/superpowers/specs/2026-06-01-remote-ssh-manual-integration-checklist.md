@@ -10,7 +10,7 @@ and a running desktop build; verify them by hand once.
 
 - A reachable VM you can `ssh <target>` into **non-interactively** (key in
   `~/.ssh`, host in `~/.ssh/known_hosts`, ssh-agent loaded). `ssh -o BatchMode=yes
-<target> true` must succeed from the desktop machine.
+  <target> true` must succeed from the desktop machine.
 - `aghub-api` installed on the VM and on `PATH` (v1 is detect-or-instruct):
   build/install it on the VM (`cargo install --path crates/api` or `just install`).
   Confirm `ssh <target> aghub-api --version` prints `aghub-api 1.1.1`.

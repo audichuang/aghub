@@ -24,7 +24,7 @@
 
 1. **`nas-container` 安裝**：`accept-rename` 永遠會被稽核擋（B1 無 override）。
    可行是兩步：`source sync audichuang/audi-skill --skill nas-container --install-missing
--a all --yes --force-unsafe`，成功後再 `delete skills synology-container -a <逗號清單> --yes`。
+   -a all --yes --force-unsafe`，成功後再 `delete skills synology-container -a <逗號清單> --yes`。
    代價是失去 rename 的原子性。**中途失敗會怎樣**：兩步是兩個獨立交易，
    而順序是「先裝新的、再刪舊的」，所以不存在「舊的沒了、新的沒裝上」的空窗——
    第一步失敗＝什麼都沒變（`synology-container` 還在）；第一步成功、第二步失敗＝

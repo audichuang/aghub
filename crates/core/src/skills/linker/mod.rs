@@ -395,19 +395,18 @@ impl Linker {
 	pub fn is_link_checked(path: &Path) -> io::Result<bool> {
 		match path.symlink_metadata() {
 			Ok(meta) => {
-				if meta.file_type().is_symlink() {
-					return Ok(true);
-				}
 				#[cfg(windows)]
 				{
 					use std::os::windows::fs::MetadataExt;
 					const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-					Ok(meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT
-						!= 0)
+					Ok(meta.file_type().is_symlink()
+						|| meta.file_attributes()
+							& FILE_ATTRIBUTE_REPARSE_POINT
+							!= 0)
 				}
 				#[cfg(not(windows))]
 				{
-					Ok(false)
+					Ok(meta.file_type().is_symlink())
 				}
 			}
 			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),

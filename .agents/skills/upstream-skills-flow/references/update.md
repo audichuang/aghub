@@ -15,7 +15,7 @@ Always online. Global, per source:
 4. **Diff** → `getSkillFolderHashFromTree(tree, skillPath) !== entry.skillFolderHash`
    (tree SHA vs tree SHA) marks it for update.
 5. **Apply** → `update.ts` writes no files: `buildUpdateInstallSource` + `spawnSync(…,
-'add', url, '-g', '-y')`, so the lock updates through `runAdd`. Failures skip and continue.
+   'add', url, '-g', '-y')`, so the lock updates through `runAdd`. Failures skip and continue.
 
 Project (`skills-lock.json`): clone + deletion check, then re-`add` **every remaining
 skill** (`buildLocalUpdateSource`, `add … --skill <name> -y`) — no hash diff.

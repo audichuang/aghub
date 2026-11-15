@@ -205,7 +205,7 @@ no error-kind branch and no slot for a button, and children using the context ar
 
 - **`crates/remote`** (with `MockRunner`): - `probe_remote_platform` normalization: `Darwin/arm64 → macos/aarch64`, `Linux/x86_64`,
   unparseable → `None`. - `force_redeploy_remote_api` argv sequence: `pkill → (resolve target) → scp upload → mv+chmod →
-probe`; returns a compatible `TestResult` when the mock reports a matching version. - re-probe still incompatible → error surfaced, no start. - install-target resolution picks the probe-resolved path. - existing `parse_api_version` / `is_version_compatible` tests unchanged; update the
+  probe`; returns a compatible `TestResult` when the mock reports a matching version. - re-probe still incompatible → error surfaced, no start. - install-target resolution picks the probe-resolved path. - existing `parse_api_version` / `is_version_compatible` tests unchanged; update the
   `install_remote_api`/finish-step argv test for the `mv`+`chmod` change.
 - **`crates/desktop` (frontend)**: incompatible screen renders with version info; button
   enabled/disabled by same-platform; confirm→mutation→`setQueryData` path; transient errors → toast.

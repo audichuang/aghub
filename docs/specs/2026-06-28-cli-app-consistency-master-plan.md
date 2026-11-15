@@ -138,7 +138,7 @@ impl McpTransport {
 > `from_inputs` + the shared `reject_zero_timeout` rule), `crates/api/src/dto/mcp.rs`
 > and `crates/api/src/routes/mcps.rs` (DTO `validate()` delegating to the core
 > rule + route wiring + tests), `crates/cli/src/{main.rs,commands/mod.rs,
-commands/add.rs,commands/update.rs}` (the `--timeout` flag + delegation), and
+> commands/add.rs,commands/update.rs}` (the `--timeout` flag + delegation), and
 > `crates/cli/tests/cli_tests.rs` (end-to-end cases). This note (not the
 > narrower `crates/core/src/models.rs` shorthand) is the authoritative
 > allowed-file set for the Phase 0 PR; the touched diff matches it exactly,

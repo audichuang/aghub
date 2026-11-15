@@ -4071,7 +4071,8 @@ fn a_multi_ref_source_diffs_per_ref_but_still_refuses_to_sync() {
 			.unwrap()
 			.iter()
 			.find(|s| s["name"] == name)
-			.unwrap_or_else(|| panic!("row {name} missing from {json}"))["state"]
+			.unwrap_or_else(|| panic!("row {name} missing from {json}"))
+			["state"]
 			.as_str()
 			.unwrap()
 			.to_string()
@@ -4345,7 +4346,8 @@ fn a_source_spanning_two_forges_diffs_each_scope_against_its_own_origin() {
 		views
 			.iter()
 			.find(|v| v["scope"] == scope)
-			.unwrap_or_else(|| panic!("scope {scope} missing from {json}"))["origin"]
+			.unwrap_or_else(|| panic!("scope {scope} missing from {json}"))
+			["origin"]
 			.as_str()
 			.unwrap()
 			.to_string()
@@ -10505,7 +10507,8 @@ fn check_offline_reports_permanent_reasons_not_network() {
 	let reason = |name: &str| -> String {
 		rows.iter()
 			.find(|r| r["name"] == name)
-			.unwrap_or_else(|| panic!("row {name} missing from {rows:?}"))["reason"]
+			.unwrap_or_else(|| panic!("row {name} missing from {rows:?}"))
+			["reason"]
 			.as_str()
 			.unwrap()
 			.to_string()

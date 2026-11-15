@@ -99,13 +99,11 @@ fn prepare_fetch(
 	});
 
 	match branch {
-		Some(branch) => prep.with_ref_name(Some(branch)).map_err(
-			|e: gix::refs::name::Error| {
-				GitError::clone_failed(format!(
-					"Invalid branch name '{branch}': {e}"
-				))
-			},
-		),
+		Some(branch) => prep.with_ref_name(Some(branch)).map_err(|e| {
+			GitError::clone_failed(format!(
+				"Invalid branch name '{branch}': {e}"
+			))
+		}),
 		None => Ok(prep),
 	}
 }

@@ -9,7 +9,7 @@ messages, but this is the discoverable, durable home.
 
 - **Fork upstream — [`AkaraChen/aghub`](https://github.com/AkaraChen/aghub)**: the
   repo this fork descends from. **This file tracks it.** On this clone its `git
-remote` is named **`origin`** (NOT `upstream`); our own publish remote is
+  remote` is named **`origin`** (NOT `upstream`); our own publish remote is
   **`fork`** — push commits and release tags to `fork`, never to `origin`.
 - **Skills-ecosystem upstream — vercel-labs `npx skills` package**: the skill CLI we
   stay round-trip compatible with. Documented by the `npx-skills-contract` and
@@ -199,10 +199,10 @@ or a needed feature lands upstream.
 
 - **Reuse, don't duplicate**: ported the _protection_, but reused our existing
   `install_layout` (copy) and `aghub_core::skills::removal::{allowed_skill_roots,
-assert_contained}` instead of upstream's parallel `copy_dir_recursive` / `canonical_*`
+  assert_contained}` instead of upstream's parallel `copy_dir_recursive` / `canonical_*`
   helpers — one definition, no drift.
 - **Universal-install symlinks**: content/tree must still list `.claude/skills/foo →
-.agents/skills/foo` symlinks (a real feature here), so we containment-check the symlink
+  .agents/skills/foo` symlinks (a real feature here), so we containment-check the symlink
   target against the allow-listed roots instead of upstream's blanket reject.
 - **Host-scoped credentials**: the github.com guard applies to the _explicit_ credential
   path + a session same-host check, NOT a blanket rule — preserves this fork's host-scoped

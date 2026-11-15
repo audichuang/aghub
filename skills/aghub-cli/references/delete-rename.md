@@ -42,7 +42,7 @@ readers. To remove the skill everywhere: `delete skills <NAME> --all-agents`.
   is NAMED (the `-a` target or list, or a `reconcile --remove` row; `-a`
   defaults to `claude`, so a disabled claude IS swept when you omit `-a`), and an
   unnamed one's link keeps the Master alive. Either `aghub-cli agents enable
-<id>` (see `agents list`), unlink exactly the listed entries, or name the
+  <id>` (see `agents list`), unlink exactly the listed entries, or name the
   holders (`reconcile skill --remove a,b`, or the desktop delete dialog's "also
   remove these agents' links") — naming is the consent. Do not widen to `-a all`.
 - **A real directory that git TRACKS in a shared slot** is refused (exit 1) by
@@ -74,7 +74,7 @@ JSON shape depends on the roster:
   `paths`, `skipped`, `type`, `name` and the prune fields — no `still_read_*`,
   no `master_reclaimed`.
 - **`-a a,b` list**: an envelope whose `results[]` rows are `{agent, ok,
-outcome, code, output, error}` in request order. `code` appears only on a
+  outcome, code, output, error}` in request order. `code` appears only on a
   row-level failure (`partial` or a config load error); a missing skill is a
   no-op `absent` with no code, exit 0. Everything else sits in
   `results[].output`: `still_read_from` (paths still reading it),

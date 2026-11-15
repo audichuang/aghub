@@ -7,7 +7,7 @@ round 7 修了四處會造成資料遺失的檔案層吞錯。同一個掃描還
 
 - `crates/agents/src/agents/codex/sub_agent.rs:129` — codex 自己的 sub-agent
   loader 還是 `fe0db092` 之前的形狀：`let Ok(entries) = fs::read_dir(dir)
-else { return Vec::new() }`、`.flatten()`、`.ok()?`。**不是資料遺失**：
+  else { return Vec::new() }`、`.flatten()`、`.ok()?`。**不是資料遺失**：
   codex 的寫入路徑會重讀原檔（`read_original`/`validate_existing_file`）
   並以 `IO_ERROR` 拒絕，已驗證（transfer 進 codex 覆蓋 chmod-000 的
   `foo.toml` → exit 1，原檔保留）。

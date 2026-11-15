@@ -30,7 +30,7 @@ map the normalized model into each agent's config format.
 - **Tests never hit the real keyring** (Linux native backend needs
   secret-service/dbus — a recurring CI red). Inject a `CredentialStore`:
   `FileCredentialStore` / `$AGHUB_TEST_CREDENTIAL_FILE`, or `Arc<dyn
-CredentialStore>` per-request in the API
+  CredentialStore>` per-request in the API
 - This crate's `CredentialStore` is **distinct** from git/source credentials in
   `crates/api` (whose test double is `MockKeyringBackend`) — don't conflate them
 - Each agent maps differently; model changes must update every agent's mapping

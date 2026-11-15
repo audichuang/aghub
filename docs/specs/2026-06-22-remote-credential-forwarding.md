@@ -172,7 +172,7 @@ HTTP headers pass through unchanged.
 ## Backend changes (`aghub-api` + desktop `src-tauri`)
 
 - **A. Resolution (no HTTP endpoint).** Add `pub fn
-resolve_git_token_for_source(source: &str) -> Option<ResolvedToken>` to
+  resolve_git_token_for_source(source: &str) -> Option<ResolvedToken>` to
   `aghub-api` wrapping the existing resolver; `ResolvedToken` carries
   `{ token, origin: (scheme, host, port) }` (origin-aware — see §E / Codex
   2nd-pass P2), not a bare host. The existing resolver internals stay

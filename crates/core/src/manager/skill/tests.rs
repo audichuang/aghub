@@ -3033,7 +3033,8 @@ fn linked_masters_do_not_bypass_exhaustive_store_validation() {
 					.remove_skill_planned("twin", true, dry_run, !dry_run);
 				assert!(
 					master.join("SKILL.md").is_file()
-						&& other.exists() && link.exists(),
+						&& other.exists()
+						&& link.exists(),
 					"{agent_dir}, unreadable={unreadable}: a refusal must \
 					 preserve both Masters and the Referrer; got {result:?}"
 				);

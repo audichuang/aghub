@@ -76,11 +76,11 @@ static TEST_GIT_FETCHER: std::sync::Mutex<Option<fn() -> GitFetcher>> =
 impl ApiFetcher {
 	fn new() -> Self {
 		#[cfg(test)]
-		let inner = match *TEST_GIT_FETCHER.lock().unwrap_or_else(|e| e.into_inner())
-		{
-			Some(build) => build(),
-			None => GitFetcher::new(),
-		};
+		let inner =
+			match *TEST_GIT_FETCHER.lock().unwrap_or_else(|e| e.into_inner()) {
+				Some(build) => build(),
+				None => GitFetcher::new(),
+			};
 		#[cfg(not(test))]
 		let inner = GitFetcher::new();
 		Self {

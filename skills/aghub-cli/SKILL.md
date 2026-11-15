@@ -175,7 +175,7 @@ private directory does not count — repair leaves that alone.
 **Dead ends — disclosed, not routed; do not pick a verb for them:**
 
 - An `orphan-lock` with NOTHING on disk restores with `source sync <SOURCE>
---skill <NAME> --install-missing --yes` while `source diff` calls it
+  --skill <NAME> --install-missing --yes` while `source diff` calls it
   `uncheckable` (`local`). If upstream moved (`installedOutdated`),
   `--install-missing` skips it and `--update` refuses (no installed copy), and
   `renamed` refuses likewise: `prune-lock` and install fresh, or just prune.

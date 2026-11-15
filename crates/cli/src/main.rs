@@ -1296,10 +1296,11 @@ fn takes_agent_list(command: &Commands) -> bool {
 			| Commands::Disable { .. }
 			| Commands::Source {
 				action: SourceAction::Sync { .. }
-			} | Commands::Doctor {
-			verify_links: true,
-			..
-		}
+			}
+			| Commands::Doctor {
+				verify_links: true,
+				..
+			}
 	)
 }
 
@@ -2227,18 +2228,19 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 				}
 				// A `kept` delete row is a success that removed nothing; counting
 				// it as "ok" read as done when the disk was untouched.
-				let kept =
-					view.results
-						.iter()
-						.filter(|row| {
-							row.ok
-								&& row
-									.output
-									.as_ref()
-									.and_then(|o| o.get("outcome"))
-									.and_then(|o| o.as_str()) == Some("kept")
-						})
-						.count();
+				let kept = view
+					.results
+					.iter()
+					.filter(|row| {
+						row.ok
+							&& row
+								.output
+								.as_ref()
+								.and_then(|o| o.get("outcome"))
+								.and_then(|o| o.as_str())
+								== Some("kept")
+					})
+					.count();
 				if kept > 0 {
 					println!(
 						"{} ok, {kept} kept (nothing removed), {} failed",

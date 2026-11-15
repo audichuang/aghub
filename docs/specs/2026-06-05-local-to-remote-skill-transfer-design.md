@@ -77,13 +77,13 @@ crates/desktop src-tauri Likely a Tauri command to pack the local skill folder i
 
 1. **Remote receive+install endpoint (`crates/api`).** A new
    `POST /skills/upload` (name TBD) accepting the `.skill` bytes plus `{ agents, scope,
-project_root? , name? }`. Decode → temp file → `skill::unpack` → validate
+   project_root? , name? }`. Decode → temp file → `skill::unpack` → validate
    (`skill::validate`, path-traversal guard) → `add_skill_from_path` per agent → write a
    `source_type: "local"` lock entry. Returns an `OperationBatchResponse`-shaped per-agent result
    (mirror `transfer_skill_route`). - **Wire encoding**: multipart vs base64-in-JSON — see Open Questions. Rocket supports both; the
    rest of the API is JSON, so base64-in-JSON is the lower-friction default for small skills. - **Size guard**: cap the accepted body (skills are small; reject multi-MB uploads).
 2. **Local pack (`crates/desktop` src-tauri).** A Tauri command `pack_skill(source_path) ->
-bytes/base64` that resolves the local skill folder (tilde-expand, the `skill_root` logic already
+   bytes/base64` that resolves the local skill folder (tilde-expand, the `skill_root` logic already
    in `connection`/`skills_update`) and calls `skill::pack` into a temp file, returning the bytes.
    (The webview can't zip a local directory itself.)
 3. **FE action (`crates/desktop` src).** A "Send to remote host" entry next to "Add to agent" in
