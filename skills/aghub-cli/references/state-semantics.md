@@ -96,7 +96,7 @@ Two of those are weaker than they read:
   so deleting on the strength of `removed` alone can throw away a skill that
   merely moved. Look for the orphan `notInstalled` first. When that `notInstalled` row has
   the SAME name, the skill merely moved and `source sync --skill <NAME>
---install-missing` re-points the lock's `skillPath` to the new location.
+  --install-missing` re-points the lock's `skillPath` to the new location.
 - `uncheckable` with `reason: "local"` means there is no local evidence: no
   readable installed copy (folder gone, nothing a managed agent reads and no
   Master) or the enabled agents' copies disagree, AND the lock hash still

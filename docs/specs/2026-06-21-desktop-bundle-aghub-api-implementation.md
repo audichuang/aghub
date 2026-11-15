@@ -295,7 +295,7 @@ section is authoritative:
   writes to `~/.cargo/bin/aghub-api`; it can't honor a custom path).
 - **`just desktop-bundle`**: `--config` must NOT be passed after a `--` (that
   forwards it to `cargo`); a second `--config` sets `createUpdaterArtifacts:
-false` so a local build needs no signing key; the staging dir is removed via
+  false` so a local build needs no signing key; the staging dir is removed via
   an EXIT trap on every exit.
 
 ## Out of scope / follow-ups

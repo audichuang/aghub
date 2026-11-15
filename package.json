@@ -12,7 +12,7 @@
 		"@types/bun": "latest",
 		"husky": "^9.1.7",
 		"nano-staged": "^1.0.2",
-		"oxfmt": "0.70.0",
+		"oxfmt": "0.78.0",
 		"semver": "^7.8.6"
 	},
 	"peerDependencies": {

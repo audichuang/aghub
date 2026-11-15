@@ -123,7 +123,7 @@ Forgiving that turned out to need a credential, not just a shared backing:
 
 - Copilot's project MCP path falls back to `<root>/.mcp.json` while neither
   that file nor `.github/mcp.json` exists, so `--remove claude --remove
-copilot` against an absent file blessed both `ResourceNotFound`s:
+  copilot` against an absent file blessed both `ResourceNotFound`s:
   `success_count: 2` for removing something nobody had.
 - The skill arm forgave every `ResourceNotFound` unconditionally, so removing
   from two agents that never held the skill exited 0 with the disk untouched.
@@ -256,7 +256,7 @@ reconcile's own copies do not exist yet.
   `--add amp --remove kimi -g` planned a copy whose Referrer slot was the entry
   Kimi's delete then unlinked; Amp, the agent being added, lost the skill.
 - Deriving either half from `skill_store_roots` refused `reconcile --add claude
---remove amp -g` outright: that list includes the XDG dir no copy to a
+  --remove amp -g` outright: that list includes the XDG dir no copy to a
   different agent writes.
 
 Rule: `a_copy_restores_it` compares the dirs the copies leave a readable entry

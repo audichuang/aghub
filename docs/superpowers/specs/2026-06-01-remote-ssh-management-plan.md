@@ -14,7 +14,7 @@ Companion to `2026-06-01-remote-ssh-management-design.md`.
 2. **No new dependencies.** api crate already has tokio `process`; hand-roll arg parsing
    (no clap). Desktop crate: `std::process` only. Connection ids via `crypto.randomUUID()`.
 3. **Shared Rust IPC types in `ssh.rs`:** `CommandOutput { status_code: Option<i32>,
-stdout: String, stderr: String }`, `RunError` (plain enum impl `std::error::Error`,
+   stdout: String, stderr: String }`, `RunError` (plain enum impl `std::error::Error`,
    **no thiserror**), `ChildHandle` (wraps `std::process::Child`, exposes `pid()` + `kill()`).
 4. **Connection Rust struct** carries `#[serde(rename_all = "camelCase")]` so the FE
    camelCase payload (`sshTarget`/`remoteAghubPath`) deserializes. Round-trip serde test.
@@ -70,7 +70,7 @@ stdout: String, stderr: String }`, `RunError` (plain enum impl `std::error::Erro
   `error`/`disconnected` and offers reconnect.
 - **App-exit cleanup:** restructure `lib.rs` tail from `.run(generate_context!())` to
   `let app = builder.build(generate_context!())?; app.run(|app, event| match event {
-RunEvent::ExitRequested { .. } | RunEvent::Exit => cleanup_all_remotes(app), _ => {} })`.
+  RunEvent::ExitRequested { .. } | RunEvent::Exit => cleanup_all_remotes(app), _ => {} })`.
 - **Status projection:** Rust `ConnState` (Disconnected/Probing/Deploying/Starting/
   Tunneling/Connected/Error) projects to a 4-state FE status (idle/connecting/connected/
   error). Own the mapping in the provider.
@@ -146,7 +146,7 @@ unit tests).
   `Unreachable{stderr}`, `StartTimeout`, `TunnelFailed`) — all `Serialize`.
 - Generic over `<R: CommandRunner>` so it runs under MockRunner with no real ssh:
   `probe_connection`, `decide_deploy(test_result, same_platform, has_bundled_binary) ->
-DeployDecision`, `start_remote` (issue start cmd, **bounded-attempts** poll of the log via
+  DeployDecision`, `start_remote` (issue start cmd, **bounded-attempts** poll of the log via
   `parse_remote_port`, injectable attempts+delay; on timeout issue guarded kill →
   `StartTimeout`), `cleanup_remote` (guarded kill).
 - RED tests: probe (ok / unreachable-stderr / command-not-found); decide_deploy 3 branches;
@@ -164,7 +164,7 @@ Files: `commands/remote.rs` (command layer), `commands/mod.rs`, `commands/server
   spawn tunnel (ChildHandle) → spawn watcher thread (emits `remote-disconnected`) → store
   handle (lock-discipline per the concurrency rule) → return local port.
 - Register all four in `generate_handler!`; restructure builder tail to `.build()?.run(|app,
-event| …)` with `cleanup_all_remotes` on exit.
+  event| …)` with `cleanup_all_remotes` on exit.
 - Tests: command-level state transitions via injected MockRunner where feasible;
   serde round-trip of `Connection`; assert `capabilities/default.json` unchanged.
 

@@ -118,7 +118,7 @@ Edit `crates/skill/Cargo.toml`, in `[dependencies]`:
 
 ```toml
 sha2 = "0.10"
-feruca = "0.11"   # UCA collation to match JS localeCompare; swap for icu_collator if golden mismatches
+feruca = "0.11" # UCA collation to match JS localeCompare; swap for icu_collator if golden mismatches
 ```
 
 - [ ] **Step 2: Run to confirm it resolves**
