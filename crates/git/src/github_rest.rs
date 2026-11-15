@@ -18,6 +18,7 @@ use crate::backend::{
 	entry_matches_selection, Blob, RepoFetchBackend, RepoTree, SourceRef,
 	TreeEntry,
 };
+use crate::blob_store::BlobStore;
 use crate::credentials::Credentials;
 use crate::error::{GitError, Result};
 use crate::stage::{stage_tree_entries, StagedEntry, StagedEntryMode};
@@ -38,6 +39,17 @@ use crate::RepoSnapshot;
 /// GitHub's documented 100-concurrent secondary limit ever starts returning
 /// 403s, the fix is a shared semaphore, not a smaller constant.
 pub const DEFAULT_CONCURRENCY: usize = 16;
+
+/// Most blobs one `materialize` downloads over REST when a [`BlobStore`] is
+/// attached. Past this the backend declines with [`BULK_HANDOFF`] so the caller
+/// re-serves the same commit over git, which spends no REST quota and backfills
+/// the store; below it REST stays the faster path. See
+/// docs/history/skill-update.md#rest-sync-spent-the-shared-github-quota-per-file
+pub const MAX_REST_BLOBS: usize = 100;
+
+/// `RestFallback` reason for a deliberate bulk handoff to git — not a failure,
+/// so the fallback chain does not report it as `rateLimited`/`unavailable`.
+pub const BULK_HANDOFF: &str = "bulk download handed to git";
 
 /// Accept header for commit + tree JSON endpoints.
 const ACCEPT_JSON: &str = "application/vnd.github+json";
@@ -326,6 +338,7 @@ pub struct GithubRest {
 	pub(crate) timeout: Option<Duration>,
 	pub(crate) concurrency: usize,
 	pub(crate) cache: Arc<Mutex<HashMap<String, RepoContext>>>,
+	pub(crate) blob_store: Option<BlobStore>,
 }
 
 impl GithubRest {
@@ -338,7 +351,16 @@ impl GithubRest {
 			timeout: None,
 			concurrency: DEFAULT_CONCURRENCY,
 			cache: Arc::new(Mutex::new(HashMap::new())),
+			blob_store: None,
 		}
+	}
+
+	/// Persist downloaded blobs in `store` and serve later reads — in this or
+	/// any later process — from it. Also enables the [`MAX_REST_BLOBS`] bulk
+	/// handoff, since git's download can then warm the store for next time.
+	pub fn with_blob_store(mut self, store: BlobStore) -> Self {
+		self.blob_store = Some(store);
+		self
 	}
 
 	/// Set an absolute deadline; requests issued at or after it fail with
@@ -377,6 +399,7 @@ impl GithubRest {
 			timeout: None,
 			concurrency: self.concurrency,
 			cache: Arc::clone(&self.cache),
+			blob_store: self.blob_store.clone(),
 		})
 	}
 
@@ -728,15 +751,22 @@ impl RepoFetchBackend for GithubRest {
 		let mut out = Vec::with_capacity(unique.len());
 		let mut missing = Vec::new();
 		{
-			let cache = ctx.blob_cache.lock().map_err(|_| {
+			let mut cache = ctx.blob_cache.lock().map_err(|_| {
 				GitError::clone_failed("GithubRest blob cache lock poisoned")
 			})?;
 			for oid in unique {
-				match cache.get(&oid) {
-					Some(bytes) => out.push(Blob {
+				if let Some(bytes) = cache.get(&oid) {
+					out.push(Blob {
 						oid,
 						bytes: bytes.clone(),
-					}),
+					});
+					continue;
+				}
+				match self.blob_store.as_ref().and_then(|s| s.get(&oid)) {
+					Some(bytes) => {
+						cache.insert(oid.clone(), bytes.clone());
+						out.push(Blob { oid, bytes });
+					}
 					None => missing.push(oid),
 				}
 			}
@@ -847,6 +877,11 @@ impl RepoFetchBackend for GithubRest {
 				&fetched,
 				observed.lock().ok().and_then(|slot| *slot),
 			)?;
+			if let Some(store) = &self.blob_store {
+				for blob in &fetched {
+					store.put(&blob.oid, &blob.bytes);
+				}
+			}
 			if let Some(e) = failure {
 				return Err(e);
 			}
@@ -894,6 +929,26 @@ impl RepoFetchBackend for GithubRest {
 			})
 			.map(|e| e.oid.clone())
 			.collect();
+
+		if let Some(store) = &self.blob_store {
+			let ctx = self.get_context(&snapshot.commit_oid)?;
+			let in_memory = ctx.blob_cache.lock().map_err(|_| {
+				GitError::clone_failed("GithubRest blob cache lock poisoned")
+			})?;
+			let to_download = blob_oids
+				.iter()
+				.collect::<HashSet<_>>()
+				.into_iter()
+				.filter(|oid| {
+					!in_memory.contains_key(*oid) && !store.contains(oid)
+				})
+				.count();
+			if to_download > MAX_REST_BLOBS {
+				return Err(GitError::rest_fallback(format!(
+					"{BULK_HANDOFF}: {to_download} blobs > {MAX_REST_BLOBS}"
+				)));
+			}
+		}
 
 		let blobs = operation.read_blobs(snapshot, &blob_oids)?;
 		let mut by_oid: HashMap<String, Vec<u8>> =

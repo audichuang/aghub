@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aghub_git::{
-	github_api_host, Blob, Credentials, GitError, GithubRest, GixShallow,
-	HttpTransport, RepoFetchBackend, RepoSnapshot, ReqwestTransport,
-	StagedEntryMode, TreeEntry,
+	github_api_host, Blob, BlobStore, Credentials, GitError, GithubRest,
+	GixShallow, HttpTransport, RepoFetchBackend, RepoSnapshot,
+	ReqwestTransport, StagedEntryMode, TreeEntry,
 };
 use skill::{discover_from_entries, CandidateEntry, SkillPath};
 
@@ -138,6 +138,10 @@ pub struct SkillRepository {
 	/// Coarse reason code of the first REST decline this repository served over
 	/// gix; never the raw backend message (it can name internal detail).
 	rest_fallback: std::sync::Mutex<Option<&'static str>>,
+	/// The REST backend's persistent blob store, backfilled from what gix
+	/// materializes when REST hands a snapshot over — or a bulk sync would
+	/// stay cold forever and ride gix every time.
+	blob_store: Option<BlobStore>,
 }
 
 /// Collapse a REST decline message to a coarse, wire-safe code.
@@ -233,21 +237,51 @@ impl Default for SkillRepository {
 impl SkillRepository {
 	/// Production: `GithubRest(ReqwestTransport)` + `GixShallow`, whose final
 	/// tail is system git for OS-credential-helper-only private hosts.
+	///
+	/// Blobs persist under the app data root, so a later process (the next
+	/// `source sync`, another surface) spends no request on unchanged files.
 	pub fn new() -> Self {
-		Self::with_http_transport(Arc::new(ReqwestTransport::new()))
+		let store = BlobStore::new(
+			aghub_core::paths::app_data_dir()
+				.join("cache")
+				.join("github-blobs"),
+		);
+		Self::production(Arc::new(ReqwestTransport::new()), Some(store))
 	}
 
 	/// Build the production backend composite over an injectable HTTP
 	/// transport. This is the production-construction seam used by deadline
 	/// tests; fallback remains the real gix→system-git tail.
 	#[doc(hidden)]
+	/// No blob store: tests through this seam must not write the app data root.
+	#[doc(hidden)]
 	pub fn with_http_transport(transport: Arc<dyn HttpTransport>) -> Self {
-		let rest: Arc<dyn RepoFetchBackend> = Arc::new(
-			GithubRest::new(transport).with_timeout(FETCH_HTTP_TIMEOUT),
-		);
+		Self::production(transport, None)
+	}
+
+	fn production(
+		transport: Arc<dyn HttpTransport>,
+		store: Option<BlobStore>,
+	) -> Self {
+		let mut rest =
+			GithubRest::new(transport).with_timeout(FETCH_HTTP_TIMEOUT);
+		if let Some(store) = &store {
+			rest = rest.with_blob_store(store.clone());
+		}
 		let gix: Arc<dyn RepoFetchBackend> =
 			Arc::new(GixShallow::with_timeout(Some(FETCH_HTTP_TIMEOUT)));
-		Self::with_backends(Some(rest), gix)
+		let repo = Self::with_backends(Some(Arc::new(rest)), gix);
+		match store {
+			Some(store) => repo.with_blob_store(store),
+			None => repo,
+		}
+	}
+
+	/// Backfill `store` from gix-served fetches. Pass the SAME store the REST
+	/// backend was given ([`GithubRest::with_blob_store`]).
+	pub fn with_blob_store(mut self, store: BlobStore) -> Self {
+		self.blob_store = Some(store);
+		self
 	}
 
 	/// Injected backends for tests. `rest = None` means gix-only.
@@ -259,6 +293,7 @@ impl SkillRepository {
 			rest,
 			gix,
 			rest_fallback: std::sync::Mutex::new(None),
+			blob_store: None,
 		}
 	}
 
@@ -622,7 +657,10 @@ impl SkillRepository {
 		let Some((git_sr, auth)) = origin else {
 			return Err(SkillRepoError::Network(reason));
 		};
-		self.note_rest_fallback(&reason);
+		// A bulk handoff is REST choosing git on purpose, not a degraded run.
+		if !reason.contains(aghub_git::BULK_HANDOFF) {
+			self.note_rest_fallback(&reason);
+		}
 		log::info!(
 			"skill repo fetch: rest declined after resolve ({reason}), \
 			 re-resolving over gix"
@@ -646,9 +684,34 @@ impl SkillRepository {
 		}
 		let mut fetched =
 			self.fetch_with_backend(&tip, BackendKind::Gix, selection)?;
+		self.backfill_blob_store(&tip, &fetched.root);
 		// Same commit, so same content — but only REST knew its time.
 		fetched.snapshot = snapshot.clone();
 		Ok(fetched)
+	}
+
+	/// Copy what gix just put on disk into the blob store, keyed by the tree's
+	/// oids. `put` re-hashes, so a file that is not the blob's raw bytes (a
+	/// staged symlink, an absent path of a partial selection) is skipped.
+	fn backfill_blob_store(&self, tip: &RepoSnapshot, root: &Path) {
+		let Some(store) = &self.blob_store else {
+			return;
+		};
+		let Ok(tree) = self.gix.read_tree(tip) else {
+			return;
+		};
+		for entry in &tree.entries {
+			if !matches!(
+				entry.mode,
+				StagedEntryMode::Regular | StagedEntryMode::Executable
+			) || store.contains(&entry.oid)
+			{
+				continue;
+			}
+			if let Ok(bytes) = std::fs::read(root.join(&entry.path)) {
+				store.put(&entry.oid, &bytes);
+			}
+		}
 	}
 
 	fn fetch_with_backend(

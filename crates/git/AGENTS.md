@@ -39,6 +39,17 @@ and transfer's credential check; core never fetches).
   wall-clock: a timing only measures whichever path that machine happened
   to take.
 
+- **REST blobs persist across processes** in a content-addressed `BlobStore`
+  (`<app data>/cache/github-blobs`), attached ONLY by `SkillRepository::new()`;
+  `GithubRest::new` and `with_http_transport` get none, so tests never write
+  the real data root. Every read re-hashes (a mismatch is a miss), so the store
+  needs no invalidation. With a store attached, a `materialize` needing more
+  than `MAX_REST_BLOBS` downloads declines with `BULK_HANDOFF`: gix serves the
+  same commit with zero REST quota, its files backfill the store, and the
+  handoff is NOT recorded as a `rateLimited`/`unavailable` fallback. The check
+  sits in `materialize`, never `read_blobs` — `list` reads blobs too, and a
+  decline there is a clean error, not a re-gix.
+
 ## WHERE TO LOOK
 
 | Task                            | File                           |
