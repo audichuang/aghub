@@ -41,7 +41,6 @@ ts-rs = "12.0.1"
 clap = { version = "4.5", features = [ "derive" ] }
 tabled = "0.22"
 anyhow = "1.0"
-colored = "3.0"
 
 # HTTP dependencies
 # gzip: GitHub serves recursive-tree JSON uncompressed otherwise (measured
@@ -70,10 +69,4 @@ toml_edit = "0.25"
 libc = "0.2"
 
 # Interactive CLI
-inquire = "0.9"
 
-# Git hooks
-cargo-husky = { version = "1", default-features = false, features = [
-	"precommit-hooks",
-	"run-cargo-test",
-] }
