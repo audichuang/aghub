@@ -250,6 +250,9 @@ On 2026-11-16 RUSTSEC-2026-0429 (a crafted symlink size aborts
 `ZipArchive::extract`) hit the same 4.x copy; updater 2.13.0 still requires
 `zip ^4`, and the signature check keeps it unreachable, so it joined the list.
 
+Lifted the same day: `tauri-plugin-updater` 2.14.1 depends on `zip` 9, so the
+lockfile holds no 4.x copy and all four ignores were removed.
+
 ## cargo audit ignores sqlx's bundled SQLite
 
 RUSTSEC-2026-0459 (2026-10-30): bundled SQLite before 3.54 can return
