@@ -134,6 +134,7 @@ fn fetch_into_bare(
 		connection.set_credentials(noninteractive_credentials);
 		if let Some(timeout) = total_timeout {
 			let options = gix::protocol::transport::client::blocking_io::http::reqwest::Options {
+				configure_client: None,
 				configure_request: Some(Box::new(move |request| {
 					*request.timeout_mut() = Some(timeout);
 					Ok(())
@@ -145,13 +146,9 @@ fn fetch_into_bare(
 	});
 
 	if let Some(branch) = ref_ {
-		prep = prep.with_ref_name(Some(branch)).map_err(
-			|e: gix::refs::name::Error| {
-				GitError::clone_failed(format!(
-					"Invalid ref name '{branch}': {e}"
-				))
-			},
-		)?;
+		prep = prep.with_ref_name(Some(branch)).map_err(|e| {
+			GitError::clone_failed(format!("Invalid ref name '{branch}': {e}"))
+		})?;
 	}
 
 	// Depth-1: tip commit only; parent history is not transferred.
