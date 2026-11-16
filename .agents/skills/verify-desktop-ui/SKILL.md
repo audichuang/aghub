@@ -83,7 +83,9 @@ The acceptance scenarios in the spec issue written by
 ```
 
 Per scenario: `url`, `settle`, optional `dark` and `viewport`. Steps: `click` /
-`clickLast` (add `role` + `exact` to go through `getByRole`), `fill` + `value`,
+`clickLast` (add `role` + `exact` to go through `getByRole`; the click value is
+then the accessible name: `{"click": "繁體中文", "role": "option", "exact": true}`
+— a separate `name` key is ignored and the click times out), `fill` + `value`,
 `eval` (any expression, promises awaited), `screenshot`, `wait`. A key the
 dispatcher does not recognise is skipped silently, so a typo like `screenShot`
 produces a green scenario that did nothing.

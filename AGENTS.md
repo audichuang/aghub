@@ -146,6 +146,9 @@ The two rules that span crates stay here:
   integration-test binaries, splitting the `aghub-api` lib's unit tests, a
   Windows bun cache, offline cargo on a cache hit), so re-trying one starts from
   its measurement, not from scratch
+- CI's Rust is `dtolnay/rust-toolchain@stable`, unpinned: fmt or clippy failing
+  in files the PR never touched means the local toolchain is behind —
+  `rustup update stable`, then fix with that version
 - Prefer file-scoped over the full suite:
   `cargo test -p aghub-core <full::module::path::name> -- --exact`
 

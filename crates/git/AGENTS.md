@@ -50,6 +50,11 @@ and transfer's credential check; core never fetches).
   sits in `materialize`, never `read_blobs` — `list` reads blobs too, and a
   decline there is a clean error, not a re-gix.
 
+- **A gix major bump can silently break auth detection.** skill-update's
+  `map_git_error` classifies `Auth` by matching the error STRING, and no test
+  feeds it a real gix error. After the bump, run a private repo over gix with
+  and without a token (shallow fetch + materialize, clone) before trusting it.
+
 ## WHERE TO LOOK
 
 | Task                            | File                           |

@@ -102,6 +102,9 @@ and another installer's pin on the old name does not follow it.
   `localeCompare`. Pinned against real npx output in
   `crates/skill/tests/hash_parity_golden.rs` (incl. `10.md`, `ZEBRA.md`); a
   change to the hash re-pins those goldens from real npx, never from aghub.
+  A feruca bump can ship new UCA/CLDR data while those mostly-ASCII goldens
+  stay green: compare the old and new build's hashes of the installed skills
+  and their sort of a large synthetic name set (accents, CJK, emoji).
 
 ## Cosmetic (round-trips; fix only to minimize byte diffs)
 
