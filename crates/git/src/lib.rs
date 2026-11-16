@@ -33,7 +33,7 @@ pub mod tree;
 pub use backend::{
 	Blob, GixShallow, RepoFetchBackend, RepoTree, SourceRef, TreeEntry,
 };
-pub use blob_store::BlobStore;
+pub use blob_store::{BlobStore, EtagStore};
 pub use clone::{clone_to_path, clone_to_temp, CloneOptions};
 pub use credentials::{inject_credentials, read_credentials, Credentials};
 pub use error::{GitError, Result};

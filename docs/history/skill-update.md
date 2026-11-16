@@ -41,6 +41,21 @@ Pinned by: `a_later_catalog_fetch_of_an_unchanged_source_downloads_no_blob`,
 `a_later_catalog_fetch_downloads_only_the_changed_file`,
 `a_bulk_cold_fetch_rides_git_and_warms_the_store` (`src/tree_first_tests.rs`).
 
+## Unmoved sources still paid one request each
+
+After the blob store, a warm `source sync` cost 2 requests (commit + tree) and
+`upall`'s skill step 83 across three machines: `apply-update --outdated` and
+`check --online` each spend one `/commits/<ref>` per Source, 11 Sources on one
+machine. Measured on 2026-11-16: five conditional GETs answered `304` raised
+`rate_limit`'s `used` by 0, one plain GET by 1.
+
+Rule: commit and tree GETs carry `If-None-Match` from an `EtagStore`; a 304
+reuses the stored body.
+
+Pinned by: `an_unchanged_source_costs_no_billable_request`,
+`a_changed_tree_is_refetched_not_served_from_the_etag_store`
+(`src/tree_first_tests.rs`).
+
 ## One clone coordinate per lock entry
 
 `owner/repo` is the shape EVERY forge's lock identifier takes, so whoever

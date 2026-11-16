@@ -55,18 +55,74 @@ impl BlobStore {
 		if blob_oid(bytes).as_deref() != Some(oid) {
 			return;
 		}
-		let Some(parent) = path.parent() else { return };
-		let written = std::fs::create_dir_all(parent)
-			.and_then(|()| tempfile::NamedTempFile::new_in(parent))
-			.and_then(|mut tmp| {
-				std::io::Write::write_all(&mut tmp, bytes)?;
-				tmp.persist(&path).map_err(|e| e.error)?;
-				Ok(())
-			});
-		if let Err(e) = written {
+		if let Err(e) = write_atomic(&path, bytes) {
 			log::debug!("blob store: skipped writing {oid}: {e}");
 		}
 	}
+}
+
+/// On-disk ETag cache for GitHub JSON GETs (`/commits/<ref>`, `/git/trees/<sha>`).
+///
+/// A conditional request answered `304 Not Modified` while authorized does not
+/// count against the REST rate limit, so a repeated tip check of an unmoved
+/// source costs nothing. Keyed by the full URL (no token): the SERVER decides
+/// the 304 for this request's own credential — one that cannot read the repo
+/// gets a 404, never the cached body. Each entry stores its URL and is ignored
+/// unless it matches, so a key-hash collision is a miss. Failures are misses.
+// ponytail: unbounded, like `BlobStore`; one small file per URL ever fetched.
+#[derive(Clone, Debug)]
+pub struct EtagStore {
+	dir: PathBuf,
+}
+
+impl EtagStore {
+	/// A store rooted at `dir` (created lazily on first write).
+	pub fn new(dir: impl Into<PathBuf>) -> Self {
+		Self { dir: dir.into() }
+	}
+
+	fn path(&self, url: &str) -> Option<PathBuf> {
+		let key = blob_oid(url.as_bytes())?;
+		Some(self.dir.join(&key[..2]).join(&key[2..]))
+	}
+
+	/// `(etag, body)` last stored for exactly `url`.
+	pub fn get(&self, url: &str) -> Option<(String, Vec<u8>)> {
+		let raw = std::fs::read(self.path(url)?).ok()?;
+		let mut parts = raw.splitn(3, |b| *b == b'\n');
+		let (stored_url, etag, body) =
+			(parts.next()?, parts.next()?, parts.next()?);
+		if stored_url != url.as_bytes() || etag.is_empty() {
+			return None;
+		}
+		Some((String::from_utf8(etag.to_vec()).ok()?, body.to_vec()))
+	}
+
+	/// Remember `body` as the representation `etag` names for `url`.
+	pub fn put(&self, url: &str, etag: &str, body: &[u8]) {
+		if url.contains('\n') || etag.contains('\n') || etag.is_empty() {
+			return;
+		}
+		let Some(path) = self.path(url) else { return };
+		let mut raw = format!("{url}\n{etag}\n").into_bytes();
+		raw.extend_from_slice(body);
+		if let Err(e) = write_atomic(&path, &raw) {
+			log::debug!("etag store: skipped writing {url}: {e}");
+		}
+	}
+}
+
+/// Temp file in the target dir, then rename: concurrent CLI / desktop /
+/// scheduled runs never see a half-written entry.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+	let parent = path
+		.parent()
+		.ok_or_else(|| std::io::Error::other("entry path has no parent"))?;
+	std::fs::create_dir_all(parent)?;
+	let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+	std::io::Write::write_all(&mut tmp, bytes)?;
+	tmp.persist(path).map_err(|e| e.error)?;
+	Ok(())
 }
 
 fn blob_oid(bytes: &[u8]) -> Option<String> {
@@ -102,6 +158,23 @@ mod tests {
 		store.put(HELLO, b"hello\n");
 		std::fs::write(store.path(HELLO).unwrap(), b"tampered\n").unwrap();
 		assert_eq!(store.get(HELLO), None);
+	}
+
+	#[test]
+	fn an_etag_entry_serves_only_its_own_url() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = EtagStore::new(dir.path());
+		store.put("https://h/a", "W/\"1\"", b"{\"sha\":\"x\"}\n");
+		assert_eq!(
+			store.get("https://h/a"),
+			Some(("W/\"1\"".to_string(), b"{\"sha\":\"x\"}\n".to_vec()))
+		);
+		assert_eq!(store.get("https://h/b"), None);
+		// A colliding key on disk still names its own URL: a miss, never b's body.
+		let b_path = store.path("https://h/b").unwrap();
+		std::fs::create_dir_all(b_path.parent().unwrap()).unwrap();
+		std::fs::copy(store.path("https://h/a").unwrap(), b_path).unwrap();
+		assert_eq!(store.get("https://h/b"), None);
 	}
 
 	#[test]
