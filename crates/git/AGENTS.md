@@ -49,6 +49,12 @@ and transfer's credential check; core never fetches).
   handoff is NOT recorded as a `rateLimited`/`unavailable` fallback. The check
   sits in `materialize`, never `read_blobs` — `list` reads blobs too, and a
   decline there is a clean error, not a re-gix.
+- **Commit and tree GETs are conditional** against an `EtagStore`
+  (`<app data>/cache/github-etags`, attached with the blob store): GitHub does
+  not charge an authorized `304`, so re-checking an unmoved source is free.
+  Entries are keyed by URL, never token — the server decides each 304 for the
+  request's own credential. A 304 serves the stored body but keeps the 304's
+  headers, so the rate-limit reading stays live.
 
 ## WHERE TO LOOK
 

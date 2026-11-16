@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aghub_git::{
-	github_api_host, Blob, BlobStore, Credentials, GitError, GithubRest,
-	GixShallow, HttpTransport, RepoFetchBackend, RepoSnapshot,
+	github_api_host, Blob, BlobStore, Credentials, EtagStore, GitError,
+	GithubRest, GixShallow, HttpTransport, RepoFetchBackend, RepoSnapshot,
 	ReqwestTransport, StagedEntryMode, TreeEntry,
 };
 use skill::{discover_from_entries, CandidateEntry, SkillPath};
@@ -241,32 +241,33 @@ impl SkillRepository {
 	/// Blobs persist under the app data root, so a later process (the next
 	/// `source sync`, another surface) spends no request on unchanged files.
 	pub fn new() -> Self {
-		let store = BlobStore::new(
-			aghub_core::paths::app_data_dir()
-				.join("cache")
-				.join("github-blobs"),
-		);
-		Self::production(Arc::new(ReqwestTransport::new()), Some(store))
+		let cache = aghub_core::paths::app_data_dir().join("cache");
+		Self::production(Arc::new(ReqwestTransport::new()), Some(cache))
 	}
 
 	/// Build the production backend composite over an injectable HTTP
 	/// transport. This is the production-construction seam used by deadline
 	/// tests; fallback remains the real gix→system-git tail.
-	#[doc(hidden)]
-	/// No blob store: tests through this seam must not write the app data root.
+	/// No disk caches: tests through this seam must not write the app data root.
 	#[doc(hidden)]
 	pub fn with_http_transport(transport: Arc<dyn HttpTransport>) -> Self {
 		Self::production(transport, None)
 	}
 
+	/// `cache_root` holds the REST blob store and ETag store; `None` = neither.
 	fn production(
 		transport: Arc<dyn HttpTransport>,
-		store: Option<BlobStore>,
+		cache_root: Option<PathBuf>,
 	) -> Self {
 		let mut rest =
 			GithubRest::new(transport).with_timeout(FETCH_HTTP_TIMEOUT);
-		if let Some(store) = &store {
-			rest = rest.with_blob_store(store.clone());
+		let mut store = None;
+		if let Some(root) = cache_root {
+			let blobs = BlobStore::new(root.join("github-blobs"));
+			rest = rest
+				.with_blob_store(blobs.clone())
+				.with_etag_store(EtagStore::new(root.join("github-etags")));
+			store = Some(blobs);
 		}
 		let gix: Arc<dyn RepoFetchBackend> =
 			Arc::new(GixShallow::with_timeout(Some(FETCH_HTTP_TIMEOUT)));

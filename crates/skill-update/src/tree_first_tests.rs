@@ -32,6 +32,8 @@ fn oid(bytes: &[u8]) -> String {
 struct FakeGithub {
 	files: BTreeMap<String, (StagedEntryMode, Vec<u8>)>,
 	recorded: Mutex<Vec<String>>,
+	/// Requests answered `304 Not Modified` — free on GitHub's rate limit.
+	not_modified: Mutex<usize>,
 }
 
 impl FakeGithub {
@@ -39,11 +41,17 @@ impl FakeGithub {
 		Arc::new(Self {
 			files,
 			recorded: Mutex::new(Vec::new()),
+			not_modified: Mutex::new(0),
 		})
 	}
 
 	fn urls(&self) -> Vec<String> {
 		self.recorded.lock().unwrap().clone()
+	}
+
+	/// Requests GitHub would charge: everything not answered 304.
+	fn billable(&self) -> usize {
+		self.urls().len() - *self.not_modified.lock().unwrap()
 	}
 
 	/// Blob oids downloaded, as a set.
@@ -64,6 +72,13 @@ impl FakeGithub {
 	}
 }
 
+fn json_with_etag(body: Vec<u8>) -> HttpResponse {
+	let mut out = response("application/json", body);
+	out.headers
+		.push(("etag".into(), format!("W/\"{}\"", oid(&out.body))));
+	out
+}
+
 fn response(content_type: &str, body: Vec<u8>) -> HttpResponse {
 	HttpResponse {
 		status: 200,
@@ -74,7 +89,29 @@ fn response(content_type: &str, body: Vec<u8>) -> HttpResponse {
 
 impl HttpTransport for FakeGithub {
 	fn execute(&self, request: HttpRequest) -> aghub_git::Result<HttpResponse> {
-		let url = request.url;
+		let if_none_match = request
+			.headers
+			.iter()
+			.find(|(k, _)| k.eq_ignore_ascii_case("if-none-match"))
+			.map(|(_, v)| v.clone());
+		let mut response = self.serve(request.url)?;
+		let matches = match (if_none_match.as_deref(), response.header("etag"))
+		{
+			(Some(sent), Some(current)) => sent == current,
+			_ => false,
+		};
+		if matches {
+			*self.not_modified.lock().unwrap() += 1;
+			response.status = 304;
+			response.body.clear();
+		}
+		Ok(response)
+	}
+}
+
+impl FakeGithub {
+	/// The 200 a plain GET gets; JSON endpoints carry a content ETag.
+	fn serve(&self, url: String) -> aghub_git::Result<HttpResponse> {
 		self.recorded.lock().unwrap().push(url.clone());
 		if let Some(wanted) = url.split("/git/blobs/").nth(1) {
 			let bytes = self
@@ -113,13 +150,13 @@ impl HttpTransport for FakeGithub {
 				r#"{{"sha":"{TREE}","truncated":false,"tree":[{}]}}"#,
 				entries.join(",")
 			);
-			return Ok(response("application/json", body.into_bytes()));
+			return Ok(json_with_etag(body.into_bytes()));
 		}
 		if url.contains("/commits/") {
 			let body = format!(
 				r#"{{"sha":"{COMMIT}","commit":{{"tree":{{"sha":"{TREE}"}},"committer":{{"date":"2026-07-17T00:00:00Z"}}}}}}"#
 			);
-			return Ok(response("application/json", body.into_bytes()));
+			return Ok(json_with_etag(body.into_bytes()));
 		}
 		Ok(HttpResponse {
 			status: 404,
@@ -762,4 +799,68 @@ fn a_bulk_cold_fetch_rides_git_and_warms_the_store() {
 	catalog_fetch(&stored_fetcher(&second, &store, Arc::new(NeverGix)));
 	assert_eq!(second.blobs(), BTreeSet::new());
 	assert_eq!(second.urls().len(), 2);
+}
+
+fn cached_fetcher(fake: &Arc<FakeGithub>, root: &Path) -> GitFetcher {
+	let blobs = aghub_git::BlobStore::new(root.join("github-blobs"));
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(
+		GithubRest::new(Arc::clone(fake) as Arc<dyn HttpTransport>)
+			.with_blob_store(blobs.clone())
+			.with_etag_store(aghub_git::EtagStore::new(
+				root.join("github-etags"),
+			)),
+	);
+	GitFetcher::with_repository(
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverGix))
+			.with_blob_store(blobs),
+	)
+}
+
+/// With the ETag store a later process re-checking an unmoved source sends
+/// only conditional GETs, all answered 304: GitHub charges nothing.
+#[test]
+fn an_unchanged_source_costs_no_billable_request() {
+	let cache = tempfile::tempdir().unwrap();
+	let first = FakeGithub::new(six_skills());
+	catalog_fetch(&cached_fetcher(&first, cache.path()));
+	assert_eq!(
+		*first.not_modified.lock().unwrap(),
+		0,
+		"cold run has no ETag"
+	);
+
+	let second = FakeGithub::new(six_skills());
+	let repo = catalog_fetch(&cached_fetcher(&second, cache.path()));
+
+	assert_eq!(second.urls().len(), 2, "{:#?}", second.urls());
+	assert_eq!(second.billable(), 0, "commit + tree must both be 304");
+	assert_eq!(
+		std::fs::read(repo.root.join("skills/s1/SKILL.md")).unwrap(),
+		skill_md("s1"),
+		"a 304 must still serve the stored body"
+	);
+}
+
+/// A changed tree is a 200, never the stored listing: the new file arrives.
+#[test]
+fn a_changed_tree_is_refetched_not_served_from_the_etag_store() {
+	let cache = tempfile::tempdir().unwrap();
+	catalog_fetch(&cached_fetcher(
+		&FakeGithub::new(six_skills()),
+		cache.path(),
+	));
+
+	let mut changed = six_skills();
+	changed.insert(
+		"skills/s2/docs/guide.md".to_string(),
+		(StagedEntryMode::Regular, b"guide v2\n".to_vec()),
+	);
+	let second = FakeGithub::new(changed);
+	let repo = catalog_fetch(&cached_fetcher(&second, cache.path()));
+
+	assert_eq!(second.blobs(), BTreeSet::from([oid(b"guide v2\n")]));
+	assert_eq!(
+		std::fs::read(repo.root.join("skills/s2/docs/guide.md")).unwrap(),
+		b"guide v2\n"
+	);
 }

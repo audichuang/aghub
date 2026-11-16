@@ -18,7 +18,7 @@ use crate::backend::{
 	entry_matches_selection, Blob, RepoFetchBackend, RepoTree, SourceRef,
 	TreeEntry,
 };
-use crate::blob_store::BlobStore;
+use crate::blob_store::{BlobStore, EtagStore};
 use crate::credentials::Credentials;
 use crate::error::{GitError, Result};
 use crate::stage::{stage_tree_entries, StagedEntry, StagedEntryMode};
@@ -339,6 +339,7 @@ pub struct GithubRest {
 	pub(crate) concurrency: usize,
 	pub(crate) cache: Arc<Mutex<HashMap<String, RepoContext>>>,
 	pub(crate) blob_store: Option<BlobStore>,
+	pub(crate) etag_store: Option<EtagStore>,
 }
 
 impl GithubRest {
@@ -352,7 +353,15 @@ impl GithubRest {
 			concurrency: DEFAULT_CONCURRENCY,
 			cache: Arc::new(Mutex::new(HashMap::new())),
 			blob_store: None,
+			etag_store: None,
 		}
+	}
+
+	/// Send commit and tree GETs as conditional requests against `store`; a
+	/// `304` (free on GitHub's rate limit when authorized) is answered from it.
+	pub fn with_etag_store(mut self, store: EtagStore) -> Self {
+		self.etag_store = Some(store);
+		self
 	}
 
 	/// Persist downloaded blobs in `store` and serve later reads — in this or
@@ -400,6 +409,7 @@ impl GithubRest {
 			concurrency: self.concurrency,
 			cache: Arc::clone(&self.cache),
 			blob_store: self.blob_store.clone(),
+			etag_store: self.etag_store.clone(),
 		})
 	}
 
@@ -416,7 +426,9 @@ impl GithubRest {
 	}
 
 	/// Issue one GET via the transport. Deadline is checked first; transport
-	/// errors and non-2xx statuses become [`GitError::RestFallback`].
+	/// errors and non-2xx statuses become [`GitError::RestFallback`]. With an
+	/// [`EtagStore`] the GET is conditional, and a `304` returns the stored body
+	/// under the 304's own headers (its rate-limit reading is the live one).
 	fn request(
 		&self,
 		url: String,
@@ -424,22 +436,40 @@ impl GithubRest {
 		accept: &str,
 		deadline: Option<Instant>,
 	) -> Result<HttpResponse> {
-		let headers = build_headers(token, accept);
+		let mut headers = build_headers(token, accept);
+		let cached = self.etag_store.as_ref().and_then(|s| s.get(&url));
+		if let Some((etag, _)) = &cached {
+			headers.push(("If-None-Match".into(), etag.clone()));
+		}
 		let response = self
 			.transport
 			.execute(HttpRequest {
-				url,
+				url: url.clone(),
 				headers,
 				timeout: remaining_timeout(deadline)?,
 			})
 			.map_err(|e| {
 				GitError::rest_fallback(format!("transport error: {e}"))
 			})?;
+		if response.status == 304 {
+			if let Some((_, body)) = cached {
+				return Ok(HttpResponse {
+					status: 200,
+					headers: response.headers,
+					body,
+				});
+			}
+		}
 		if !(200..300).contains(&response.status) {
 			return Err(GitError::rest_fallback(format!(
 				"HTTP {}",
 				response.status
 			)));
+		}
+		if let (Some(store), Some(etag)) =
+			(&self.etag_store, response.header("etag"))
+		{
+			store.put(&url, etag, &response.body);
 		}
 		Ok(response)
 	}
