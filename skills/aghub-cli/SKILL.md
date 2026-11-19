@@ -271,6 +271,12 @@ Read rather than retry:
   `source diff`/`sync` refuse it too); `network` with
   `checked: false` = you omitted `--online`; `network`/`timeout` online =
   transient, retry.
+- `installedOutdated` while the lock's `refCommit` equals upstream HEAD usually
+  means the skill wrote into its own Master at runtime. The comparison skips
+  only `.git`, `__pycache__`, `__pypackages__` and `metadata.json`, so a `.venv`
+  from `uv run` (or a `node_modules`) counts as a local change, and `--update`
+  then offers a no-op update. Fix the skill to keep runtime state outside its
+  folder (`UV_PROJECT_ENVIRONMENT`), not by updating.
 - `source diff` and `check --online` share one verdict and agree row for row on
   the same scope (equivalences in [state semantics](references/state-semantics.md#source-diff---json));
   a disagreement means the disk changed between runs — re-run both.
